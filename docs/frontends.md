@@ -357,7 +357,15 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_confident_match_count` and
   `orca_library_accept_confident_matches` on every file's best above a
   confidence in (0, 1], and `orca_library_apply_matched_release` applies a
-  Release whose Tracks came to agree. `orca_library_track_verification` hands
+  Release whose Tracks came to agree; `orca_library_apply_matched_release_fields`
+  stores only the `orca_release_field` bits it is given, locked, from the
+  best candidate.
+  `orca_library_query_release_matches` pages Releases by
+  `orca_release_match_bucket` with their best MusicBrainz release,
+  `orca_library_release_match_counts` counts the buckets,
+  `orca_library_release_match_evidence` and `orca_library_release_match_diff`
+  compare a Release with a release, and `orca_library_dismiss_release_candidate`
+  marks one as not the Release. `orca_library_track_verification` hands
   a Track's last verification with the recordings AcoustID heard, and
   `orca_library_query_correction_groups` pages album groups of corrections
   with their members, accepted or dismissed only whole. Acceptance writes the

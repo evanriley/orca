@@ -5,6 +5,7 @@ const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
 const scanner = @import("scanner.zig");
+const BoundedText = @import("../core/job.zig").BoundedText;
 
 pub const CancellationToken = scanner.CancellationToken;
 
@@ -893,6 +894,262 @@ fn queryFor(candidate: database.MatchCandidate) providers.Query {
 const testing = std.testing;
 const in_effect_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
 const heard_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
+
+/// Two texts agree when, case and spacing folded, they are this similar.
+pub const text_agreement_minimum: f64 = 0.9;
+
+/// A Track's duration agrees with its recording's within this.
+pub const duration_agreement_ms: i64 = 1000;
+
+/// Why a Release is, or is not, a MusicBrainz release.
+pub const MatchEvidence = struct {
+    /// Tracks whose proposal on the release AcoustID heard at 0.9 or more.
+    fingerprints_matched: u32,
+    tracks: u32,
+    /// At least one Track's duration was compared, and each compared one is
+    /// within a second of its recording's.
+    durations_within_1s: bool,
+    artist_agrees: bool,
+    title_agrees: bool,
+    /// The dates are the same text, so a year does not agree with a full
+    /// date.
+    date_agrees: bool,
+    note: BoundedText(256),
+};
+
+/// A Release value beside the candidate's. `differs` is true when the
+/// candidate has a value and it is not the local one.
+pub const ReleaseFieldDiff = struct {
+    field: database.ReleaseField,
+    local: []const u8,
+    candidate: []const u8,
+    differs: bool,
+};
+
+/// A Track beside its track on the candidate. `candidate_title` is empty
+/// and `delta_ms` null for a Track the release does not name.
+pub const ReleaseTrackAlignment = struct {
+    track_id: i64,
+    position: u32,
+    local_title: []const u8,
+    candidate_title: []const u8,
+    /// The recording's duration less the Track's.
+    delta_ms: ?i64,
+    fingerprint: bool,
+};
+
+pub const ReleaseMatchDiff = struct {
+    arena: *std.heap.ArenaAllocator,
+    release_mbid: []const u8,
+    /// One per `database.ReleaseField`, in its order.
+    fields: []ReleaseFieldDiff,
+    tracks: []ReleaseTrackAlignment,
+    /// Tracks the release names.
+    aligned: u32,
+
+    pub fn deinit(self: ReleaseMatchDiff) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+};
+
+/// The release a view is compared with: `release_mbid`, else its best
+/// candidate.
+pub fn comparedRelease(view: *const database.ReleaseMatchView, allocator: std.mem.Allocator, release_mbid: ?[]const u8) ![]const u8 {
+    if (release_mbid) |mbid| {
+        if (!metadata.isMusicBrainzId(mbid)) return error.InvalidMusicBrainzId;
+        return mbid;
+    }
+    const best = (try view.best(allocator)) orelse return error.NoReleaseCandidate;
+    return best.release_mbid;
+}
+
+/// The release's values as its Tracks' proposals on it give them.
+const CandidateRelease = struct {
+    title: []const u8 = "",
+    artist: []const u8 = "",
+    date: []const u8 = "",
+};
+
+fn candidateRelease(view: *const database.ReleaseMatchView, release_mbid: []const u8) CandidateRelease {
+    const described = view.describedCandidate(release_mbid);
+    var result: CandidateRelease = .{ .title = described.title, .date = described.date orelse "" };
+    for (view.tracks) |*track| {
+        const proposal = track.chosen(release_mbid) orelse continue;
+        if (!proposal.payload.isEnriched() or !std.mem.eql(u8, proposal.payload.release_mbid.?, release_mbid)) continue;
+        if (proposal.payload.release_artist) |artist| if (artist.len != 0) {
+            result.artist = artist;
+            break;
+        };
+    }
+    return result;
+}
+
+fn textsAgree(allocator: std.mem.Allocator, local: []const u8, candidate: []const u8) !bool {
+    if (local.len == 0 or candidate.len == 0) return false;
+    const local_key = try database.text_key.normalizeKey(allocator, local);
+    defer allocator.free(local_key);
+    const candidate_key = try database.text_key.normalizeKey(allocator, candidate);
+    defer allocator.free(candidate_key);
+    return try providers.scoring.textSimilarity(allocator, local_key, candidate_key) >= text_agreement_minimum;
+}
+
+pub fn releaseMatchEvidence(
+    allocator: std.mem.Allocator,
+    view: *const database.ReleaseMatchView,
+    release_mbid: []const u8,
+) !MatchEvidence {
+    var evidence: MatchEvidence = .{
+        .fingerprints_matched = 0,
+        .tracks = view.track_count,
+        .durations_within_1s = false,
+        .artist_agrees = false,
+        .title_agrees = false,
+        .date_agrees = false,
+        .note = .{},
+    };
+    var compared: u32 = 0;
+    var within: u32 = 0;
+    for (view.tracks) |*track| {
+        const proposal = track.chosen(release_mbid) orelse continue;
+        if (proposal.fingerprintBacked()) evidence.fingerprints_matched += 1;
+        if (durationDelta(track, proposal)) |delta| {
+            compared += 1;
+            if (@abs(delta) <= duration_agreement_ms) within += 1;
+        }
+    }
+    evidence.durations_within_1s = compared != 0 and within == compared;
+    const release = candidateRelease(view, release_mbid);
+    evidence.artist_agrees = try textsAgree(allocator, view.album_artist, release.artist);
+    evidence.title_agrees = try textsAgree(allocator, view.title, release.title);
+    evidence.date_agrees = view.release_date != null and release.date.len != 0 and
+        std.mem.eql(u8, view.release_date.?, release.date);
+
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writer.print("{d} of {d} tracks match by fingerprint", .{ evidence.fingerprints_matched, evidence.tracks }) catch {};
+    if (compared == 0) {
+        writer.writeAll("; no durations to compare") catch {};
+    } else if (evidence.durations_within_1s) {
+        writer.writeAll("; durations agree within 1 s") catch {};
+    } else {
+        writer.print("; {d} of {d} durations differ by more than 1 s", .{ compared - within, compared }) catch {};
+    }
+    const differing = [_]struct { agrees: bool, name: []const u8 }{
+        .{ .agrees = evidence.artist_agrees, .name = "artist" },
+        .{ .agrees = evidence.title_agrees, .name = "title" },
+        .{ .agrees = evidence.date_agrees, .name = "date" },
+    };
+    var names: [differing.len][]const u8 = undefined;
+    var disagreeing: usize = 0;
+    for (differing) |each| {
+        if (each.agrees) continue;
+        names[disagreeing] = each.name;
+        disagreeing += 1;
+    }
+    for (names[0..disagreeing], 0..) |name, index| {
+        const separator = if (index == 0) "; the " else if (index + 1 == disagreeing) " and " else ", ";
+        writer.print("{s}{s}", .{ separator, name }) catch {};
+    }
+    if (disagreeing != 0) writer.writeAll(if (disagreeing == 1) " differs" else " differ") catch {};
+    if (view.release_date != null and release.date.len != 0 and !evidence.date_agrees) {
+        writer.print(" ({s} here, {s} on the release)", .{ view.release_date.?, release.date }) catch {};
+    }
+    writer.writeAll(".") catch {};
+    evidence.note.set(writer.buffered());
+    return evidence;
+}
+
+fn durationDelta(track: *const database.ReleaseMatchTrack, proposal: *const database.ReleaseMatchProposal) ?i64 {
+    const local = track.duration_ms orelse return null;
+    const recording = std.math.cast(i64, proposal.payload.duration_ms orelse return null) orelse return null;
+    if (local <= 0 or recording <= 0) return null;
+    return recording - local;
+}
+
+pub fn releaseMatchDiff(
+    allocator: std.mem.Allocator,
+    view: *const database.ReleaseMatchView,
+    release_mbid: []const u8,
+) !ReleaseMatchDiff {
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    arena.* = .init(allocator);
+    var diff: ReleaseMatchDiff = .{ .arena = arena, .release_mbid = "", .fields = &.{}, .tracks = &.{}, .aligned = 0 };
+    errdefer diff.deinit();
+    const owned = arena.allocator();
+    diff.release_mbid = try owned.dupe(u8, release_mbid);
+
+    const tracks = try owned.alloc(ReleaseTrackAlignment, view.tracks.len);
+    var titles_differ: u32 = 0;
+    for (view.tracks, tracks, 0..) |*track, *alignment, index| {
+        const proposal = track.chosen(release_mbid);
+        const payload = if (proposal) |chosen| chosen.payload else null;
+        const candidate_title = if (payload) |named| named.track_title orelse named.title else "";
+        alignment.* = .{
+            .track_id = track.track_id,
+            .position = if (payload) |named| named.track_number orelse fallbackPosition(track, index) else fallbackPosition(track, index),
+            .local_title = try owned.dupe(u8, track.title),
+            .candidate_title = try owned.dupe(u8, candidate_title),
+            .delta_ms = if (proposal) |chosen| durationDelta(track, chosen) else null,
+            .fingerprint = if (proposal) |chosen| chosen.fingerprintBacked() else false,
+        };
+        if (proposal != null or track.names(release_mbid)) diff.aligned += 1;
+        if (candidate_title.len != 0 and !std.mem.eql(u8, candidate_title, track.title)) titles_differ += 1;
+    }
+    diff.tracks = tracks;
+
+    const release = candidateRelease(view, release_mbid);
+    const fields = try owned.alloc(ReleaseFieldDiff, std.meta.fields(database.ReleaseField).len);
+    for (fields, 0..) |*field_diff, index| {
+        const field: database.ReleaseField = @enumFromInt(index);
+        const local: []const u8, const candidate: []const u8 = switch (field) {
+            .album => .{ view.title, release.title },
+            .album_artist => .{ view.album_artist, release.artist },
+            .release_date => .{ view.release_date orelse "", release.date },
+            .release_type => .{ view.release_type orelse "", "" },
+            .release_id => .{ view.release_mbid orelse "", release_mbid },
+            .genre => .{ try std.mem.join(owned, " / ", view.genres), "" },
+            .artwork => .{ localArtwork(view, release_mbid), if (hasCoverArt(view, release_mbid)) cover_art_archive else "" },
+            .track_titles => .{
+                try std.fmt.allocPrint(owned, "{d} of {d} differ", .{ titles_differ, view.tracks.len }),
+                try std.fmt.allocPrint(owned, "{d} of {d} on the release", .{ diff.aligned, view.tracks.len }),
+            },
+        };
+        field_diff.* = .{
+            .field = field,
+            .local = try owned.dupe(u8, local),
+            .candidate = try owned.dupe(u8, candidate),
+            .differs = if (field == .track_titles) titles_differ != 0 else candidate.len != 0 and !std.mem.eql(u8, local, candidate),
+        };
+    }
+    diff.fields = fields;
+    return diff;
+}
+
+const cover_art_archive = "Cover Art Archive";
+
+fn fallbackPosition(track: *const database.ReleaseMatchTrack, index: usize) u32 {
+    return track.track_number orelse std.math.cast(u32, index + 1) orelse std.math.maxInt(u32);
+}
+
+fn localArtwork(view: *const database.ReleaseMatchView, release_mbid: []const u8) []const u8 {
+    return switch (view.artwork orelse return "") {
+        .embedded => "embedded",
+        .folder => "folder",
+        .fetched => if (view.artwork_release_mbid != null and std.mem.eql(u8, view.artwork_release_mbid.?, release_mbid))
+            cover_art_archive
+        else
+            "fetched",
+        .chosen => "chosen",
+    };
+}
+
+fn hasCoverArt(view: *const database.ReleaseMatchView, release_mbid: []const u8) bool {
+    if (view.artwork_release_mbid) |mbid| if (std.mem.eql(u8, mbid, release_mbid)) return true;
+    for (view.cover_art_releases) |mbid| if (std.mem.eql(u8, mbid, release_mbid)) return true;
+    return false;
+}
 
 test "a file agrees when AcoustID hears its recording at 0.5, and disagrees only when another reaches 0.9" {
     try testing.expectEqual(database.VerificationOutcome.agrees, classify(in_effect_mbid, &.{

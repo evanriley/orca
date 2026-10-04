@@ -4514,6 +4514,192 @@ orca_status orca_library_apply_matched_release(
     uint32_t *values_written
 );
 
+/* A value Match Review compares between a Release and a MusicBrainz release.
+ * Bit `1u << field` selects it for orca_library_apply_matched_release_fields.
+ * RELEASE_ID covers the release, release group, release track and album
+ * artist IDs, the track and disc numbers and the recording ID; TRACK_TITLES
+ * each Track's title and artist. RELEASE_TYPE, GENRE and ARTWORK are compared
+ * but never stored. */
+typedef enum orca_release_field {
+    ORCA_RELEASE_FIELD_ALBUM = 0,
+    ORCA_RELEASE_FIELD_ALBUM_ARTIST = 1,
+    ORCA_RELEASE_FIELD_RELEASE_DATE = 2,
+    ORCA_RELEASE_FIELD_RELEASE_TYPE = 3,
+    ORCA_RELEASE_FIELD_RELEASE_ID = 4,
+    ORCA_RELEASE_FIELD_GENRE = 5,
+    ORCA_RELEASE_FIELD_ARTWORK = 6,
+    ORCA_RELEASE_FIELD_TRACK_TITLES = 7
+} orca_release_field;
+
+/* Stores the fields whose bits are set in `fields` of the Release's best
+ * candidate, locked, so they outrank the files' own tags; the other values
+ * and their provenance stay. The Tracks' values come from their accepted
+ * matches on the release, else their
+ * pending proposals enriched for it that are neither corrections nor in an
+ * album group; with RELEASE_ID such a proposal is accepted, and without it it
+ * stays pending. A user lock wins and no file is written. A bit past
+ * TRACK_TITLES is INVALID_ARGUMENT. */
+orca_status orca_library_apply_matched_release_fields(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    uint32_t fields,
+    uint32_t *values_written
+);
+
+/* Where a Release stands against MusicBrainz. CONFIDENT: its best candidate
+ * is at least `confident_at` and is not dismissed. NEEDS_REVIEW: a candidate
+ * exists below that. UNMATCHED: there is none. */
+typedef enum orca_release_match_bucket {
+    ORCA_RELEASE_MATCH_BUCKET_CONFIDENT = 0,
+    ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW = 1,
+    ORCA_RELEASE_MATCH_BUCKET_UNMATCHED = 2
+} orca_release_match_bucket;
+
+/* A Release beside its best MusicBrainz release candidate: the release its
+ * Tracks are named on, by tag, accepted match or proposal, that has the
+ * highest mean per-Track confidence. The candidate fields are empty and
+ * `has_best` 0 for an unmatched Release. Valid only for the duration of the
+ * callback. */
+typedef struct orca_release_match_view {
+    int64_t release_id;
+    uint32_t track_count;
+    uint8_t bucket;
+    uint8_t has_best;
+    uint8_t has_candidate_track_count;
+    uint8_t reserved[1];
+    orca_string_view title;
+    orca_string_view artist;
+    orca_string_view release_mbid;
+    orca_string_view candidate_title;
+    orca_string_view candidate_date;
+    uint32_t candidate_track_count;
+    float confidence;
+} orca_release_match_view;
+
+typedef void (*orca_release_match_callback)(void *context, const orca_release_match_view *item);
+
+/* Invokes the callback for a page of the Releases in `bucket`, an
+ * orca_release_match_bucket, by album artist and title. `confident_at` is
+ * greater than 0 and at most 1, and `limit` 1 to 512; otherwise
+ * INVALID_ARGUMENT. */
+orca_status orca_library_query_release_matches(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t bucket,
+    float confident_at,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_release_match_callback callback
+);
+
+typedef struct orca_release_match_counts {
+    uint64_t confident;
+    uint64_t needs_review;
+    uint64_t unmatched;
+} orca_release_match_counts;
+
+/* How many Releases each bucket of orca_library_query_release_matches holds. */
+orca_status orca_library_release_match_counts(
+    orca_runtime *runtime,
+    orca_handle library,
+    float confident_at,
+    orca_release_match_counts *output
+);
+
+/* Why a Release is, or is not, a MusicBrainz release. `fingerprints_matched`
+ * counts Tracks AcoustID heard on it at 0.9 or more; `durations_within_1s`
+ * is set when each compared Track is within a second of its recording; the
+ * artist and title agree when nearly equal ignoring case and spacing, the
+ * date only when the same text. `note` says it in a sentence. Valid only for
+ * the duration of the callback. */
+typedef struct orca_match_evidence_view {
+    uint32_t fingerprints_matched;
+    uint32_t tracks;
+    uint8_t durations_within_1s;
+    uint8_t artist_agrees;
+    uint8_t title_agrees;
+    uint8_t date_agrees;
+    uint8_t reserved[4];
+    orca_string_view note;
+} orca_match_evidence_view;
+
+typedef void (*orca_match_evidence_callback)(void *context, const orca_match_evidence_view *evidence);
+
+/* The evidence for the Release against `release_mbid`, a NUL-terminated
+ * MusicBrainz release ID, or its best candidate when NULL. NOT_FOUND for an
+ * unknown Release or one with no candidate; INVALID_ARGUMENT for an ID that
+ * is not a MusicBrainz ID. */
+orca_status orca_library_release_match_evidence(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    const char *release_mbid,
+    void *context,
+    orca_match_evidence_callback callback
+);
+
+/* One orca_release_field beside the candidate's. `differs` is set when the
+ * candidate has a value that is not the local one. */
+typedef struct orca_release_field_diff_view {
+    uint8_t field;
+    uint8_t differs;
+    uint8_t reserved[6];
+    orca_string_view local;
+    orca_string_view candidate;
+} orca_release_field_diff_view;
+
+/* A Track beside its track on the candidate: `candidate_title` is empty and
+ * `has_delta_ms` 0 when the release does not name it. `delta_ms` is the
+ * recording's duration less the Track's. */
+typedef struct orca_release_track_alignment_view {
+    int64_t track_id;
+    int64_t delta_ms;
+    uint32_t position;
+    uint8_t has_delta_ms;
+    uint8_t fingerprint;
+    uint8_t reserved[2];
+    orca_string_view local_title;
+    orca_string_view candidate_title;
+} orca_release_track_alignment_view;
+
+/* Every orca_release_field in order, then every Track; `aligned` counts the
+ * Tracks the release names. Valid only for the duration of the callback. */
+typedef struct orca_release_match_diff_view {
+    orca_string_view release_mbid;
+    const orca_release_field_diff_view *fields;
+    size_t field_count;
+    const orca_release_track_alignment_view *tracks;
+    size_t track_count;
+    uint32_t aligned;
+    uint8_t reserved[4];
+} orca_release_match_diff_view;
+
+typedef void (*orca_release_match_diff_callback)(void *context, const orca_release_match_diff_view *diff);
+
+/* The Release's values beside a candidate's, `release_mbid` as
+ * orca_library_release_match_evidence. Statuses as it. */
+orca_status orca_library_release_match_diff(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    const char *release_mbid,
+    void *context,
+    orca_release_match_diff_callback callback
+);
+
+/* Marks `release_mbid` as not the Release ("Not This Release"): it is no
+ * longer a candidate for it. A Release of more Tracks than one page is never
+ * a candidate. NOT_FOUND for an unknown Release; INVALID_ARGUMENT for an ID
+ * that is not a MusicBrainz ID. */
+orca_status orca_library_dismiss_release_candidate(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    const char *release_mbid
+);
+
 /* A recording AcoustID heard in a fingerprint, with its score from 0 to 1. */
 typedef struct orca_heard_recording_view {
     orca_string_view mbid;

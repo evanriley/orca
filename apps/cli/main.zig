@@ -45,6 +45,9 @@ fn describe(err: anyerror) []const u8 {
         error.OwnNeedsArtist => "--own needs --artist",
         error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release; --reidentify needs --track or --release and takes no --accept-min-score; --track and --release do not go together",
         error.UnknownRelease => "no release with that id",
+        error.NoReleaseCandidate => "no MusicBrainz release is proposed for that release; run match --release=ID first, or pass --candidate=MBID",
+        error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
+        error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
         error.CoverArtUnavailable => "the Cover Art Archive could not be reached; try again later",
         error.CoverArtArchiveInUse => "the Cover Art Archive is in use by another Orca process; try again once it finishes",
@@ -255,7 +258,15 @@ const commands = [_]Command{
         .max_arguments = null,
         .run = matchLibrary,
     },
-    .{ .name = "matches", .usage = "matches DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = listMatches },
+    .{
+        .name = "matches",
+        .usage = "matches DATABASE (TRACK_ID | --releases [--bucket=confident|needs_review|unmatched]\n" ++ usage_indent ++
+            "  [--min-score=SCORE] [--limit=N] [--offset=N] | --release=ID [--candidate=MBID]\n" ++ usage_indent ++
+            "  (--evidence | --diff | --dismiss=MBID))",
+        .min_arguments = 2,
+        .max_arguments = 7,
+        .run = listMatches,
+    },
     .{ .name = "cover-art", .usage = "cover-art DATABASE RELEASE_ID [--candidates | --use=CAA_ID[:front|back|booklet]]", .min_arguments = 2, .max_arguments = 3, .run = fetchCoverArt },
     .{
         .name = "verify",
@@ -273,7 +284,7 @@ const commands = [_]Command{
     .{ .name = "accept-match", .usage = "accept-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = acceptMatch },
     .{ .name = "dismiss-match", .usage = "dismiss-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = dismissMatch, .shares_usage_line = true },
     .{ .name = "accept-matches", .usage = "accept-matches DATABASE --min-score=SCORE", .min_arguments = 2, .max_arguments = 2, .run = acceptConfidentMatches },
-    .{ .name = "apply-release", .usage = "apply-release DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = applyMatchedRelease, .shares_usage_line = true },
+    .{ .name = "apply-release", .usage = "apply-release DATABASE RELEASE_ID [--fields=FIELD,...]", .min_arguments = 2, .max_arguments = 3, .run = applyMatchedRelease, .shares_usage_line = true },
     .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
@@ -2243,8 +2254,21 @@ fn applyMatchedRelease(context: Context) !void {
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    const values_written = try runtime.libraryApplyMatchedRelease(library, release_id);
+    const fields: ?liborca.ReleaseFieldSet = if (context.arguments.len == 3) try parseReleaseFields(context.arguments[2]) else null;
+    const values_written = try runtime.libraryApplyMatchedRelease(library, release_id, fields);
     try context.stdout.print("values_written={d}\n", .{values_written});
+}
+
+fn parseReleaseFields(argument: []const u8) !liborca.ReleaseFieldSet {
+    if (!std.mem.startsWith(u8, argument, "--fields=")) return error.UnknownOption;
+    var fields: liborca.ReleaseFieldSet = .initEmpty();
+    var names = std.mem.splitScalar(u8, argument["--fields=".len..], ',');
+    while (names.next()) |name| {
+        const field = std.meta.stringToEnum(liborca.ReleaseField, name) orelse
+            if (std.mem.eql(u8, name, "date")) liborca.ReleaseField.release_date else return error.UnknownReleaseField;
+        fields.insert(field);
+    }
+    return fields;
 }
 
 fn dismissMatch(context: Context) !void {
@@ -4736,6 +4760,112 @@ fn listSubmittable(runtime: *liborca.Runtime, library: liborca.LibraryHandle, st
 }
 
 fn listMatches(context: Context) !void {
+    const mode = context.arguments[1];
+    if (std.mem.eql(u8, mode, "--releases")) return listReleaseMatches(context);
+    if (std.mem.startsWith(u8, mode, "--release=")) return reviewReleaseMatch(context);
+    if (context.arguments.len != 2) return error.UnknownOption;
+    return listTrackMatches(context);
+}
+
+const default_confident_at: f32 = 0.9;
+
+fn listReleaseMatches(context: Context) !void {
+    const stdout = context.stdout;
+    var bucket: ?liborca.ReleaseMatchBucket = null;
+    var confident_at = default_confident_at;
+    var limit: u32 = 512;
+    var offset: u32 = 0;
+    for (context.arguments[2..]) |argument| {
+        if (std.mem.startsWith(u8, argument, "--bucket=")) {
+            bucket = std.meta.stringToEnum(liborca.ReleaseMatchBucket, argument["--bucket=".len..]) orelse return error.UnknownOption;
+        } else if (std.mem.startsWith(u8, argument, "--min-score=")) {
+            confident_at = try std.fmt.parseFloat(f32, argument["--min-score=".len..]);
+        } else if (std.mem.startsWith(u8, argument, "--limit=")) {
+            limit = try std.fmt.parseInt(u32, argument["--limit=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--offset=")) {
+            offset = try std.fmt.parseInt(u32, argument["--offset=".len..], 10);
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const buckets: []const liborca.ReleaseMatchBucket = if (bucket) |one| &.{one} else &.{ .confident, .needs_review, .unmatched };
+    for (buckets) |each| {
+        const page = try runtime.libraryReleaseMatchPage(library, context.allocator, each, confident_at, limit, offset);
+        defer page.deinit();
+        for (page.items) |item| {
+            try stdout.print("{d}\t{s}\t{s}\t{s}\ttracks={d}", .{ item.release_id, @tagName(item.bucket), item.title, item.artist, item.track_count });
+            if (item.best) |best| {
+                try stdout.print("\tcandidate={s} confidence={d:.2} title={s} date={s} candidate_tracks=", .{
+                    best.release_mbid, best.confidence, best.title, best.date orelse "-",
+                });
+                if (best.track_count) |count| try stdout.print("{d}", .{count}) else try stdout.writeAll("-");
+            } else try stdout.writeAll("\tcandidate=-");
+            try stdout.writeAll("\n");
+        }
+    }
+    const counts = try runtime.libraryReleaseMatchCounts(library, confident_at);
+    try stdout.print("confident={d} needs_review={d} unmatched={d}\n", .{ counts.confident, counts.needs_review, counts.unmatched });
+}
+
+fn reviewReleaseMatch(context: Context) !void {
+    const stdout = context.stdout;
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1]["--release=".len..], 10);
+    const Action = enum { evidence, diff, dismiss };
+    var action: ?Action = null;
+    var candidate: ?[]const u8 = null;
+    for (context.arguments[2..]) |argument| {
+        if (std.mem.eql(u8, argument, "--evidence")) {
+            action = .evidence;
+        } else if (std.mem.eql(u8, argument, "--diff")) {
+            action = .diff;
+        } else if (std.mem.startsWith(u8, argument, "--dismiss=")) {
+            action = .dismiss;
+            candidate = argument["--dismiss=".len..];
+        } else if (std.mem.startsWith(u8, argument, "--candidate=")) {
+            candidate = argument["--candidate=".len..];
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    switch (action orelse return error.MissingReleaseAction) {
+        .evidence => {
+            const evidence = try runtime.libraryReleaseMatchEvidence(library, release_id, candidate);
+            try stdout.print("fingerprints={d}/{d} durations_within_1s={s} date_agrees={s} artist_agrees={s} title_agrees={s}\nnote={s}\n", .{
+                evidence.fingerprints_matched,
+                evidence.tracks,
+                flag(evidence.durations_within_1s),
+                flag(evidence.date_agrees),
+                flag(evidence.artist_agrees),
+                flag(evidence.title_agrees),
+                evidence.note.slice(),
+            });
+        },
+        .diff => {
+            const diff = try runtime.libraryReleaseMatchDiff(library, context.allocator, release_id, candidate);
+            defer diff.deinit();
+            try stdout.print("candidate={s} aligned={d}/{d}\n", .{ diff.release_mbid, diff.aligned, diff.tracks.len });
+            for (diff.fields) |field| {
+                try stdout.print("{s}\tdiffers={s}\tlocal={s}\tcandidate={s}\n", .{
+                    @tagName(field.field), flag(field.differs), field.local, field.candidate,
+                });
+            }
+            for (diff.tracks) |track| {
+                try stdout.print("track={d}\tposition={d}\tfingerprint={s}\tdelta_ms=", .{ track.track_id, track.position, flag(track.fingerprint) });
+                if (track.delta_ms) |delta| try stdout.print("{d}", .{delta}) else try stdout.writeAll("-");
+                try stdout.print("\tlocal={s}\tcandidate={s}\n", .{ track.local_title, track.candidate_title });
+            }
+        },
+        .dismiss => {
+            const mbid = candidate orelse unreachable;
+            try runtime.libraryDismissReleaseCandidate(library, release_id, mbid);
+            try stdout.print("dismissed release={d} candidate={s}\n", .{ release_id, mbid });
+        },
+    }
+}
+
+fn listTrackMatches(context: Context) !void {
     const allocator = context.allocator;
     const io = context.io;
     const stdout = context.stdout;
@@ -4770,6 +4900,10 @@ fn listMatches(context: Context) !void {
             proposal.corrects orelse "-",
         });
     }
+}
+
+fn flag(value: bool) []const u8 {
+    return if (value) "yes" else "no";
 }
 
 fn writeDetailKey(stdout: *std.Io.Writer, comptime key: []const u8) !void {

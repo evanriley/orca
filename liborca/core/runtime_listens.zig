@@ -22,6 +22,12 @@ const TrackVerification = runtime.TrackVerification;
 const MatchAcceptance = runtime.MatchAcceptance;
 const MatchProposalPage = runtime.MatchProposalPage;
 const MatchReviewPage = runtime.MatchReviewPage;
+const MatchEvidence = runtime.MatchEvidence;
+const ReleaseFieldSet = runtime.ReleaseFieldSet;
+const ReleaseMatchBucket = runtime.ReleaseMatchBucket;
+const ReleaseMatchCounts = runtime.ReleaseMatchCounts;
+const ReleaseMatchDiff = runtime.ReleaseMatchDiff;
+const ReleaseMatchPage = runtime.ReleaseMatchPage;
 const OrcaRuntime = runtime.OrcaRuntime;
 const PlayStats = runtime.PlayStats;
 const PlayerObject = runtime.PlayerObject;
@@ -273,17 +279,62 @@ pub fn libraryAcceptMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_i
     return acceptance;
 }
 
-pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !u32 {
+pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, fields: ?ReleaseFieldSet) !u32 {
     const library_database = try runtime.libraryDatabase(self, library);
-    const release = try library_database.releases.byId(self.allocator, release_id) orelse return error.UnknownRelease;
-    release.deinit(self.allocator);
     var written: std.ArrayList(i64) = .empty;
     defer written.deinit(self.allocator);
-    const values_written = try library_database.identification_proposals.applyReleaseConsensus(self.allocator, release_id, &written);
+    const proposals = &library_database.identification_proposals;
+    const values_written = if (fields) |chosen|
+        try proposals.applyMatchedRelease(self.allocator, release_id, chosen, &written)
+    else consensus: {
+        const release = try library_database.releases.byId(self.allocator, release_id) orelse return error.UnknownRelease;
+        release.deinit(self.allocator);
+        break :consensus try proposals.applyReleaseConsensus(self.allocator, release_id, &written);
+    };
     if (values_written == 0) return 0;
     try reproject(self, library_database, written.items);
     recordingIdsChanged(self, library);
     return values_written;
+}
+
+pub fn libraryReleaseMatchPage(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    bucket: ReleaseMatchBucket,
+    confident_at: f32,
+    limit: u32,
+    offset: u32,
+) !ReleaseMatchPage {
+    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchPage(allocator, bucket, confident_at, limit, offset);
+}
+
+pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32) !ReleaseMatchCounts {
+    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchCounts(self.allocator, confident_at);
+}
+
+pub fn libraryReleaseMatchEvidence(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !MatchEvidence {
+    const view = try (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchView(self.allocator, release_id, false);
+    defer view.deinit();
+    const compared = try library_pass.matching.comparedRelease(&view, self.allocator, release_mbid);
+    return library_pass.matching.releaseMatchEvidence(self.allocator, &view, compared);
+}
+
+pub fn libraryReleaseMatchDiff(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    release_id: i64,
+    release_mbid: ?[]const u8,
+) !ReleaseMatchDiff {
+    const view = try (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchView(allocator, release_id, true);
+    defer view.deinit();
+    const compared = try library_pass.matching.comparedRelease(&view, allocator, release_mbid);
+    return library_pass.matching.releaseMatchDiff(allocator, &view, compared);
+}
+
+pub fn libraryDismissReleaseCandidate(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: []const u8) !void {
+    try (try runtime.libraryDatabase(self, library)).identification_proposals.dismissReleaseCandidate(release_id, release_mbid);
 }
 
 fn reproject(self: *OrcaRuntime, library_database: *database.LibraryDatabase, file_ids: []const i64) !void {

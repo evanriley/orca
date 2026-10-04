@@ -800,8 +800,46 @@ defer page.deinit();
   pending proposal at least that confident, chosen as
   [metadata.md](metadata.md#musicbrainz-recording-ids) describes, and
   returns a `ConfidentMatchAcceptance`. `libraryApplyMatchedRelease(library,
-  release_id)` stores a Release's album values once its Tracks agree on one
-  MusicBrainz release and returns how many it stored. Accepts reproject, so
+  release_id, fields)` returns how many values it stored. With `fields` null
+  it stores, unlocked, every value of the release all the Release's Tracks
+  name; with a `ReleaseFieldSet` it stores those fields of the best
+  candidate locked, so they outrank file tags.
+  [metadata.md](metadata.md#applying-a-release) says when each applies.
+  Release matches serve the Matches and Match Review screens.
+  `libraryReleaseMatchPage(library, allocator, bucket, confident_at, limit,
+  offset)` returns a `ReleaseMatchPage` of at most 512 `ReleaseMatchItem`s in
+  one `ReleaseMatchBucket`, by album artist and title: each Release's title,
+  artist, Track count and `best` `ReleaseCandidate` (release ID, title, date,
+  track count, confidence). A Release's candidates are the MusicBrainz
+  releases its Tracks name by tag, accepted match or pending proposal, less
+  those dismissed for it; a candidate's confidence is the mean over the
+  Tracks of 1 for a Track whose tag or accepted match names it, else its
+  most confident pending proposal listing it, else 0. The best is the most
+  confident, then one with as many tracks as the Release, then the earliest
+  date, then the lowest ID. The buckets:
+  - `confident`: the best candidate is at least `confident_at`, the
+    caller's auto-accept score, and is not dismissed;
+  - `needs_review`: a candidate exists below that score;
+  - `unmatched`: there is no candidate.
+  `confident_at` is in (0, 1], else `error.InvalidMinimumConfidence`. Only
+  Releases with a Track whose play file has a release tag or an undismissed
+  proposal are weighed, 256 at a time; the rest are unmatched.
+  `libraryReleaseMatchCounts(library,
+  confident_at)` counts each bucket. `libraryReleaseMatchEvidence(library,
+  release_id, release_mbid)` returns a `MatchEvidence` against
+  `release_mbid`, or the best candidate when null
+  (`error.NoReleaseCandidate` when there is none): Tracks AcoustID heard on
+  it at 0.9 or more, whether every compared duration is within a second,
+  whether artist and title agree (case and spacing folded, similarity at
+  least 0.9) and the date (same text), and a `note` sentence.
+  `libraryReleaseMatchDiff(library, allocator, release_id, release_mbid)`
+  returns a `ReleaseMatchDiff`: a `ReleaseFieldDiff` per `ReleaseField` in
+  order, local beside candidate, and a `ReleaseTrackAlignment` per Track
+  (position, local and candidate title, duration delta, fingerprint).
+  `libraryDismissReleaseCandidate(library, release_id, release_mbid)` marks
+  a release as not the Release; it stops being a candidate for it. An ID
+  that is not a MusicBrainz ID is `error.InvalidMusicBrainzId`, an unknown
+  Release `error.UnknownRelease`. Accepts reproject, so
   Track and Release ids can change; see
   [metadata.md](metadata.md#accepting-a-match). Once a job started with
   `MatchRequest.release_id` that searches or re-identifies has finished,

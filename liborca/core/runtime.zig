@@ -447,6 +447,17 @@ pub const MatchProposal = database.MatchProposal;
 pub const MatchProposalPage = database.MatchProposalPage;
 pub const MatchReviewItem = database.MatchReviewItem;
 pub const MatchReviewPage = database.MatchReviewPage;
+pub const ReleaseMatchBucket = database.ReleaseMatchBucket;
+pub const ReleaseCandidate = database.ReleaseCandidate;
+pub const ReleaseMatchItem = database.ReleaseMatchItem;
+pub const ReleaseMatchPage = database.ReleaseMatchPage;
+pub const ReleaseMatchCounts = database.ReleaseMatchCounts;
+pub const ReleaseField = database.ReleaseField;
+pub const ReleaseFieldSet = database.ReleaseFieldSet;
+pub const MatchEvidence = library_pass.matching.MatchEvidence;
+pub const ReleaseFieldDiff = library_pass.matching.ReleaseFieldDiff;
+pub const ReleaseTrackAlignment = library_pass.matching.ReleaseTrackAlignment;
+pub const ReleaseMatchDiff = library_pass.matching.ReleaseMatchDiff;
 pub const MatchAcceptance = database.ProposalAcceptance;
 
 pub const ConfidentMatchAcceptance = struct {
@@ -1478,12 +1489,65 @@ pub const OrcaRuntime = struct {
         return runtime_listens.libraryAcceptConfidentMatches(self, library, minimum_confidence);
     }
 
-    /// Stores what the MusicBrainz release a Release's accepted matches
-    /// agree on says, when every Track names it, and reprojects. For a
-    /// Release that came to agree without an accept: after an edit moved a
-    /// stray file out, or a rescan. Returns how many values were stored.
-    pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !u32 {
-        return runtime_listens.libraryApplyMatchedRelease(self, library, release_id);
+    /// With null `fields`, stores what the MusicBrainz release a Release's
+    /// accepted matches agree on says, unlocked, when every Track names it:
+    /// for a Release that came to agree without an accept, after an edit
+    /// moved a stray file out or a rescan. With `fields`, a person's choice
+    /// in Match Review, stores those fields of the Release's best candidate
+    /// locked, so they outrank file tags; every Track must name the release
+    /// by its tag or accepted match, or have a pending proposal enriched for
+    /// it that is neither a correction nor in an album group, and applying
+    /// `release_id` accepts those proposals. A user's locked value stays
+    /// either way, no media file is written, and the Release is reprojected.
+    /// Returns how many values were stored.
+    pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, fields: ?ReleaseFieldSet) !u32 {
+        return runtime_listens.libraryApplyMatchedRelease(self, library, release_id, fields);
+    }
+
+    /// Releases in `bucket`, by album artist and title, at most `max_page`.
+    /// A Release is `confident` when its best candidate's confidence is at
+    /// least `confident_at`, `needs_review` when it is lower, and
+    /// `unmatched` with no candidate. Weighing every Release, a page costs a
+    /// walk of the library.
+    pub fn libraryReleaseMatchPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        bucket: ReleaseMatchBucket,
+        confident_at: f32,
+        limit: u32,
+        offset: u32,
+    ) !ReleaseMatchPage {
+        return runtime_listens.libraryReleaseMatchPage(self, library, allocator, bucket, confident_at, limit, offset);
+    }
+
+    /// How many Releases each bucket of `libraryReleaseMatchPage` holds.
+    pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32) !ReleaseMatchCounts {
+        return runtime_listens.libraryReleaseMatchCounts(self, library, confident_at);
+    }
+
+    /// Why the Release is or is not `release_mbid`, or its best candidate
+    /// when that is null.
+    pub fn libraryReleaseMatchEvidence(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !MatchEvidence {
+        return runtime_listens.libraryReleaseMatchEvidence(self, library, release_id, release_mbid);
+    }
+
+    /// The Release's values and Tracks beside `release_mbid`'s, or its best
+    /// candidate's when that is null.
+    pub fn libraryReleaseMatchDiff(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+        release_mbid: ?[]const u8,
+    ) !ReleaseMatchDiff {
+        return runtime_listens.libraryReleaseMatchDiff(self, library, allocator, release_id, release_mbid);
+    }
+
+    /// "Not This Release": `release_mbid` is never the Release's candidate
+    /// again. Its Tracks' proposals and values stay as they are.
+    pub fn libraryDismissReleaseCandidate(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: []const u8) !void {
+        return runtime_listens.libraryDismissReleaseCandidate(self, library, release_id, release_mbid);
     }
 
     pub fn libraryTrackFeedback(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !Feedback {

@@ -122,9 +122,47 @@ names R only by its tag gets nothing new. Running it again stores nothing.
 
 An accept applies it in its own transaction; bulk acceptance applies it once
 per Release it touched before each commit; Match Album applies it at its
-end. `Runtime.libraryApplyMatchedRelease` and `orca-cli apply-release` apply
-it to a Release that came to agree without an accept, such as after an edit
-moved a stray file out of it.
+end.
+
+#### Applying a release
+
+`Runtime.libraryApplyMatchedRelease(library, release_id, fields)` and
+`orca-cli apply-release` take one of two paths.
+
+With `fields` null (`apply-release` without `--fields`, or
+`orca_library_apply_matched_release`), it stores every value of the
+release that every Track names by tag or accepted match, as unlocked
+provider values under the `.match` write, and accepts no proposal. A
+Release whose Tracks do not all name one release stores nothing.
+
+With a `ReleaseFieldSet` (`--fields=`, or
+`orca_library_apply_matched_release_fields`), a person chose those fields
+of the Release's best candidate (see [api.md](api.md)) after reviewing it,
+so they are stored locked under the `.correction` write. It applies when
+every Track has a play file and either names the candidate (tag or
+accepted match enriched for it) or has an applicable proposal: its
+accepted match enriched for the candidate, else its most confident pending
+proposal enriched for it that is neither a correction nor in an album
+group. A Release of more than 512 Tracks never applies; one that does not
+apply stores nothing and returns 0. For each Track with an applicable
+proposal, on every file of the Track:
+
+- `album`: the release title;
+- `album_artist`: the release artist, plus `compilation=1` for Various
+  Artists;
+- `release_date`: the release date;
+- `release_id`: disc and track numbers and the release, release-group,
+  release-track and album-artist IDs; a pending proposal is accepted, storing
+  its recording ID;
+- `track_titles`: the title and artist the release credits.
+
+`release_type`, `genre` and `artwork` are compared by Match Review but never
+stored. A user's lock wins, an equal value is not counted, and fields not
+selected keep their values and provenance. Without `release_id` pending
+proposals stay pending. Being locked, the stored values outrank the files'
+own tags under the projection's `prefer_file` policy, and a later user edit
+replaces them. Nothing is written to a file.
+`libraryDismissReleaseCandidate` removes a release from the candidates.
 
 The projection resolves a Release's MusicBrainz release ID from the Orca
 value and the tag under `prefer_file`, so an accepted release ID keys the

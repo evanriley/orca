@@ -226,6 +226,8 @@ zig build run -- love-artist DATABASE IDS [--clear]   # artist love; kept in the
 zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
 zig build run -- match DATABASE (--track=ID | --release=ID) --reidentify   # again, ignoring IDs and earlier searches; confirmed= counts IDs found again
 zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal; the replaced ID last
+zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= title= date= candidate_tracks=, then `confident= needs_review= unmatched=`
+zig build run -- matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff | --dismiss=MBID)   # evidence: fingerprints=N/M durations_within_1s= date_agrees= artist_agrees= title_agrees=, then note=; diff: a line per field, then per Track; dismiss: Not This Release
 zig build run -- verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N] [--cancel-after=MS]   # recording IDs against AcoustID; proposes corrections
 zig build run -- corrections DATABASE [--limit N] [--offset N]   # album groups of corrections
 zig build run -- accept-correction DATABASE GROUP   # the whole group, locked, in the library only
@@ -234,7 +236,7 @@ zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FI
 zig build run -- accept-match DATABASE PROPOSAL_ID   # recording ID, title, artist (and album values) in the library only; a correction locked
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
-zig build run -- apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release
+zig build run -- apply-release DATABASE RELEASE_ID [--fields=album,album_artist,date,release_id,track_titles]   # the album's values once every Track names one release; --fields stores only those of the best candidate, locked, also from proposals on it
 zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album; release= is the album's Release afterwards
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to

@@ -480,6 +480,18 @@ problem. Property backfill measures them, as described under
 the version-20 table from the front rows that name a release ID and drops
 the rest.
 
+Migration 52 adds `dismissed_release_candidates(release_id, musicbrainz_release_id,
+dismissed_at)`, primary key `(release_id, musicbrainz_release_id)`, without
+rowid: the MusicBrainz releases a Release was marked as not being ("Not This
+Release"). Rows cascade with their Release, and a reprojection that leaves a
+Release without Tracks hands them to the Release that took most of them when
+that one has none, as it does covers and love. Existing libraries start with
+none. It also adds `releases_match_order` on `(album_artist COLLATE NOCASE,
+title COLLATE NOCASE)`, the order Match Review pages Releases in, so a page
+reads Releases in that order from the index instead of sorting every one,
+which took 0.66 s at 429,312 Releases. The rewind to version 25 drops the
+table and the index.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the

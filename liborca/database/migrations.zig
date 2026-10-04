@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 51;
+pub const current_version = 52;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1508,6 +1508,19 @@ const migration_51 =
     \\
 ;
 
+/// A MusicBrainz release the user said a Release is not ("Not This
+/// Release"), so it is never its best candidate again.
+const migration_52 =
+    \\CREATE TABLE dismissed_release_candidates (
+    \\    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    \\    musicbrainz_release_id TEXT NOT NULL,
+    \\    dismissed_at INTEGER NOT NULL,
+    \\    PRIMARY KEY (release_id, musicbrainz_release_id)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX releases_match_order ON releases(album_artist COLLATE NOCASE, title COLLATE NOCASE);
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2043,6 +2056,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 49 and target_version >= 49) try db.exec(migration_49);
     if (version < 50 and target_version >= 50) try db.exec(migration_50);
     if (version < 51 and target_version >= 51) try db.exec(migration_51);
+    if (version < 52 and target_version >= 52) try db.exec(migration_52);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -3989,5 +4003,47 @@ test "a version-50 library keeps every fetched cover byte for byte as a fetched 
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM observed_file_tags WHERE artwork_byte_size > 0 AND artwork_hash IS NULL;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM folder_images WHERE hash IS NULL;"));
     try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT modified_ns FROM folder_images;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-51 library keeps its releases and gains release candidate dismissals that go with their release" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v51-dismissals.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 51);
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_date, release_key, musicbrainz_release_id) VALUES
+        \\    (1, 'ONEPOINTFIVE', 'Amine', '2018', 'one', '2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b'),
+        \\    (2, 'Limbo', 'Amine', '2020', 'two', NULL);
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10);
+        \\INSERT INTO identification_proposals(file_id, provider, provider_id, confidence, payload, state, updated_at)
+        \\VALUES (1, 'musicbrainz', '3e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', 0.9, X'7B7D', 0, 1);
+    );
+    const rows_sql = "SELECT group_concat(id || ':' || title || ':' || album_artist || ':' || COALESCE(release_date, '-') || ':' || " ++
+        "COALESCE(musicbrainz_release_id, '-'), ' ') FROM (SELECT * FROM releases ORDER BY id);";
+    const before = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(before);
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    const after = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM identification_proposals WHERE state = 0;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM dismissed_release_candidates;"));
+
+    try db.exec(
+        \\INSERT INTO dismissed_release_candidates(release_id, musicbrainz_release_id, dismissed_at)
+        \\VALUES (1, '4e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', 1800000000), (2, '4e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', 1800000000);
+    );
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO dismissed_release_candidates(release_id, musicbrainz_release_id, dismissed_at) VALUES (1, '4e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', 0);",
+    ));
+    try db.exec("DELETE FROM releases WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM dismissed_release_candidates;"));
     try checkForeignKeys(db);
 }

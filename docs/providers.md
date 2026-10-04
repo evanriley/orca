@@ -571,7 +571,9 @@ orca-cli matches DATABASE TRACK_ID
 orca-cli accept-match DATABASE PROPOSAL_ID
 orca-cli dismiss-match DATABASE PROPOSAL_ID
 orca-cli accept-matches DATABASE --min-score=0.9
-orca-cli apply-release DATABASE RELEASE_ID
+orca-cli apply-release DATABASE RELEASE_ID [--fields=album,album_artist,date,release_id,track_titles]
+orca-cli matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9]
+orca-cli matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff | --dismiss=MBID)
 orca-cli fingerprint DATABASE TRACK_ID
 ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 ```

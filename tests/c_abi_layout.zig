@@ -129,6 +129,12 @@ const struct_pairs = .{
     .{ c_api.MatchAcceptanceView, c.orca_match_acceptance },
     .{ c_api.ConfidentAcceptanceView, c.orca_confident_acceptance },
     .{ c_api.MatchReviewView, c.orca_match_review_view },
+    .{ c_api.ReleaseMatchView, c.orca_release_match_view },
+    .{ c_api.ReleaseMatchCountsView, c.orca_release_match_counts },
+    .{ c_api.MatchEvidenceView, c.orca_match_evidence_view },
+    .{ c_api.ReleaseFieldDiffView, c.orca_release_field_diff_view },
+    .{ c_api.ReleaseTrackAlignmentView, c.orca_release_track_alignment_view },
+    .{ c_api.ReleaseMatchDiffView, c.orca_release_match_diff_view },
     .{ c_api.HeardRecordingView, c.orca_heard_recording_view },
     .{ c_api.TrackVerificationView, c.orca_track_verification_view },
     .{ c_api.CorrectionMemberView, c.orca_correction_member_view },
@@ -364,6 +370,20 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_REPLAY_GAIN_";
         pub const Tag = audio.processing.ReplayGainMode;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_MATCH_BUCKET_";
+        pub const Tag = core.runtime.ReleaseMatchBucket;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_FIELD_";
+        pub const Tag = core.runtime.ReleaseField;
         pub fn produce(tag: Tag) ?i64 {
             return @intFromEnum(tag);
         }
@@ -716,6 +736,20 @@ const import_mappings = .{
         pub const Tag = core.runtime.JobHistoryFilter;
         pub fn consume(value: u8) ?Tag {
             return c_api.importJobHistoryFilter(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_MATCH_BUCKET_";
+        pub const Tag = core.runtime.ReleaseMatchBucket;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importReleaseMatchBucket(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_FIELD_";
+        pub const Tag = core.runtime.ReleaseField;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importReleaseField(value);
         }
     },
 };

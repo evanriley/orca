@@ -28,6 +28,10 @@ const OrcaRuntime = runtime_module.OrcaRuntime;
 const PlayStats = runtime_module.PlayStats;
 const PlayerHandle = runtime_module.PlayerHandle;
 const RecordingIdSource = runtime_module.RecordingIdSource;
+const ReleaseField = runtime_module.ReleaseField;
+const ReleaseFieldSet = runtime_module.ReleaseFieldSet;
+const ReleaseMatchBucket = runtime_module.ReleaseMatchBucket;
+const ReleaseMatchCounts = runtime_module.ReleaseMatchCounts;
 const ScanStats = runtime_module.ScanStats;
 const ScrobblerState = runtime_module.ScrobblerState;
 const SubmissionOutcome = runtime_module.SubmissionOutcome;
@@ -3242,7 +3246,7 @@ test "accepting one file of a two-file Release stores its title and artist only,
     try std.testing.expectEqual(@as(?RecordingIdSource, .match), details.musicbrainz_release_id_source);
     try std.testing.expectEqualStrings(nick_drake_mbid, details.musicbrainz_album_artist_id.?);
 
-    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, releases.items[0].id));
+    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, releases.items[0].id, null));
 }
 
 test "an accept keeps a locked title, still stores the other values, and a Various Artists release marks a compilation" {
@@ -3292,17 +3296,17 @@ test "a stray file accepted on another release blocks the album's values until a
     _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, stray, "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8092", elsewhere));
     try expectOrcaValue(library_database, northern_sky, .album, null);
     const album = try releaseOfFile(library_database, northern_sky);
-    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, album));
+    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, album, null));
 
     const moved = try runtime.libraryEditTracks(library, &.{try trackOfFile(library_database, stray)}, &.{.{ .field = .album, .value = "Strays" }});
     moved.deinit();
-    try std.testing.expectEqual(@as(u32, 2 * 9), try runtime.libraryApplyMatchedRelease(library, album));
+    try std.testing.expectEqual(@as(u32, 2 * 9), try runtime.libraryApplyMatchedRelease(library, album, null));
 
     try expectOrcaValue(library_database, northern_sky, .album, "Bryter Layter");
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
     try expectOrcaValue(library_database, stray, .musicbrainz_release_id, null);
     try std.testing.expect(try releaseOfFile(library_database, northern_sky) != album);
-    try std.testing.expectError(error.UnknownRelease, runtime.libraryApplyMatchedRelease(library, album));
+    try std.testing.expectError(error.UnknownRelease, runtime.libraryApplyMatchedRelease(library, album, null));
 }
 
 test "library matching looks the best release up before storing a search, asks nothing again within thirty days, stops on an unreachable lookup and stores a missing release unlooked" {
@@ -6642,4 +6646,261 @@ test "release groups an Artist's browse no longer names take their covers with t
     defer rows.deinit();
     try std.testing.expectEqual(database.sqlite.Step.row, try rows.step());
     try std.testing.expectEqual(@as(i64, 4), rows.columnInt64(0));
+}
+
+fn observeAlbumFile(library_database: *database.LibraryDatabase, uri: []const u8, title: []const u8, duration_ms: i64) !i64 {
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024, .duration_ms = duration_ms });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = uri,
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = title,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .album_artist = "Nick Drake",
+        .date = "1971",
+    } });
+    return file_id;
+}
+
+fn putHeardPayload(library_database: *database.LibraryDatabase, file_id: i64, recording_mbid: []const u8, payload: database.ProposalPayload, confidence: f32) !void {
+    const encoded = try payload.encode(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    _ = try library_database.identification_proposals.put(.{
+        .file_id = file_id,
+        .provider = "musicbrainz+acoustid",
+        .provider_id = recording_mbid,
+        .confidence = confidence,
+        .payload = encoded,
+    });
+}
+
+fn proposalStates(library_database: *database.LibraryDatabase, state: i64) !i64 {
+    var statement = try library_database.database.prepare("SELECT count(*) FROM identification_proposals WHERE state = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, state);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+test "release match pages and counts across many Releases agree with weighing each Release on its own" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-match-chunks?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    try library_database.database.exec(
+        \\CREATE TEMP TABLE numbers AS
+        \\    WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM n WHERE v < 1200) SELECT v FROM n;
+        \\INSERT INTO releases(id, title, album_artist)
+        \\    SELECT v, printf('Album %d', v % 7), printf('Artist %03d', (v * 37) % 600) FROM numbers WHERE v <= 600;
+        \\INSERT INTO recordings(id, title) SELECT v, 'Song' FROM numbers;
+        \\INSERT INTO files(id, recording_id) SELECT v, v FROM numbers;
+        \\INSERT INTO tracks(id, recording_id, release_id, title, track_number, preferred_file_id)
+        \\    SELECT v, v, (v + 1) / 2, 'Song', 2 - v % 2, CASE WHEN v % 7 = 0 THEN NULL ELSE v END FROM numbers;
+        \\INSERT INTO observed_file_tags(file_id, musicbrainz_release_id)
+        \\    SELECT v, printf('00000000-0000-4000-8000-%012d', (v + 1) / 2) FROM numbers
+        \\    WHERE ((v + 1) / 2) % 3 = 0 OR (((v + 1) / 2) % 3 = 1 AND v % 2 = 1);
+        \\INSERT INTO dismissed_release_candidates(release_id, musicbrainz_release_id, dismissed_at)
+        \\    SELECT v, printf('00000000-0000-4000-8000-%012d', v), 0 FROM numbers WHERE v <= 600 AND v % 45 = 0;
+    );
+    const repository = &library_database.identification_proposals;
+    var expected: [3]std.ArrayList(i64) = .{ .empty, .empty, .empty };
+    defer for (&expected) |*list| list.deinit(std.testing.allocator);
+    {
+        var releases = try library_database.database.prepare(
+            "SELECT id FROM releases ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
+        );
+        defer releases.deinit();
+        while (try releases.step() == .row) {
+            const view = try repository.releaseMatchView(std.testing.allocator, releases.columnInt64(0), false);
+            defer view.deinit();
+            const bucket = @import("../database/repository/identification.zig").releaseMatchBucket(try view.best(std.testing.allocator), 0.9);
+            try expected[@intFromEnum(bucket)].append(std.testing.allocator, view.release_id);
+        }
+    }
+    try std.testing.expectEqual(ReleaseMatchCounts{
+        .confident = expected[@intFromEnum(ReleaseMatchBucket.confident)].items.len,
+        .needs_review = expected[@intFromEnum(ReleaseMatchBucket.needs_review)].items.len,
+        .unmatched = expected[@intFromEnum(ReleaseMatchBucket.unmatched)].items.len,
+    }, try runtime.libraryReleaseMatchCounts(library, 0.9));
+    try std.testing.expectEqual(@as(usize, 187), expected[@intFromEnum(ReleaseMatchBucket.confident)].items.len);
+    try std.testing.expectEqual(@as(usize, 200), expected[@intFromEnum(ReleaseMatchBucket.needs_review)].items.len);
+    for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched }) |bucket| {
+        const all = expected[@intFromEnum(bucket)].items;
+        for ([_]u32{ 0, 1, 150, 199, 250 }) |offset| for ([_]u32{ 7, 512 }) |limit| {
+            var page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, limit, offset);
+            defer page.deinit();
+            const start = @min(offset, all.len);
+            const want = all[start..@min(all.len, start + limit)];
+            try std.testing.expectEqual(want.len, page.items.len);
+            for (want, page.items) |release_id, item| {
+                try std.testing.expectEqual(release_id, item.release_id);
+                try std.testing.expectEqual(bucket, item.bucket);
+                try std.testing.expectEqual(@as(u32, 2), item.track_count);
+            }
+        };
+    }
+}
+
+test "a Release sorts into a bucket by its best release's mean confidence, and dismissing that release leaves it unmatched" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-match-buckets?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeAlbumFile(library_database, "/music/drake/01.flac", "Northern Sky", 227_000);
+    const pink_moon = try observeAlbumFile(library_database, "/music/drake/02.flac", "Pink Moon", 125_000);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+    _ = try putPayload(library_database, northern_sky, northern_sky_mbid, bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3));
+    _ = try putPayload(library_database, pink_moon, pink_moon_mbid, bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4));
+
+    var confident = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .confident, 0.9, 512, 0);
+    defer confident.deinit();
+    try std.testing.expectEqual(@as(usize, 1), confident.items.len);
+    const item = confident.items[0];
+    try std.testing.expectEqual(album, item.release_id);
+    try std.testing.expectEqual(@as(u32, 2), item.track_count);
+    try std.testing.expectEqualStrings(bryter_layter_mbid, item.best.?.release_mbid);
+    try std.testing.expectEqualStrings("Bryter Layter", item.best.?.title);
+    try std.testing.expectEqualStrings("1971-03-01", item.best.?.date.?);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.95), item.best.?.confidence, 0.001);
+
+    var review = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .needs_review, 0.99, 512, 0);
+    defer review.deinit();
+    try std.testing.expectEqual(@as(usize, 1), review.items.len);
+    try std.testing.expectEqual(ReleaseMatchBucket.needs_review, review.items[0].bucket);
+    const counts = try runtime.libraryReleaseMatchCounts(library, 0.99);
+    try std.testing.expectEqual(ReleaseMatchCounts{ .confident = 0, .needs_review = 1, .unmatched = 0 }, counts);
+
+    try runtime.libraryDismissReleaseCandidate(library, album, bryter_layter_mbid);
+    try runtime.libraryDismissReleaseCandidate(library, album, bryter_layter_mbid);
+    var unmatched = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .unmatched, 0.9, 512, 0);
+    defer unmatched.deinit();
+    try std.testing.expectEqual(@as(usize, 1), unmatched.items.len);
+    try std.testing.expectEqual(@as(?database.ReleaseCandidate, null), unmatched.items[0].best);
+    try std.testing.expectError(error.NoReleaseCandidate, runtime.libraryReleaseMatchEvidence(library, album, null));
+    try std.testing.expectError(error.InvalidMusicBrainzId, runtime.libraryDismissReleaseCandidate(library, album, "not-an-id"));
+    try std.testing.expectError(error.UnknownRelease, runtime.libraryDismissReleaseCandidate(library, album + 100, bryter_layter_mbid));
+    try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryReleaseMatchCounts(library, 0));
+}
+
+test "applying only the album artist from pending proposals stores it locked over the file's tag, keeps a user's lock, leaves the rest and the proposals alone, and yields to a later edit" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-apply-fields?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeAlbumFile(library_database, "/music/drake/01.flac", "Northern Sky", 227_000);
+    const pink_moon = try observeAlbumFile(library_database, "/music/drake/02.flac", "Pink Moon", 125_000);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+    var northern_payload = bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3);
+    northern_payload.release_artist = "Nicholas Drake";
+    var pink_payload = bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4);
+    pink_payload.release_artist = "Nicholas Drake";
+    _ = try putPayload(library_database, northern_sky, northern_sky_mbid, northern_payload);
+    _ = try putPayload(library_database, pink_moon, pink_moon_mbid, pink_payload);
+    try library_database.orca_metadata.upsert(.{ .file_id = pink_moon, .field = .album_artist, .value = "Mine", .provenance = .user, .locked = true });
+
+    const only_album_artist: ReleaseFieldSet = .initOne(.album_artist);
+    try std.testing.expectEqual(@as(u32, 1), try runtime.libraryApplyMatchedRelease(library, album, only_album_artist));
+
+    const applied = (try library_database.orca_metadata.get(std.testing.allocator, northern_sky, .album_artist)).?;
+    defer applied.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Nicholas Drake", applied.text);
+    try std.testing.expect(applied.locked);
+    try std.testing.expectEqual(metadata.Provenance.provider, applied.provenance);
+    try expectOrcaValue(library_database, pink_moon, .album_artist, "Mine");
+    const shown = (try runtime.libraryTrackDetails(library, try trackOfFile(library_database, northern_sky))).?;
+    try std.testing.expectEqualStrings("Nicholas Drake", shown.album_artist);
+    try std.testing.expectEqualStrings("1971", shown.date.?);
+    shown.deinit();
+    for ([_]i64{ northern_sky, pink_moon }) |file| {
+        try expectOrcaValue(library_database, file, .album, null);
+        try expectOrcaValue(library_database, file, .date, null);
+        try expectOrcaValue(library_database, file, .title, null);
+        try expectOrcaValue(library_database, file, .track_number, null);
+        try expectOrcaValue(library_database, file, .musicbrainz_release_id, null);
+        try expectOrcaValue(library_database, file, .compilation, null);
+    }
+    try std.testing.expectEqual(@as(i64, 2), try proposalStates(library_database, 0));
+    try std.testing.expectEqual(@as(i64, 0), try proposalStates(library_database, 1));
+
+    (try runtime.libraryEditTracks(library, &.{try trackOfFile(library_database, northern_sky)}, &.{.{ .field = .album_artist, .value = "Edited" }})).deinit();
+    try expectOrcaValue(library_database, northern_sky, .album_artist, "Edited");
+}
+
+test "apply-release without fields stores nothing while the Tracks have only pending proposals and leaves them pending" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-apply-consensus?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeAlbumFile(library_database, "/music/drake/01.flac", "Northern Sky", 227_000);
+    const pink_moon = try observeAlbumFile(library_database, "/music/drake/02.flac", "Pink Moon", 125_000);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+    _ = try putPayload(library_database, northern_sky, northern_sky_mbid, bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3));
+    _ = try putPayload(library_database, pink_moon, pink_moon_mbid, bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4));
+
+    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, album, null));
+
+    for ([_]i64{ northern_sky, pink_moon }) |file| {
+        try expectOrcaValue(library_database, file, .album_artist, null);
+        try expectOrcaValue(library_database, file, .musicbrainz_release_id, null);
+        try expectOrcaValue(library_database, file, .musicbrainz_recording_id, null);
+    }
+    try std.testing.expectEqual(@as(i64, 2), try proposalStates(library_database, 0));
+    try std.testing.expectEqual(@as(i64, 0), try proposalStates(library_database, 1));
+}
+
+test "release evidence counts Tracks heard by fingerprint and compares dates as text, and the diff lines each Track up with its title on the release" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-evidence?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeAlbumFile(library_database, "/music/drake/01.flac", "Northern Sky", 227_000);
+    const pink_moon = try observeAlbumFile(library_database, "/music/drake/02.flac", "Pink Moon (demo)", 125_000);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+    var heard = bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3);
+    heard.duration_ms = 227_400;
+    heard.acoustid_score = 0.97;
+    try putHeardPayload(library_database, northern_sky, northern_sky_mbid, heard, 0.97);
+    var searched = bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4);
+    searched.duration_ms = 126_900;
+    _ = try putPayload(library_database, pink_moon, pink_moon_mbid, searched);
+
+    const evidence = try runtime.libraryReleaseMatchEvidence(library, album, null);
+    try std.testing.expectEqual(@as(u32, 1), evidence.fingerprints_matched);
+    try std.testing.expectEqual(@as(u32, 2), evidence.tracks);
+    try std.testing.expect(!evidence.durations_within_1s);
+    try std.testing.expect(evidence.artist_agrees);
+    try std.testing.expect(evidence.title_agrees);
+    try std.testing.expect(!evidence.date_agrees);
+    try std.testing.expectEqualStrings(
+        "1 of 2 tracks match by fingerprint; 1 of 2 durations differ by more than 1 s; the date differs (1971 here, 1971-03-01 on the release).",
+        evidence.note.slice(),
+    );
+
+    const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, bryter_layter_mbid);
+    defer diff.deinit();
+    try std.testing.expectEqual(@as(u32, 2), diff.aligned);
+    const date = diff.fields[@intFromEnum(ReleaseField.release_date)];
+    try std.testing.expectEqualStrings("1971", date.local);
+    try std.testing.expectEqualStrings("1971-03-01", date.candidate);
+    try std.testing.expect(date.differs);
+    try std.testing.expect(!diff.fields[@intFromEnum(ReleaseField.album)].differs);
+    const titles = diff.fields[@intFromEnum(ReleaseField.track_titles)];
+    try std.testing.expectEqualStrings("1 of 2 differ", titles.local);
+    try std.testing.expect(titles.differs);
+    try std.testing.expectEqual(@as(usize, 2), diff.tracks.len);
+    try std.testing.expectEqual(@as(u32, 3), diff.tracks[0].position);
+    try std.testing.expectEqual(@as(?i64, 400), diff.tracks[0].delta_ms);
+    try std.testing.expect(diff.tracks[0].fingerprint);
+    try std.testing.expectEqualStrings("Pink Moon (demo)", diff.tracks[1].local_title);
+    try std.testing.expectEqualStrings("Pink Moon", diff.tracks[1].candidate_title);
+    try std.testing.expectEqual(@as(?i64, 1900), diff.tracks[1].delta_ms);
+    try std.testing.expect(!diff.tracks[1].fingerprint);
 }

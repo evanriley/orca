@@ -3818,6 +3818,23 @@ static void count_match_review(void *context, const orca_match_review_view *item
     ((struct match_smoke_count *)context)->calls += 1;
 }
 
+static void count_release_match(void *context, const orca_release_match_view *item) {
+    struct match_smoke_count *count = context;
+    if (item->bucket == ORCA_RELEASE_MATCH_BUCKET_UNMATCHED && item->has_best == 0) count->calls += 1;
+}
+
+static void count_match_evidence(void *context, const orca_match_evidence_view *evidence) {
+    struct match_smoke_count *count = context;
+    if (evidence->fingerprints_matched == 0 && evidence->date_agrees == 0 && evidence->note.length > 0) count->calls += 1;
+}
+
+static void count_release_match_diff(void *context, const orca_release_match_diff_view *diff) {
+    struct match_smoke_count *count = context;
+    if (diff->field_count == ORCA_RELEASE_FIELD_TRACK_TITLES + 1 && diff->fields[ORCA_RELEASE_FIELD_RELEASE_ID].field == ORCA_RELEASE_FIELD_RELEASE_ID &&
+        diff->aligned == 0)
+        count->calls += 1;
+}
+
 static void count_track_verification(void *context, const orca_track_verification_view *verification) {
     (void)verification;
     ((struct match_smoke_count *)context)->calls += 1;
@@ -3904,6 +3921,36 @@ static int matching_smoke(orca_runtime *runtime, orca_handle library, int64_t tr
     uint32_t values_written = 1;
     SMOKE_CHECK(orca_library_apply_matched_release(runtime, library, release_id, &values_written) == ORCA_STATUS_OK);
     SMOKE_CHECK(values_written == 0);
+    values_written = 1;
+    SMOKE_CHECK(orca_library_apply_matched_release_fields(runtime, library, release_id, 1u << ORCA_RELEASE_FIELD_ALBUM_ARTIST, &values_written) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(values_written == 0);
+    SMOKE_CHECK(orca_library_apply_matched_release_fields(runtime, library, release_id, 1u << 8, &values_written) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    struct match_smoke_count releases = {0};
+    SMOKE_CHECK(orca_library_query_release_matches(runtime, library, ORCA_RELEASE_MATCH_BUCKET_UNMATCHED, 0.9f, 512, 0, &releases, count_release_match) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(releases.calls >= 1);
+    SMOKE_CHECK(orca_library_query_release_matches(runtime, library, 3, 0.9f, 512, 0, &releases, count_release_match) == ORCA_STATUS_INVALID_ARGUMENT);
+    orca_release_match_counts release_counts = {0};
+    SMOKE_CHECK(orca_library_release_match_counts(runtime, library, 0.9f, &release_counts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(release_counts.unmatched == (uint64_t)releases.calls);
+    SMOKE_CHECK(orca_library_release_match_counts(runtime, library, 0.0f, &release_counts) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    const char *candidate = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01";
+    struct match_smoke_count evidence = {0};
+    SMOKE_CHECK(orca_library_release_match_evidence(runtime, library, release_id, 0, &evidence, count_match_evidence) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_release_match_evidence(runtime, library, release_id, "not-an-mbid", &evidence, count_match_evidence) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_release_match_evidence(runtime, library, release_id, candidate, &evidence, count_match_evidence) == ORCA_STATUS_OK);
+    SMOKE_CHECK(evidence.calls == 1);
+    struct match_smoke_count diff = {0};
+    SMOKE_CHECK(orca_library_release_match_diff(runtime, library, release_id, candidate, &diff, count_release_match_diff) == ORCA_STATUS_OK);
+    SMOKE_CHECK(diff.calls == 1);
+    SMOKE_CHECK(orca_library_release_match_diff(runtime, library, 999999999, candidate, &diff, count_release_match_diff) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_dismiss_release_candidate(runtime, library, release_id, candidate) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_dismiss_release_candidate(runtime, library, release_id, candidate) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_dismiss_release_candidate(runtime, library, 999999999, candidate) == ORCA_STATUS_NOT_FOUND);
 
     orca_runtime *fresh = orca_runtime_create();
     SMOKE_CHECK(fresh != 0);

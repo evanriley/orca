@@ -75,7 +75,7 @@ const CarriedTable = struct {
 };
 
 /// A Release left without Tracks hands its stored covers, its cover art
-/// candidates and its love to the Release that took most of them, each only
+/// candidates, its love and its dismissed MusicBrainz releases to the Release that took most of them, each only
 /// when that one has none of its own, so a cover fetched or chosen or an
 /// album loved before a regrouping survives it. The tables cascade on the
 /// Release row, so whatever is not handed over goes with it.
@@ -87,7 +87,9 @@ fn carryReleaseState(db: database.sqlite.Database, allocator: std.mem.Allocator,
     defer candidates.deinit();
     var loves = try CarriedTable.prepare(db, "release_loves");
     defer loves.deinit();
-    const carried = [_]*CarriedTable{ &artwork, &candidates, &loves };
+    var dismissals = try CarriedTable.prepare(db, "dismissed_release_candidates");
+    defer dismissals.deinit();
+    const carried = [_]*CarriedTable{ &artwork, &candidates, &loves, &dismissals };
     var in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
     defer in_use.deinit();
     var now_on = try db.prepare(

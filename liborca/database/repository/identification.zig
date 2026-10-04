@@ -408,7 +408,9 @@ pub const MatchProposalPage = struct {
     }
 };
 
-const AcceptanceReview = enum { reviewed, bulk, group };
+/// `release` is an accept by a release apply: it stores the recording ID
+/// only and leaves the Track's other values to the apply.
+const AcceptanceReview = enum { reviewed, bulk, group, release };
 
 pub const ProposalAcceptance = struct {
     file_id: i64,
@@ -589,6 +591,44 @@ const ProviderValueWriter = struct {
     }
 };
 
+/// What the release says about a Track, for `fields` of it.
+fn writeReleaseValues(
+    writer: *ProviderValueWriter,
+    file_id: i64,
+    payload: ProposalPayload,
+    release_mbid: []const u8,
+    fields: ReleaseFieldSet,
+) !void {
+    if (fields.contains(.album)) try writer.text(file_id, .album, payload.release_title);
+    if (fields.contains(.album_artist)) {
+        try writer.text(file_id, .album_artist, payload.release_artist);
+        if (payload.release_artist_mbid) |artist_mbid| {
+            if (std.mem.eql(u8, artist_mbid, various_artists_mbid)) try writer.text(file_id, .compilation, "1");
+        }
+    }
+    if (fields.contains(.release_date)) try writer.text(file_id, .date, payload.release_date);
+    if (fields.contains(.release_id)) {
+        try writer.number(file_id, .disc_number, payload.disc_number);
+        try writer.number(file_id, .track_number, payload.track_number);
+        try writer.text(file_id, .musicbrainz_release_id, release_mbid);
+        try writer.text(file_id, .musicbrainz_release_group_id, payload.release_group_mbid);
+        try writer.text(file_id, .musicbrainz_release_track_id, payload.release_track_mbid);
+        try writer.text(file_id, .musicbrainz_album_artist_id, payload.release_artist_mbid);
+    }
+}
+
+/// The Release's best candidate, when every Track has a play file and names
+/// it or has a proposal an apply can take its values from.
+fn applicableRelease(view: *const ReleaseMatchView, allocator: std.mem.Allocator) !?[]const u8 {
+    const best = (try view.best(allocator)) orelse return null;
+    if (view.tracks.len == 0) return null;
+    for (view.tracks) |*track| {
+        if (track.play_file == null) return null;
+        if (!track.names(best.release_mbid) and track.applicable(best.release_mbid) == null) return null;
+    }
+    return best.release_mbid;
+}
+
 fn isMusicBrainzIdField(field: metadata.Field) bool {
     return switch (field) {
         .musicbrainz_recording_id,
@@ -731,6 +771,312 @@ pub const MatchReviewPage = struct {
     }
 };
 
+/// Where a Release stands against MusicBrainz on the Matches page.
+pub const ReleaseMatchBucket = enum(u8) {
+    /// Its best candidate is at least as confident as the caller's threshold.
+    confident,
+    /// Its best candidate is less confident than that.
+    needs_review,
+    /// None of its Tracks names a MusicBrainz release it was not told is wrong.
+    unmatched,
+};
+
+/// A MusicBrainz release some of a Release's Tracks are named on: by a tag,
+/// an accepted match enriched for it or a proposal listing it.
+pub const ReleaseCandidate = struct {
+    release_mbid: []const u8,
+    /// The release's own title, else the album a proposal on it gave, else
+    /// empty.
+    title: []const u8,
+    date: ?[]const u8,
+    track_count: ?u32,
+    /// The mean over the Release's Tracks of 1 for a Track whose tag or
+    /// accepted match names the release, else the confidence of its most
+    /// confident pending proposal listing it, else 0.
+    confidence: f32,
+};
+
+pub const ReleaseMatchItem = struct {
+    release_id: i64,
+    title: []const u8,
+    artist: []const u8,
+    track_count: u32,
+    best: ?ReleaseCandidate,
+    bucket: ReleaseMatchBucket,
+};
+
+pub const ReleaseMatchPage = struct {
+    arena: *std.heap.ArenaAllocator,
+    items: []ReleaseMatchItem,
+
+    pub fn deinit(self: ReleaseMatchPage) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+};
+
+pub const ReleaseMatchCounts = struct {
+    confident: u64 = 0,
+    needs_review: u64 = 0,
+    unmatched: u64 = 0,
+};
+
+/// A Release value Match Review compares with a candidate's.
+pub const ReleaseField = enum(u8) {
+    album,
+    album_artist,
+    release_date,
+    release_type,
+    /// The release, release group, release track and album artist IDs, the
+    /// track and disc numbers, and the recording ID that accepting the
+    /// Track's proposal on the release stores.
+    release_id,
+    genre,
+    artwork,
+    /// Each Track's title and artist as the release credits them.
+    track_titles,
+};
+
+/// The fields an apply stores. `release_type`, `genre` and `artwork` are
+/// compared but never stored: a release lookup gives no value for the first
+/// two, and a cover comes from the Cover Art Archive fetch.
+pub const ReleaseFieldSet = std.EnumSet(ReleaseField);
+
+/// A proposal that is not dismissed on a Track's play file.
+pub const ReleaseMatchProposal = struct {
+    id: i64,
+    state: ProposalState,
+    confidence: f32,
+    found_by: ProviderSet,
+    recording_mbid: []const u8,
+    in_album_group: bool,
+    /// Accepting it would replace the recording ID in effect.
+    corrects: bool,
+    payload: ProposalPayload,
+
+    pub fn fingerprintBacked(self: ReleaseMatchProposal) bool {
+        const acoustid_score = self.payload.acoustid_score orelse return false;
+        return self.found_by.acoustid and acoustid_score >= fingerprint_minimum;
+    }
+
+    fn enrichedOn(self: ReleaseMatchProposal, release_mbid: []const u8) bool {
+        return self.payload.isEnriched() and std.mem.eql(u8, self.payload.release_mbid.?, release_mbid);
+    }
+};
+
+pub const ReleaseMatchTrack = struct {
+    track_id: i64,
+    play_file: ?i64,
+    title: []const u8,
+    artist: []const u8,
+    duration_ms: ?i64,
+    track_number: ?u32,
+    disc_number: ?u32,
+    /// The play file's MusicBrainz release tag, when it is an ID.
+    tagged_release: ?[]const u8,
+    /// Accepted and pending, most confident first.
+    proposals: []const ReleaseMatchProposal,
+
+    /// Its tag or an accepted match enriched for it names the release.
+    pub fn names(self: ReleaseMatchTrack, release_mbid: []const u8) bool {
+        if (self.tagged_release) |tag| if (std.mem.eql(u8, tag, release_mbid)) return true;
+        for (self.proposals) |proposal| {
+            if (proposal.state == .accepted and proposal.enrichedOn(release_mbid)) return true;
+        }
+        return false;
+    }
+
+    pub fn score(self: ReleaseMatchTrack, release_mbid: []const u8) f32 {
+        if (self.names(release_mbid)) return 1;
+        for (self.proposals) |proposal| {
+            if (proposal.state == .pending and proposal.payload.listsRelease(release_mbid))
+                return std.math.clamp(proposal.confidence, 0, 1);
+        }
+        return 0;
+    }
+
+    /// The proposal that speaks for the Track on the release: its accepted
+    /// match enriched for it, else its most confident pending proposal
+    /// enriched for it, else its most confident pending one listing it.
+    pub fn chosen(self: *const ReleaseMatchTrack, release_mbid: []const u8) ?*const ReleaseMatchProposal {
+        for (self.proposals) |*proposal| {
+            if (proposal.state == .accepted and proposal.enrichedOn(release_mbid)) return proposal;
+        }
+        for (self.proposals) |*proposal| {
+            if (proposal.state == .pending and proposal.enrichedOn(release_mbid)) return proposal;
+        }
+        for (self.proposals) |*proposal| {
+            if (proposal.state == .pending and proposal.payload.listsRelease(release_mbid)) return proposal;
+        }
+        return null;
+    }
+
+    /// The proposal an apply takes the Track's values from: its accepted
+    /// match enriched for the release, else its most confident pending
+    /// proposal enriched for it that is neither a correction nor in an
+    /// album group.
+    fn applicable(self: *const ReleaseMatchTrack, release_mbid: []const u8) ?*const ReleaseMatchProposal {
+        for (self.proposals) |*proposal| {
+            if (proposal.state == .accepted and proposal.enrichedOn(release_mbid)) return proposal;
+        }
+        for (self.proposals) |*proposal| {
+            if (proposal.state == .pending and proposal.enrichedOn(release_mbid) and
+                !proposal.in_album_group and !proposal.corrects) return proposal;
+        }
+        return null;
+    }
+};
+
+pub const LocalArtworkSource = enum { embedded, folder, fetched, chosen };
+
+/// A Release beside every MusicBrainz release its Tracks are named on.
+pub const ReleaseMatchView = struct {
+    arena: *std.heap.ArenaAllocator,
+    release_id: i64,
+    title: []const u8,
+    album_artist: []const u8,
+    release_date: ?[]const u8,
+    release_type: ?[]const u8,
+    /// The Release's own MusicBrainz release ID.
+    release_mbid: ?[]const u8,
+    /// Empty for a Release of more than `max_page` Tracks.
+    tracks: []const ReleaseMatchTrack,
+    track_count: u32,
+    dismissed: []const []const u8,
+    /// The rest is read only with details.
+    genres: []const []const u8 = &.{},
+    artwork: ?LocalArtworkSource = null,
+    /// The release a stored Cover Art Archive front cover came from.
+    artwork_release_mbid: ?[]const u8 = null,
+    /// Releases Orca fetched Cover Art Archive images of for the Release.
+    cover_art_releases: []const []const u8 = &.{},
+
+    pub fn deinit(self: ReleaseMatchView) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+
+    pub fn isDismissed(self: *const ReleaseMatchView, release_mbid: []const u8) bool {
+        for (self.dismissed) |each| if (std.ascii.eqlIgnoreCase(each, release_mbid)) return true;
+        return false;
+    }
+
+    /// Every release the Tracks name that is not dismissed, best first: by
+    /// confidence, then a track count equal to the Release's, then the
+    /// earlier date, then the lower ID.
+    pub fn candidates(self: *const ReleaseMatchView, allocator: std.mem.Allocator) ![]ReleaseCandidate {
+        var list: std.ArrayList(ReleaseCandidate) = .empty;
+        errdefer list.deinit(allocator);
+        for (self.tracks) |track| {
+            if (track.tagged_release) |tag| try self.addCandidate(allocator, &list, tag);
+            for (track.proposals) |proposal| {
+                if (proposal.state == .accepted) {
+                    if (proposal.payload.isEnriched()) try self.addCandidate(allocator, &list, proposal.payload.release_mbid.?);
+                    continue;
+                }
+                if (proposal.payload.release_mbid) |mbid| try self.addCandidate(allocator, &list, mbid);
+                for (proposal.payload.release_mbids orelse &.{}) |mbid| try self.addCandidate(allocator, &list, mbid);
+            }
+        }
+        for (list.items) |*candidate| self.describe(candidate);
+        std.mem.sort(ReleaseCandidate, list.items, self.track_count, betterCandidate);
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn best(self: *const ReleaseMatchView, allocator: std.mem.Allocator) !?ReleaseCandidate {
+        const all = try self.candidates(allocator);
+        defer allocator.free(all);
+        return if (all.len == 0) null else all[0];
+    }
+
+    /// What the Tracks say about `release_mbid`, dismissed or not.
+    pub fn describedCandidate(self: *const ReleaseMatchView, release_mbid: []const u8) ReleaseCandidate {
+        var result: ReleaseCandidate = .{ .release_mbid = release_mbid, .title = "", .date = null, .track_count = null, .confidence = 0 };
+        self.describe(&result);
+        return result;
+    }
+
+    fn addCandidate(self: *const ReleaseMatchView, allocator: std.mem.Allocator, list: *std.ArrayList(ReleaseCandidate), mbid: []const u8) !void {
+        if (!metadata.isMusicBrainzId(mbid) or self.isDismissed(mbid)) return;
+        for (list.items) |each| if (std.mem.eql(u8, each.release_mbid, mbid)) return;
+        try list.append(allocator, .{ .release_mbid = mbid, .title = "", .date = null, .track_count = null, .confidence = 0 });
+    }
+
+    fn describe(self: *const ReleaseMatchView, candidate: *ReleaseCandidate) void {
+        const mbid = candidate.release_mbid;
+        var total: f32 = 0;
+        var album: ?[]const u8 = null;
+        for (self.tracks) |track| {
+            total += track.score(mbid);
+            for (track.proposals) |proposal| {
+                const payload = proposal.payload;
+                if (payload.release_mbid) |named| if (std.mem.eql(u8, named, mbid)) {
+                    if (candidate.title.len == 0) candidate.title = payload.release_title orelse "";
+                    if (album == null and payload.album.len != 0) album = payload.album;
+                    if (candidate.date == null) candidate.date = presentOrNull(payload.release_date);
+                };
+                for (payload.release_facts orelse &.{}) |fact| {
+                    if (!std.mem.eql(u8, fact.mbid, mbid)) continue;
+                    if (candidate.date == null) candidate.date = presentOrNull(fact.date);
+                    if (candidate.track_count == null) candidate.track_count = fact.track_count;
+                }
+            }
+        }
+        if (candidate.title.len == 0) candidate.title = album orelse "";
+        candidate.confidence = if (self.tracks.len == 0) 0 else total / @as(f32, @floatFromInt(self.tracks.len));
+    }
+};
+
+fn presentOrNull(value: ?[]const u8) ?[]const u8 {
+    const text = value orelse return null;
+    return if (text.len == 0) null else text;
+}
+
+fn betterCandidate(track_count: u32, a: ReleaseCandidate, b: ReleaseCandidate) bool {
+    if (a.confidence != b.confidence) return a.confidence > b.confidence;
+    const a_count = a.track_count == track_count;
+    const b_count = b.track_count == track_count;
+    if (a_count != b_count) return a_count;
+    if (a.date != null and b.date != null) {
+        const order = std.mem.order(u8, a.date.?, b.date.?);
+        if (order != .eq) return order == .lt;
+    } else if ((a.date == null) != (b.date == null)) return a.date != null;
+    return std.mem.order(u8, a.release_mbid, b.release_mbid) == .lt;
+}
+
+const weigh_chunk = 256;
+const json_release_ids = "(SELECT value FROM json_each(?1))";
+
+fn releaseIdsJson(owned: std.mem.Allocator, views: []const ReleaseMatchView, listed: bool) ![]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    try text.append(owned, '[');
+    for (views) |view| {
+        if (listed and view.track_count > max_page) continue;
+        if (text.items.len > 1) try text.append(owned, ',');
+        var buffer: [24]u8 = undefined;
+        try text.appendSlice(owned, std.fmt.bufPrint(&buffer, "{d}", .{view.release_id}) catch unreachable);
+    }
+    try text.append(owned, ']');
+    return text.items;
+}
+
+/// The Releases with a Track whose play file may carry a release tag or a
+/// proposal that is not dismissed (`?1`); a superset of those with a
+/// candidate.
+const releases_with_candidate_sources =
+    "WITH sources(file_id) AS (\n" ++
+    "    SELECT file_id FROM identification_proposals WHERE state != ?1\n" ++
+    "    UNION SELECT file_id FROM observed_file_tags WHERE musicbrainz_release_id > '')\n" ++
+    "SELECT tracks.release_id FROM sources JOIN tracks ON tracks.preferred_file_id = sources.file_id\n" ++
+    "UNION SELECT tracks.release_id FROM sources JOIN files ON files.id = sources.file_id\n" ++
+    "    JOIN tracks ON tracks.recording_id = files.recording_id";
+
+pub fn releaseMatchBucket(best: ?ReleaseCandidate, confident_at: f32) ReleaseMatchBucket {
+    const candidate = best orelse return .unmatched;
+    return if (candidate.confidence >= confident_at) .confident else .needs_review;
+}
 pub const IdentificationProposalRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
@@ -855,7 +1201,7 @@ pub const IdentificationProposalRepository = struct {
         defer writer.deinit();
         try writer.text(file_id, .musicbrainz_recording_id, acceptable.recording_mbid);
         const track_ids = try self.idsFor(scratch, file_track_ids_sql, file_id);
-        const track_files = try self.filesOfTracks(scratch, track_ids, file_id);
+        const track_files: []const i64 = if (review == .release) &.{} else try self.filesOfTracks(scratch, track_ids, file_id);
         for (track_files) |track_file| {
             try writer.text(track_file, .title, payload.track_title orelse payload.title);
             try writer.text(track_file, .artist, payload.track_artist orelse payload.artist);
@@ -1023,20 +1369,8 @@ pub const IdentificationProposalRepository = struct {
             const payload = for (accepted) |candidate| {
                 if (std.mem.eql(u8, candidate.release_mbid.?, &agreed)) break candidate;
             } else continue;
-            for (try self.filesOfTracks(scratch, &.{release_track.id}, release_track.play_file)) |file_id| {
-                try writer.text(file_id, .album, payload.release_title);
-                try writer.text(file_id, .album_artist, payload.release_artist);
-                try writer.text(file_id, .date, payload.release_date);
-                try writer.number(file_id, .disc_number, payload.disc_number);
-                try writer.number(file_id, .track_number, payload.track_number);
-                try writer.text(file_id, .musicbrainz_release_id, &agreed);
-                try writer.text(file_id, .musicbrainz_release_group_id, payload.release_group_mbid);
-                try writer.text(file_id, .musicbrainz_release_track_id, payload.release_track_mbid);
-                try writer.text(file_id, .musicbrainz_album_artist_id, payload.release_artist_mbid);
-                if (payload.release_artist_mbid) |artist_mbid| {
-                    if (std.mem.eql(u8, artist_mbid, various_artists_mbid)) try writer.text(file_id, .compilation, "1");
-                }
-            }
+            for (try self.filesOfTracks(scratch, &.{release_track.id}, release_track.play_file)) |file_id|
+                try writeReleaseValues(&writer, file_id, payload, &agreed, .initFull());
         }
         return writer.values_written;
     }
@@ -1128,6 +1462,439 @@ pub const IdentificationProposalRepository = struct {
         }
         list.items = items.items;
         return list;
+    }
+
+    /// A Release, its Tracks with their accepted and pending proposals, and
+    /// the releases it was told it is not; with `detail` also its genres
+    /// and artwork.
+    pub fn releaseMatchView(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+        detail: bool,
+    ) !ReleaseMatchView {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+        const owned = arena.allocator();
+        var views = [1]ReleaseMatchView{emptyReleaseMatchView(arena, release_id)};
+        var found = [1]bool{false};
+        try self.fillReleaseMatchViews(owned, &views, &found);
+        if (!found[0]) return error.UnknownRelease;
+        if (detail) try self.readReleaseMatchDetail(owned, &views[0]);
+        return views[0];
+    }
+
+    fn emptyReleaseMatchView(arena: *std.heap.ArenaAllocator, release_id: i64) ReleaseMatchView {
+        return .{
+            .arena = arena,
+            .release_id = release_id,
+            .title = "",
+            .album_artist = "",
+            .release_date = null,
+            .release_type = null,
+            .release_mbid = null,
+            .tracks = &.{},
+            .track_count = 0,
+            .dismissed = &.{},
+        };
+    }
+
+    fn fillReleaseMatchViews(
+        self: *const IdentificationProposalRepository,
+        owned: std.mem.Allocator,
+        views: []ReleaseMatchView,
+        found: []bool,
+    ) !void {
+        var index_of: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+        for (views, 0..) |view, index| try index_of.put(owned, view.release_id, index);
+        const all_ids = try releaseIdsJson(owned, views, false);
+        {
+            var statement = try self.db.prepare(
+                "SELECT id, title, album_artist, release_date, release_type, musicbrainz_release_id,\n" ++
+                    "       (SELECT count(*) FROM tracks WHERE tracks.release_id = releases.id)\n" ++
+                    "FROM releases WHERE id IN " ++ json_release_ids ++ ";",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, all_ids);
+            while (try statement.step() == .row) {
+                const index = index_of.get(statement.columnInt64(0)) orelse continue;
+                const view = &views[index];
+                found[index] = true;
+                view.title = try owned.dupe(u8, statement.columnText(1));
+                view.album_artist = try owned.dupe(u8, statement.columnText(2));
+                view.release_date = presentOrNull(try duplicateNullableColumn(owned, statement, 3));
+                view.release_type = presentOrNull(try duplicateNullableColumn(owned, statement, 4));
+                view.release_mbid = presentOrNull(try duplicateNullableColumn(owned, statement, 5));
+                view.track_count = std.math.cast(u32, statement.columnInt64(6)) orelse std.math.maxInt(u32);
+            }
+        }
+        const listed_ids = try releaseIdsJson(owned, views, true);
+        const tracks = try owned.alloc(std.ArrayList(ReleaseMatchTrack), views.len);
+        for (tracks) |*list| list.* = .empty;
+        {
+            var statement = try self.db.prepare(
+                "SELECT release_id, id, play, title, artist, duration_ms, track_number, disc_number,\n" ++
+                    "       (SELECT musicbrainz_release_id FROM observed_file_tags WHERE observed_file_tags.file_id = play)\n" ++
+                    "FROM (SELECT tracks.release_id, tracks.id, tracks.title, tracks.artist, tracks.duration_ms,\n" ++
+                    "             tracks.track_number, tracks.disc_number, " ++ track_play_file ++ " AS play\n" ++
+                    "      FROM tracks WHERE tracks.release_id IN " ++ json_release_ids ++ ")\n" ++
+                    "ORDER BY release_id, COALESCE(disc_number, 1), track_number IS NULL, track_number, id;",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, listed_ids);
+            while (try statement.step() == .row) {
+                const index = index_of.get(statement.columnInt64(0)) orelse continue;
+                const tag = statement.columnText(8);
+                try tracks[index].append(owned, .{
+                    .track_id = statement.columnInt64(1),
+                    .play_file = optionalInt64(statement, 2),
+                    .title = try owned.dupe(u8, statement.columnText(3)),
+                    .artist = try owned.dupe(u8, statement.columnText(4)),
+                    .duration_ms = optionalInt64(statement, 5),
+                    .track_number = if (optionalInt64(statement, 6)) |number| std.math.cast(u32, number) else null,
+                    .disc_number = if (optionalInt64(statement, 7)) |number| std.math.cast(u32, number) else null,
+                    .tagged_release = if (metadata.isMusicBrainzId(tag)) try owned.dupe(u8, tag) else null,
+                    .proposals = &.{},
+                });
+            }
+        }
+        var by_file: std.AutoHashMapUnmanaged(i64, std.ArrayList(ReleaseMatchProposal)) = .empty;
+        {
+            var statement = try self.db.prepare(comptime "SELECT id, state, confidence, provider, provider_id, album_group IS NOT NULL, payload,\n" ++
+                "       " ++ effectiveRecordingMbid("identification_proposals.file_id") ++ ", file_id\n" ++
+                "FROM identification_proposals WHERE state != ?2 AND file_id IN\n" ++
+                "    (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.release_id IN " ++ json_release_ids ++ ")\n" ++
+                "ORDER BY file_id, confidence DESC, id;");
+            defer statement.deinit();
+            try statement.bindText(1, listed_ids);
+            try statement.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+            while (try statement.step() == .row) {
+                const entry = try by_file.getOrPut(owned, statement.columnInt64(8));
+                if (!entry.found_existing) entry.value_ptr.* = .empty;
+                if (entry.value_ptr.items.len >= max_page) continue;
+                const parsed = ProposalPayload.parse(owned, statement.columnBlob(6)) catch |err| switch (err) {
+                    error.InvalidProposalPayload => continue,
+                    error.OutOfMemory => return err,
+                };
+                const state: ProposalState = if (statement.columnInt64(1) == @intFromEnum(ProposalState.accepted)) .accepted else .pending;
+                const recording_mbid = try owned.dupe(u8, statement.columnText(4));
+                const in_effect = try duplicateNullableColumn(owned, statement, 7);
+                try entry.value_ptr.append(owned, .{
+                    .id = statement.columnInt64(0),
+                    .state = state,
+                    .confidence = @floatCast(statement.columnDouble(2)),
+                    .found_by = ProviderSet.parse(statement.columnText(3)),
+                    .recording_mbid = recording_mbid,
+                    .in_album_group = statement.columnInt64(5) != 0,
+                    .corrects = state == .pending and correctedId(in_effect, recording_mbid) != null,
+                    .payload = parsed.value,
+                });
+            }
+        }
+        for (views, tracks) |*view, *list| {
+            for (list.items) |*track| {
+                const play_file = track.play_file orelse continue;
+                if (by_file.get(play_file)) |proposals| track.proposals = proposals.items;
+            }
+            view.tracks = list.items;
+        }
+        const dismissed = try owned.alloc(std.ArrayList([]const u8), views.len);
+        for (dismissed) |*list| list.* = .empty;
+        {
+            var statement = try self.db.prepare(
+                "SELECT release_id, musicbrainz_release_id FROM dismissed_release_candidates\n" ++
+                    "WHERE release_id IN " ++ json_release_ids ++ " ORDER BY release_id, musicbrainz_release_id;",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, all_ids);
+            while (try statement.step() == .row) {
+                const index = index_of.get(statement.columnInt64(0)) orelse continue;
+                if (dismissed[index].items.len >= max_page) continue;
+                try dismissed[index].append(owned, try owned.dupe(u8, statement.columnText(1)));
+            }
+        }
+        for (views, dismissed) |*view, list| view.dismissed = list.items;
+    }
+
+    fn readReleaseMatchDetail(self: *const IdentificationProposalRepository, owned: std.mem.Allocator, view: *ReleaseMatchView) !void {
+        {
+            var statement = try self.db.prepare(
+                "SELECT genres.name FROM track_genres JOIN genres ON genres.id = track_genres.genre_id\n" ++
+                    "WHERE track_genres.track_id IN (SELECT id FROM tracks WHERE release_id=?1)\n" ++
+                    "GROUP BY genres.id ORDER BY count(*) DESC, min(track_genres.ordinal), genres.name LIMIT 8;",
+            );
+            defer statement.deinit();
+            try statement.bindInt64(1, view.release_id);
+            var genres: std.ArrayList([]const u8) = .empty;
+            while (try statement.step() == .row) try genres.append(owned, try owned.dupe(u8, statement.columnText(0)));
+            view.genres = genres.items;
+        }
+        {
+            var statement = try self.db.prepare(
+                "SELECT source, musicbrainz_release_id FROM release_artwork\n" ++
+                    "WHERE release_id=?1 AND kind=0 AND image IS NOT NULL;",
+            );
+            defer statement.deinit();
+            try statement.bindInt64(1, view.release_id);
+            if (try statement.step() == .row) {
+                view.artwork = switch (statement.columnInt64(0)) {
+                    0 => .embedded,
+                    1 => .folder,
+                    2 => .fetched,
+                    else => .chosen,
+                };
+                view.artwork_release_mbid = presentOrNull(try duplicateNullableColumn(owned, statement, 1));
+            }
+        }
+        if (view.artwork == null) {
+            var statement = try self.db.prepare(
+                "SELECT (SELECT has_folder_cover FROM releases WHERE id=?1),\n" ++
+                    "       EXISTS (SELECT 1 FROM tracks JOIN observed_file_tags\n" ++
+                    "               ON observed_file_tags.file_id = " ++ track_play_file ++ "\n" ++
+                    "               WHERE tracks.release_id=?1 AND observed_file_tags.artwork_byte_size > 0);",
+            );
+            defer statement.deinit();
+            try statement.bindInt64(1, view.release_id);
+            if (try statement.step() == .row) {
+                if (statement.columnInt64(0) != 0) view.artwork = .folder else if (statement.columnInt64(1) != 0) view.artwork = .embedded;
+            }
+        }
+        {
+            var statement = try self.db.prepare(
+                "SELECT DISTINCT musicbrainz_release_id FROM cover_art_candidates WHERE release_id=?1\n" ++
+                    "ORDER BY musicbrainz_release_id LIMIT ?2;",
+            );
+            defer statement.deinit();
+            try statement.bindInt64(1, view.release_id);
+            try statement.bindInt64(2, max_page);
+            var releases: std.ArrayList([]const u8) = .empty;
+            while (try statement.step() == .row) try releases.append(owned, try owned.dupe(u8, statement.columnText(0)));
+            view.cover_art_releases = releases.items;
+        }
+    }
+
+    /// Releases by album artist and title whose best candidate puts them in
+    /// `bucket` against `confident_at`. Only Releases a tag or a proposal
+    /// could name a release for are weighed; every other one is unmatched.
+    pub fn releaseMatchPage(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        bucket: ReleaseMatchBucket,
+        confident_at: f32,
+        limit: u32,
+        offset: u32,
+    ) !ReleaseMatchPage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        if (!validMinimumConfidence(confident_at)) return error.InvalidMinimumConfidence;
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        var page: ReleaseMatchPage = .{ .arena = arena, .items = &.{} };
+        errdefer page.deinit();
+        const owned = arena.allocator();
+        var items: std.ArrayList(ReleaseMatchItem) = .empty;
+        var skipped: u32 = 0;
+        var releases = try self.db.prepare(if (bucket == .unmatched)
+            "SELECT id, id IN (" ++ releases_with_candidate_sources ++ ") FROM releases\n" ++
+                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;"
+        else
+            "SELECT id, 1 FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ")\n" ++
+                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;");
+        defer releases.deinit();
+        try releases.bindInt64(1, @intFromEnum(ProposalState.dismissed));
+        var ids: [weigh_chunk]i64 = undefined;
+        var weighed: [weigh_chunk]bool = undefined;
+        var more = true;
+        while (more and items.items.len < limit) {
+            var count: usize = 0;
+            while (count < weigh_chunk) {
+                if (try releases.step() != .row) {
+                    more = false;
+                    break;
+                }
+                ids[count] = releases.columnInt64(0);
+                weighed[count] = releases.columnInt64(1) != 0;
+                count += 1;
+            }
+            var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
+            defer chunk_arena.deinit();
+            const chunk = chunk_arena.allocator();
+            var views: std.ArrayList(ReleaseMatchView) = .empty;
+            for (ids[0..count], weighed[0..count]) |id, weigh| {
+                if (weigh) try views.append(chunk, emptyReleaseMatchView(&chunk_arena, id));
+            }
+            const found = try chunk.alloc(bool, views.items.len);
+            @memset(found, false);
+            if (views.items.len != 0) try self.fillReleaseMatchViews(chunk, views.items, found);
+            var next_view: usize = 0;
+            for (ids[0..count], weighed[0..count]) |id, weigh| {
+                if (items.items.len >= limit) break;
+                var best: ?ReleaseCandidate = null;
+                var view: *const ReleaseMatchView = undefined;
+                if (weigh) {
+                    view = &views.items[next_view];
+                    const exists = found[next_view];
+                    next_view += 1;
+                    if (!exists) continue;
+                    best = try view.best(chunk);
+                }
+                if (releaseMatchBucket(best, confident_at) != bucket) continue;
+                if (skipped < offset) {
+                    skipped += 1;
+                    continue;
+                }
+                var single: ?ReleaseMatchView = null;
+                defer if (single) |each| each.deinit();
+                if (!weigh) {
+                    single = self.releaseMatchView(allocator, id, false) catch |err| switch (err) {
+                        error.UnknownRelease => continue,
+                        else => return err,
+                    };
+                    view = &single.?;
+                }
+                try items.append(owned, .{
+                    .release_id = view.release_id,
+                    .title = try owned.dupe(u8, view.title),
+                    .artist = try owned.dupe(u8, view.album_artist),
+                    .track_count = view.track_count,
+                    .best = if (best) |candidate| .{
+                        .release_mbid = try owned.dupe(u8, candidate.release_mbid),
+                        .title = try owned.dupe(u8, candidate.title),
+                        .date = if (candidate.date) |date| try owned.dupe(u8, date) else null,
+                        .track_count = candidate.track_count,
+                        .confidence = candidate.confidence,
+                    } else null,
+                    .bucket = bucket,
+                });
+            }
+        }
+        page.items = items.items;
+        return page;
+    }
+
+    pub fn releaseMatchCounts(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        confident_at: f32,
+    ) !ReleaseMatchCounts {
+        if (!validMinimumConfidence(confident_at)) return error.InvalidMinimumConfidence;
+        var counts: ReleaseMatchCounts = .{};
+        var total: u64 = 0;
+        {
+            var statement = try self.db.prepare("SELECT count(*) FROM releases;");
+            defer statement.deinit();
+            if (try statement.step() != .row) return error.SqlFailed;
+            total = @intCast(statement.columnInt64(0));
+        }
+        var releases = try self.db.prepare(releases_with_candidate_sources ++ ";");
+        defer releases.deinit();
+        try releases.bindInt64(1, @intFromEnum(ProposalState.dismissed));
+        var more = true;
+        while (more) {
+            var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
+            defer chunk_arena.deinit();
+            const chunk = chunk_arena.allocator();
+            var views: std.ArrayList(ReleaseMatchView) = .empty;
+            while (views.items.len < weigh_chunk) {
+                if (try releases.step() != .row) {
+                    more = false;
+                    break;
+                }
+                try views.append(chunk, emptyReleaseMatchView(&chunk_arena, releases.columnInt64(0)));
+            }
+            const found = try chunk.alloc(bool, views.items.len);
+            @memset(found, false);
+            try self.fillReleaseMatchViews(chunk, views.items, found);
+            for (views.items, found) |*view, exists| {
+                if (!exists) continue;
+                switch (releaseMatchBucket(try view.best(chunk), confident_at)) {
+                    .confident => counts.confident += 1,
+                    .needs_review => counts.needs_review += 1,
+                    .unmatched => {},
+                }
+            }
+        }
+        counts.unmatched = total -| (counts.confident + counts.needs_review);
+        return counts;
+    }
+
+    /// Remembers that the Release is not `release_mbid`, so the release is
+    /// never one of its candidates again. Its Tracks' proposals and values
+    /// stay as they are.
+    pub fn dismissReleaseCandidate(self: *IdentificationProposalRepository, release_id: i64, release_mbid: []const u8) !void {
+        if (!metadata.isMusicBrainzId(release_mbid)) return error.InvalidMusicBrainzId;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            "INSERT INTO dismissed_release_candidates(release_id, musicbrainz_release_id, dismissed_at)\n" ++
+                "SELECT id, ?2, unixepoch() FROM releases WHERE id=?1\n" ++
+                "ON CONFLICT(release_id, musicbrainz_release_id) DO NOTHING;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        try statement.bindText(2, release_mbid);
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() == 0) {
+            var exists = try self.db.prepare("SELECT 1 FROM releases WHERE id=?1;");
+            defer exists.deinit();
+            try exists.bindInt64(1, release_id);
+            if (try exists.step() != .row) return error.UnknownRelease;
+        }
+    }
+
+    /// Stores `fields` of the Release's best candidate, locked, on every
+    /// file of each Track: from its accepted match enriched for the release,
+    /// else from its pending proposal enriched for it, which `release_id`
+    /// accepts. A user's locked value stays. Writes nothing and returns 0
+    /// unless every Track has a play file and its tag, accepted match or
+    /// such a proposal names the release. Returns how many values were
+    /// stored.
+    pub fn applyMatchedRelease(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+        fields: ReleaseFieldSet,
+        written: ?*std.ArrayList(i64),
+    ) !u32 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const view = try self.releaseMatchView(allocator, release_id, false);
+        defer view.deinit();
+        const release_mbid = if (try applicableRelease(&view, allocator)) |mbid| mbid else {
+            try self.db.exec("COMMIT;");
+            return 0;
+        };
+
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        var values_written: u32 = 0;
+        var writer = try ProviderValueWriter.init(self.db, allocator, written, .correction);
+        defer writer.deinit();
+        for (view.tracks) |*track| {
+            const proposal = track.applicable(release_mbid) orelse continue;
+            const play_file = track.play_file.?;
+            if (proposal.state == .pending and fields.contains(.release_id)) {
+                var touched: std.ArrayList(i64) = .empty;
+                defer touched.deinit(allocator);
+                values_written += (try self.acceptLocked(allocator, proposal.id, .release, written, &touched)).values_written;
+            }
+            const payload = proposal.payload;
+            for (try self.filesOfTracks(scratch, &.{track.track_id}, play_file)) |file_id| {
+                if (fields.contains(.track_titles)) {
+                    try writer.text(file_id, .title, payload.track_title orelse payload.title);
+                    try writer.text(file_id, .artist, payload.track_artist orelse payload.artist);
+                }
+                try writeReleaseValues(&writer, file_id, payload, release_mbid, fields);
+            }
+        }
+        try self.db.exec("COMMIT;");
+        return values_written + writer.values_written;
     }
 
     /// A proposal in an album group is dismissed only with its group. The

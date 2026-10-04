@@ -4,6 +4,24 @@
 
 ### Added
 
+- **Release match review.** `libraryReleaseMatchPage` and
+  `libraryReleaseMatchCounts` sort Releases into confident, needs review and
+  unmatched by their best MusicBrainz release candidate against an
+  auto-accept score; `libraryReleaseMatchEvidence` says how many Tracks
+  AcoustID heard on a release and whether durations, artist, title and date
+  agree; `libraryReleaseMatchDiff` sets the Release's fields and Tracks
+  beside the release's; `libraryDismissReleaseCandidate` marks a release as
+  not the Release (migration 52, `dismissed_release_candidates`).
+  `libraryApplyMatchedRelease` takes an optional `ReleaseFieldSet`: null
+  applies as before; a set stores only those fields of the best candidate,
+  locked so they outrank file tags, also from pending proposals on it, and
+  leaves the rest and their provenance alone. The C ABI adds
+  `orca_library_query_release_matches`, `orca_library_release_match_counts`,
+  `orca_library_release_match_evidence`, `orca_library_release_match_diff`,
+  `orca_library_dismiss_release_candidate` and
+  `orca_library_apply_matched_release_fields`. `orca-cli matches --releases
+  [--bucket=]`, `matches --release=ID --evidence|--diff|--dismiss=MBID` and
+  `apply-release --fields=`.
 - **Duplicates page.** `orca-gtk`'s Compare on a Library Health duplicate
   opens a Duplicates page instead of a dialog: the groups with their copies
   and potential savings, Group N of M, a card per copy with the suggested
