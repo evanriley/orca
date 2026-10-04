@@ -227,6 +227,8 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_tag_write_group_detail_view` of what an undo restores beside each
   file's value now, at most 512 rows; see
   [metadata.md](metadata.md#change-history).
+  `orca_library_export_tag_write_history` writes the history to a file
+  atomically, in the form of `orca-cli changes`.
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is the files walked

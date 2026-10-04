@@ -4,6 +4,10 @@
 
 ### Added
 
+- **Exporting the change history.** `exportTagWriteHistory` writes every
+  tag write's `orca-cli changes` line to a file atomically and refuses an
+  existing file unless asked to replace it. `orca-cli changes --export`
+  uses it, and the C ABI adds `orca_library_export_tag_write_history`.
 - **Offline folder state.** `libraryAvailability` re-checks the roots and
   counts the Tracks and Releases the unavailable ones leave unable to play,
   and `libraryReleasesAvailable` answers per Release; `LibraryRoot` adds

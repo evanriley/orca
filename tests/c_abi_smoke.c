@@ -3630,6 +3630,26 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
     SMOKE_CHECK(detail.restores[0] == 0 && detail.current[0] == 0);
     SMOKE_CHECK(file_is(song, original, original_length) == 0);
 
+    char history[1024];
+    SMOKE_CHECK(snprintf(history, sizeof history, "%s/changes.txt", root) < (int)sizeof history);
+    uint64_t exported = 0;
+    SMOKE_CHECK(orca_library_export_tag_write_history(runtime, *library, history, strlen(history), 0,
+                                                      &exported) == ORCA_STATUS_OK);
+    SMOKE_CHECK(exported == 2);
+    char history_text[4096];
+    SMOKE_CHECK(read_text_file(history, history_text, sizeof history_text) == 0);
+    SMOKE_CHECK(strncmp(history_text, "group=", 6) == 0);
+    SMOKE_CHECK(strstr(history_text, "state=undone can_undo=no expired=no") != 0);
+    SMOKE_CHECK(strstr(history_text, "state=applied can_undo=no expired=yes") != 0);
+    SMOKE_CHECK(orca_library_export_tag_write_history(runtime, *library, history, strlen(history), 0,
+                                                      &exported) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_library_export_tag_write_history(runtime, *library, history, strlen(history), 1,
+                                                      &exported) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_export_tag_write_history(runtime, *library, history, strlen(history), 2,
+                                                      &exported) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_export_tag_write_history(runtime, *library, history, strlen(history), 1,
+                                                      0) == ORCA_STATUS_INVALID_ARGUMENT);
+
     if (tag_track(runtime, *library, &track) != 0) return 1;
     if (tag_write_genre_steps(runtime, *library, track.id) != 0) return 1;
     if (set_title(runtime, *library, track.id, "Smoke Discarded Title", &track_id) != 0) return 1;

@@ -2079,7 +2079,7 @@ fn showChanges(context: Context) !void {
     const page = try runtime.libraryTagWriteGroupPage(library, context.allocator, limit, offset);
     defer page.deinit();
     for (page.items) |*group| {
-        try writeChangeGroup(context.stdout, group, null);
+        try group.writeLine(context.stdout, null);
         try context.stdout.writeByte('\n');
     }
 }
@@ -2088,7 +2088,7 @@ fn printChangeDetail(context: Context, runtime: *liborca.Runtime, library: libor
     const detail = try runtime.libraryTagWriteGroup(library, context.allocator, context.io, group_id);
     defer detail.deinit();
     const stdout = context.stdout;
-    try writeChangeGroup(stdout, &detail.group, detail);
+    try detail.group.writeLine(stdout, &detail);
     try stdout.writeByte('\n');
     for (detail.diffs) |diff| {
         try stdout.print("{s}\t", .{diff.file});
@@ -2104,41 +2104,9 @@ fn noneIfEmpty(value: []const u8) []const u8 {
     return if (value.len == 0) "(none)" else value;
 }
 
-fn writeChangeGroup(writer: *std.Io.Writer, group: *const liborca.TagWriteGroup, detail: ?liborca.TagWriteGroupDetail) !void {
-    try writer.print("group={d} written_at={d} files={d} state={t} can_undo={s} expired={s}", .{
-        group.group_id,
-        group.written_at,
-        group.file_count,
-        group.state,
-        if (group.can_undo) "yes" else "no",
-        if (group.expired) "yes" else "no",
-    });
-    if (detail) |shown| try writer.print(" fields={d} more_files={d}", .{ shown.field_count, shown.more_files });
-    try writer.print(" title={s}", .{group.title.slice()});
-}
-
 fn exportChanges(context: Context, runtime: *liborca.Runtime, library: liborca.LibraryHandle, path: []const u8, force: bool) !void {
-    const io = context.io;
-    var file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = force });
-    defer file.deinit(io);
-    var buffer: [4096]u8 = undefined;
-    var file_writer = file.file.writer(io, &buffer);
-    const writer = &file_writer.interface;
-    var exported: u64 = 0;
-    while (true) {
-        const page = try runtime.libraryTagWriteGroupPage(library, context.allocator, 512, @intCast(exported));
-        defer page.deinit();
-        for (page.items) |*group| {
-            try writeChangeGroup(writer, group, null);
-            try writer.writeByte('\n');
-        }
-        exported += page.items.len;
-        if (page.items.len < 512) break;
-    }
-    try writer.flush();
-    try file.file.sync(io);
-    if (force) try file.replace(io) else try file.link(io);
-    try context.stdout.print("exported={d}\n", .{exported});
+    const exported = try runtime.exportTagWriteHistory(library, context.io, path, .{ .replace = force });
+    try context.stdout.print("exported={d}\n", .{exported.groups});
 }
 
 fn listDevices(context: Context) !void {

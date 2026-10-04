@@ -320,6 +320,8 @@ pub const TagWriteGroupPage = tag_write_history.TagWriteGroupPage;
 pub const TagWriteDiffSubject = tag_write_history.TagWriteDiffSubject;
 pub const TagWriteDiff = tag_write_history.TagWriteDiff;
 pub const TagWriteGroupDetail = tag_write_history.TagWriteGroupDetail;
+pub const TagWriteHistoryExport = tag_write_history.TagWriteHistoryExport;
+pub const TagWriteHistoryExportOptions = tag_write_history.TagWriteHistoryExportOptions;
 
 /// Plans held between `planTagWrite` and `startTagWrite`. Few, because a plan
 /// waits on a person.
@@ -2512,6 +2514,16 @@ pub const OrcaRuntime = struct {
         group_id: u64,
     ) !TagWriteGroupDetail {
         return tag_write_history.detail(try libraryDatabase(self, library), allocator, io, group_id);
+    }
+
+    pub fn exportTagWriteHistory(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        path: []const u8,
+        options: TagWriteHistoryExportOptions,
+    ) !TagWriteHistoryExport {
+        return tag_write_history.exportHistory(try libraryDatabase(self, library), self.allocator, io, path, options);
     }
 
     /// Starts a filesystem scan on a registered `work.Registry` worker and

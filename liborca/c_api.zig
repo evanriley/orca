@@ -4213,6 +4213,29 @@ pub export fn orca_library_query_tag_write_group(
     return .ok;
 }
 
+pub export fn orca_library_export_tag_write_history(
+    runtime: ?*Runtime,
+    library: Handle,
+    path: ?[*]const u8,
+    path_length: usize,
+    replace: u8,
+    exported: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = exported orelse return box.reject(@src(), .invalid_argument, "exported is null");
+    const file_path = stringInput(path, path_length) orelse
+        return box.reject(@src(), .invalid_argument, "path is null and path_length is not zero");
+    if (file_path.len == 0) return box.reject(@src(), .invalid_argument, "path is empty");
+    if (replace > 1) return box.reject(@src(), .invalid_argument, "replace must be 0 or 1");
+    const written = box.runtime.exportTagWriteHistory(importLibrary(library), box.io(), file_path, .{ .replace = replace == 1 }) catch |err| return switch (err) {
+        error.FileNotFound => box.reject(@src(), .not_found, "the folder to export into does not exist"),
+        error.PathAlreadyExists => box.reject(@src(), .invalid_state, "the file exists; pass replace to overwrite it"),
+        else => box.fail(@src(), err),
+    };
+    destination.* = written.groups;
+    return .ok;
+}
+
 fn tagWritePlanView(allocator: std.mem.Allocator, plan: *const core.runtime.TagWritePlan) !TagWritePlanView {
     var change_total: usize = 0;
     for (plan.files) |file| change_total += file.changes.len;

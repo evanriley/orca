@@ -3984,6 +3984,21 @@ orca_status orca_library_query_tag_write_group(
     orca_tag_write_group_detail_callback callback
 );
 
+/* Writes every tag write group, newest first, to `path` (`path_length` bytes,
+ * not NUL-terminated), one line each in the form of `orca-cli changes`. The
+ * file appears complete and synced or not at all. An existing file is
+ * INVALID_STATE unless `replace` is 1; `replace` above 1 is INVALID_ARGUMENT.
+ * NOT_FOUND when the folder does not exist. `exported` counts the groups
+ * written. */
+orca_status orca_library_export_tag_write_history(
+    orca_runtime *runtime,
+    orca_handle library,
+    const char *path,
+    size_t path_length,
+    uint8_t replace,
+    uint64_t *exported
+);
+
 /* Registering a root is an explicit user action: it is the one path allowed to
  * persist a volume identifier at a mount root. */
 orca_status orca_library_add_root(

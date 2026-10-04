@@ -646,6 +646,13 @@ with both values empty.
 differing field of every file, those left out included, so it is 0 once the
 backups are gone.
 
+`Runtime.exportTagWriteHistory(library, io, path, options)` writes every
+group's list line, newest first, to `path` through an atomic replace and
+returns `TagWriteHistoryExport.groups`, the lines written. Without
+`TagWriteHistoryExportOptions.replace` it refuses an existing file with
+`error.PathAlreadyExists` and leaves it as it was. `orca-cli changes
+--export` and `orca_library_export_tag_write_history` call it.
+
 ```sh
 orca-cli changes DATABASE [--limit N] [--offset N]
 orca-cli changes DATABASE GROUP

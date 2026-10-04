@@ -33,6 +33,19 @@ pub const TagWriteGroup = struct {
             .title = .init(summary.title orelse ""),
         };
     }
+
+    pub fn writeLine(self: *const TagWriteGroup, writer: *std.Io.Writer, shown: ?*const TagWriteGroupDetail) std.Io.Writer.Error!void {
+        try writer.print("group={d} written_at={d} files={d} state={t} can_undo={s} expired={s}", .{
+            self.group_id,
+            self.written_at,
+            self.file_count,
+            self.state,
+            if (self.can_undo) "yes" else "no",
+            if (self.expired) "yes" else "no",
+        });
+        if (shown) |group_detail| try writer.print(" fields={d} more_files={d}", .{ group_detail.field_count, group_detail.more_files });
+        try writer.print(" title={s}", .{self.title.slice()});
+    }
 };
 
 pub const TagWriteGroupPage = struct {
@@ -82,6 +95,43 @@ pub fn page(
     const items = try allocator.alloc(TagWriteGroup, summaries.items.len);
     for (items, summaries.items) |*item, summary| item.* = .fromSummary(summary);
     return .{ .allocator = allocator, .items = items };
+}
+
+pub const TagWriteHistoryExportOptions = struct {
+    replace: bool = false,
+};
+
+pub const TagWriteHistoryExport = struct {
+    groups: u64,
+};
+
+pub fn exportHistory(
+    library_database: *database.LibraryDatabase,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    options: TagWriteHistoryExportOptions,
+) !TagWriteHistoryExport {
+    var file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = options.replace });
+    defer file.deinit(io);
+    var buffer: [4096]u8 = undefined;
+    var file_writer = file.file.writer(io, &buffer);
+    const writer = &file_writer.interface;
+    var exported: u64 = 0;
+    while (true) {
+        const groups = try page(library_database, allocator, max_diff_rows, @intCast(exported));
+        defer groups.deinit();
+        for (groups.items) |*group| {
+            try group.writeLine(writer, null);
+            try writer.writeByte('\n');
+        }
+        exported += groups.items.len;
+        if (groups.items.len < max_diff_rows) break;
+    }
+    try writer.flush();
+    try file.file.sync(io);
+    if (options.replace) try file.replace(io) else try file.link(io);
+    return .{ .groups = exported };
 }
 
 pub fn detail(
@@ -335,4 +385,52 @@ test "a group's detail keeps at most a page of rows, whole files only, and still
     const shown_files = max_diff_rows / per_file;
     try std.testing.expectEqual(shown_files * per_file, bounded.diffs.len);
     try std.testing.expectEqual(files - shown_files, bounded.more_files);
+}
+
+test "exporting the change history writes every group's line and replaces an existing file only when asked" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try runtime_tests.tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = runtime_module.OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime_tests.scannedTempLibrary(&runtime, &temporary, database_path);
+
+    const first = try writeAlbum(&runtime, library, "Exported Album");
+    defer first.deinit();
+    const second = try writeAlbum(&runtime, library, "Exported Again");
+    defer second.deinit();
+
+    var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer expected.deinit();
+    {
+        const groups = try runtime.libraryTagWriteGroupPage(library, std.testing.allocator, 512, 0);
+        defer groups.deinit();
+        try std.testing.expectEqual(@as(usize, 2), groups.items.len);
+        for (groups.items) |*group| {
+            try group.writeLine(&expected.writer, null);
+            try expected.writer.writeByte('\n');
+        }
+    }
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/changes.txt", .{data.sub_path});
+    defer std.testing.allocator.free(path);
+    try data.dir.writeFile(std.testing.io, .{ .sub_path = "changes.txt", .data = "kept" });
+
+    try std.testing.expectError(error.PathAlreadyExists, runtime.exportTagWriteHistory(library, std.testing.io, path, .{}));
+    const kept = try data.dir.readFileAlloc(std.testing.io, "changes.txt", std.testing.allocator, .limited(1 << 16));
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("kept", kept);
+
+    const exported = try runtime.exportTagWriteHistory(library, std.testing.io, path, .{ .replace = true });
+    try std.testing.expectEqual(@as(u64, 2), exported.groups);
+    const written = try data.dir.readFileAlloc(std.testing.io, "changes.txt", std.testing.allocator, .limited(1 << 16));
+    defer std.testing.allocator.free(written);
+    try std.testing.expectEqualStrings(expected.written(), written);
+    try std.testing.expect(std.mem.indexOf(u8, written, "title=Exported Again\n") != null);
+
+    try data.dir.deleteFile(std.testing.io, "changes.txt");
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.exportTagWriteHistory(library, std.testing.io, path, .{})).groups);
 }

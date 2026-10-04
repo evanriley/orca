@@ -164,6 +164,8 @@ pub const TagWriteGroupPage = runtime.TagWriteGroupPage;
 pub const TagWriteDiffSubject = runtime.TagWriteDiffSubject;
 pub const TagWriteDiff = runtime.TagWriteDiff;
 pub const TagWriteGroupDetail = runtime.TagWriteGroupDetail;
+pub const TagWriteHistoryExport = runtime.TagWriteHistoryExport;
+pub const TagWriteHistoryExportOptions = runtime.TagWriteHistoryExportOptions;
 pub const TagWriteDigest = internal.metadata.mutation.Digest;
 pub const PruneSummary = runtime.PruneSummary;
 

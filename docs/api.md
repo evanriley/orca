@@ -296,6 +296,10 @@ defer page.deinit();
   what an undo restores beside the file's value now, at most 512 rows, with
   `more_files` and `field_count`. Both only read; see
   [metadata.md](metadata.md#change-history).
+  `exportTagWriteHistory(library, io, path, TagWriteHistoryExportOptions)`
+  writes every group's `orca-cli changes` line to a file atomically and
+  returns a `TagWriteHistoryExport` with the count; it refuses an existing
+  file unless `replace` is set.
 - The queue can be edited in place: `playerQueueJump` plays an entry now,
   `playerQueueInsertNext` queues Tracks after the current one,
   `playerQueueRemove` removes an entry, and `playerQueueMove(player, from,
