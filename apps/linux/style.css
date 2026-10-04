@@ -2102,7 +2102,7 @@ button.now-full-queue image {
 /* Artists */
 
 .artist-list {
-  padding: 0 24px 12px 24px;
+  padding: 0 24px 60px 24px;
   background-color: transparent;
 }
 
@@ -2128,149 +2128,170 @@ button.now-full-queue image {
   font-size: 1em;
 }
 
-.artists-genre-chip {
-  margin: 0 24px 12px 24px;
+.album-grid.artist-grid {
+  padding-bottom: 60px;
 }
 
 .artist-grid > child {
-  padding: 10px 8px 14px 8px;
+  padding: 0 11px 28px 11px;
 }
 
 .cover.artist-photo {
   border-radius: 9999px;
   background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  outline: 2px solid transparent;
+  outline-offset: 0;
+  transition: outline-color var(--orca-transition);
+}
+
+.artist-grid > child:hover .artist-photo,
+.artist-grid > child:focus-visible .artist-photo {
+  outline-color: @orca_text;
+}
+
+.artist-photo .cover-initials {
+  font-size: 40px;
+  font-weight: 400;
+  color: @orca_text_2;
 }
 
 .artist-tile-name {
-  margin-top: 10px;
-  font-size: 14px;
-  font-weight: 600;
+  margin-top: 12px;
+  font-size: 13.5px;
+  font-weight: 500;
   color: @orca_text;
 }
 
 .artist-tile-meta {
-  margin-top: 2px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.artists-note {
+  margin: 0 32px 24px 32px;
   font-size: 12px;
   color: @orca_text_3;
 }
 
 .artist-page {
-  margin: 0 24px 36px 24px;
+  margin: 24px 32px 48px 32px;
 }
 
 .narrow .artist-page {
-  margin: 0 16px 28px 16px;
+  margin: 16px 16px 28px 16px;
 }
 
-.artist-hero-block {
-  margin-right: 24px;
+.cover.artist-hero-photo {
+  border-radius: 9999px;
+  box-shadow: var(--orca-art-shadow);
 }
 
-.artist-hero-block.stacked {
-  margin: 0 24px;
+.artist-hero-photo .cover-initials {
+  font-size: 5em;
 }
 
-.artist-hero-block.stacked .artist-facts {
-  margin: 24px 0 20px 0;
+.artist-overline {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: @orca_text_3;
 }
 
-.narrow .artist-hero-block {
-  margin: 0 16px;
+.artist-hero-title {
+  font-family: Newsreader, serif;
+  font-size: 64px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  color: @orca_text;
 }
 
-.artist-hero-art {
-  border-radius: 0;
-  background-color: @orca_bg_raised_2;
-}
-
-.artist-hero-art .cover-initials {
-  font-size: 4em;
-}
-
-.artist-hero-fade {
-  background-image:
-    linear-gradient(to right, transparent 45%, color-mix(in srgb, @orca_bg_main 30%, transparent) 75%, color-mix(in srgb, @orca_bg_main 75%, transparent)),
-    linear-gradient(to bottom, transparent 60%, color-mix(in srgb, @orca_bg_main 80%, transparent));
-}
-
-.artist-facts {
-  margin: 28px 0;
+.narrow .artist-hero-title {
+  font-size: 44px;
 }
 
 .artist-genres {
-  font-size: 15px;
+  font-size: 13.5px;
   color: @orca_text_2;
 }
 
 .artist-genre-separator {
-  color: @orca_accent_text;
-}
-
-button.artist-biography {
-  margin: 4px 0 0 -8px;
-  padding: 4px 8px;
-  font-weight: 400;
-  color: @orca_text_2;
+  color: @orca_text_dim;
 }
 
 .artist-biography-text {
   font-size: 14px;
-  line-height: 1.45;
-}
-
-.artist-stats {
-  margin: 28px 8px 28px 24px;
-}
-
-.artist-hero-block.stacked .artist-stats {
-  margin: 0 0 12px 0;
-}
-
-.artist-stat-number {
-  font-size: 22px;
-  font-weight: 600;
-  color: @orca_text;
-}
-
-.artist-stat-label {
-  font-size: 13px;
+  line-height: 1.2;
   color: @orca_text_2;
 }
 
-button.artist-photo-credit {
-  min-height: 0;
-  padding: 0 4px;
+.artist-biography-text > link {
+  color: @orca_accent_text;
+}
+
+.artist-biography-credit {
+  margin-top: 4px;
   font-size: 11px;
-  font-weight: 400;
   color: @orca_text_3;
 }
 
-.artist-section-subtitle {
-  font-size: 12px;
-  color: @orca_text_3;
+.album-actions.artist-actions {
+  margin-top: 10px;
 }
 
-.artist-track-number {
-  color: @orca_text_3;
-}
-
-button.related-artist {
-  padding: 6px 8px;
+.artist-actions > button.pill {
+  min-height: 40px;
+  padding: 0 24px;
   border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
-.related-artist-name {
-  font-size: 13px;
+.artist-actions > button.pill.suggested-action image {
+  -gtk-icon-size: 13px;
+}
+
+.artist-actions > button.pill:not(.suggested-action) {
+  padding: 0 18px;
   font-weight: 500;
+  color: @orca_text;
+  background-color: @orca_bg_raised_2;
+}
+
+.artist-actions > button.pill:not(.suggested-action) image {
+  -gtk-icon-size: 16px;
+}
+
+.artist-actions > button.album-heart,
+.artist-actions > button.album-more {
+  min-width: 40px;
+  min-height: 40px;
+  background-color: @orca_bg_raised_2;
+}
+
+.artist-actions > button.album-more {
+  color: @orca_text_artist;
+}
+
+.artist-actions > button.pill:not(.suggested-action):hover,
+.artist-actions > button.album-heart:hover,
+.artist-actions > button.album-more:hover {
+  background-color: @orca_bg_hover;
+}
+
+.artist-section-title {
+  font-family: Newsreader, serif;
+  font-size: 26px;
+  font-weight: 400;
   color: @orca_text;
 }
 
-.related-artists > flowboxchild {
-  padding: 0;
-}
-
-.artist-section-heading {
-  margin-bottom: 4px;
+.artist-section-caption {
+  font-size: 12px;
+  color: @orca_text_3;
 }
 
 button.see-all {
@@ -2281,27 +2302,151 @@ button.see-all {
   color: @orca_text_2;
 }
 
+list.artist-tracks {
+  background-color: transparent;
+}
+
+list.artist-tracks > row {
+  min-height: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+list.artist-tracks > row:hover {
+  background-color: @orca_bg_hover;
+}
+
+list.artist-tracks > row.now-playing {
+  background-color: alpha(@orca_accent, 0.1);
+}
+
+list.artist-tracks > row.now-playing .artist-track-title {
+  color: @orca_accent_text;
+  font-weight: 500;
+}
+
+list.artist-tracks button.row-more {
+  min-width: 28px;
+  min-height: 28px;
+}
+
+.artist-track-number {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.artist-track-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.artist-track-album {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.artist-track-duration {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
 .artist-track {
   min-height: 52px;
   padding: 0 8px;
+}
+
+list.artist-tracks .artist-track {
+  min-height: 0;
+  padding: 0;
 }
 
 .artist-track-cover {
   border-radius: 4px;
 }
 
-.artist-albums {
-  margin: 0 -8px;
-}
-
-.artist-albums > flowboxchild {
-  padding: 8px 8px 12px 8px;
-  border-radius: 10px;
+.artist-albums > flowboxchild,
+.artist-elsewhere > flowboxchild,
+.related-artists > flowboxchild {
+  padding: 0;
+  border-radius: 0;
 }
 
 .artist-albums > flowboxchild:hover,
-.artist-albums > flowboxchild:selected {
+.artist-albums > flowboxchild:selected,
+.artist-elsewhere > flowboxchild:hover,
+.artist-elsewhere > flowboxchild:selected,
+.related-artists > flowboxchild:hover {
   background-color: transparent;
+}
+
+.artist-album-tile .album-cover-frame,
+.artist-album-tile .cover {
+  border-radius: 7px;
+}
+
+.artist-album-tile .tile-title,
+.elsewhere-tile .tile-title {
+  margin-top: 9px;
+}
+
+.elsewhere-tile {
+  opacity: 0.6;
+  transition: opacity var(--orca-transition);
+}
+
+.artist-elsewhere > flowboxchild:hover .elsewhere-tile,
+.artist-elsewhere > flowboxchild:focus-visible .elsewhere-tile {
+  opacity: 0.85;
+}
+
+.cover.elsewhere-cover {
+  border: 1px dashed @orca_border_strong;
+  border-radius: 7px;
+  background-color: transparent;
+}
+
+.elsewhere-absent {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.elsewhere-tile.covered .cover.elsewhere-cover {
+  border-style: solid;
+  border-color: transparent;
+  background-color: @orca_bg_raised;
+}
+
+.elsewhere-tile.covered .elsewhere-absent {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: @orca_text_2;
+  background-color: @orca_art_overlay;
+}
+
+button.related-artist {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.cover.related-artist-photo {
+  border-radius: 9999px;
+}
+
+.related-artist-photo .cover-initials {
+  font-size: 28px;
+  font-weight: 400;
+  color: @orca_text_2;
+}
+
+.related-artist-name {
+  font-size: 12.5px;
+  color: @orca_text;
+}
+
+button.related-artist:hover .related-artist-name {
+  color: @orca_accent_text;
 }
 
 /* Sound */
@@ -2313,50 +2458,70 @@ button.see-all {
 /* Inspector */
 
 .inspector {
-  background-color: @orca_bg_main;
+  background-color: @orca_bg_sidebar;
   border-left: 1px solid @orca_border;
 }
 
 .inspector-body {
-  padding: 24px 22px;
+  padding: 20px 22px 28px;
 }
 
 .inspector-header {
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .inspector-title {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 500;
   line-height: 1.25;
   color: @orca_text;
-  margin-bottom: 4px;
 }
 
 .inspector-subtitle {
-  font-size: 16px;
+  font-size: 13px;
   color: @orca_text_2;
 }
 
+.inspector-subtitle.dim {
+  color: @orca_text_3;
+}
+
+button.inspector-close {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+}
+
+button.inspector-close image {
+  -gtk-icon-size: 14px;
+}
+
+button.inspector-close:hover {
+  color: @orca_text;
+  background-color: @orca_bg_hover;
+}
+
 .inspector-section {
-  margin-top: 16px;
+  margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid @orca_border;
 }
 
 .inspector-section-header {
-  min-height: 24px;
-  margin-bottom: 6px;
+  min-height: 18px;
+  margin-bottom: 7px;
 }
 
 .inspector-icon {
-  color: @orca_text_2;
+  color: @orca_text_3;
 }
 
 .inspector-heading {
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-weight: 500;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: @orca_text_2;
 }
@@ -2365,7 +2530,7 @@ button.see-all {
 .inspector-line,
 .inspector-proposal,
 .inspector-actions {
-  margin-left: 32px;
+  margin-left: 25px;
 }
 
 .inspector-row {
@@ -2373,12 +2538,12 @@ button.see-all {
 }
 
 .inspector-key {
-  font-size: 14px;
+  font-size: 12.5px;
   color: @orca_text_3;
 }
 
 .inspector-value {
-  font-size: 14px;
+  font-size: 12.5px;
   color: @orca_text;
 }
 
@@ -2391,12 +2556,21 @@ button.inspector-link {
   min-height: 0;
   margin: -2px 0 -2px -6px;
   padding: 2px 6px;
-  font-size: 14px;
+  font-size: 12.5px;
+  font-weight: 400;
   color: @orca_accent_text;
 }
 
 button.inspector-link image {
   -gtk-icon-size: 12px;
+}
+
+.inspector-links > button.inspector-link > label {
+  text-decoration-line: none;
+}
+
+.inspector-links > button.inspector-link:hover > label {
+  text-decoration-line: underline;
 }
 
 .inspector-description {
@@ -2412,6 +2586,7 @@ button.inspector-link image {
 
 .inspector-links {
   margin-top: 2px;
+  margin-left: 25px;
 }
 
 button.inspector-copy {

@@ -12,6 +12,7 @@ const track_model = @import("track_model.zig");
 const track_table = @import("track_table.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
 const queue = @import("queue.zig");
 const nowplaying = @import("nowplaying.zig");
 const playlists = @import("playlists.zig");
@@ -190,7 +191,7 @@ fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void
 pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
     repaintRows(self, changed, change_value);
     albums.repaint(self, changed, change_value);
-    artists.repaint(self, changed, change_value);
+    artist_page.repaint(self, changed, change_value);
     queue.repaint(self, changed, change_value);
     nowplaying.repaint(changed, change_value);
     playlists.repaint(self, changed, change_value);

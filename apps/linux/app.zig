@@ -21,6 +21,7 @@ const album_filters = @import("album_filters.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
 const details = @import("details.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
@@ -403,7 +404,7 @@ pub const App = struct {
     albums_syncing_controls: bool = false,
     open_album_pages: [open_album_page_limit]*albums.AlbumPage = undefined,
     open_album_page_count: usize = 0,
-    open_artist_pages: [open_artist_page_limit]*artists.ArtistPage = undefined,
+    open_artist_pages: [open_artist_page_limit]*artist_page.ArtistPage = undefined,
     open_artist_page_count: usize = 0,
 
     now_playing: nowplaying.State = .{},

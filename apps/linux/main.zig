@@ -27,6 +27,7 @@ const window = @import("window.zig");
 const palette = @import("palette.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
 const menu = @import("menu.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
@@ -91,7 +92,7 @@ fn tick(self: *App) void {
         details.tick(self);
         lyrics.tick(self);
         albums.tick(self);
-        artists.tick(self);
+        artist_page.tick(self);
     }
     armTimeout(self);
 }
@@ -685,7 +686,7 @@ pub fn main(init: std.process.Init) !u8 {
     preferences.shutdown(&self);
     lyrics.shutdown(&self);
     albums.shutdown(&self);
-    artists.shutdown(&self);
+    artist_page.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};

@@ -25,6 +25,9 @@ const window = @import("window.zig");
 const nowplaying = @import("nowplaying.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
+const tag_editor = @import("tags.zig");
+const playlists = @import("playlists.zig");
 
 const App = app.App;
 
@@ -228,46 +231,26 @@ const Artist = struct {
     title: *gtk.Widget,
     genre_row: Row,
     years_row: Row,
+    origin_row: Row,
     albums_row: Row,
-    tracks_row: Row,
-    library_row: Row,
-    biography_section: *gtk.Widget,
-    biography: *gtk.Widget,
-    biography_link: *gtk.Widget,
-    biography_licence: *gtk.Widget,
+    loved_row: Row,
+    played_row: Row,
+    identity_section: *gtk.Widget,
+    musicbrainz_row: Row,
+    mbid_row: Row,
+    image_row: Row,
     links_section: *gtk.Widget,
     links: *gtk.Widget,
     fetch: *gtk.Widget,
 };
 
-const link_order = [_]liborca.ArtistLinkKind{
-    .official, .wikipedia, .musicbrainz, .discogs,  .bandcamp, .soundcloud,
-    .youtube,  .spotify,   .apple_music, .tidal,    .deezer,   .instagram,
-    .x,        .facebook,  .tiktok,      .wikidata, .lastfm,
-};
+const ArtistLink = struct { kind: liborca.ArtistLinkKind, name: [*:0]const u8 };
 
-fn linkName(kind: liborca.ArtistLinkKind) [*:0]const u8 {
-    return switch (kind) {
-        .official => "Official Website",
-        .wikipedia => "Wikipedia",
-        .wikidata => "Wikidata",
-        .musicbrainz => "MusicBrainz",
-        .discogs => "Discogs",
-        .lastfm => "Last.fm",
-        .bandcamp => "Bandcamp",
-        .soundcloud => "SoundCloud",
-        .youtube => "YouTube",
-        .spotify => "Spotify",
-        .apple_music => "Apple Music",
-        .tidal => "TIDAL",
-        .deezer => "Deezer",
-        .instagram => "Instagram",
-        .x => "X (Twitter)",
-        .facebook => "Facebook",
-        .tiktok => "TikTok",
-        .other => "Website",
-    };
-}
+const artist_links = [_]ArtistLink{
+    .{ .kind = .musicbrainz, .name = "MusicBrainz" },
+    .{ .kind = .wikipedia, .name = "Wikipedia" },
+    .{ .kind = .official, .name = "Official website" },
+};
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -692,45 +675,41 @@ fn populateArtist(panel: *Panel, artist_id: i64) bool {
 
     var genre_buffer: [512]u8 = undefined;
     _ = setRow(view.genre_row, artistGenres(panel, artist_id, &genre_buffer));
+    const totals = self.runtime.libraryArtistTotals(library, artist_id) catch null;
     var albums_buffer: [32]u8 = undefined;
-    _ = setRow(view.albums_row, strings.format(&albums_buffer, "{d}", .{artist.release_count}));
-    var tracks_buffer: [32]u8 = undefined;
-    _ = setRow(view.tracks_row, strings.format(&tracks_buffer, "{d}", .{artist.track_count}));
-    var library_buffer: [48]u8 = undefined;
-    _ = setRow(view.library_row, strings.format(&library_buffer, "{d} {s}", .{
-        artist.track_count,
-        if (artist.track_count == 1) "track" else "tracks",
-    }));
+    _ = setRow(view.albums_row, strings.format(&albums_buffer, "{d}", .{if (totals) |found| found.release_count else artist.release_count}));
+    var loved_buffer: [32]u8 = undefined;
+    const loved = self.runtime.libraryTrackMatchCount(library, .{ .artist_id = artist_id, .loved_only = true }) catch null;
+    _ = setRow(view.loved_row, if (loved) |count| strings.format(&loved_buffer, "{d}", .{count}) else null);
+    var played_buffer: [64]u8 = undefined;
+    _ = setRow(view.played_row, recentMomentText(&played_buffer, artistLastPlayed(self, library, artist_id)));
 
     var stored = self.runtime.libraryArtistInfo(library, artist_id) catch null;
     defer if (stored) |*info| info.deinit();
     const record = if (stored) |info| info.record else null;
     var years_buffer: [48]u8 = undefined;
     _ = setRow(view.years_row, if (record) |found| yearsText(&years_buffer, found) else null);
+    var origin_buffer: [256]u8 = undefined;
+    const origin = std.mem.trim(u8, if (record) |found| found.origin orelse "" else "", " \n");
+    _ = setRow(view.origin_row, if (origin.len != 0) strings.terminated(&origin_buffer, origin) else null);
 
-    const biography = std.mem.trim(u8, if (record) |found| found.biography orelse "" else "", " \n");
-    gtk.gtk_widget_set_visible(view.biography_section, boolean(biography.len != 0));
-    if (biography.len != 0) {
-        const owned = self.allocator.dupeZ(u8, biography) catch null;
-        defer if (owned) |text| self.allocator.free(text);
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.biography), if (owned) |text| text.ptr else "");
-        const url = record.?.biography_url orelse "";
-        gtk.gtk_widget_set_visible(view.biography_link, boolean(url.len != 0));
-        if (url.len != 0) gtk.gtk_link_button_set_uri(gtk.cast(gtk.LinkButton, view.biography_link), strings.terminated(&buffer, url).ptr);
-        const licence = record.?.biography_licence orelse "";
-        gtk.gtk_widget_set_visible(view.biography_licence, boolean(licence.len != 0));
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.biography_licence), strings.terminated(&buffer, licence).ptr);
-    }
+    gtk.gtk_widget_set_visible(view.identity_section, boolean(record != null));
+    const mbid = if (record) |found| found.musicbrainz_artist_id orelse "" else "";
+    _ = setRow(view.musicbrainz_row, if (mbid.len != 0) "Matched" else "Not matched");
+    var mbid_buffer: [64]u8 = undefined;
+    _ = setRow(view.mbid_row, if (mbid.len != 0) strings.terminated(&mbid_buffer, mbid) else null);
+    var image_buffer: [512]u8 = undefined;
+    _ = setRow(view.image_row, if (record) |found| imageText(&image_buffer, found) else null);
 
     while (gtk.gtk_widget_get_first_child(view.links)) |child| gtk.gtk_box_remove(gtk.cast(gtk.Box, view.links), child);
     var shown_links: usize = 0;
     if (record != null) {
         var links = self.runtime.libraryArtistLinks(library, artist_id) catch null;
         defer if (links) |*found| found.deinit();
-        if (links) |found| for (link_order) |kind| {
+        if (links) |found| for (artist_links) |shown| {
             for (found.items) |link| {
-                if (link.kind != kind or link.url.len == 0) continue;
-                gtk.gtk_box_append(gtk.cast(gtk.Box, view.links), newExternalLink(strings.terminated(&buffer, link.url).ptr, linkName(kind)));
+                if (link.kind != shown.kind or link.url.len == 0) continue;
+                gtk.gtk_box_append(gtk.cast(gtk.Box, view.links), newExternalLink(strings.terminated(&buffer, link.url).ptr, shown.name));
                 shown_links += 1;
                 break;
             }
@@ -738,7 +717,7 @@ fn populateArtist(panel: *Panel, artist_id: i64) bool {
     }
     gtk.gtk_widget_set_visible(view.links_section, boolean(shown_links != 0));
     gtk.gtk_widget_set_visible(view.fetch, boolean(record == null));
-    gtk.gtk_widget_set_sensitive(view.fetch, boolean(!artists.infoPending(self, artist_id)));
+    gtk.gtk_widget_set_sensitive(view.fetch, boolean(!artist_page.infoPending(self, artist_id)));
     return true;
 }
 
@@ -754,6 +733,26 @@ fn artistGenres(panel: *Panel, artist_id: i64, buffer: []u8) ?[:0]const u8 {
         writer.writeAll(genre.name) catch {};
     }
     return finish(buffer, &writer);
+}
+
+fn artistLastPlayed(self: *App, library: liborca.LibraryHandle, artist_id: i64) ?i64 {
+    const page = self.runtime.libraryTrackQuery(library, "", .{
+        .artist_id = artist_id,
+        .sort = .last_played,
+        .direction = .descending,
+        .limit = 1,
+    }) catch return null;
+    defer page.deinit();
+    if (page.items.len == 0) return null;
+    return page.items[0].last_played_at;
+}
+
+fn imageText(buffer: []u8, record: liborca.ArtistInfoRecord) ?[:0]const u8 {
+    const source = record.photo_source orelse return null;
+    if (source == .local) return "Local · artist.jpg";
+    const credit = std.mem.trim(u8, record.photo_credit orelse "", " \n");
+    if (credit.len == 0) return "Wikimedia Commons";
+    return strings.format(buffer, "Wikimedia Commons · {s}", .{credit});
 }
 
 fn yearsText(buffer: []u8, record: liborca.ArtistInfoRecord) ?[:0]const u8 {
@@ -804,8 +803,8 @@ pub fn artistInfoChanged(self: *App, artist_id: i64) void {
 fn fetchArtistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
     const artist_id = followedArtist(panel) orelse return;
-    artists.requestInfo(panel.self, artist_id, true);
-    gtk.gtk_widget_set_sensitive(panel.artist_view.fetch, boolean(!artists.infoPending(panel.self, artist_id)));
+    artist_page.requestInfo(panel.self, artist_id, true);
+    gtk.gtk_widget_set_sensitive(panel.artist_view.fetch, boolean(!artist_page.infoPending(panel.self, artist_id)));
 }
 
 /// Draws `path`, as `transport.refreshSignalPath` read it, in the inspector;
@@ -1714,20 +1713,16 @@ fn newPlaylistView() PlaylistView {
     };
 }
 
-fn newArtistView() Artist {
+fn newArtistView(panel: *Panel) Artist {
     const title = newLabel("inspector-title");
     const subtitle = newLabel("inspector-subtitle");
+    gtk.gtk_widget_add_css_class(subtitle, "dim");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, subtitle), "Artist");
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_add_css_class(heading, "inspector-header");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), subtitle);
+    const heading = newHeader(panel, &.{ title, subtitle }, null);
 
     const genre_row = newRow("Genres");
-    const years_row = newRow("Years active");
-    const albums_row = newRow("Total albums");
-    const tracks_row = newRow("Total tracks");
-    const library_row = newRow("In your library");
+    const years_row = newRow("Active");
+    const origin_row = newRow("Origin");
     const fetch = gtk.gtk_button_new_with_label("Fetch artist info");
     gtk.gtk_widget_add_css_class(fetch, "inspector-action");
     gtk.gtk_widget_set_halign(fetch, gtk.ALIGN_START);
@@ -1735,37 +1730,49 @@ fn newArtistView() Artist {
     const overview = newSection("x-office-document-symbolic", "Overview", &.{
         genre_row.root,
         years_row.root,
-        albums_row.root,
-        tracks_row.root,
-        library_row.root,
+        origin_row.root,
         fetch,
     }, null);
 
-    const biography = newLabel("inspector-description");
-    const biography_link = newExternalLink("https://wikipedia.org/", "Read more on Wikipedia");
-    const biography_licence = newLabel("inspector-licence");
-    const biography_section = newSection("format-justify-left-symbolic", "Biography", &.{ biography, biography_link, biography_licence }, null);
+    const albums_row = newRow("Albums");
+    const loved_row = newRow("Loved tracks");
+    const played_row = newRow("Last played");
+    const library_section = newSection("audio-x-generic-symbolic", "In your library", &.{
+        albums_row.root,
+        loved_row.root,
+        played_row.root,
+    }, null);
 
-    const links = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const musicbrainz_row = newRow("MusicBrainz");
+    const mbid_row = newIdRow("Artist ID");
+    const image_row = newRow("Image");
+    const identity_section = newSection("auth-fingerprint-symbolic", "Identity", &.{
+        musicbrainz_row.root,
+        mbid_row.root,
+        image_row.root,
+    }, null);
+
+    const links = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 7);
     gtk.gtk_widget_add_css_class(links, "inspector-links");
     const links_section = newSection("insert-link-symbolic", "Links", &.{links}, null);
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, overview, biography_section, links_section }) |section|
+    for ([_]*gtk.Widget{ heading, overview, library_section, identity_section, links_section }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
     return .{
         .content = content,
         .title = title,
         .genre_row = genre_row,
         .years_row = years_row,
+        .origin_row = origin_row,
         .albums_row = albums_row,
-        .tracks_row = tracks_row,
-        .library_row = library_row,
-        .biography_section = biography_section,
-        .biography = biography,
-        .biography_link = biography_link,
-        .biography_licence = biography_licence,
+        .loved_row = loved_row,
+        .played_row = played_row,
+        .identity_section = identity_section,
+        .musicbrainz_row = musicbrainz_row,
+        .mbid_row = mbid_row,
+        .image_row = image_row,
         .links_section = links_section,
         .links = links,
         .fetch = fetch,

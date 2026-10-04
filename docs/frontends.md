@@ -620,11 +620,18 @@ The window is an `AdwNavigationSplitView`:
   A button in the header chooses extra columns, Rating, Format and Sample
   rate, saved as `[view] album_columns`. A narrow window shrinks the grid and
   stacks the album page's cover above its title.
-- **Artists** is every Artist as a grid of round 150 px photos or as flush
-  rows, chosen by a grid and list switch saved as `[view] artists_layout`.
-  Each shows the Artist's photo when artist info stored one, otherwise their
-  first album's cover, otherwise their initials, then their name and
-  `N albums • N tracks`. A Sort by menu orders them by Name, Most tracks,
+- **Artists** lists every Artist, or with Album artists chosen in the menu
+  beside Sort by only those a Release is filed under (`ArtistQuery.role`,
+  saved as `[view] artists_role`, Album artists by default); the line under
+  the title counts them, `8 artists · album artists only`. They show as a
+  grid of round photos at least 132 px wide or as flush rows, chosen by a
+  grid and list switch saved as `[view] artists_layout`. Each shows the
+  Artist's photo when artist info stored one, otherwise their first album's
+  cover, otherwise their initials in Newsreader on a ringed dark disc, then
+  their name and `N albums` in the grid, `N albums • N tracks` in the list;
+  a grid photo takes a ring on hover. Scrolled to the end, the page shows
+  `No artist photo? Orca uses artwork from one of their albums, then a
+  monochrome monogram.` A Sort by menu orders them by Name, Most tracks,
   Recently loved or Recently added, the Artist whose newest release, filed
   under them or appeared on, came latest first (`ArtistSort`, saved as
   `[view] artist_sort`); a Search
@@ -634,46 +641,49 @@ The window is an `AdwNavigationSplitView`:
   scopes the query to that genre (`ArtistQuery.genre_id`) until its × is
   clicked. The grid keeps at least two
   columns and shrinks its tiles to fit a 560 px window. An artist opens a
-  page whose hero lays a 300 by 330 px photo, fading right and down, over
-  its artwork backdrop: the Artist's photo, otherwise their most played
-  album's cover, otherwise their initials. Beside it sit an Artist overline,
-  their name, their top three genres joined by accent dots
-  (`libraryArtistGenres`), the first four lines of the stored biography,
-  which open the inspector, then Play, Shuffle, a heart that loves the
-  Artist (`librarySetArtistLove`) and a more button. A column at the end
-  shows their ListenBrainz listener count, when known, as `9.0K` or `3.2M`,
-  then their release and track counts and the time their tracks fill in the
-  library, all from `libraryArtistTotals`. A `Photo: credit • licence` line under the hero links to the
-  photo's page. Below sit Top Tracks, their five most played tracks, or by
-  rating while none has been played, each with its cover, an E badge when
-  explicit, a heart, duration and more button, with See All opening Tracks
-  scoped to the artist sorted by plays; Albums, EPs & Singles and
-  Appearances, each a wrapping grid of up to eight releases, newest first,
-  under a heading with its count, whose release opens its page in place.
-  Albums are the releases filed under the Artist, which
-  `ReleaseQuery.album_artist_id` with `own_releases_only` selects, whose type is
-  album or compilation or unknown (`ReleaseQuery.release_kind` `.album`), EPs &
-  Singles those of type EP or single (`.ep_or_single`), and Appearances the
-  releases with a track credited to them that are filed under another
-  artist (`ReleaseQuery.appearing_artist_id`); a row with nothing in it is
-  left out. The hero's cover falls back to their most played or first
-  release, taken from their own releases before any they appear on. Each
-  row's See All opens Albums scoped to the Artist and that kind, under the
-  same query, shown as a `Name • Albums` (or `EPs & Singles`, `Appearances`) chip
-  beside the Albums search that combines with the search, shelves and
-  filters in the query until its × is clicked. Related Artists shows up to
-  six round tiles from `libraryRelatedArtists`, each name under the photo,
-  wrapping between words onto at most two lines and then ellipsized. A related artist in the library
-  opens their page; one outside it shows initials and opens their
-  MusicBrainz page in the browser. Opening an Artist without stored info
+  page, `artist_page.zig`, laid over a blurred backdrop of the hero photo
+  and clamped to 1060 px. The hero shows a round 232 px photo: the
+  Artist's stored photo, otherwise their most played album's cover,
+  otherwise their initials. Beside it sit an Artist overline, their name in
+  Newsreader, their top three genres (`libraryArtistGenres`), and the
+  stored biography (`libraryArtistInfo`). A biography longer than three
+  lines is cut at a word so that `… Read more` ends the third line, measured
+  with Pango at the label's width and measured again when the width
+  changes; the inline Read more link expands it in place to the full text
+  and a `From Wikipedia · licence` credit, and a Show less link at its end
+  folds it again. Then come Play, a dark Shuffle, a heart that loves the
+  Artist (`librarySetArtistLove`) and a more button. Below, Top
+  Tracks, `By your plays`, lists up to five of their tracks with plays,
+  most played first (`libraryTrackQuery` sorted by `play_count`
+  descending), each with its cover, an E badge when explicit, its album and
+  play count, duration and a more button; while none has been played it
+  lists five by rating under `By rating`. Beside it, Albums, `In your
+  library`, shows up to nine releases filed under the Artist
+  (`ReleaseQuery.album_artist_id` with `own_releases_only`) in three
+  columns, then Appears On up to six releases filed under another artist
+  with a track credited to them (`ReleaseQuery.appearing_artist_id`); a
+  section with more shows `See all N`, which opens Albums scoped to the
+  Artist under a `Name • Albums` (or `Appearances`) chip beside the Albums
+  search until its × is clicked. Elsewhere, `From MusicBrainz · not in your
+  library`, shows the release groups `libraryArtistElsewhere` lists as
+  dimmed tiles marked `No local files`, captioned with the other artists
+  credited and the year, such as `with Kaytranada · 2023`, each opening its
+  MusicBrainz page in the browser. A tile shows the release group's kept
+  Cover Art Archive cover (`ArtworkSubject.release_group`, requested only
+  when `ElsewhereRelease.cover` is `kept`) under a `No local files` pill,
+  otherwise a dashed frame with the label at its centre. Related
+  Artists shows up to seven round tiles from `libraryRelatedArtists`, each
+  with its kept photo or initials; one in the library opens their page, one
+  outside it their MusicBrainz page. Opening an Artist without stored info
   starts an artist info Job (`startArtistInfoFetch`) once a session while
   Preferences' Fetch artist info switch, saved as
-  `[library] fetch_artist_info`, is on; when it finishes the photo,
-  biography, listeners, credit and related artists refresh in place.
-  Activating a track plays the artist's tracks in album order from it, and
-  the inspector shows the selected track, otherwise the Artist. A window too
-  narrow for the full header stacks the hero and the two sections and lays
-  the stats out in a row; a narrow window hides the stats.
+  `[library] fetch_artist_info`, is on; when it finishes the page refreshes
+  in place. Activating a track plays the artist's tracks in album order from
+  it. Top Tracks is 380 px wide, narrower only when the three album
+  columns beside it would not fit, and the albums take the rest; the
+  playing track's row is tinted blue with its title in the accent colour.
+  A narrow window, or one too narrow for the full header, stacks the
+  photo above the name and Top Tracks above the albums.
 - **Tracks** is the track list. Its header carries its own search,
   `Search tracks, artists, albums…` with a Ctrl F hint, in place of the
   library search, and a Filters menu: Genre, a Year range, Format (Any,
@@ -1067,7 +1077,8 @@ without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
 and only those whose recording changed are replaced. The list factories connect
 each button once, in setup, and read the row's track when the button is pressed.
 
-Each page's header bar is flat and carries no title. A page pushed onto
+Each page's header bar is flat, carries no title and spans the main column
+only; the inspector beside it runs the full height of the window. A page pushed onto
 another, such as an album or artist page, shows a breadcrumb at its start
 whose first part returns to the page it was opened from (Albums › ABBA),
 dimmed, and whose last part is the page in the normal text colour; a
@@ -1324,7 +1335,13 @@ never on the tick.
 
 The **inspector** sits at the end of the Tracks list, the Loved page, each
 album page and playlist, and Now Playing, where it takes the place of the
-Up Next column and shows the playing track.
+Up Next column and shows the playing track. It is a column from the top of
+the window to the transport bar, 316 px wide for a track or an album, 300
+px for an artist, 290 px for a playlist, 380 px for lyrics and 388 px for
+the signal path. Its header holds the title, a dim subtitle and a × that
+closes it, and for a track a … button with the track menu before the ×; each
+section has a small dim capitals heading with an icon, and its rows a 104 px
+label column.
 Three shortcuts, also palette commands, show it in one of three modes,
 or hide it: the track inspector (`Ctrl+I`), lyrics (`Ctrl+Shift+L`) and the
 signal path (`Ctrl+Shift+S`). The mode is shared by every page and saved as `[view] details`,
@@ -1338,11 +1355,14 @@ the playing track when it belongs to the album, otherwise the album: its
 title, an Album subtitle, an Overview (artist, date, genres, tracks, duration
 and format), Identity (whether a MusicBrainz release is matched, once release
 info is stored) and its Description. An artist page's inspector shows the
-Artist until a track is selected or the biography is clicked: their name, an
-Artist subtitle, an Overview (genres one per line, years active, total
-albums and tracks, and how many tracks are in the library), the full Biography with its
-licence and a Read more link, Links from `libraryArtistLinks`, each opening
-in the browser, and a button that fetches the info again. On an album page a click or
+Artist until a track is selected: their name, an Artist subtitle, an
+Overview (genres, years active as `2014 – present`, origin as stored, and a
+button that fetches the info again), In your library (albums, loved
+tracks and when one of their tracks was last played), Identity (whether a
+MusicBrainz artist is matched, its ID, and the photo's source: `Local ·
+artist.jpg` or the provider and credit) and Links: MusicBrainz, Wikipedia
+and Official website, those of them `libraryArtistLinks` lists, as plain
+labels opening in the browser. On an album page a click or
 the arrow keys select a row, one per page, and double-click or Enter plays
 from it. The Tracks table and the Albums, Artists, Playlists and Queue lists
 each take one Tab stop: Tab visits the focused row's buttons and then leaves

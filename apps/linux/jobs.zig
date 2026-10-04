@@ -16,6 +16,7 @@ const app = @import("app.zig");
 const browse = @import("browse.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
 const details = @import("details.zig");

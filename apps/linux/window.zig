@@ -16,6 +16,7 @@ const queue = @import("queue.zig");
 const albums = @import("albums.zig");
 const nowplaying = @import("nowplaying.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const ratings = @import("ratings.zig");
@@ -477,7 +478,7 @@ fn sectionSource(self: *App, page: Page) details.Source {
 fn pushedSource(self: *App, page: *adw.NavigationPage) ?details.Source {
     return switch (pushedOf(self, page) orelse return null) {
         .album => albums.inspectorSource(self, page),
-        .artist => artists.inspectorSource(self, page),
+        .artist => artist_page.inspectorSource(self, page),
         .playlist => |id| .{ .playlist = .{
             .selection = self.playlists.tracks.selection orelse return null,
             .playlist_id = id,
@@ -544,7 +545,7 @@ fn findInStack(self: *App, navigation: *adw.NavigationView, pushed: Pushed) ?*ad
 fn open(self: *App, navigation: *adw.NavigationView, pushed: Pushed) void {
     switch (pushed) {
         .album => |release_id| albums.openAlbum(self, navigation, release_id),
-        .artist => |artist_id| artists.openArtist(self, navigation, artist_id),
+        .artist => |artist_id| artist_page.openArtist(self, navigation, artist_id),
         .playlist => |playlist_id| playlists.open(self, playlist_id),
     }
 }
@@ -836,7 +837,7 @@ pub fn showArtist(self: *App, artist_id: i64) void {
     showPage(self, .artists);
     const navigation = self.artists_navigation orelse return;
     popToTag(self, navigation, "artists");
-    artists.openArtist(self, navigation, artist_id);
+    artist_page.openArtist(self, navigation, artist_id);
 }
 
 pub fn goTo(self: *App, page: Page) void {
@@ -1163,7 +1164,7 @@ fn compacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     details.refit(self);
     narrowTables(self, true);
     albums.setNarrow(self);
-    artists.setNarrow(self);
+    artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
 }
@@ -1174,7 +1175,7 @@ fn uncompacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     details.refit(self);
     narrowTables(self, false);
     albums.setNarrow(self);
-    artists.setNarrow(self);
+    artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
 }
@@ -1206,7 +1207,7 @@ fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.browse_collapsed = true;
     showBrowsePanes(self);
     albums.setNarrow(self);
-    artists.setNarrow(self);
+    artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
 }
@@ -1220,7 +1221,7 @@ fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.browse_collapsed = false;
     showBrowsePanes(self);
     albums.setNarrow(self);
-    artists.setNarrow(self);
+    artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
     syncSidebarSelection(self);

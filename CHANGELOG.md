@@ -165,6 +165,33 @@
 - **Files-without-bitrate index.** Schema version 41 adds
   `files_without_bitrate`, so a bitrate-sorted Track page finds the Tracks
   without a bitrate through it instead of reading every Track.
+- **Artists page redesign in orca-gtk.** Artists follows the redesign: a
+  Sort by menu and an Album artists menu (All artists or Album artists,
+  `ArtistQuery.role`, saved as `[view] artists_role`) beside a segmented
+  grid and list switch, the count under the title with `· album artists
+  only`, round photos at least 132 px wide with the name and `N albums`, a
+  ringed initials monogram when there is no photo or cover, a ring on
+  hover, and a note on the fallbacks at the end of the page.
+- **Artist page redesign in orca-gtk.** An artist's page follows the
+  redesign, in the new `apps/linux/artist_page.zig`: a round photo over its
+  blurred backdrop, the name in Newsreader, genres, a biography clamped to
+  three lines that end in an inline Read more, which expands it in place,
+  Play, a dark Shuffle, love and more, a 380 px Top Tracks `By your plays`
+  with each track's play count and the playing row tinted blue, Albums and
+  Appears On grids `In your
+  library`, Elsewhere tiles for the MusicBrainz release groups the library
+  lacks, with their kept Cover Art Archive covers, marked `No local files`
+  and captioned `with Kaytranada · 2023`, and Related Artists as round
+  tiles. The artist inspector shows Overview (genres, active years,
+  origin), In your library (albums, loved tracks, last played), Identity
+  (MusicBrainz match and ID, photo source) and Links (MusicBrainz,
+  Wikipedia, Official website).
+- **Full-height inspector in orca-gtk.** The inspector runs from the top of
+  the window beside the main column, which now holds the header bar and
+  search, with a header of title, dim subtitle and close button, small
+  capitals section headings, a 100 px label column and a width per view:
+  316 px for a track or album, 300 for an artist, 290 for a playlist. The
+  breadcrumb's parent is dim and its current page plain text.
 - **Tracks page redesign in orca-gtk.** Tracks follows the redesign: a
   grouped `2,847 tracks` count, Sort by, Filters and Columns buttons in the
   Albums header style, Date Added newest first as the library's default
