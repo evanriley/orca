@@ -5392,71 +5392,404 @@ button.genre-chip {
 
 /* Folders */
 
+.page-title.folder-title {
+  padding-bottom: 0;
+}
+
+.folder-split {
+  margin: 18px 32px 32px 32px;
+  border-top: 1px solid @orca_border;
+}
+
 .folder-pane {
-  background-color: @orca_bg_sidebar;
+  padding: 14px 14px 14px 0;
   border-right: 1px solid @orca_border;
 }
 
 .folder-tree {
   background-color: transparent;
-  padding: 6px;
+}
+
+.folder-tree > row {
+  margin-bottom: 1px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: @orca_text_2;
+  background-color: transparent;
+}
+
+.folder-tree > row:hover {
+  background-color: @orca_bg_raised_2;
+  color: @orca_text;
+}
+
+.folder-tree > row:selected {
+  background-color: @orca_bg_selected;
+  color: @orca_text;
+}
+
+.folder-tree treeexpander indent {
+  -gtk-icon-size: 16px;
+}
+
+.folder-tree treeexpander expander {
+  min-width: 16px;
+  min-height: 16px;
+  -gtk-icon-source: -gtk-icontheme("orca-chevron-right-symbolic");
+  -gtk-icon-size: 12px;
+  color: @orca_text_3;
+}
+
+.folder-tree treeexpander expander:checked {
+  -gtk-icon-transform: rotate(90deg);
 }
 
 .folder-node {
-  min-height: 28px;
+  margin-left: 3px;
 }
 
-.folder-row-icon {
+.folder-node-icon {
+  color: @orca_text_3;
+}
+
+.folder-tree > row:selected .folder-node-icon {
+  color: @orca_accent;
+}
+
+.folder-content {
+  padding: 14px 0 0 24px;
+}
+
+.folder-crumbs {
+  font-family: "Geist Mono", monospace;
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+button.folder-crumb {
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  border-radius: 4px;
+  background-color: transparent;
+  box-shadow: none;
+  color: @orca_text_3;
+}
+
+button.folder-crumb:hover {
+  color: @orca_text;
+}
+
+.folder-crumb-current {
+  color: @orca_text;
+}
+
+.folder-switch > button {
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12.5px;
   color: @orca_text_2;
 }
 
-.folder-toolbar {
-  padding: 10px 16px;
-  border-bottom: 1px solid @orca_border;
+button.folder-button {
+  min-height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: @orca_text;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+}
+
+button.folder-button:hover {
+  background-color: @orca_bg_hover;
+}
+
+.folder-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: @orca_bg_popover;
+}
+
+.folder-card-cover {
+  border-radius: 5px;
+}
+
+.folder-card-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.folder-card-title > link {
+  color: @orca_accent_text;
+  text-decoration-line: none;
+}
+
+.folder-card-title > link:hover {
+  text-decoration-line: underline;
+}
+
+.folder-card-detail {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.folder-header-row {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: @orca_text_3;
+}
+
+.folder-header-row > .folder-cell {
+  padding: 0 10px 10px 10px;
 }
 
 .folder-files {
   background-color: transparent;
+  font-size: 13px;
 }
 
 .folder-files > row {
   padding: 0;
-  border-bottom: 1px solid @orca_border;
+  border-top: 1px solid @orca_bg_raised_2;
+  background-color: transparent;
+}
+
+.folder-files > row:hover,
+.folder-files > row:selected {
+  background-color: @orca_bg_raised_2;
 }
 
 .folder-row {
-  min-height: 36px;
-  padding: 0 12px;
+  min-height: 32px;
 }
 
-.folder-row-secondary,
-.folder-row-column {
-  font-size: 13px;
+.folder-row > .folder-cell {
+  padding: 0 10px;
 }
 
-.folder-files button.row-more {
-  min-height: 20px;
+.folder-row-icon {
+  color: @orca_text_3;
 }
 
-.folder-files button.row-more.unused {
-  opacity: 0;
-}
-
-.folder-library {
-  padding: 0 4px;
-}
-
-.folder-release {
-  padding: 16px 12px 8px 12px;
-  border-bottom: 1px solid @orca_border;
-}
-
-.folder-release-title {
-  font-weight: 600;
+.folder-row-name {
+  font-family: "Geist Mono", monospace;
+  font-size: 12.5px;
   color: @orca_text;
 }
 
-.folder-release-detail {
-  font-size: 13px;
+.folder-row-kind,
+.folder-row-length {
   color: @orca_text_2;
+}
+
+.folder-row-status {
+  color: @orca_text_3;
+}
+
+/* Tracks, large library */
+
+window:not(.narrow) .tracks-large .page-title.tracks-title {
+  padding: 14px 52px 6px 32px;
+}
+
+.tracks-large .page-title .display-page {
+  font-size: 42px;
+}
+
+.tracks-large .page-title .meta {
+  margin-top: 0;
+  font-size: 14px;
+  color: @orca_text_3;
+}
+
+.token-bar {
+  margin: 0 32px;
+  padding: 6px;
+  border-radius: 10px;
+  background-color: @orca_bg_raised_2;
+}
+
+.tok {
+  min-height: 26px;
+  padding: 0 4px 0 10px;
+  border-radius: 7px;
+  background-color: @orca_bg_chip_on;
+  font-size: 12.5px;
+  color: @orca_text;
+}
+
+.tok-name {
+  color: @orca_text_3;
+}
+
+button.tok-remove {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  color: @orca_text_3;
+  -gtk-icon-size: 12px;
+}
+
+button.tok-remove:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+menubutton.tok-add > button {
+  min-height: 26px;
+  padding: 0 8px;
+  background-color: transparent;
+  box-shadow: none;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text_2;
+}
+
+menubutton.tok-add > button:hover,
+menubutton.tok-add > button:checked {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+.token-totals {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+button.token-save {
+  min-height: 0;
+  padding: 0 4px 0 0;
+  background-color: transparent;
+  box-shadow: none;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_accent_text;
+}
+
+button.token-save:hover {
+  text-decoration: underline;
+}
+
+.tracks-large .tracks-page {
+  margin: 12px 32px 0 32px;
+}
+
+.tracks-large .tracks-page .track-list > header > button {
+  min-height: 34px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.tracks-large .tracks-page .track-list > listview > row {
+  min-height: 34px;
+  font-size: 13px;
+}
+
+.tracks-large .tracks-page .track-list .track-number {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.tracks-large .tracks-page .track-list .track-tech {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+menubutton.columns-corner {
+  margin: 3px 32px 0 0;
+}
+
+menubutton.columns-corner > button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 7px;
+  background-color: @orca_bg_selected;
+  box-shadow: none;
+  color: @orca_text_2;
+}
+
+menubutton.columns-corner > button:hover,
+menubutton.columns-corner > button:checked {
+  color: @orca_text;
+}
+
+popover.column-chooser > contents {
+  min-width: 260px;
+  padding: 8px;
+  border-radius: 12px;
+  background-color: @orca_bg_popover;
+}
+
+.chooser-title {
+  margin: 4px 8px 6px 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+list.chooser-list {
+  background-color: transparent;
+}
+
+list.chooser-list > row.chooser-row {
+  min-height: 0;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+list.chooser-list > row.chooser-row:hover {
+  background-color: @orca_bg_hover;
+}
+
+.chooser-grip {
+  color: @orca_text_dim;
+}
+
+list.chooser-list checkbutton {
+  min-height: 0;
+  padding: 0;
+}
+
+list.chooser-list checkbutton check {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0 8px 0 0;
+  border-radius: 4px;
+}
+
+list.chooser-list checkbutton:disabled {
+  opacity: 0.6;
+}
+
+.chooser-extra {
+  margin: 6px 8px 0 8px;
+  font-size: 13px;
+}
+
+.chooser-footer {
+  margin-top: 6px;
+  padding: 8px 8px 2px 8px;
+  border-top: 1px solid @orca_border_popover;
+  font-size: 12px;
+}
+
+button.chooser-reset {
+  min-height: 0;
+  padding: 0;
+  background-color: transparent;
+  font-size: 12px;
+  font-weight: 400;
+  color: @orca_accent_text;
+}
+
+.chooser-note {
+  color: @orca_text_3;
 }

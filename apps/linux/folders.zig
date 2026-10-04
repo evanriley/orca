@@ -6,28 +6,27 @@ const app = @import("app.zig");
 const albums = @import("albums.zig");
 const art = @import("art.zig");
 const browse_model = @import("browse_model.zig");
+const details = @import("details.zig");
+const jobs = @import("jobs.zig");
 const menu = @import("menu.zig");
 const page_ui = @import("page.zig");
 const signal_path = @import("signal_path.zig");
 const strings = @import("strings.zig");
 const transport = @import("transport.zig");
+const window = @import("window.zig");
 
 const App = app.App;
 const BrowseObject = browse_model.BrowseObject;
 
-const pane_width: c_int = 280;
-const column_pixels: c_int = 160;
-const duration_pixels: c_int = 76;
-const number_pixels: c_int = 28;
-const format_pixels: c_int = 96;
-const rate_pixels: c_int = 64;
-const track_duration_pixels: c_int = 44;
-const cover_pixels: c_int = 48;
+const pane_width: c_int = 260;
+const kind_pixels: c_int = 260;
+const length_pixels: c_int = 72;
+const status_pixels: c_int = 136;
+const cover_pixels: c_int = 44;
 const max_tree_pages = 16;
+const max_filter_pages = 16;
 
-pub const Mode = enum { files, library };
-
-const Kind = enum { root, folder, file };
+const Kind = enum { folder, file, image };
 
 const Root = struct {
     id: i64,
@@ -36,17 +35,11 @@ const Root = struct {
 
 const Entry = struct {
     kind: Kind,
-    root_id: i64,
+    object: *BrowseObject,
     track_id: ?i64 = null,
     duration_ms: i64 = 0,
-};
-
-const LibraryTrack = struct {
-    id: i64,
-    recording_id: ?i64,
-    feedback: liborca.Feedback,
-    release_id: ?i64,
-    artist_id: ?i64,
+    track_count: u32 = 0,
+    front_cover: bool = false,
 };
 
 pub const State = struct {
@@ -57,25 +50,24 @@ pub const State = struct {
     tree_view: ?*gtk.Widget = null,
     files_store: ?*gtk.ListStore = null,
     files_view: ?*gtk.Widget = null,
-    library_list: ?*gtk.ListBox = null,
     crumbs: ?*gtk.Box = null,
-    count: ?*gtk.Label = null,
+    page: ?*gtk.Stack = null,
     body: ?*gtk.Stack = null,
-    toolbar: ?*gtk.Widget = null,
-    play: ?*gtk.Widget = null,
-    shuffle: ?*gtk.Widget = null,
+    card_cover: ?*gtk.Widget = null,
+    card_title: ?*gtk.Label = null,
+    card_detail: ?*gtk.Label = null,
+    files_button: ?*gtk.Widget = null,
+    library_button: ?*gtk.Widget = null,
     roots: std.ArrayList(Root) = .empty,
     entries: std.ArrayList(Entry) = .empty,
-    library_tracks: std.ArrayList(LibraryTrack) = .empty,
     root_id: ?i64 = null,
     path: app.OwnedText = .{},
-    mode: Mode = .files,
+    filter: app.OwnedText = .{},
+    release_id: ?i64 = null,
+    last_scanned_at: ?i64 = null,
+    image_count: u32 = 0,
     loaded: u32 = 0,
     exhausted: bool = true,
-    folder_count: u32 = 0,
-    file_count: u32 = 0,
-    files_below: u64 = 0,
-    library_stale: bool = true,
     stale: bool = true,
     suppress: bool = false,
     narrow: bool = false,
@@ -84,15 +76,21 @@ pub const State = struct {
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         clearRoots(self, allocator);
         self.roots.deinit(allocator);
+        clearEntries(self);
         self.entries.deinit(allocator);
-        self.library_tracks.deinit(allocator);
         self.path.clear(allocator);
+        self.filter.clear(allocator);
     }
 };
 
 fn clearRoots(folders: *State, allocator: std.mem.Allocator) void {
     for (folders.roots.items) |root| allocator.free(root.path);
     folders.roots.clearRetainingCapacity();
+}
+
+fn clearEntries(folders: *State) void {
+    for (folders.entries.items) |entry| gtk.g_object_unref(entry.object);
+    folders.entries.clearRetainingCapacity();
 }
 
 fn state(data: ?*anyopaque) *App {
@@ -126,9 +124,11 @@ fn parentPath(path: []const u8) []const u8 {
     return path[0..slash];
 }
 
-fn stem(name: []const u8) []const u8 {
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name;
-    return if (dot == 0) name else name[0..dot];
+fn absolutePath(self: *App, relative: []const u8) ?[:0]u8 {
+    const root = rootById(self, self.folders.root_id orelse return null) orelse return null;
+    const base = std.mem.trimEnd(u8, root.path, "/");
+    const parts: []const []const u8 = if (relative.len == 0) &.{base} else &.{ base, "/", relative };
+    return std.mem.concatWithSentinel(self.allocator, u8, parts, 0) catch null;
 }
 
 pub fn shown(self: *App) void {
@@ -140,6 +140,18 @@ pub fn invalidate(self: *App) void {
     if (self.current_page == .folders) refresh(self);
 }
 
+pub fn setFilter(self: *App, text: []const u8) void {
+    const folders = &self.folders;
+    if (std.mem.eql(u8, text, folders.filter.value)) return;
+    folders.filter.set(self.allocator, text);
+    if (folders.filter.value.len != 0) {
+        var pages: usize = 0;
+        while (!folders.exhausted and pages < max_filter_pages) : (pages += 1) loadNext(self);
+    }
+    refill(self);
+    showBody(self);
+}
+
 fn refresh(self: *App) void {
     const folders = &self.folders;
     folders.stale = false;
@@ -148,6 +160,7 @@ fn refresh(self: *App) void {
         folders.root_id = null;
         folders.path.clear(self.allocator);
     };
+    if (folders.root_id == null and folders.roots.items.len != 0) folders.root_id = folders.roots.items[0].id;
     if (folders.tree_roots) |store| {
         folders.suppress = true;
         gtk.g_list_store_remove_all(store);
@@ -183,10 +196,10 @@ fn loadRoots(self: *App) void {
 
 const Origin = enum { list, tree };
 
-fn open(self: *App, root_id: ?i64, path: []const u8, origin: Origin) void {
+fn open(self: *App, root_id: i64, path: []const u8, origin: Origin) void {
     const folders = &self.folders;
     folders.root_id = root_id;
-    if (root_id == null) folders.path.clear(self.allocator) else folders.path.set(self.allocator, path);
+    folders.path.set(self.allocator, path);
     show(self, origin);
 }
 
@@ -194,41 +207,37 @@ fn show(self: *App, origin: Origin) void {
     const folders = &self.folders;
     rebuildCrumbs(self);
     reloadFiles(self);
-    folders.library_stale = true;
-    if (folders.mode == .library) fillLibrary(self);
+    updateCardDetail(self);
     showBody(self);
     if (origin == .list) syncTree(self);
-    if (folders.files_view) |view| if (folders.entries.items.len != 0)
+    if (folders.files_view) |view| if (visibleCount(self) != 0)
         gtk.gtk_list_view_scroll_to(gtk.cast(gtk.ListView, view), 0, gtk.LIST_SCROLL_NONE, null);
 }
 
 fn goUp(self: *App) bool {
     const folders = &self.folders;
     const root_id = folders.root_id orelse return false;
-    if (folders.path.value.len == 0) {
-        open(self, null, "", .list);
-    } else {
-        open(self, root_id, parentPath(folders.path.value), .list);
-    }
+    if (folders.path.value.len == 0) return false;
+    open(self, root_id, parentPath(folders.path.value), .list);
     return true;
+}
+
+fn visibleCount(self: *App) c_uint {
+    const store = self.folders.files_store orelse return 0;
+    return gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store));
 }
 
 fn showBody(self: *App) void {
     const folders = &self.folders;
+    if (folders.page) |page| gtk.gtk_stack_set_visible_child_name(page, if (folders.roots.items.len == 0) "welcome" else "folders");
     const body = folders.body orelse return;
-    const visible = if (folders.roots.items.len == 0)
-        "welcome"
-    else if (folders.root_id != null and folders.entries.items.len == 0)
+    const visible = if (folders.entries.items.len == 0)
         "empty"
-    else switch (folders.mode) {
-        .files => "files",
-        .library => if (folders.library_tracks.items.len == 0) "empty" else "library",
-    };
+    else if (visibleCount(self) == 0)
+        "unmatched"
+    else
+        "files";
     gtk.gtk_stack_set_visible_child_name(body, visible);
-    const playable = folders.root_id != null and folders.files_below != 0;
-    for ([_]?*gtk.Widget{ folders.play, folders.shuffle }) |maybe|
-        gtk.gtk_widget_set_sensitive(maybe orelse continue, @intFromBool(playable));
-    if (folders.toolbar) |toolbar| gtk.gtk_widget_set_visible(toolbar, @intFromBool(folders.roots.items.len != 0));
 }
 
 fn removeChildren(box: *gtk.Box) void {
@@ -238,40 +247,37 @@ fn removeChildren(box: *gtk.Box) void {
 fn crumbLabel(text: []const u8, class: [*:0]const u8) *gtk.Widget {
     var buffer: [512]u8 = undefined;
     const label = gtk.gtk_label_new(strings.terminated(&buffer, text).ptr);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_MIDDLE);
     gtk.gtk_widget_add_css_class(label, class);
     return label;
 }
 
 fn crumbButton(self: *App, text: []const u8, depth: usize) *gtk.Widget {
     const button = gtk.gtk_button_new();
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), crumbLabel(text, "breadcrumb-text"));
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), crumbLabel(text, "folder-crumb-text"));
     gtk.gtk_widget_add_css_class(button, "flat");
-    gtk.gtk_widget_add_css_class(button, "breadcrumb-parent");
+    gtk.gtk_widget_add_css_class(button, "folder-crumb");
     gtk.g_object_set_data(button, "orca-depth", @ptrFromInt(depth + 1));
     _ = gtk.signalConnect(button, "clicked", gtk.callback(crumbClicked), self);
     return button;
 }
 
 fn separator() *gtk.Widget {
-    const label = gtk.gtk_label_new("›");
-    gtk.gtk_widget_add_css_class(label, "breadcrumb-separator");
-    return label;
+    const icon = gtk.gtk_image_new_from_icon_name("orca-chevron-right-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 12);
+    gtk.gtk_widget_add_css_class(icon, "folder-crumb-separator");
+    return icon;
 }
 
 fn rebuildCrumbs(self: *App) void {
     const folders = &self.folders;
     const crumbs = folders.crumbs orelse return;
     removeChildren(crumbs);
-    const root = if (folders.root_id) |id| rootById(self, id) else null;
-    const top = root orelse {
-        gtk.gtk_box_append(crumbs, crumbLabel("Folders", "breadcrumb-current"));
-        return;
-    };
-    gtk.gtk_box_append(crumbs, crumbButton(self, "Folders", 0));
+    const root = rootById(self, folders.root_id orelse return) orelse return;
     var names: [64][]const u8 = undefined;
     var count: usize = 0;
-    names[count] = displayName(top.path);
+    names[count] = std.mem.trimEnd(u8, root.path, "/");
+    if (names[count].len == 0) names[count] = root.path;
     count += 1;
     var components = std.mem.tokenizeScalar(u8, folders.path.value, '/');
     while (components.next()) |component| {
@@ -279,12 +285,12 @@ fn rebuildCrumbs(self: *App) void {
         names[count] = component;
         count += 1;
     }
-    for (names[0..count], 0..) |name, index| {
-        gtk.gtk_box_append(crumbs, separator());
-        if (index + 1 == count)
-            gtk.gtk_box_append(crumbs, crumbLabel(name, "breadcrumb-current"))
+    for (names[0..count], 0..) |name, depth| {
+        if (depth != 0) gtk.gtk_box_append(crumbs, separator());
+        if (depth + 1 == count)
+            gtk.gtk_box_append(crumbs, crumbLabel(name, "folder-crumb-current"))
         else
-            gtk.gtk_box_append(crumbs, crumbButton(self, name, index + 1));
+            gtk.gtk_box_append(crumbs, crumbButton(self, name, depth));
     }
 }
 
@@ -294,16 +300,17 @@ fn crumbClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (marked == 0) return;
     const depth = marked - 1;
     const root_id = self.folders.root_id orelse return;
-    if (depth == 0) return open(self, null, "", .list);
     const path = self.folders.path.value;
     var end: usize = 0;
     var components = std.mem.tokenizeScalar(u8, path, '/');
-    var taken: usize = 1;
+    var taken: usize = 0;
     while (taken < depth) : (taken += 1) {
         const component = components.next() orelse break;
         end = @intFromPtr(component.ptr) - @intFromPtr(path.ptr) + component.len;
     }
-    open(self, root_id, path[0..end], .list);
+    const target = self.allocator.dupe(u8, path[0..end]) catch return;
+    defer self.allocator.free(target);
+    open(self, root_id, target, .list);
 }
 
 fn reloadFiles(self: *App) void {
@@ -312,29 +319,18 @@ fn reloadFiles(self: *App) void {
     folders.suppress = true;
     gtk.g_list_store_remove_all(store);
     folders.suppress = false;
-    folders.entries.clearRetainingCapacity();
+    clearEntries(folders);
     folders.loaded = 0;
-    folders.exhausted = false;
-    folders.folder_count = 0;
-    folders.file_count = 0;
-    folders.files_below = 0;
-    if (folders.root_id == null) listRoots(self) else loadNext(self);
-    updateCount(self);
-}
-
-fn listRoots(self: *App) void {
-    const folders = &self.folders;
-    const store = folders.files_store orelse return;
-    folders.exhausted = true;
-    for (folders.roots.items) |root| {
-        const object = browse_model.newWithCaption(root.id, displayName(root.path), root.path, "") orelse continue;
-        folders.entries.append(self.allocator, .{ .kind = .root, .root_id = root.id }) catch {
-            gtk.g_object_unref(object);
-            return;
-        };
-        gtk.g_list_store_append(store, object);
-        gtk.g_object_unref(object);
-        folders.folder_count += 1;
+    folders.exhausted = folders.root_id == null;
+    folders.release_id = null;
+    folders.last_scanned_at = null;
+    folders.image_count = 0;
+    setCardRelease(self, null, null, null);
+    if (folders.filter.value.len == 0) {
+        loadNext(self);
+    } else {
+        var pages: usize = 0;
+        while (!folders.exhausted and pages < max_filter_pages) : (pages += 1) loadNext(self);
     }
 }
 
@@ -346,12 +342,38 @@ fn formatText(buffer: []u8, summary: liborca.TrackSummary) []const u8 {
     if (summary.codec.len == 0) return "";
     var writer = std.Io.Writer.fixed(buffer);
     signal_path.writeCodecName(&writer, summary.codec) catch return "";
-    if (summary.bit_depth) |bits| writer.print(" {d}-bit", .{bits}) catch return writer.buffered();
+    if (summary.bit_depth) |bits| writer.print(" · {d}-bit", .{bits}) catch return writer.buffered();
     if (summary.sample_rate) |rate| {
         writer.writeAll(" · ") catch return writer.buffered();
         signal_path.writeRate(&writer, rate) catch return writer.buffered();
     }
     return writer.buffered();
+}
+
+fn extensionText(buffer: []u8, name: []const u8) []const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return "";
+    const extension = name[dot + 1 ..];
+    if (dot == 0 or extension.len == 0 or extension.len > buffer.len) return "";
+    return std.ascii.upperString(buffer[0..extension.len], extension);
+}
+
+fn imageKindText(buffer: []u8, mime: ?[]const u8) []const u8 {
+    const known = mime orelse return "Image";
+    const slash = std.mem.indexOfScalar(u8, known, '/') orelse return "Image";
+    const subtype = known[slash + 1 ..];
+    if (subtype.len == 0 or subtype.len + " image".len > buffer.len) return "Image";
+    _ = std.ascii.upperString(buffer[0..subtype.len], subtype);
+    @memcpy(buffer[subtype.len..][0..6], " image");
+    return buffer[0 .. subtype.len + 6];
+}
+
+fn roleText(role: ?liborca.ArtworkRole) []const u8 {
+    return switch (role orelse .other) {
+        .front => "Front cover",
+        .back => "Back cover",
+        .booklet => "Booklet",
+        .other => "Image",
+    };
 }
 
 fn loadNext(self: *App) void {
@@ -368,85 +390,91 @@ fn loadNext(self: *App) void {
         return;
     };
     defer page.deinit();
+    if (folders.loaded == 0) {
+        folders.release_id = page.release_id;
+        folders.last_scanned_at = page.last_scanned_at;
+        folders.image_count = page.image_count;
+        setCardRelease(self, page.release_id, page.release_title, page.release_artist);
+    }
     if (page.items.len < app.page_size) folders.exhausted = true;
     var additions: std.ArrayList(?*anyopaque) = .empty;
-    defer {
-        for (additions.items) |row| gtk.g_object_unref(row);
-        additions.deinit(self.allocator);
-    }
+    defer additions.deinit(self.allocator);
+    folders.entries.ensureUnusedCapacity(self.allocator, page.items.len) catch {
+        folders.exhausted = true;
+        return;
+    };
     for (page.items) |item| {
-        var column_buffer: [96]u8 = undefined;
-        var column: []const u8 = "";
-        var secondary: []const u8 = "";
-        var summary: ?liborca.TrackSummary = null;
-        defer if (summary) |found| found.deinit(self.allocator);
-        var entry: Entry = .{
-            .kind = if (item.kind == .folder) .folder else .file,
-            .root_id = root_id,
-            .track_id = item.track_id,
-            .duration_ms = item.total_duration_ms,
-        };
-        switch (item.kind) {
-            .folder => column = plural(&column_buffer, item.file_count, "file", "files"),
-            .file => if (item.track_id) |id| {
-                summary = self.runtime.libraryTrackSummary(library, id) catch null;
-                if (summary) |found| {
-                    if (found.title.len != 0 and !std.mem.eql(u8, found.title, stem(item.name))) secondary = found.title;
-                    if (entry.duration_ms <= 0) entry.duration_ms = found.duration_ms orelse 0;
-                    column = formatText(&column_buffer, found);
-                }
-            },
-        }
-        const object = browse_model.newWithCaption(item.track_id, item.name, secondary, column) orelse continue;
-        additions.append(self.allocator, object) catch {
-            gtk.g_object_unref(object);
-            break;
-        };
-        folders.entries.append(self.allocator, entry) catch {
-            _ = additions.pop();
-            gtk.g_object_unref(object);
-            break;
-        };
+        var kind_buffer: [96]u8 = undefined;
+        var status_buffer: [48]u8 = undefined;
+        var kind_text: []const u8 = "";
+        var status_text: []const u8 = "";
+        var entry_kind: Kind = .folder;
+        var duration_ms = item.total_duration_ms;
         switch (item.kind) {
             .folder => {
-                folders.folder_count += 1;
-                folders.files_below += item.file_count;
+                kind_text = "Folder";
+                status_text = plural(&status_buffer, item.track_count, "track", "tracks");
             },
             .file => {
-                folders.file_count += 1;
-                folders.files_below += 1;
+                entry_kind = .file;
+                var summary: ?liborca.TrackSummary = null;
+                if (item.track_id) |id| summary = self.runtime.libraryTrackSummary(library, id) catch null;
+                defer if (summary) |found| found.deinit(self.allocator);
+                if (summary) |found| {
+                    kind_text = formatText(&kind_buffer, found);
+                    if (duration_ms <= 0) duration_ms = found.duration_ms orelse 0;
+                }
+                if (kind_text.len == 0) kind_text = extensionText(&kind_buffer, item.name);
+                status_text = if (item.status == .unreadable)
+                    "Unreadable"
+                else if (item.track_id != null)
+                    "In library"
+                else
+                    "Not imported";
+            },
+            .image => {
+                entry_kind = .image;
+                kind_text = imageKindText(&kind_buffer, item.mime);
+                status_text = roleText(item.artwork_role);
             },
         }
+        const index: i64 = @intCast(folders.entries.items.len);
+        const object = browse_model.newWithCaption(index, item.name, kind_text, status_text) orelse continue;
+        folders.entries.appendAssumeCapacity(.{
+            .kind = entry_kind,
+            .object = object,
+            .track_id = item.track_id,
+            .duration_ms = duration_ms,
+            .track_count = item.track_count,
+            .front_cover = item.artwork_role == .front,
+        });
+        if (matches(self, object)) additions.append(self.allocator, object) catch {};
     }
     if (additions.items.len != 0) {
         folders.suppress = true;
-        gtk.g_list_store_splice(
-            store,
-            gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store)),
-            0,
-            additions.items.ptr,
-            @intCast(additions.items.len),
-        );
+        gtk.g_list_store_splice(store, visibleCount(self), 0, additions.items.ptr, @intCast(additions.items.len));
         folders.suppress = false;
     }
     folders.loaded += @intCast(page.items.len);
+    updateCardDetail(self);
 }
 
-fn updateCount(self: *App) void {
+fn matches(self: *App, object: *BrowseObject) bool {
+    const filter = self.folders.filter.value;
+    return filter.len == 0 or std.ascii.indexOfIgnoreCase(object.name(), filter) != null;
+}
+
+fn refill(self: *App) void {
     const folders = &self.folders;
-    const label = folders.count orelse return;
-    var folder_buffer: [48]u8 = undefined;
-    var file_buffer: [48]u8 = undefined;
-    var buffer: [128]u8 = undefined;
-    const folders_text = plural(&folder_buffer, folders.folder_count, "folder", "folders");
-    if (folders.root_id == null) return gtk.gtk_label_set_text(label, strings.terminated(&buffer, folders_text).ptr);
-    const files_text = plural(&file_buffer, folders.files_below, "file", "files");
-    const more: []const u8 = if (folders.exhausted) "" else "+";
-    const text = if (folders.folder_count == 0)
-        strings.format(&buffer, "{s}{s}", .{ files_text, more })
-    else
-        strings.format(&buffer, "{s} • {s}{s}", .{ folders_text, files_text, more });
-    gtk.gtk_label_set_text(label, text.ptr);
+    const store = folders.files_store orelse return;
+    var kept: std.ArrayList(?*anyopaque) = .empty;
+    defer kept.deinit(self.allocator);
+    for (folders.entries.items) |entry| {
+        if (matches(self, entry.object)) kept.append(self.allocator, entry.object) catch break;
+    }
+    folders.suppress = true;
+    gtk.g_list_store_splice(store, 0, visibleCount(self), kept.items.ptr, @intCast(kept.items.len));
+    folders.suppress = false;
 }
 
 fn filesMoved(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -455,32 +483,138 @@ fn filesMoved(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const value = gtk.cast(gtk.Adjustment, adjustment);
     const page = gtk.gtk_adjustment_get_page_size(value);
     const remaining = gtk.gtk_adjustment_get_upper(value) - (gtk.gtk_adjustment_get_value(value) + page);
-    if (remaining < page) {
-        loadNext(self);
-        updateCount(self);
-    }
+    if (remaining < page) loadNext(self);
 }
 
-fn objectAt(store: *gtk.ListStore, position: usize) ?*BrowseObject {
-    const object = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), @intCast(position)) orelse return null;
-    gtk.g_object_unref(object);
-    return @ptrCast(@alignCast(object));
-}
-
-fn activateAt(self: *App, position: usize) void {
+fn setCardRelease(self: *App, release_id: ?i64, title: ?[]const u8, artist: ?[]const u8) void {
     const folders = &self.folders;
-    if (position >= folders.entries.items.len) return;
-    const entry = folders.entries.items[position];
-    switch (entry.kind) {
-        .root => open(self, entry.root_id, "", .list),
-        .folder => {
-            const store = folders.files_store orelse return;
-            const object = objectAt(store, position) orelse return;
-            const path = joinPath(self.allocator, folders.path.value, object.name()) catch return;
-            defer self.allocator.free(path);
-            open(self, entry.root_id, path, .list);
+    if (folders.library_button) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(release_id != null));
+    if (folders.card_cover) |cover| {
+        gtk.gtk_widget_set_visible(cover, @intFromBool(release_id != null));
+        if (release_id) |id| {
+            art.setInitials(cover, title orelse "");
+            art.show(self, cover, art.Key.release(id, .thumb));
+        }
+    }
+    const label = folders.card_title orelse return;
+    if (release_id == null) {
+        var buffer: [512]u8 = undefined;
+        const name = if (folders.path.value.len != 0)
+            displayName(folders.path.value)
+        else if (folders.root_id) |id| (if (rootById(self, id)) |root| root.path else "") else "";
+        gtk.gtk_label_set_text(label, strings.terminated(&buffer, name).ptr);
+        return;
+    }
+    const shown_title = if (title) |value| (if (value.len != 0) value else "Untitled") else "Untitled";
+    const escaped_title = gtk.g_markup_escape_text(shown_title.ptr, @intCast(shown_title.len));
+    defer gtk.g_free(escaped_title);
+    const shown_artist = artist orelse "";
+    const escaped_artist = gtk.g_markup_escape_text(shown_artist.ptr, @intCast(shown_artist.len));
+    defer gtk.g_free(escaped_artist);
+    var buffer: [2048]u8 = undefined;
+    const markup = if (shown_artist.len != 0)
+        strings.format(&buffer, "Imported as <a href=\"release\">{s}</a> by {s}", .{ std.mem.span(escaped_title), std.mem.span(escaped_artist) })
+    else
+        strings.format(&buffer, "Imported as <a href=\"release\">{s}</a>", .{std.mem.span(escaped_title)});
+    gtk.gtk_label_set_markup(label, markup.ptr);
+}
+
+fn updateCardDetail(self: *App) void {
+    const folders = &self.folders;
+    const label = folders.card_detail orelse return;
+    var tracks: u64 = 0;
+    var front_covers: u32 = 0;
+    for (folders.entries.items) |entry| switch (entry.kind) {
+        .folder => tracks += entry.track_count,
+        .file => {
+            if (entry.track_id != null) tracks += 1;
         },
-        .file => playFrom(self, position),
+        .image => {
+            if (entry.front_cover) front_covers += 1;
+        },
+    };
+    var track_buffer: [48]u8 = undefined;
+    var image_buffer: [48]u8 = undefined;
+    var moment_buffer: [96]u8 = undefined;
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    if (folders.exhausted)
+        writer.writeAll(plural(&track_buffer, tracks, "track", "tracks")) catch {}
+    else
+        writer.print("{d}+ tracks", .{tracks}) catch {};
+    if (folders.image_count != 0) {
+        const covers = front_covers == folders.image_count;
+        writer.writeAll(" · ") catch {};
+        writer.writeAll(plural(&image_buffer, folders.image_count, if (covers) "cover image" else "image", if (covers) "cover images" else "images")) catch {};
+    }
+    if (folders.last_scanned_at) |scanned| {
+        const moment = details.recentMomentText(&moment_buffer, scanned);
+        writer.writeAll(" · last scanned ") catch {};
+        if (moment.len != 0) {
+            writer.writeByte(std.ascii.toLower(moment[0])) catch {};
+            writer.writeAll(moment[1..]) catch {};
+        }
+    }
+    buffer[writer.end] = 0;
+    gtk.gtk_label_set_text(label, buffer[0..writer.end :0].ptr);
+}
+
+fn cardLinkActivated(_: ?*anyopaque, _: ?[*:0]const u8, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    openRelease(state(data));
+    return gtk.true_;
+}
+
+fn openRelease(self: *App) void {
+    const release_id = self.folders.release_id orelse return;
+    window.showAlbum(self, release_id);
+}
+
+fn libraryToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button.?)) == 0) return;
+    if (self.folders.files_button) |files| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, files), gtk.true_);
+    openRelease(self);
+}
+
+fn rescanClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const root_id = self.folders.root_id orelse return;
+    jobs.rescanFolder(self, root_id, self.folders.path.value);
+}
+
+fn showInFilesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const absolute = absolutePath(self, self.folders.path.value) orelse return;
+    defer self.allocator.free(absolute);
+    const uri = gtk.g_filename_to_uri(absolute.ptr, null, null) orelse return self.toast("Could not open the file manager");
+    defer gtk.g_free(uri);
+    var err: ?*gtk.GError = null;
+    if (gtk.g_app_info_launch_default_for_uri(uri, null, &err) != 0) return;
+    gtk.g_clear_error(&err);
+    self.toast("Could not open the file manager");
+}
+
+fn entryAt(self: *App, position: usize) ?usize {
+    const store = self.folders.files_store orelse return null;
+    const object = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), @intCast(position)) orelse return null;
+    defer gtk.g_object_unref(object);
+    const index = (@as(*BrowseObject, @ptrCast(@alignCast(object)))).id() orelse return null;
+    if (index < 0 or index >= self.folders.entries.items.len) return null;
+    return @intCast(index);
+}
+
+fn activateEntry(self: *App, index: usize) void {
+    const folders = &self.folders;
+    const entry = folders.entries.items[index];
+    const root_id = folders.root_id orelse return;
+    switch (entry.kind) {
+        .folder => {
+            const path = joinPath(self.allocator, folders.path.value, entry.object.name()) catch return;
+            defer self.allocator.free(path);
+            open(self, root_id, path, .list);
+        },
+        .file => playFrom(self, index),
+        .image => {},
     }
 }
 
@@ -504,11 +638,11 @@ fn levelTrackIds(self: *App) ![]i64 {
     return ids.toOwnedSlice(self.allocator);
 }
 
-fn playFrom(self: *App, position: usize) void {
+fn playFrom(self: *App, index: usize) void {
     const folders = &self.folders;
-    if (folders.entries.items[position].track_id == null) return self.toast("This file is not in the library yet");
+    if (folders.entries.items[index].track_id == null) return self.toast("This file is not in the library yet");
     var start: u32 = 0;
-    for (folders.entries.items[0..position]) |entry| {
+    for (folders.entries.items[0..index]) |entry| {
         if (entry.kind == .file and entry.track_id != null) start += 1;
     }
     const ids = levelTrackIds(self) catch return self.toast("Could not read this folder");
@@ -517,147 +651,96 @@ fn playFrom(self: *App, position: usize) void {
     transport.playIds(self, ids, start);
 }
 
-fn playFolder(self: *App, shuffle: bool) void {
-    const folders = &self.folders;
-    const root_id = folders.root_id orelse return;
-    const library = self.library orelse return;
-    if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
-    self.runtime.playerPlayFolder(self.player, library, self.io, root_id, folders.path.value, shuffle) catch |err| switch (err) {
-        error.FolderEmpty => return self.toast("No tracks in this folder"),
-        else => return self.toast("Could not start playback"),
-    };
-    self.requestTick();
-}
-
-fn playClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    playFolder(state(data), false);
-}
-
-fn shuffleClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    playFolder(state(data), true);
-}
-
 fn filesActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {
-    activateAt(state(data), position);
+    const self = state(data);
+    const index = entryAt(self, position) orelse return;
+    activateEntry(self, index);
 }
 
-fn rowLabel(class: [*:0]const u8) *gtk.Widget {
+fn cellLabel(class: [*:0]const u8, width: c_int, xalign: f32) *gtk.Widget {
     const label = gtk.gtk_label_new(null);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), xalign);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 1);
+    gtk.gtk_widget_add_css_class(label, "folder-cell");
     gtk.gtk_widget_add_css_class(label, class);
+    if (width > 0) gtk.gtk_widget_set_size_request(label, width, -1) else gtk.gtk_widget_set_hexpand(label, gtk.true_);
     return label;
 }
 
 fn setupFile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(box, "folder-row");
-    const icon = gtk.gtk_image_new_from_icon_name("folder-symbolic");
+    const name_cell = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 9);
+    gtk.gtk_widget_add_css_class(name_cell, "folder-cell");
+    gtk.gtk_widget_set_hexpand(name_cell, gtk.true_);
+    const icon = gtk.gtk_image_new_from_icon_name("orca-file-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 15);
     gtk.gtk_widget_add_css_class(icon, "folder-row-icon");
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
-    const name = rowLabel("folder-row-name");
-    const secondary = rowLabel("folder-row-secondary");
-    gtk.gtk_widget_add_css_class(secondary, "dim-label");
+    const name = gtk.gtk_label_new(null);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, name), 0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, name), gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, name), 1);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, secondary), 1);
     gtk.gtk_widget_set_hexpand(name, gtk.true_);
-    gtk.gtk_widget_set_hexpand(secondary, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), name);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), secondary);
-    const column = rowLabel("folder-row-column");
-    gtk.gtk_widget_add_css_class(column, "dim-label");
-    gtk.gtk_widget_add_css_class(column, "numeric");
-    gtk.gtk_widget_set_size_request(column, column_pixels, -1);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, column), 1);
-    const duration = rowLabel("folder-row-duration");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, duration), 1.0);
-    gtk.gtk_widget_add_css_class(duration, "dim-label");
-    gtk.gtk_widget_add_css_class(duration, "numeric");
-    gtk.gtk_widget_set_size_request(duration, duration_pixels, -1);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, duration), 1);
-    const more = gtk.gtk_button_new_from_icon_name("view-more-symbolic");
-    gtk.gtk_widget_add_css_class(more, "flat");
-    gtk.gtk_widget_add_css_class(more, "row-more");
-    gtk.gtk_widget_set_valign(more, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(more, "More");
-    _ = gtk.signalConnect(more, "clicked", gtk.callback(moreClicked), self);
-    for ([_]*gtk.Widget{ icon, labels, column, duration, more }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
+    gtk.gtk_widget_add_css_class(name, "folder-row-name");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, name_cell), icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, name_cell), name);
+    const kind = cellLabel("folder-row-kind", kind_pixels, 0);
+    const length = cellLabel("folder-row-length", length_pixels, 1);
+    gtk.gtk_widget_add_css_class(length, "numeric");
+    const status = cellLabel("folder-row-status", status_pixels, 0);
+    for ([_]*gtk.Widget{ name_cell, kind, length, status }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
+    gtk.gtk_widget_set_visible(kind, @intFromBool(!self.folders.narrow));
     menu.onSecondaryClick(box, rowMenu, self);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), box);
     gtk.g_object_set_data(box, "orca-icon", icon);
     gtk.g_object_set_data(box, "orca-name", name);
-    gtk.g_object_set_data(box, "orca-secondary", secondary);
-    gtk.g_object_set_data(box, "orca-column", column);
-    gtk.g_object_set_data(box, "orca-duration", duration);
-    gtk.g_object_set_data(box, "orca-more", more);
-    fitName(box, self.folders.narrow);
-}
-
-fn fitName(box: *gtk.Widget, narrow: bool) void {
-    const name = part(box, "orca-name") orelse return;
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, name), if (narrow) -1 else 1);
-    gtk.gtk_widget_set_hexpand(name, @intFromBool(!narrow));
+    gtk.g_object_set_data(box, "orca-kind", kind);
+    gtk.g_object_set_data(box, "orca-length", length);
+    gtk.g_object_set_data(box, "orca-status", status);
 }
 
 fn bindFile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const list_item = gtk.cast(gtk.ListItem, item);
-    const position = gtk.gtk_list_item_get_position(list_item);
-    if (position >= self.folders.entries.items.len) return;
-    const entry = self.folders.entries.items[position];
     const object: *BrowseObject = @ptrCast(@alignCast(gtk.gtk_list_item_get_item(list_item) orelse return));
+    const raw_index = object.id() orelse return;
+    if (raw_index < 0 or raw_index >= self.folders.entries.items.len) return;
+    const index: usize = @intCast(raw_index);
+    const entry = self.folders.entries.items[index];
     const box = gtk.gtk_list_item_get_child(list_item) orelse return;
-    gtk.g_object_set_data(box, "orca-position", @ptrFromInt(@as(usize, position) + 1));
-    const icon: [*:0]const u8 = if (entry.kind == .file) "audio-x-generic-symbolic" else "folder-symbolic";
+    gtk.g_object_set_data(box, "orca-index", @ptrFromInt(index + 1));
+    const icon: [*:0]const u8 = switch (entry.kind) {
+        .folder => "orca-folders-symbolic",
+        .file => "orca-file-symbolic",
+        .image => "orca-image-symbolic",
+    };
     if (part(box, "orca-icon")) |image| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), icon);
     if (part(box, "orca-name")) |label| gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), object.name().ptr);
-    if (part(box, "orca-secondary")) |label| {
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), object.detail().ptr);
-        gtk.gtk_widget_set_visible(label, @intFromBool(object.detail().len != 0));
-    }
-    if (part(box, "orca-column")) |label| {
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), object.caption().ptr);
-        gtk.gtk_widget_set_visible(label, @intFromBool(!self.folders.narrow));
-    }
+    if (part(box, "orca-kind")) |label| gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), object.detail().ptr);
+    if (part(box, "orca-status")) |label| gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), object.caption().ptr);
     var buffer: [32]u8 = undefined;
-    const duration: [:0]const u8 = if (entry.duration_ms <= 0)
+    const duration: [:0]const u8 = if (entry.duration_ms <= 0 or entry.kind == .image)
         ""
     else if (entry.kind == .file)
         strings.formatMs(&buffer, @intCast(entry.duration_ms))
     else
         strings.terminated(buffer[16..], strings.totalDuration(buffer[0..16], entry.duration_ms));
-    if (part(box, "orca-duration")) |label| gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), duration.ptr);
-    if (part(box, "orca-more")) |more| {
-        gtk.g_object_set_data(more, "orca-position", @ptrFromInt(@as(usize, position) + 1));
-        const usable = entry.kind == .file;
-        gtk.gtk_widget_set_can_target(more, @intFromBool(usable));
-        gtk.gtk_widget_set_can_focus(more, @intFromBool(usable));
-        if (usable) gtk.gtk_widget_remove_css_class(more, "unused") else gtk.gtk_widget_add_css_class(more, "unused");
-    }
+    if (part(box, "orca-length")) |label| gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), duration.ptr);
     gtk.gtk_widget_set_tooltip_text(box, object.name().ptr);
     albums.showPlaying(box, sameTrack(self.shown_track_id, entry.track_id));
 }
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
     const folders = &self.folders;
-    if (folders.files_view) |view| {
-        var child = gtk.gtk_widget_get_first_child(view);
-        while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
-            const box = gtk.gtk_widget_get_first_child(cell) orelse continue;
-            const position = markedPosition(box) orelse continue;
-            if (position >= folders.entries.items.len) continue;
-            albums.showPlaying(box, sameTrack(track_id, folders.entries.items[position].track_id));
-        }
-    }
-    if (folders.library_list) |list| {
-        var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, list));
-        while (child) |row| : (child = gtk.gtk_widget_get_next_sibling(row)) {
-            const position = markedPosition(row) orelse continue;
-            if (position >= folders.library_tracks.items.len) continue;
-            albums.showPlaying(row, sameTrack(track_id, folders.library_tracks.items[position].id));
-        }
+    const view = folders.files_view orelse return;
+    var child = gtk.gtk_widget_get_first_child(view);
+    while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
+        const box = gtk.gtk_widget_get_first_child(cell) orelse continue;
+        const index = markedIndex(box) orelse continue;
+        if (index >= folders.entries.items.len) continue;
+        albums.showPlaying(box, sameTrack(track_id, folders.entries.items[index].track_id));
     }
 }
 
@@ -667,41 +750,32 @@ fn sameTrack(playing: ?i64, track_id: ?i64) bool {
     return a == b;
 }
 
-fn markedPosition(widget: *gtk.Widget) ?usize {
-    const marked = @intFromPtr(gtk.g_object_get_data(widget, "orca-position"));
+fn markedIndex(widget: *gtk.Widget) ?usize {
+    const marked = @intFromPtr(gtk.g_object_get_data(widget, "orca-index"));
     if (marked == 0) return null;
     return marked - 1;
-}
-
-fn moreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const widget = gtk.cast(gtk.Widget, button.?);
-    const position = markedPosition(widget) orelse return;
-    const x: f64 = @floatFromInt(@divTrunc(gtk.gtk_widget_get_width(widget), 2));
-    const y: f64 = @floatFromInt(gtk.gtk_widget_get_height(widget));
-    fileMenu(self, widget, position, x, y);
 }
 
 fn rowMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const box = menu.gestureWidget(gesture);
-    const position = markedPosition(box) orelse return;
-    fileMenu(self, box, position, x, y);
+    const index = markedIndex(box) orelse return;
+    fileMenu(self, box, index, x, y);
 }
 
-fn fileMenu(self: *App, widget: *gtk.Widget, position: usize, x: f64, y: f64) void {
+fn fileMenu(self: *App, widget: *gtk.Widget, index: usize, x: f64, y: f64) void {
     const folders = &self.folders;
-    if (position >= folders.entries.items.len) return;
-    const entry = folders.entries.items[position];
-    if (entry.kind != .file) return;
-    folders.menu_position = position;
+    if (index >= folders.entries.items.len) return;
+    const entry = folders.entries.items[index];
+    if (entry.kind == .folder) return;
+    folders.menu_position = index;
     const items = gtk.g_menu_new();
     defer gtk.g_object_unref(items);
     const reveal = gtk.g_menu_new();
     gtk.g_menu_append(reveal, "Show in Files", "folders.reveal");
     gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, reveal));
     gtk.g_object_unref(reveal);
-    if (trackContext(self, entry.track_id)) {
+    if (entry.kind == .file and trackContext(self, entry.track_id)) {
         const playback = gtk.g_menu_new();
         gtk.g_menu_append(playback, "Play", "app.ctx-play");
         gtk.g_menu_append(playback, "Add to Queue", "app.ctx-enqueue");
@@ -737,14 +811,11 @@ fn launched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque)
 fn revealActivated(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const folders = &self.folders;
-    const position = folders.menu_position orelse return;
-    if (position >= folders.entries.items.len) return;
-    const root = rootById(self, folders.entries.items[position].root_id) orelse return;
-    const store = folders.files_store orelse return;
-    const object = objectAt(store, position) orelse return;
-    const relative = joinPath(self.allocator, folders.path.value, object.name()) catch return;
+    const index = folders.menu_position orelse return;
+    if (index >= folders.entries.items.len) return;
+    const relative = joinPath(self.allocator, folders.path.value, folders.entries.items[index].object.name()) catch return;
     defer self.allocator.free(relative);
-    const absolute = std.mem.concatWithSentinel(self.allocator, u8, &.{ std.mem.trimEnd(u8, root.path, "/"), "/", relative }, 0) catch return;
+    const absolute = absolutePath(self, relative) orelse return;
     defer self.allocator.free(absolute);
     const file = gtk.g_file_new_for_path(absolute.ptr);
     defer gtk.g_object_unref(file);
@@ -752,257 +823,6 @@ fn revealActivated(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
     const launcher = gtk.gtk_file_launcher_new(file);
     gtk.gtk_file_launcher_open_containing_folder(launcher, self.window, null, launched, self);
     gtk.g_object_unref(launcher);
-}
-
-const ReleaseGroup = struct {
-    release_id: ?i64,
-    order: usize,
-};
-
-const Sorting = struct {
-    summaries: []const liborca.TrackSummary,
-    groups: []const usize,
-
-    fn lessThan(context: Sorting, left: usize, right: usize) bool {
-        if (context.groups[left] != context.groups[right]) return context.groups[left] < context.groups[right];
-        const a = context.summaries[left];
-        const b = context.summaries[right];
-        const disc_a = a.disc_number orelse 0;
-        const disc_b = b.disc_number orelse 0;
-        if (disc_a != disc_b) return disc_a < disc_b;
-        const track_a = a.track_number orelse std.math.maxInt(i64);
-        const track_b = b.track_number orelse std.math.maxInt(i64);
-        if (track_a != track_b) return track_a < track_b;
-        return left < right;
-    }
-};
-
-fn fillLibrary(self: *App) void {
-    const folders = &self.folders;
-    folders.library_stale = false;
-    folders.library_tracks.clearRetainingCapacity();
-    const list = folders.library_list orelse return;
-    gtk.gtk_list_box_remove_all(list);
-    const library = self.library orelse return;
-    const ids = levelTrackIds(self) catch return;
-    defer self.allocator.free(ids);
-    var summaries: std.ArrayList(liborca.TrackSummary) = .empty;
-    defer {
-        for (summaries.items) |summary| summary.deinit(self.allocator);
-        summaries.deinit(self.allocator);
-    }
-    for (ids) |id| {
-        const summary = (self.runtime.libraryTrackSummary(library, id) catch null) orelse continue;
-        summaries.append(self.allocator, summary) catch {
-            summary.deinit(self.allocator);
-            break;
-        };
-    }
-    const count = summaries.items.len;
-    const groups = self.allocator.alloc(usize, count) catch return;
-    defer self.allocator.free(groups);
-    const order = self.allocator.alloc(usize, count) catch return;
-    defer self.allocator.free(order);
-    var seen: std.AutoHashMapUnmanaged(i64, usize) = .empty;
-    defer seen.deinit(self.allocator);
-    for (summaries.items, 0..) |summary, index| {
-        order[index] = index;
-        const release = summary.release_id orelse {
-            groups[index] = std.math.maxInt(usize);
-            continue;
-        };
-        const found = seen.getOrPut(self.allocator, release) catch return;
-        if (!found.found_existing) found.value_ptr.* = seen.count() - 1;
-        groups[index] = found.value_ptr.*;
-    }
-    std.sort.pdq(usize, order, Sorting{ .summaries = summaries.items, .groups = groups }, Sorting.lessThan);
-    folders.library_tracks.ensureTotalCapacity(self.allocator, count) catch return;
-    var previous_group: ?usize = null;
-    for (order) |index| {
-        const summary = summaries.items[index];
-        const starts = previous_group != groups[index];
-        previous_group = groups[index];
-        const row = libraryRow(self, summary, folders.library_tracks.items.len, starts);
-        gtk.gtk_list_box_append(list, row);
-        folders.library_tracks.appendAssumeCapacity(.{
-            .id = summary.id,
-            .recording_id = summary.recording_id,
-            .feedback = summary.feedback,
-            .release_id = summary.release_id,
-            .artist_id = summary.artist_id,
-        });
-    }
-}
-
-fn columnLabel(text: []const u8, width: c_int) *gtk.Widget {
-    var buffer: [128]u8 = undefined;
-    const label = gtk.gtk_label_new(strings.terminated(&buffer, text).ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_size_request(label, width, -1);
-    gtk.gtk_widget_add_css_class(label, "album-track-column");
-    gtk.gtk_widget_add_css_class(label, "dim-label");
-    return label;
-}
-
-fn releaseHeader(self: *App, summary: liborca.TrackSummary) *gtk.Widget {
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(box, "folder-release");
-    const cover = art.newCover(self, art.initialsPlaceholder(), cover_pixels);
-    gtk.gtk_widget_add_css_class(cover, "album-cover");
-    art.setInitials(cover, summary.album);
-    art.show(self, cover, if (summary.release_id) |release| art.Key.release(release, .thumb) else art.Key.track(summary.id, .thumb));
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
-    var buffer: [512]u8 = undefined;
-    const album: []const u8 = if (summary.release_id == null) "Other Tracks" else if (summary.album.len != 0) summary.album else "Untitled";
-    const title = gtk.gtk_label_new(strings.terminated(&buffer, album).ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(title, "folder-release-title");
-    const artist = if (summary.album_artist.len != 0) summary.album_artist else summary.artist;
-    const detail_text = if (summary.release_id == null)
-        strings.terminated(&buffer, "")
-    else if (summary.year) |year|
-        (if (artist.len != 0) strings.format(&buffer, "{s} · {d}", .{ artist, year }) else strings.format(&buffer, "{d}", .{year}))
-    else
-        strings.terminated(&buffer, artist);
-    const detail = gtk.gtk_label_new(detail_text.ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, detail), 0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, detail), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(detail, "folder-release-detail");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title);
-    if (detail_text.len != 0) gtk.gtk_box_append(gtk.cast(gtk.Box, labels), detail);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), cover);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
-    return box;
-}
-
-fn libraryRow(self: *App, summary: liborca.TrackSummary, position: usize, starts_group: bool) *gtk.Widget {
-    const row = gtk.gtk_list_box_row_new();
-    gtk.gtk_widget_add_css_class(row, "album-track-row");
-    gtk.g_object_set_data(row, "orca-position", @ptrFromInt(position + 1));
-    if (starts_group) {
-        const header = releaseHeader(self, summary);
-        gtk.g_object_set_data_full(row, "orca-header", gtk.g_object_ref_sink(header), gtk.g_object_unref);
-    }
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(box, "album-track");
-    var buffer: [512]u8 = undefined;
-    const number: [:0]const u8 = if (summary.track_number) |value| strings.format(&buffer, "{d}", .{value}) else "";
-    const number_label = gtk.gtk_label_new(number.ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, number_label), 1.0);
-    gtk.gtk_widget_set_size_request(number_label, number_pixels, -1);
-    gtk.gtk_widget_add_css_class(number_label, "numeric");
-    gtk.gtk_widget_add_css_class(number_label, "album-track-number");
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
-    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    const title = gtk.gtk_label_new(strings.terminated(&buffer, if (summary.title.len != 0) summary.title else "Untitled").ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(title, "album-track-title");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title);
-    if (summary.artist.len != 0 and !std.mem.eql(u8, summary.artist, summary.album_artist)) {
-        const artist = gtk.gtk_label_new(strings.terminated(&buffer, summary.artist).ptr);
-        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, artist), 0.0);
-        gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, artist), gtk.ELLIPSIZE_END);
-        gtk.gtk_widget_add_css_class(artist, "caption");
-        gtk.gtk_widget_add_css_class(artist, "dim-label");
-        gtk.gtk_box_append(gtk.cast(gtk.Box, labels), artist);
-    }
-    var format_buffer: [64]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&format_buffer);
-    if (summary.codec.len != 0) {
-        signal_path.writeCodecName(&writer, summary.codec) catch {};
-        if (summary.bit_depth) |bits| writer.print(" {d}-bit", .{bits}) catch {};
-    }
-    const format_label = columnLabel(writer.buffered(), format_pixels);
-    writer = std.Io.Writer.fixed(&format_buffer);
-    if (summary.sample_rate) |rate| signal_path.writeRate(&writer, rate) catch {};
-    const rate_label = columnLabel(writer.buffered(), rate_pixels);
-    const duration: [:0]const u8 = if (summary.duration_ms) |ms|
-        (if (ms >= 0) strings.formatMs(&buffer, @intCast(ms)) else "")
-    else
-        "";
-    const duration_label = gtk.gtk_label_new(duration.ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, duration_label), 1.0);
-    gtk.gtk_widget_set_size_request(duration_label, track_duration_pixels, -1);
-    gtk.gtk_widget_add_css_class(duration_label, "numeric");
-    gtk.gtk_widget_add_css_class(duration_label, "dim-label");
-    const more = gtk.gtk_button_new_from_icon_name("view-more-symbolic");
-    gtk.gtk_widget_add_css_class(more, "flat");
-    gtk.gtk_widget_add_css_class(more, "row-more");
-    gtk.gtk_widget_set_valign(more, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(more, "More");
-    gtk.g_object_set_data(more, "orca-position", @ptrFromInt(position + 1));
-    _ = gtk.signalConnect(more, "clicked", gtk.callback(libraryMoreClicked), self);
-    for ([_]*gtk.Widget{ number_label, labels, format_label, rate_label, duration_label, more }) |piece|
-        gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
-    gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
-    menu.onSecondaryClick(row, libraryRowMenu, self);
-    if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
-    albums.showPlaying(row, sameTrack(self.shown_track_id, summary.id));
-    return row;
-}
-
-fn updateHeader(row: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
-    const list_row = gtk.cast(gtk.ListBoxRow, row.?);
-    if (gtk.gtk_list_box_row_get_header(list_row) != null) return;
-    const header = part(gtk.cast(gtk.Widget, list_row), "orca-header") orelse return;
-    gtk.gtk_list_box_row_set_header(list_row, header);
-}
-
-fn libraryContext(self: *App, position: usize) bool {
-    const tracks = self.folders.library_tracks.items;
-    if (position >= tracks.len) return false;
-    const track = tracks[position];
-    self.context.reset(.tracks);
-    self.context.addTrack(self.allocator, track.id, track.recording_id, track.feedback) catch return false;
-    self.context.release_id = track.release_id;
-    self.context.artist_id = track.artist_id;
-    return true;
-}
-
-fn libraryMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const widget = gtk.cast(gtk.Widget, button.?);
-    const position = markedPosition(widget) orelse return;
-    if (!libraryContext(self, position)) return;
-    const x: f64 = @floatFromInt(@divTrunc(gtk.gtk_widget_get_width(widget), 2));
-    const y: f64 = @floatFromInt(gtk.gtk_widget_get_height(widget));
-    menu.popup(self, widget, x, y);
-}
-
-fn libraryRowMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const row = menu.gestureWidget(gesture);
-    const position = markedPosition(row) orelse return;
-    if (libraryContext(self, position)) menu.popup(self, row, x, y);
-}
-
-fn libraryActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const position = markedPosition(gtk.cast(gtk.Widget, row.?)) orelse return;
-    const tracks = self.folders.library_tracks.items;
-    if (position >= tracks.len) return;
-    const ids = self.allocator.alloc(i64, tracks.len) catch return;
-    defer self.allocator.free(ids);
-    for (tracks, ids) |track, *id| id.* = track.id;
-    transport.playIds(self, ids, @intCast(position));
-}
-
-fn modeToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button.?)) == 0) return;
-    const marked = @intFromPtr(gtk.g_object_get_data(button.?, "orca-mode"));
-    if (marked == 0) return;
-    const mode: Mode = @enumFromInt(marked - 1);
-    if (self.folders.mode == mode) return;
-    self.folders.mode = mode;
-    if (mode == .library and self.folders.library_stale) fillLibrary(self);
-    showBody(self);
 }
 
 fn childFolders(item: ?*anyopaque, data: ?*anyopaque) callconv(.c) ?*gtk.ListModel {
@@ -1036,11 +856,14 @@ fn childFolders(item: ?*anyopaque, data: ?*anyopaque) callconv(.c) ?*gtk.ListMod
 
 fn setupNode(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
     const expander = gtk.gtk_tree_expander_new();
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 7);
     gtk.gtk_widget_add_css_class(box, "folder-node");
-    const icon = gtk.gtk_image_new_from_icon_name("folder-symbolic");
-    gtk.gtk_widget_add_css_class(icon, "folder-row-icon");
-    const label = rowLabel("folder-node-name");
+    const icon = gtk.gtk_image_new_from_icon_name("orca-folders-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 16);
+    gtk.gtk_widget_add_css_class(icon, "folder-node-icon");
+    const label = gtk.gtk_label_new(null);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 1);
     gtk.gtk_widget_set_hexpand(label, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), icon);
@@ -1158,7 +981,6 @@ fn buildTree(self: *App) *gtk.Widget {
     const view = gtk.gtk_list_view_new(gtk.cast(gtk.SelectionModel, selection), factory);
     gtk.gtk_list_view_set_tab_behavior(gtk.cast(gtk.ListView, view), gtk.LIST_TAB_ITEM);
     gtk.gtk_widget_add_css_class(view, "folder-tree");
-    gtk.gtk_widget_add_css_class(view, "navigation-sidebar");
     self.folders.tree_view = view;
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
@@ -1167,6 +989,12 @@ fn buildTree(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(scroller, "folder-pane");
     self.folders.pane = scroller;
     return scroller;
+}
+
+fn headerLabel(text: [*:0]const u8, width: c_int, xalign: f32) *gtk.Widget {
+    const label = cellLabel("folder-heading", width, xalign);
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), text);
+    return label;
 }
 
 fn buildFiles(self: *App) *gtk.Widget {
@@ -1187,88 +1015,122 @@ fn buildFiles(self: *App) *gtk.Widget {
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), view);
+    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     _ = gtk.signalConnect(
         gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
         "value-changed",
         gtk.callback(filesMoved),
         self,
     );
-    return scroller;
+
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(header, "folder-header-row");
+    const kind = headerLabel("KIND", kind_pixels, 0);
+    for ([_]*gtk.Widget{
+        headerLabel("NAME", 0, 0),
+        kind,
+        headerLabel("LENGTH", length_pixels, 1),
+        headerLabel("STATUS", status_pixels, 0),
+    }) |label| gtk.gtk_box_append(gtk.cast(gtk.Box, header), label);
+    gtk.g_object_set_data(view, "orca-kind-heading", kind);
+
+    const table = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, table), header);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, table), scroller);
+    return table;
 }
 
-fn buildLibrary(self: *App) *gtk.Widget {
-    const list = gtk.gtk_list_box_new();
-    gtk.gtk_widget_add_css_class(list, "album-tracks");
-    gtk.gtk_widget_add_css_class(list, "folder-library");
-    gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, list), gtk.SELECTION_SINGLE);
-    gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, list), gtk.false_);
-    gtk.gtk_list_box_set_header_func(gtk.cast(gtk.ListBox, list), updateHeader, null, null);
-    _ = gtk.signalConnect(list, "row-activated", gtk.callback(libraryActivated), self);
-    self.folders.library_list = gtk.cast(gtk.ListBox, list);
-    const scroller = gtk.gtk_scrolled_window_new();
-    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), list);
-    return scroller;
-}
-
-fn modeButton(self: *App, label: [*:0]const u8, mode: Mode) *gtk.Widget {
-    const button = gtk.gtk_toggle_button_new();
-    gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), label);
-    gtk.g_object_set_data(button, "orca-mode", @ptrFromInt(@as(usize, @intFromEnum(mode)) + 1));
-    _ = gtk.signalConnect(button, "toggled", gtk.callback(modeToggled), self);
-    return button;
-}
-
-fn actionButton(label: [*:0]const u8, icon: [*:0]const u8, suggested: bool) *gtk.Widget {
+fn folderButton(label: [*:0]const u8, icon: ?[*:0]const u8) *gtk.Widget {
     const button = gtk.gtk_button_new();
-    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), gtk.gtk_image_new_from_icon_name(icon));
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_set_halign(content, gtk.ALIGN_CENTER);
+    if (icon) |name| {
+        const image = gtk.gtk_image_new_from_icon_name(name);
+        gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), 14);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, content), image);
+    }
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), gtk.gtk_label_new(label));
     gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
-    gtk.gtk_widget_add_css_class(button, "folder-action");
+    gtk.gtk_widget_add_css_class(button, "folder-button");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    if (suggested) gtk.gtk_widget_add_css_class(button, "suggested-action");
     return button;
 }
 
-fn buildToolbar(self: *App) *gtk.Widget {
-    const toolbar = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_widget_add_css_class(toolbar, "folder-toolbar");
-    const files = modeButton(self, "Files", .files);
-    const library = modeButton(self, "Library", .library);
+fn buildBar(self: *App) *gtk.Widget {
+    const bar = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    gtk.gtk_widget_add_css_class(bar, "folder-bar");
+    const crumbs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_widget_add_css_class(crumbs, "folder-crumbs");
+    gtk.gtk_widget_set_hexpand(crumbs, gtk.true_);
+    gtk.gtk_widget_set_valign(crumbs, gtk.ALIGN_CENTER);
+    self.folders.crumbs = gtk.cast(gtk.Box, crumbs);
+
+    const files = gtk.gtk_toggle_button_new();
+    gtk.gtk_button_set_label(gtk.cast(gtk.Button, files), "Files");
+    const library = gtk.gtk_toggle_button_new();
+    gtk.gtk_button_set_label(gtk.cast(gtk.Button, library), "Library view");
     gtk.gtk_toggle_button_set_group(gtk.cast(gtk.ToggleButton, library), gtk.cast(gtk.ToggleButton, files));
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, if (self.folders.mode == .files) files else library), gtk.true_);
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, files), gtk.true_);
+    gtk.gtk_widget_set_tooltip_text(library, "Open the album these files were imported as");
+    _ = gtk.signalConnect(library, "toggled", gtk.callback(libraryToggled), self);
+    self.folders.files_button = files;
+    self.folders.library_button = library;
     const switcher = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(switcher, "linked");
-    gtk.gtk_widget_add_css_class(switcher, "view-switch");
+    gtk.gtk_widget_add_css_class(switcher, "segmented");
+    gtk.gtk_widget_add_css_class(switcher, "folder-switch");
     gtk.gtk_widget_set_valign(switcher, gtk.ALIGN_CENTER);
     gtk.gtk_box_append(gtk.cast(gtk.Box, switcher), files);
     gtk.gtk_box_append(gtk.cast(gtk.Box, switcher), library);
-    const play = actionButton("Play", "media-playback-start-symbolic", true);
-    gtk.gtk_widget_set_tooltip_text(play, "Play this folder and every folder in it");
-    _ = gtk.signalConnect(play, "clicked", gtk.callback(playClicked), self);
-    self.folders.play = play;
-    const shuffle = actionButton("Shuffle", "media-playlist-shuffle-symbolic", false);
-    gtk.gtk_widget_set_tooltip_text(shuffle, "Shuffle this folder and every folder in it");
-    _ = gtk.signalConnect(shuffle, "clicked", gtk.callback(shuffleClicked), self);
-    self.folders.shuffle = shuffle;
-    const count = gtk.gtk_label_new(null);
-    gtk.gtk_widget_add_css_class(count, "meta");
-    gtk.gtk_widget_add_css_class(count, "numeric");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, count), 1.0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, count), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_hexpand(count, gtk.true_);
-    self.folders.count = gtk.cast(gtk.Label, count);
-    for ([_]*gtk.Widget{ switcher, play, shuffle, count }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, toolbar), piece);
-    self.folders.toolbar = toolbar;
-    return toolbar;
+
+    const reveal = folderButton("Show in File Manager", "orca-external-link-symbolic");
+    _ = gtk.signalConnect(reveal, "clicked", gtk.callback(showInFilesClicked), self);
+
+    const end = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, end), switcher);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, end), reveal);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), crumbs);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), end);
+    return bar;
 }
 
-fn buildEmpty() *gtk.Widget {
-    const empty = adw.adw_status_page_new();
-    adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, empty), "folder-symbolic");
-    adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, empty), "No audio files here.");
-    return empty;
+fn cardLabel(class: [*:0]const u8) *gtk.Widget {
+    const label = gtk.gtk_label_new(null);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
+    gtk.gtk_widget_add_css_class(label, class);
+    return label;
+}
+
+fn buildCard(self: *App) *gtk.Widget {
+    const card = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
+    gtk.gtk_widget_add_css_class(card, "folder-card");
+    const cover = art.newCover(self, art.initialsPlaceholder(), cover_pixels);
+    gtk.gtk_widget_add_css_class(cover, "folder-card-cover");
+    self.folders.card_cover = cover;
+    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
+    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
+    const title = cardLabel("folder-card-title");
+    _ = gtk.signalConnect(title, "activate-link", gtk.callback(cardLinkActivated), self);
+    const detail = cardLabel("folder-card-detail");
+    gtk.gtk_widget_add_css_class(detail, "numeric");
+    self.folders.card_title = gtk.cast(gtk.Label, title);
+    self.folders.card_detail = gtk.cast(gtk.Label, detail);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), detail);
+    const rescan = folderButton("Rescan Folder", null);
+    gtk.gtk_widget_set_tooltip_text(rescan, "Read this folder and every folder in it again");
+    _ = gtk.signalConnect(rescan, "clicked", gtk.callback(rescanClicked), self);
+    for ([_]*gtk.Widget{ cover, labels, rescan }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, card), piece);
+    return card;
+}
+
+fn buildStatus(icon: [*:0]const u8, title: [*:0]const u8) *gtk.Widget {
+    const page = adw.adw_status_page_new();
+    adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, page), icon);
+    adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, page), title);
+    gtk.gtk_widget_set_vexpand(page, gtk.true_);
+    return page;
 }
 
 fn buildWelcome() *gtk.Widget {
@@ -1289,11 +1151,11 @@ fn buildWelcome() *gtk.Widget {
 fn setNarrow(self: *App, narrow: bool) void {
     self.folders.narrow = narrow;
     const view = self.folders.files_view orelse return;
+    if (part(view, "orca-kind-heading")) |heading| gtk.gtk_widget_set_visible(heading, @intFromBool(!narrow));
     var row = gtk.gtk_widget_get_first_child(view);
     while (row) |widget| : (row = gtk.gtk_widget_get_next_sibling(widget)) {
         const box = gtk.gtk_widget_get_first_child(widget) orelse continue;
-        if (part(box, "orca-column")) |label| gtk.gtk_widget_set_visible(label, @intFromBool(!narrow));
-        fitName(box, narrow);
+        if (part(box, "orca-kind")) |label| gtk.gtk_widget_set_visible(label, @intFromBool(!narrow));
     }
 }
 
@@ -1306,24 +1168,21 @@ fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn build(self: *App) *gtk.Widget {
-    const crumbs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 2);
-    gtk.gtk_widget_add_css_class(crumbs, "breadcrumb");
-    self.folders.crumbs = gtk.cast(gtk.Box, crumbs);
-    rebuildCrumbs(self);
-    page_ui.addTrail(self, .folders, crumbs);
-
     const body = gtk.gtk_stack_new();
     self.folders.body = gtk.cast(gtk.Stack, body);
     gtk.gtk_widget_set_vexpand(body, gtk.true_);
     _ = gtk.gtk_stack_add_named(self.folders.body.?, buildFiles(self), "files");
-    _ = gtk.gtk_stack_add_named(self.folders.body.?, buildLibrary(self), "library");
-    _ = gtk.gtk_stack_add_named(self.folders.body.?, buildEmpty(), "empty");
-    _ = gtk.gtk_stack_add_named(self.folders.body.?, buildWelcome(), "welcome");
+    _ = gtk.gtk_stack_add_named(self.folders.body.?, buildStatus("folder-symbolic", "No audio files here."), "empty");
+    _ = gtk.gtk_stack_add_named(self.folders.body.?, buildStatus("system-search-symbolic", "Nothing in this folder matches"), "unmatched");
 
-    const right = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), buildBar(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), buildCard(self));
+
+    const right = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
     gtk.gtk_widget_set_hexpand(right, gtk.true_);
     gtk.gtk_widget_add_css_class(right, "folder-content");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, right), buildToolbar(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, right), content);
     gtk.gtk_box_append(gtk.cast(gtk.Box, right), body);
 
     const bin = adw.adw_breakpoint_bin_new();
@@ -1338,8 +1197,19 @@ pub fn build(self: *App) *gtk.Widget {
     }
 
     const split = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(split, "folder-split");
     gtk.gtk_box_append(gtk.cast(gtk.Box, split), buildTree(self));
     gtk.gtk_box_append(gtk.cast(gtk.Box, split), bin);
+
+    const welcome = buildWelcome();
+    const page = gtk.gtk_stack_new();
+    self.folders.page = gtk.cast(gtk.Stack, page);
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, page), split, "folders");
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, page), welcome, "welcome");
+
+    const title = page_ui.title("Folders");
+    gtk.gtk_widget_add_css_class(title.widget, "folder-title");
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, title.meta), gtk.false_);
 
     const group = gtk.g_simple_action_group_new();
     const reveal = gtk.g_simple_action_new("reveal", null).?;
@@ -1353,5 +1223,5 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(keyPressed), self);
     gtk.gtk_widget_add_controller(split, keys);
-    return split;
+    return page_ui.withTitle(title, page);
 }

@@ -258,6 +258,18 @@
   the keys act on the focused row. Previously Played rows are dimmed and
   say `6 min ago`. The sidebar's Queue badge counts the remaining tracks.
   `scripts/headless-gui.sh` takes a `drag:X1,Y1,X2,Y2` step.
+- **Folders page redesign in orca-gtk.** Folders follows the redesign: a
+  260 px tree of roots and folders with rotating chevrons beside a mono
+  path breadcrumb whose segments open that level, a Files / Library view
+  switch that opens the folder's album, and Show in File Manager. A card
+  shows the album's cover and `Imported as ALBUM by ARTIST` with the album
+  as a link, `13 tracks · 1 cover image · last scanned today, 10:24`, and
+  Rescan Folder, which reconciles only this folder as a Job. The table
+  lists Name, Kind, Length and Status: folders with their track count,
+  audio files as `FLAC · 16-bit · 44.1 kHz` and `In library` or
+  `Unreadable`, and images as `JPEG image` with their role. The header
+  search filters the folder by name (`Search this folder…`, Ctrl+F). The
+  Play and Shuffle buttons, the folder count and the Library list are gone.
 - **Playlist page and inspector redesign in orca-gtk.** A playlist's page
   follows the redesign: the mosaic over its backdrop, a `Playlist` overline,
   the name in 58 px Newsreader, `By you · 12 tracks · 52 min · Updated

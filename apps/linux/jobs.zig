@@ -203,6 +203,16 @@ pub fn rescanRoot(self: *App, root_id: i64) void {
     startScan(self, root_id);
 }
 
+pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
+    const library = self.library orelse return;
+    if (!idle(self)) return;
+    const job = self.runtime.startLibraryReconcile(library, .{
+        .root_id = root_id,
+        .scope = if (path.len == 0) .whole_root else .{ .subtrees = &.{path} },
+    }) catch return self.toast("Could not start the scan");
+    begin(self, .scan, job, "Scanning this folder");
+}
+
 /// Measures the loudness ReplayGain plays by, and the fingerprints duplicate
 /// finding compares. Hours on a large library, and stopping it keeps what is
 /// done.

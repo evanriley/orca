@@ -795,29 +795,36 @@ The window is an `AdwNavigationSplitView`:
   below 950 px. A library with no genres shows a status page whose Fill
   missing genres from MusicBrainz opens Settings › Library; a search that
   matches none shows No matching genres.
-- **Folders** browses the library as it lies on disk. The header's
-  breadcrumb reads `Folders › root › folder › …`, the root named by the last
-  component of its path, and every segment but the last opens that level.
-  A 280 px pane on the left lists the roots, each expanding lazily into its
-  folders (`libraryFolderPage`, folders only), with the open folder
-  selected; selecting a folder opens it. A window narrower than 900 px hides
-  the pane. Above the content sit a Files / Library switch, Play and Shuffle,
-  which play the folder and every folder under it
-  (`playerPlayFolder`), and a count such as `12 folders • 148 files`, the
-  files counting those in subfolders. Files lists 36 px rows, 512 at a time
-  as it scrolls: folders first with their file count and total duration,
-  activated to open them, then files with the file name, the track's title
-  beside it when it differs, the format and the duration; below 700 px of
-  content width the format (and a folder's file count) is hidden and the
-  name takes the row's width before the title beside it. Activating a file
-  plays this folder's tracks, without subfolders, in file order from it. A
-  file's more button, or a right click, offers Show in Files, Play, Add to
-  Queue and Edit Metadata…. Library shows the tracks of files directly in
-  this folder, not in its subfolders, grouped by album under a 48 px cover,
-  album title and artist and year, in disc and track order, as the album
-  page lists them. A folder without audio shows `No audio files here.`, and
-  a library without roots shows the welcome page. Each list is one Tab
-  stop, and Backspace or Alt+Up opens the parent folder.
+- **Folders** browses the library as it lies on disk. A 260 px tree on the
+  left lists the roots, each expanding lazily into its folders
+  (`libraryFolderPage`, folders only), with the open folder selected;
+  selecting a folder opens it. A window narrower than 900 px hides the
+  tree. The header holds a mono breadcrumb of the root's path and the
+  folders below it, every segment but the last opening that level, a
+  Files / Library view switch whose Library view opens the folder's
+  Release (insensitive when the folder has none), and Show in File Manager,
+  which opens the folder's `file://` URI with the default handler. A card
+  below shows the Release's cover and `Imported as TITLE by ARTIST`, the
+  title a link to the album, or the folder's name when it has no Release;
+  then `N tracks · N cover images · last scanned today, 10:24`, counting
+  tracks in subfolders too (`N+ tracks` while rows remain unloaded), and
+  Rescan Folder, which starts a reconcile of this folder and its subfolders
+  (`startLibraryReconcile` with one subtree) that shows in the sidebar's
+  task widget. The table has Name, Kind, Length and Status columns over 32
+  px rows, 512 loaded at a time as it scrolls: folders first, with their
+  total duration and track count, activated to open them; then audio files
+  with their format (`FLAC · 16-bit · 44.1 kHz`), duration and `In
+  library`, `Unreadable` or `Not imported`; then images with `JPEG image`
+  and their role (Front cover, Back cover, Booklet, Image). Activating a
+  file plays this folder's tracks, without subfolders, in file order from
+  it. A right click on a file offers Show in Files, and on a track Play,
+  Add to Queue and Edit Metadata…. The header search (`Search this
+  folder…`, Ctrl+F) filters the loaded rows by name, loading up to 16 pages
+  first, and keeps its text across folders; a folder without entries shows
+  `No audio files here.`, a search that matches none `Nothing in this
+  folder matches`, and a library without roots the welcome page. Below 700
+  px of content width the Kind column is hidden. Each list is one Tab stop,
+  and Backspace or Alt+Up opens the parent folder.
 - **Loved** opens with the Loved title, "Everything you've marked with a
   heart. Ratings are separate and live alongside.", Play, Shuffle and a more
   button, with the counts of loved Tracks, Albums and Artists on the right;

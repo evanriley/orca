@@ -267,6 +267,10 @@ fn activateContextShowArtist(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) 
     window.showArtist(self, self.context.artist_id orelse return);
 }
 
+fn activateContextShowInFolder(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.showInFolder(@ptrCast(@alignCast(data.?)));
+}
+
 fn activateContextMatchAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     menu.matchAlbum(@ptrCast(@alignCast(data.?)));
 }
@@ -642,6 +646,7 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-remove-album-love", activateContextRemoveAlbumLove, null, &self);
     addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
+    addAction(application, "ctx-show-in-folder", activateContextShowInFolder, null, &self);
     addAction(application, "ctx-match-album", activateContextMatchAlbum, null, &self);
     addAction(application, "ctx-verify-album", activateContextVerifyAlbum, null, &self);
     addAction(application, "ctx-reidentify-album", activateContextReidentifyAlbum, null, &self);

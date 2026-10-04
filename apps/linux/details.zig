@@ -1081,7 +1081,9 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
         const split = std.mem.lastIndexOfScalar(u8, path, '/');
         const folder = if (split) |index| path[0..@max(index, 1)] else "";
         const name = if (split) |index| path[index + 1 ..] else path;
-        setPathRow(panel.folder_row, folder, &buffer);
+        var folder_buffer: [1024]u8 = undefined;
+        _ = setRow(panel.folder_row, shortFolderText(&folder_buffer, folder));
+        gtk.gtk_widget_set_tooltip_text(panel.folder_row.root, if (optionalText(&buffer, folder)) |shown| shown.ptr else null);
         setPathRow(panel.file_row, name, &buffer);
         setPath(panel, path);
     } else {
@@ -2070,8 +2072,10 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const disc_row = newRow("Disc");
     const compilation_row = newRow("Compilation");
 
-    const folder_row = newPathRow("Path", gtk.ELLIPSIZE_START);
-    const file_row = newPathRow("File", gtk.ELLIPSIZE_MIDDLE);
+    const folder_row = newRow("Path");
+    gtk.gtk_label_set_wrap_mode(folder_row.value, gtk.WRAP_WORD_CHAR);
+    const file_row = newRow("File");
+    gtk.gtk_label_set_wrap_mode(file_row.value, gtk.WRAP_WORD_CHAR);
     const size_row = newRow("Size");
     const modified_row = newRow("Modified");
     const caution = newCaution(panel);
@@ -2112,7 +2116,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         disc_row.root,
         compilation_row.root,
     }, null);
-    const file_section = newSection("folder-symbolic", "File", &.{
+    const file_section = newSection("orca-folders-symbolic", "File", &.{
         folder_row.root,
         file_row.root,
         size_row.root,

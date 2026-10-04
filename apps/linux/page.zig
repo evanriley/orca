@@ -198,6 +198,8 @@ fn placeholder(self: *App) [*:0]const u8 {
         .albums => "Search albums, artists or genres…",
         .artists => "Search artists…",
         .tracks => "Search tracks, artists, albums…",
+        .genres => "Search genres…",
+        .folders => "Search this folder…",
         .playlists => "Search playlists…",
         .loved => "Search loved…",
         else => "Search your library…",
@@ -207,6 +209,11 @@ fn placeholder(self: *App) [*:0]const u8 {
 fn showPlaceholder(self: *App) void {
     const entry = self.top_bar.entry orelse return;
     gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), placeholder(self));
+    const field = gtk.gtk_widget_get_parent(entry) orelse return;
+    const hint = gtk.gtk_widget_get_last_child(field) orelse return;
+    if (hint == entry) return;
+    const in_folder = self.current_page == .folders and window.filterTarget(self) != null;
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, hint), if (in_folder) "Ctrl F" else "Ctrl K");
 }
 
 pub fn showWindowTitle(self: *App) void {

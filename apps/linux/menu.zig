@@ -512,6 +512,15 @@ pub fn enqueue(self: *App) void {
     self.requestTick();
 }
 
+pub fn showInFolder(self: *App) void {
+    const library = self.library orelse return;
+    if (self.context.tracks.items.len != 1) return;
+    const summary = (self.runtime.libraryTrackSummary(library, self.context.tracks.items[0]) catch null) orelse
+        return self.toast("File not found");
+    defer summary.deinit(self.allocator);
+    health.revealPath(self, summary.path);
+}
+
 pub fn remove(self: *App) void {
     const position = self.context.queue_position orelse return;
     self.runtime.playerQueueRemove(self.player, position) catch |err| switch (err) {

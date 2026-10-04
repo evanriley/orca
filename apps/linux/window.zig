@@ -168,6 +168,8 @@ fn applyFilter(self: *App, page: Page, text: []const u8) void {
         .albums => albums.setFilter(self, text),
         .artists => artists.setFilter(self, text),
         .tracks => filterTracks(self, text),
+        .genres => genres.setFilter(self, text),
+        .folders => folders.setFilter(self, text),
         .playlists => playlists.setFilter(self, text),
         .loved => loved.setFilter(self, text),
         else => {},
