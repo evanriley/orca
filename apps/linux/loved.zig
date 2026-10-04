@@ -14,6 +14,7 @@ const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const artist_page = @import("artist_page.zig");
 const art = @import("art.zig");
 const details = @import("details.zig");
 const feedback = @import("feedback.zig");
@@ -27,12 +28,25 @@ const App = app.App;
 const BrowseObject = browse_model.BrowseObject;
 
 const queue_limit = 10_000;
-const mosaic_pixels: c_int = 200;
 const artist_pixels: c_int = 148;
-const cover_pixels: c_int = 24;
-const cover_column_width: c_int = 40;
-const track_columns = track_table.ColumnSet.initMany(&.{ .number, .title, .artist, .album, .duration, .loved, .rating, .last_played, .more });
-const mosaic_keys = [_][*:0]const u8{ "orca-cover-0", "orca-cover-1", "orca-cover-2", "orca-cover-3" };
+const cover_pixels: c_int = 34;
+const cover_column_width: c_int = 48;
+const track_columns = track_table.ColumnSet.initMany(&.{ .number, .title, .artist, .album, .rating, .last_played, .duration, .more });
+const ColumnWidth = struct { column: track_table.Column, pixels: c_int };
+const column_widths = [_]ColumnWidth{
+    .{ .column = .number, .pixels = 48 },
+    .{ .column = .rating, .pixels = 122 },
+    .{ .column = .last_played, .pixels = 150 },
+    .{ .column = .duration, .pixels = 70 },
+};
+
+const Tab = enum { tracks, albums, artists };
+const tab_labels = std.EnumArray(Tab, [*:0]const u8).init(.{ .tracks = "Tracks", .albums = "Albums", .artists = "Artists" });
+const tab_icons = std.EnumArray(Tab, [*:0]const u8).init(.{
+    .tracks = "orca-tracks-symbolic",
+    .albums = "orca-albums-symbolic",
+    .artists = "orca-artists-symbolic",
+});
 
 pub const navigation_tag = "loved";
 
@@ -42,31 +56,75 @@ pub const State = struct {
     albums_loaded: u32 = 0,
     albums_exhausted: bool = false,
     albums_body: ?*gtk.Stack = null,
+    albums_empty: ?*adw.StatusPage = null,
     tracks: track_table.Table = .{},
     tracks_loaded: u32 = 0,
     tracks_exhausted: bool = false,
     tracks_body: ?*gtk.Stack = null,
+    tracks_empty: ?*adw.StatusPage = null,
     artist_store: ?*gtk.ListStore = null,
     artists_loaded: u32 = 0,
     artists_exhausted: bool = false,
     artists_body: ?*gtk.Stack = null,
+    artists_empty: ?*adw.StatusPage = null,
     stats: ?*gtk.Widget = null,
-    mosaic: ?*gtk.Widget = null,
+    tabs: ?*gtk.Stack = null,
     track_count: ?*gtk.Label = null,
     album_count: ?*gtk.Label = null,
     artist_count: ?*gtk.Label = null,
     actions: ?*gtk.Widget = null,
+    filter: app.OwnedText = .{},
 };
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
+pub fn setFilter(self: *App, text: []const u8) void {
+    if (std.mem.eql(u8, text, self.loved.filter.value)) return;
+    self.loved.filter.set(self.allocator, text);
+    reload(self);
+}
+
+fn showTotals(self: *App) void {
+    const library = self.library orelse return;
+    const tracks = self.runtime.libraryTrackMatchCount(library, .{ .loved_only = true }) catch 0;
+    showCount(self.loved.track_count, tracks);
+    showCount(self.loved.album_count, self.runtime.libraryReleaseCountMatching(library, .{ .loved_only = true }) catch 0);
+    showCount(self.loved.artist_count, self.runtime.libraryArtistCountMatching(library, .{ .loved_only = true }) catch 0);
+    if (self.loved.actions) |actions| gtk.gtk_widget_set_sensitive(actions, if (tracks == 0) gtk.false_ else gtk.true_);
+}
+
+fn showEmpty(self: *App, tab: Tab) void {
+    const page = switch (tab) {
+        .tracks => self.loved.tracks_empty,
+        .albums => self.loved.albums_empty,
+        .artists => self.loved.artists_empty,
+    } orelse return;
+    const searching = self.loved.filter.value.len != 0;
+    const title: [*:0]const u8, const description: [*:0]const u8 = switch (tab) {
+        .tracks => if (searching)
+            .{ "No matching loved tracks", "Try another search." }
+        else
+            .{ "No Loved Tracks", "Love a track with the heart in its row." },
+        .albums => if (searching)
+            .{ "No matching loved albums", "Try another search." }
+        else
+            .{ "No Loved Albums", "Love an album with the heart on its page or from its menu." },
+        .artists => if (searching)
+            .{ "No matching loved artists", "Try another search." }
+        else
+            .{ "No Loved Artists", "Love an artist with the heart on their page." },
+    };
+    adw.adw_status_page_set_title(page, title);
+    adw.adw_status_page_set_description(page, description);
+}
+
 pub fn reload(self: *App) void {
+    showTotals(self);
     reloadAlbums(self);
     reloadTracks(self);
     reloadArtists(self);
-    showMosaic(self);
 }
 
 pub fn releaseChanged(self: *App, release_id: i64) void {
@@ -90,7 +148,6 @@ pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
     };
     track_table.refreshRelease(&self.loved.tracks, old_id);
     if (new_id != old_id) track_table.refreshRelease(&self.loved.tracks, new_id);
-    showMosaic(self);
 }
 
 fn reloadAlbums(self: *App) void {
@@ -99,8 +156,8 @@ fn reloadAlbums(self: *App) void {
     self.loved.albums_loaded = 0;
     self.loved.albums_exhausted = false;
     const library = self.library orelse return;
-    const total = self.runtime.libraryReleaseCountMatching(library, .{ .loved_only = true }) catch 0;
-    showCount(self.loved.album_count, total);
+    const total = self.runtime.libraryReleaseCountMatching(library, .{ .loved_only = true, .text = self.loved.filter.value }) catch 0;
+    showEmpty(self, .albums);
     if (self.loved.albums_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "grid");
     loadNextAlbums(self);
 }
@@ -110,6 +167,7 @@ fn loadNextAlbums(self: *App) void {
     if (self.loved.albums_exhausted) return;
     const loaded = albums.appendReleasePage(self, store, .{
         .loved_only = true,
+        .text = self.loved.filter.value,
         .sort = .loved,
         .limit = app.page_size,
         .offset = self.loved.albums_loaded,
@@ -133,9 +191,8 @@ fn reloadTracks(self: *App) void {
     self.loved.tracks_loaded = 0;
     self.loved.tracks_exhausted = false;
     const library = self.library orelse return;
-    const total = self.runtime.libraryTrackMatchCount(library, .{ .loved_only = true }) catch 0;
-    showCount(self.loved.track_count, total);
-    if (self.loved.actions) |actions| gtk.gtk_widget_set_sensitive(actions, if (total == 0) gtk.false_ else gtk.true_);
+    const total = if (self.runtime.libraryTrackQueryTotals(library, self.loved.filter.value, .{ .loved_only = true })) |totals| totals.count else |_| 0;
+    showEmpty(self, .tracks);
     if (self.loved.tracks_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
     loadNextTracks(self);
 }
@@ -144,7 +201,7 @@ fn loadNextTracks(self: *App) void {
     const store = self.loved.tracks.store orelse return;
     if (self.loved.tracks_exhausted) return;
     const library = self.library orelse return;
-    var page = self.runtime.libraryTrackQuery(library, "", .{
+    var page = self.runtime.libraryTrackQuery(library, self.loved.filter.value, .{
         .loved_only = true,
         .sort = .loved,
         .limit = app.page_size,
@@ -188,8 +245,8 @@ fn reloadArtists(self: *App) void {
     self.loved.artists_loaded = 0;
     self.loved.artists_exhausted = false;
     const library = self.library orelse return;
-    const total = self.runtime.libraryArtistCountMatching(library, .{ .loved_only = true }) catch 0;
-    showCount(self.loved.artist_count, total);
+    const total = self.runtime.libraryArtistCountMatching(library, .{ .loved_only = true, .filter = self.loved.filter.value }) catch 0;
+    showEmpty(self, .artists);
     if (self.loved.artists_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "grid");
     loadNextArtists(self);
 }
@@ -200,6 +257,7 @@ fn loadNextArtists(self: *App) void {
     const library = self.library orelse return;
     var page = self.runtime.libraryArtistPage(library, .{
         .loved_only = true,
+        .filter = self.loved.filter.value,
         .sort = .recently_loved,
         .limit = app.page_size,
         .offset = self.loved.artists_loaded,
@@ -230,46 +288,6 @@ fn loadNextArtists(self: *App) void {
     }
     appendRows(store, additions.items);
     self.loved.artists_loaded += @intCast(page.items.len);
-}
-
-fn mosaicPart(mosaic: *gtk.Widget, key: [*:0]const u8) ?*gtk.Widget {
-    return gtk.cast(gtk.Widget, gtk.g_object_get_data(mosaic, key) orelse return null);
-}
-
-fn addCover(covers: *std.ArrayList(i64), release_id: ?i64) void {
-    const id = release_id orelse return;
-    if (covers.items.len == covers.capacity) return;
-    for (covers.items) |present| if (present == id) return;
-    covers.appendAssumeCapacity(id);
-}
-
-fn showMosaic(self: *App) void {
-    const mosaic = self.loved.mosaic orelse return;
-    var storage: [mosaic_keys.len]i64 = undefined;
-    var covers: std.ArrayList(i64) = .initBuffer(&storage);
-    if (self.library) |library| {
-        if (self.runtime.libraryReleasePage(library, .{ .loved_only = true, .sort = .loved, .limit = mosaic_keys.len })) |page| {
-            var releases = page;
-            defer releases.deinit();
-            for (releases.items) |release| addCover(&covers, release.id);
-        } else |_| {}
-        if (covers.items.len < storage.len) {
-            if (self.runtime.libraryTrackQuery(library, "", .{ .loved_only = true, .sort = .loved, .limit = app.page_size })) |page| {
-                var tracks = page;
-                defer tracks.deinit();
-                for (tracks.items) |track| addCover(&covers, track.release_id);
-            } else |_| {}
-        }
-    }
-    gtk.gtk_widget_set_visible(mosaic, if (covers.items.len == 0) gtk.false_ else gtk.true_);
-    const tiled = covers.items.len == mosaic_keys.len;
-    const single = mosaicPart(mosaic, "orca-single") orelse return;
-    if (tiled or covers.items.len == 0) art.clear(self, single) else art.show(self, single, art.Key.release(covers.items[0], .tile));
-    for (mosaic_keys, 0..) |key, index| {
-        const cell = mosaicPart(mosaic, key) orelse continue;
-        if (tiled) art.show(self, cell, art.Key.release(covers.items[index], .tile)) else art.clear(self, cell);
-    }
-    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, mosaic), if (tiled) "grid" else "single");
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
@@ -374,11 +392,12 @@ fn artistActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv
     const item = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), position) orelse return;
     defer gtk.g_object_unref(item);
     const row: *BrowseObject = @ptrCast(@alignCast(item));
-    artists.openArtist(self, self.loved.navigation orelse return, row.id() orelse return);
+    artist_page.openArtist(self, self.loved.navigation orelse return, row.id() orelse return);
 }
 
-fn emptyPage(title: [*:0]const u8, description: [*:0]const u8) *gtk.Widget {
+fn emptyPage(slot: *?*adw.StatusPage, title: [*:0]const u8, description: [*:0]const u8) *gtk.Widget {
     const page = adw.adw_status_page_new();
+    slot.* = gtk.cast(adw.StatusPage, page);
     adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, page), feedback.filled_icon);
     adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, page), title);
     adw.adw_status_page_set_description(gtk.cast(adw.StatusPage, page), description);
@@ -400,6 +419,7 @@ fn scrollerFor(child: *gtk.Widget, handler: gtk.GCallback, self: *App) *gtk.Widg
 
 fn bodyFor(slot: *?*gtk.Stack, content: *gtk.Widget, content_name: [*:0]const u8, empty: *gtk.Widget) *gtk.Widget {
     const body = gtk.gtk_stack_new();
+    gtk.gtk_widget_add_css_class(body, "loved-body");
     slot.* = gtk.cast(gtk.Stack, body);
     _ = gtk.gtk_stack_add_named(slot.*.?, content, content_name);
     _ = gtk.gtk_stack_add_named(slot.*.?, empty, "empty");
@@ -414,7 +434,7 @@ fn buildAlbums(self: *App) *gtk.Widget {
         &self.loved.albums_body,
         scrollerFor(grid, gtk.callback(albumsScrolled), self),
         "grid",
-        emptyPage("No Loved Albums", "Love an album with the heart on its page or from its menu."),
+        emptyPage(&self.loved.albums_empty, "No Loved Albums", "Love an album with the heart on its page or from its menu."),
     );
 }
 
@@ -500,7 +520,7 @@ fn buildArtists(self: *App) *gtk.Widget {
         &self.loved.artists_body,
         scrollerFor(grid, gtk.callback(artistsScrolled), self),
         "grid",
-        emptyPage("No Loved Artists", "Love an artist with the heart on their page."),
+        emptyPage(&self.loved.artists_empty, "No Loved Artists", "Love an artist with the heart on their page."),
     );
 }
 
@@ -523,7 +543,7 @@ fn unbindCover(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c
     art.forget(state(data), gtk.gtk_list_item_get_child(gtk.cast(gtk.ListItem, item)) orelse return);
 }
 
-fn arrangeColumns(self: *App) ?*gtk.ColumnViewColumn {
+fn insertCover(self: *App) ?*gtk.ColumnViewColumn {
     const view = self.loved.tracks.view orelse return null;
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupCover), self);
@@ -534,15 +554,6 @@ fn arrangeColumns(self: *App) ?*gtk.ColumnViewColumn {
     gtk.gtk_column_view_column_set_fixed_width(cover, cover_column_width);
     gtk.gtk_column_view_insert_column(view, 1, cover);
     gtk.g_object_unref(cover);
-    const duration = self.loved.tracks.header(.duration) orelse return cover;
-    const loved = self.loved.tracks.header(.loved) orelse return cover;
-    const columns = gtk.gtk_column_view_get_columns(view);
-    var index: c_uint = 0;
-    while (gtk.g_list_model_get_item(columns, index)) |column| : (index += 1) {
-        gtk.g_object_unref(column);
-        if (column == @as(*anyopaque, loved)) break;
-    }
-    gtk.gtk_column_view_insert_column(view, index, duration);
     return cover;
 }
 
@@ -553,10 +564,14 @@ fn buildTracks(self: *App) *gtk.Widget {
         .columns = track_columns,
         .duration_icon = true,
         .relative_dates = true,
+        .title_heart = true,
     });
     self.loved.tracks.positions = true;
-    gtk.gtk_widget_add_css_class(view, "loved-tracks");
-    const cover = arrangeColumns(self);
+    for (column_widths) |width| {
+        const header = self.loved.tracks.header(width.column) orelse continue;
+        gtk.gtk_column_view_column_set_fixed_width(header, width.pixels);
+    }
+    const cover = insertCover(self);
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
     const scroller = scrollerFor(view, gtk.callback(tracksScrolled), self);
@@ -567,138 +582,103 @@ fn buildTracks(self: *App) *gtk.Widget {
         &self.loved.tracks_body,
         bin,
         "list",
-        emptyPage("No Loved Tracks", "Love a track with the heart in its row."),
+        emptyPage(&self.loved.tracks_empty, "No Loved Tracks", "Love a track with the heart in its row."),
     );
 }
 
-pub fn stat(label: [*:0]const u8) struct { widget: *gtk.Widget, number: *gtk.Label } {
+fn stat(label: [*:0]const u8) struct { widget: *gtk.Widget, number: *gtk.Label } {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     gtk.gtk_widget_add_css_class(box, "loved-stat");
     const number = gtk.gtk_label_new("0");
     gtk.gtk_widget_add_css_class(number, "loved-stat-number");
     gtk.gtk_widget_add_css_class(number, "numeric");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, number), 1);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, number), 0);
     const caption = gtk.gtk_label_new(label);
     gtk.gtk_widget_add_css_class(caption, "loved-stat-label");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, caption), 1);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, caption), 0);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), number);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), caption);
     return .{ .widget = box, .number = gtk.cast(gtk.Label, number) };
 }
 
-fn heroLabel(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
-    const label = gtk.gtk_label_new(text);
-    gtk.gtk_widget_add_css_class(label, class);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, label), gtk.true_);
-    return label;
-}
-
-fn mosaicPlaceholder(pixels: c_int) *gtk.Widget {
-    const icon = gtk.gtk_image_new_from_icon_name(feedback.filled_icon);
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), @divTrunc(pixels, 3));
-    gtk.gtk_widget_add_css_class(icon, "loved-heart");
-    return icon;
-}
-
-fn newMosaic(self: *App) *gtk.Widget {
-    const stack = gtk.gtk_stack_new();
-    gtk.gtk_widget_add_css_class(stack, "loved-mosaic");
-    gtk.gtk_widget_set_overflow(stack, gtk.OVERFLOW_HIDDEN);
-    gtk.gtk_widget_set_valign(stack, gtk.ALIGN_CENTER);
-    const single = art.newCover(self, mosaicPlaceholder(mosaic_pixels), mosaic_pixels);
-    gtk.gtk_widget_add_css_class(single, "mosaic-cell");
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), single, "single");
-    gtk.g_object_set_data(stack, "orca-single", single);
-    const half = @divTrunc(mosaic_pixels, 2);
-    const grid = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    for (0..2) |row_index| {
-        const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-        for (0..2) |column| {
-            const cell = art.newCover(self, mosaicPlaceholder(half), half);
-            gtk.gtk_widget_add_css_class(cell, "mosaic-cell");
-            gtk.gtk_box_append(gtk.cast(gtk.Box, row), cell);
-            gtk.g_object_set_data(stack, mosaic_keys[row_index * 2 + column], cell);
-        }
-        gtk.gtk_box_append(gtk.cast(gtk.Box, grid), row);
-    }
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), grid, "grid");
-    return stack;
-}
-
-fn buildHero(self: *App) *gtk.Widget {
-    const hero = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 32);
-    gtk.gtk_widget_add_css_class(hero, "loved-hero");
-
-    const lead = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_valign(lead, gtk.ALIGN_CENTER);
-    const name = gtk.gtk_label_new("Loved");
-    gtk.gtk_widget_add_css_class(name, "loved-title");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, name), 0);
-    const tagline = heroLabel("The music you love, all in one place.", "loved-tagline");
-    const description = heroLabel(
-        "Tracks, albums, and artists you\u{2019}ve liked, collected and come back to. A reflection of what moves you.",
-        "loved-description",
-    );
-    const description_clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, description_clamp), 600);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, description_clamp), 600);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, description_clamp), description);
-    gtk.gtk_widget_set_halign(description_clamp, gtk.ALIGN_START);
-    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+fn buildActions(self: *App) *gtk.Widget {
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     self.loved.actions = actions;
     gtk.gtk_widget_add_css_class(actions, "album-actions");
+    gtk.gtk_widget_add_css_class(actions, "artist-actions");
     gtk.gtk_widget_add_css_class(actions, "loved-actions");
-    const play = albums.pill("Play", "media-playback-start-symbolic", true);
+    const play = albums.pill("Play", "orca-play-symbolic", true);
     _ = gtk.signalConnect(play, "clicked", gtk.callback(playClicked), self);
-    const shuffle = albums.pill("Shuffle", "media-playlist-shuffle-symbolic", false);
+    const shuffle = albums.pill("Shuffle", "orca-shuffle-symbolic", false);
     _ = gtk.signalConnect(shuffle, "clicked", gtk.callback(shuffleClicked), self);
-    const more = gtk.gtk_button_new_from_icon_name("view-more-symbolic");
-    gtk.gtk_widget_add_css_class(more, "circular");
+    const more = gtk.gtk_button_new_from_icon_name("orca-more-symbolic");
     gtk.gtk_widget_add_css_class(more, "album-more");
-    gtk.gtk_widget_set_valign(more, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(more, "More");
     _ = gtk.signalConnect(more, "clicked", gtk.callback(moreClicked), self);
     for ([_]*gtk.Widget{ play, shuffle, more }) |button| gtk.gtk_box_append(gtk.cast(gtk.Box, actions), button);
-    for ([_]*gtk.Widget{ name, tagline, description_clamp, actions }) |part| gtk.gtk_box_append(gtk.cast(gtk.Box, lead), part);
+    return actions;
+}
 
-    const aside = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 32);
-    self.loved.stats = aside;
-    gtk.gtk_widget_set_valign(aside, gtk.ALIGN_CENTER);
-    const mosaic = newMosaic(self);
-    self.loved.mosaic = mosaic;
-    const stats = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 18);
+fn buildStats(self: *App) *gtk.Widget {
+    const stats = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 32);
     gtk.gtk_widget_add_css_class(stats, "loved-stats");
-    gtk.gtk_widget_set_valign(stats, gtk.ALIGN_CENTER);
-    const tracks = stat("LOVED TRACKS");
+    self.loved.stats = stats;
+    const tracks = stat("Tracks");
     self.loved.track_count = tracks.number;
-    const loved_albums = stat("LOVED ALBUMS");
+    const loved_albums = stat("Albums");
     self.loved.album_count = loved_albums.number;
-    const loved_artists = stat("LOVED ARTISTS");
+    const loved_artists = stat("Artists");
     self.loved.artist_count = loved_artists.number;
-    for ([_]*gtk.Widget{ tracks.widget, loved_albums.widget, loved_artists.widget }) |widget| {
-        var child = gtk.gtk_widget_get_first_child(widget);
-        while (child) |label| : (child = gtk.gtk_widget_get_next_sibling(label)) gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, stats), widget);
+    for ([_]*gtk.Widget{ tracks.widget, loved_albums.widget, loved_artists.widget }) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, stats), widget);
+    return stats;
+}
+
+fn buildHeader(self: *App) *gtk.Widget {
+    const title = page_ui.title("Loved");
+    gtk.gtk_widget_add_css_class(title.widget, "loved-header");
+    gtk.gtk_label_set_text(title.meta, "Everything you\u{2019}ve marked with a heart. Ratings are separate and live alongside.");
+    const lead = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, title.title)).?;
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lead), buildActions(self));
+    title.add(buildStats(self));
+    return title.widget;
+}
+
+fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button.?)) == 0) return;
+    const index = @intFromPtr(gtk.g_object_get_data(button.?, "orca-tab") orelse return) - 1;
+    const tab: Tab = @enumFromInt(index);
+    gtk.gtk_stack_set_visible_child_name(self.loved.tabs orelse return, @tagName(tab));
+}
+
+fn tabButton(tab: Tab) *gtk.Widget {
+    const button = gtk.gtk_toggle_button_new();
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    const icon = gtk.gtk_image_new_from_icon_name(tab_icons.get(tab));
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 16);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), gtk.gtk_label_new(tab_labels.get(tab)));
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
+    gtk.gtk_widget_add_css_class(button, "loved-tab");
+    gtk.gtk_widget_set_focus_on_click(button, gtk.false_);
+    return button;
+}
+
+fn buildTabs(self: *App) *gtk.Widget {
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(row, "loved-tabs");
+    var group: ?*gtk.ToggleButton = null;
+    for (std.enums.values(Tab)) |tab| {
+        const button = tabButton(tab);
+        const toggle = gtk.cast(gtk.ToggleButton, button);
+        gtk.gtk_toggle_button_set_group(toggle, group);
+        group = group orelse toggle;
+        gtk.g_object_set_data(button, "orca-tab", @ptrFromInt(@intFromEnum(tab) + 1));
+        _ = gtk.signalConnect(button, "toggled", gtk.callback(tabToggled), self);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, row), button);
     }
-    const mosaic_slot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, mosaic_slot), mosaic);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, aside), mosaic_slot);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, aside), stats);
-
-    gtk.gtk_widget_set_halign(aside, gtk.ALIGN_END);
-
-    const bin = adw.adw_breakpoint_bin_new();
-    gtk.gtk_widget_set_size_request(bin, 1, 1);
-    gtk.gtk_widget_set_hexpand(bin, gtk.true_);
-    gtk.gtk_widget_set_valign(bin, gtk.ALIGN_CENTER);
-    adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), aside);
-    hideBelow(bin, "max-width: 340px", &.{mosaic_slot});
-    hideBelow(bin, "max-width: 110px", &.{ mosaic_slot, stats });
-
-    gtk.gtk_box_append(gtk.cast(gtk.Box, hero), lead);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, hero), bin);
-    return hero;
+    if (group) |first| gtk.gtk_toggle_button_set_active(first, gtk.true_);
+    return row;
 }
 
 fn hideBelow(bin: *gtk.Widget, condition: [*:0]const u8, objects: []const *anyopaque) void {
@@ -713,23 +693,18 @@ fn hideBelow(bin: *gtk.Widget, condition: [*:0]const u8, objects: []const *anyop
 }
 
 pub fn build(self: *App) *gtk.Widget {
-    const views = adw.adw_view_stack_new();
-    const stack = gtk.cast(adw.ViewStack, views);
-    _ = adw.adw_view_stack_add_titled_with_icon(stack, buildTracks(self), "tracks", "Loved Tracks", "audio-x-generic-symbolic");
-    _ = adw.adw_view_stack_add_titled_with_icon(stack, buildAlbums(self), "albums", "Loved Albums", "media-optical-symbolic");
-    _ = adw.adw_view_stack_add_titled_with_icon(stack, buildArtists(self), "artists", "Loved Artists", "avatar-default-symbolic");
-    gtk.gtk_widget_set_vexpand(views, gtk.true_);
-
-    const switcher = adw.adw_view_switcher_new();
-    adw.adw_view_switcher_set_stack(gtk.cast(adw.ViewSwitcher, switcher), stack);
-    adw.adw_view_switcher_set_policy(gtk.cast(adw.ViewSwitcher, switcher), adw.VIEW_SWITCHER_POLICY_WIDE);
-    gtk.gtk_widget_add_css_class(switcher, "underline-tabs");
-    gtk.gtk_widget_set_halign(switcher, gtk.ALIGN_START);
+    const pages = gtk.gtk_stack_new();
+    self.loved.tabs = gtk.cast(gtk.Stack, pages);
+    _ = gtk.gtk_stack_add_named(self.loved.tabs.?, buildTracks(self), @tagName(Tab.tracks));
+    _ = gtk.gtk_stack_add_named(self.loved.tabs.?, buildAlbums(self), @tagName(Tab.albums));
+    _ = gtk.gtk_stack_add_named(self.loved.tabs.?, buildArtists(self), @tagName(Tab.artists));
+    gtk.gtk_widget_set_vexpand(pages, gtk.true_);
 
     const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buildHero(self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), switcher);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), views);
+    gtk.gtk_widget_add_css_class(column, "loved-page");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buildHeader(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buildTabs(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), pages);
 
     const navigation = adw.adw_navigation_view_new();
     self.loved.navigation = gtk.cast(adw.NavigationView, navigation);

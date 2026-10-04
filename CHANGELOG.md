@@ -264,6 +264,15 @@
   `in_playlist` rule. The editor gains a Playlist field. The page's heart
   is gone, as Love stays in its menu, and the inspector drops Created by
   and Description, which the page shows.
+- **Loved page redesign in orca-gtk.** Loved follows the redesign: the
+  Loved title in 56 px Newsreader, `Everything you've marked with a heart.
+  Ratings are separate and live alongside.`, Play, Shuffle and more, and
+  the counts of loved Tracks, Albums and Artists on the right. Tabs with
+  icons choose Tracks, Albums or Artists. The Tracks table shows #, cover,
+  Title with an inline heart, Artist, Album, Rating, Last Played, duration
+  and •••, with no separate Loved column. The cover mosaic and tagline
+  are gone. The top-bar search reads `Search loved…` and filters the
+  current tab in place, while the counts keep showing every loved item.
 - **Albums at scale in orca-gtk.** From 2,000 albums, Albums shows the
   library's count, artists and size, facet chips for Lossless, Added,
   Genre, Decade and More filters with an `N match` count, and, sorted by

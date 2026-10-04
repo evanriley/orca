@@ -818,29 +818,31 @@ The window is an `AdwNavigationSplitView`:
   page lists them. A folder without audio shows `No audio files here.`, and
   a library without roots shows the welcome page. Each list is one Tab
   stop, and Backspace or Alt+Up opens the parent folder.
-- **Loved** opens with a large Loved title, a tagline and a short
-  description, Play, Shuffle and a more button, then a mosaic of up to four
-  loved album covers (taken from loved albums first, then from the albums of
-  loved tracks; one cover when there are fewer than four) and the counts of
-  loved tracks, albums and artists. The mosaic goes first as the page narrows,
-  then the counts. Play queues every playable loved track, most recently loved
-  first, Shuffle does the same with shuffle on, and the more button opens the
-  track menu for those tracks. Three underlined tabs follow: Loved Tracks, the
-  Tracks list's table of loved tracks, most recently loved first and paged 512
-  at a time, with the inspector for the selected track. Its columns are the
-  row's position (#), a small cover, Title, Artist, Album, Duration under a
-  clock, the heart, Rating, Last Played and a ••• button with the track menu
-  on every row; the covers go when the table is narrow, and Album, Rating and
-  Last Played as on Tracks. Last Played reads Today, Yesterday or
-  `3 days ago` up to six days, then the date, with the full date and
-  time in its tooltip; Loved Albums, the Albums grid of loved albums; and Loved
-  Artists, a grid of round artist tiles, most recently loved first, each with
+- **Loved** opens with the Loved title, "Everything you've marked with a
+  heart. Ratings are separate and live alongside.", Play, Shuffle and a more
+  button, with the counts of loved Tracks, Albums and Artists on the right;
+  the counts go when the page narrows. Play queues every playable loved
+  track, most recently loved first, Shuffle does the same with shuffle on,
+  and the more button opens the track menu for those tracks. Three tabs with
+  icons follow: Tracks, the Tracks list's table of loved tracks, most
+  recently loved first and paged 512 at a time, with the inspector for the
+  selected track. Its columns are the row's position (#), a small cover,
+  Title with the track's heart beside it, Artist, Album, Rating, Last Played,
+  the duration under a clock and a ••• button with the track menu, shown on
+  hover; the covers go when the table is narrow, and Album, Rating and Last
+  Played as on Tracks. Last Played reads Today, Yesterday or `3 days ago` up
+  to six days, then the date, with the full date and time in its tooltip;
+  Albums, the Albums grid of loved albums; and Artists, a grid of round
+  artist tiles, most recently loved first, each with
   the Artist's stored photo or its initials, its name and its album and track
   counts. The page never fetches a photo; `orca-cli artist-info --fetch`
   stores one. An album or Artist opens its page in place, a right click on an
   Artist opens the artist menu, and a track plays on activation. The page is
   read again each time it is shown, so a heart cleared on it leaves its row
-  in place until then.
+  in place until then. The top-bar search reads `Search loved…` and filters
+  the three tabs in place, while the counts keep showing every loved item;
+  a tab with no match says `No matching loved tracks`, `albums` or
+  `artists`.
 - **Playlists** opens with its title block, "Your playlists and smart
   collections.", New Smart Playlist and New Playlist; the New Playlist
   dialog also offers Import… for an M3U file. Tabs (All, Created by Me,

@@ -169,6 +169,7 @@ fn applyFilter(self: *App, page: Page, text: []const u8) void {
         .artists => artists.setFilter(self, text),
         .tracks => filterTracks(self, text),
         .playlists => playlists.setFilter(self, text),
+        .loved => loved.setFilter(self, text),
         else => {},
     }
 }

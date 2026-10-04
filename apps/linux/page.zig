@@ -198,6 +198,7 @@ fn placeholder(self: *App) [*:0]const u8 {
         .artists => "Search artists…",
         .tracks => "Search tracks, artists, albums…",
         .playlists => "Search playlists…",
+        .loved => "Search loved…",
         else => "Search your library…",
     };
 }

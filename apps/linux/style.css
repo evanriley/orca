@@ -3293,6 +3293,11 @@ row:selected button.row-heart {
   min-width: 18px;
   min-height: 24px;
   padding: 0 1px;
+  color: @orca_text_dim;
+}
+
+.rating-stars button.star:hover {
+  color: @orca_text_2;
 }
 
 .rating-stars button.star.filled {
@@ -3314,75 +3319,176 @@ row:selected .row-stars,
 
 /* Loved */
 
-.loved-hero {
-  padding: 28px 32px 24px 32px;
-  background-image: radial-gradient(circle at 78% 45%, color-mix(in srgb, @orca_loved 16%, transparent), transparent 45%);
+.loved-page .page-title.loved-header {
+  padding: 24px 32px 0 32px;
 }
 
-.narrow .loved-hero {
-  padding: 16px 16px 12px 16px;
+.loved-header .display-page {
+  margin-top: 0;
+  font-size: 56px;
+  line-height: 1;
 }
 
-.loved-title {
-  font-family: Newsreader, serif;
-  font-size: 64px;
-  font-weight: 600;
-  line-height: 1.05;
-  color: @orca_text;
-}
-
-.narrow .loved-title {
-  font-size: 44px;
-}
-
-.loved-tagline {
-  margin-top: 10px;
-  font-size: 22px;
-  color: @orca_text;
-}
-
-.loved-description {
-  margin-top: 10px;
-  font-size: 17px;
-  line-height: 1.4;
+.loved-header .meta {
+  margin-top: 2px;
+  font-size: 14px;
   color: @orca_text_2;
 }
 
-.narrow .loved-tagline {
-  font-size: 17px;
+.narrow .loved-header .display-page {
+  font-size: 40px;
 }
 
-.narrow .loved-description {
-  font-size: 14px;
-}
-
-.loved-actions {
-  margin-top: 22px;
-}
-
-.loved-mosaic {
-  border-radius: var(--orca-radius-art);
-  background-color: @orca_bg_raised_2;
-  box-shadow: var(--orca-art-shadow);
+.album-actions.artist-actions.loved-actions {
+  margin-top: 16px;
 }
 
 .loved-stat-number {
   font-family: Newsreader, serif;
   font-size: 30px;
-  font-weight: 600;
-  line-height: 1;
+  font-weight: 400;
+  line-height: 1.2;
   color: @orca_text;
 }
 
-.loved-stats .loved-stat-number {
-  font-size: 26px;
+.loved-stat-label {
+  font-size: 12px;
+  color: @orca_text_3;
 }
 
-.loved-stat-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+.loved-tabs {
+  margin: 19px 32px 0 32px;
+  box-shadow: inset 0 -1px @orca_border;
+}
+
+.narrow .loved-tabs {
+  margin: 14px 16px 0 16px;
+}
+
+button.loved-tab {
+  margin: 0 26px 0 0;
+  padding: 6px 0 12px 0;
+  min-height: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: inset 0 -2px transparent;
+  color: @orca_text_2;
+  font-size: 13.5px;
+  font-weight: 400;
+}
+
+button.loved-tab:hover {
+  color: @orca_text;
+}
+
+button.loved-tab:checked {
+  color: @orca_text;
+  box-shadow: inset 0 -2px @orca_accent;
+}
+
+button.loved-tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.loved-body {
+  margin-top: 20px;
+}
+
+.narrow .loved-body {
+  margin-top: 14px;
+}
+
+.loved-page scrolledwindow.loved-tracks {
+  margin: 0 32px;
+}
+
+.narrow .loved-page scrolledwindow.loved-tracks {
+  margin: 0 16px;
+}
+
+.loved-tracks .track-list > header {
+  border-bottom: none;
+}
+
+.loved-tracks .track-list > header > button {
+  padding-top: 0;
+  padding-bottom: 6px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.loved-tracks .track-list > header > button:first-child,
+.loved-tracks .track-list > listview > row > cell:first-child {
+  padding-left: 14px;
+}
+
+.loved-tracks .track-list > listview > row {
+  min-height: 45px;
+  border-top: 1px solid @orca_bg_raised_2;
+  border-bottom: none;
+}
+
+.loved-tracks .track-list > listview > row:hover {
+  background-color: mix(@orca_bg_raised, @orca_bg_raised_2, 0.67);
+}
+
+.loved-tracks .track-list > listview > row:selected {
+  background-color: @orca_bg_selected;
+}
+
+.loved-tracks .track-list row.playing {
+  background-color: color-mix(in srgb, @orca_accent 10%, transparent);
+}
+
+.loved-tracks .track-list row.playing .track-title {
+  font-weight: 500;
+}
+
+.loved-tracks .track-list .track-secondary,
+.loved-tracks .track-list .track-duration {
+  color: @orca_text_2;
+}
+
+.loved-tracks .track-list .track-number {
   color: @orca_text_3;
+}
+
+.loved-tracks .track-list button.title-heart {
+  min-width: 13px;
+  min-height: 13px;
+  margin-left: 3px;
+  -gtk-icon-size: 13px;
+}
+
+.loved-tracks .track-list .rating-stars button.star {
+  min-width: 12px;
+  padding: 0;
+  color: mix(@orca_border_popover, @orca_text_dim, 0.13);
+}
+
+.loved-tracks .track-list .rating-stars button.star.filled {
+  color: @orca_text_artist;
+}
+
+.loved-tracks .track-list .rating-stars button.star:hover {
+  color: @orca_text_2;
+}
+
+.loved-tracks .track-list .row-stars:not(.rated) {
+  opacity: 1;
+}
+
+.loved-tracks .track-list button.row-more {
+  min-width: 28px;
+  min-height: 28px;
+  -gtk-icon-size: 16px;
+  opacity: 0;
+}
+
+.loved-tracks .track-list row:hover button.row-more,
+.loved-tracks .track-list row:selected button.row-more,
+.loved-tracks .track-list button.row-more:focus-visible {
+  opacity: 1;
 }
 
 .cover.loved-artist-photo {
@@ -3394,7 +3500,7 @@ row:selected .row-stars,
 }
 
 .row-cover.cover {
-  border-radius: 3px;
+  border-radius: 4px;
   box-shadow: none;
 }
 

@@ -16,8 +16,7 @@ const App = app.App;
 
 const star_count = 5;
 const star_step: u8 = liborca.max_rating / star_count;
-const filled_icon = "starred-symbolic";
-const outline_icon = "non-starred-symbolic";
+const star_icon = "orca-star-symbolic";
 const star_pixels: c_int = 14;
 const change_batch = 512;
 
@@ -36,7 +35,7 @@ pub fn newStars(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
     gtk.gtk_widget_add_css_class(box, "rating-stars");
     gtk.gtk_widget_set_valign(box, gtk.ALIGN_CENTER);
     for (star_labels, 1..) |label, number| {
-        const image = gtk.gtk_image_new_from_icon_name(outline_icon);
+        const image = gtk.gtk_image_new_from_icon_name(star_icon);
         gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), star_pixels);
         const button = gtk.gtk_button_new();
         gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), image);
@@ -59,6 +58,14 @@ pub fn newRowStars(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
     return box;
 }
 
+pub fn setStarSize(stars: *gtk.Widget, pixels: c_int) void {
+    var button = gtk.gtk_widget_get_first_child(stars);
+    while (button) |star| : (button = gtk.gtk_widget_get_next_sibling(star)) {
+        const image = gtk.gtk_button_get_child(gtk.cast(gtk.Button, star)) orelse continue;
+        gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), pixels);
+    }
+}
+
 fn starsFor(rating: ?u8) usize {
     const value = rating orelse return 0;
     return std.math.clamp((@as(usize, value) + star_step / 2) / star_step, 1, star_count);
@@ -77,10 +84,7 @@ pub fn show(stars: *gtk.Widget, rating: ?u8) void {
         button = gtk.gtk_widget_get_next_sibling(star);
         number += 1;
     }) {
-        const image = gtk.gtk_button_get_child(gtk.cast(gtk.Button, star)) orelse continue;
-        const on = number <= filled;
-        gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), if (on) filled_icon else outline_icon);
-        if (on)
+        if (number <= filled)
             gtk.gtk_widget_add_css_class(star, "filled")
         else
             gtk.gtk_widget_remove_css_class(star, "filled");
