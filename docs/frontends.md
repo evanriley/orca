@@ -2046,8 +2046,11 @@ The shortcuts dialog (Ctrl+?) lists the window's shortcuts:
 | --- | --- |
 | Space | Play or pause |
 | Ctrl+→, Ctrl+← | Next track, previous track |
-| L | Love the playing track, or remove its love |
-| 1 to 5 | Rate the playing track |
+| L | Love the selected or playing track, or remove its love |
+| 1 to 5 | Rate the selected or playing track |
+| Shift+Enter | Play the selected track next |
+| Ctrl+Enter | Play the search result now |
+| Delete | Remove the selected queue or playlist entry |
 | Ctrl+K | Search and commands |
 | Ctrl+F | Search this page |
 | Ctrl+L | Show the queue |
@@ -2064,9 +2067,23 @@ The shortcuts dialog (Ctrl+?) lists the window's shortcuts:
 Space, Ctrl+←/→, L, 1 to 5 and Alt+←/→ are handled by window key
 controllers rather than application accelerators. The plain keys do nothing
 while a dialog is open or a text field or popover has focus, so a focused
-search box keeps them. Keys that belong to one page, such as Shift+Enter
-and Delete in the queue, are described with that page. The shortcuts
-cannot be rebound.
+search box keeps them.
+
+L, 1 to 5 and Shift+Enter act on the selected track row first: in the
+Tracks, Loved and playlist tables, an album's track list, an artist's Top
+Tracks and a genre's tracks. They go through the same calls as the row
+menu's Love, Rating and Play Next, so a multi-selection on the Tracks page
+is loved, rated or played next as a whole, and L removes love only when
+every selected track is already loved. With no selected row in focus, L
+and 1 to 5 act on the playing track. Delete removes the selected entry of
+a manual playlist through the menu's Remove from Playlist; a smart
+playlist ignores it. The queue's own Delete, Shift+Enter and L are
+described with the queue.
+
+In the command palette's library search and the search page, Enter opens
+the selected result, Ctrl+Enter plays it, and Shift+Enter plays a track or
+album next; Shift+Enter on an artist, playlist or genre opens it. The
+shortcuts cannot be rebound.
 
 ### Settings file
 

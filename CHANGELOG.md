@@ -1101,6 +1101,14 @@
   `scripts/design-fixture.sh` builds the library it opens,
   `fixtures/library/design.db`: 26 albums by eight artists with covers,
   three artist photos, genres and five playlists, two of them smart.
+- **Keyboard actions on the selected track.** In `orca-gtk`, L, 1 to 5
+  and Shift+Enter act on the selected track row of the Tracks, Loved and
+  playlist tables, an album's track list, an artist's Top Tracks and a
+  genre's tracks, through the row menu's Love, Rating and Play Next, before
+  falling back to the playing track; a Tracks multi-selection is acted on as
+  a whole. Delete removes the selected entry of a manual playlist, and smart
+  playlists ignore it. In the command palette and search page, Shift+Enter
+  plays a track or album result next and Ctrl+Enter plays it now.
 
 ### Changed
 

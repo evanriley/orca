@@ -427,6 +427,33 @@ pub fn rate(self: *App, stars: i64) void {
     ratings.change(self, self.context.targets.items, ratings.menuRating(stars));
 }
 
+pub const TrackKey = union(enum) {
+    love,
+    rate: i64,
+    play_next,
+};
+
+pub fn trackKey(keyval: c_uint, modifiers: c_uint) ?TrackKey {
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    return switch (keyval) {
+        gtk.KEY_l, gtk.KEY_L => if (held == 0) .love else null,
+        gtk.KEY_1...gtk.KEY_5 => if (held == 0) .{ .rate = keyval - gtk.KEY_1 + 1 } else null,
+        gtk.KEY_Return, gtk.KEY_KP_Enter, gtk.KEY_ISO_Enter => if (held == gtk.MODIFIER_SHIFT) .play_next else null,
+        else => null,
+    };
+}
+
+pub fn runTrackKey(self: *App, key: TrackKey) void {
+    switch (key) {
+        .love => {
+            const counts = countFeedback(&self.context);
+            if (counts.none == 0 and counts.hated == 0) removeLove(self) else love(self);
+        },
+        .rate => |stars| rate(self, stars),
+        .play_next => playNext(self),
+    }
+}
+
 pub fn addToPlaylist(self: *App, playlist_id: i64) void {
     playlists.addTracks(self, playlist_id, self.context.tracks.items);
 }
@@ -493,12 +520,16 @@ pub fn play(self: *App) void {
 }
 
 pub fn playNext(self: *App) void {
+    playTracksNext(self, self.context.tracks.items);
+}
+
+pub fn playTracksNext(self: *App, track_ids: []const i64) void {
     const library = self.library orelse return;
-    if (self.context.tracks.items.len == 0) return;
+    if (track_ids.len == 0) return;
     if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
-    self.runtime.playerQueueInsertNext(self.player, library, self.context.tracks.items) catch
+    self.runtime.playerQueueInsertNext(self.player, library, track_ids) catch
         return self.toast("Could not queue that");
-    self.toast(if (self.context.tracks.items.len == 1) "Playing next" else "Playing these next");
+    self.toast(if (track_ids.len == 1) "Playing next" else "Playing these next");
     self.requestTick();
 }
 

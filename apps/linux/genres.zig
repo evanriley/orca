@@ -714,6 +714,21 @@ fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(
     playGenre(self, false, self.genres.track_ids[position]);
 }
 
+fn trackKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const key = menu.trackKey(keyval, modifiers) orelse return gtk.false_;
+    if (!window.plainKeysApply(self)) return gtk.false_;
+    const list = self.genres.track_list orelse return gtk.false_;
+    const row = gtk.gtk_list_box_get_selected_row(list) orelse return gtk.false_;
+    const position = rowPosition(row) orelse return gtk.false_;
+    if (position >= self.genres.track_count) return gtk.false_;
+    const target = self.genres.tracks[position].target;
+    self.context.reset(.tracks);
+    self.context.addTrack(self.allocator, target.track_id, target.recording_id, target.feedback) catch return gtk.false_;
+    menu.runTrackKey(self, key);
+    return gtk.true_;
+}
+
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
     const value = switch (change) {
         .feedback => |value| value,
@@ -826,6 +841,9 @@ fn buildDetail(self: *App, bin: *gtk.Widget) *gtk.Widget {
     gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, track_list), gtk.false_);
     _ = gtk.signalConnect(track_list, "row-selected", gtk.callback(trackSelected), self);
     _ = gtk.signalConnect(track_list, "row-activated", gtk.callback(trackActivated), self);
+    const keys = gtk.gtk_event_controller_key_new();
+    _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(trackKeyPressed), self);
+    gtk.gtk_widget_add_controller(track_list, keys);
     self.genres.track_list = gtk.cast(gtk.ListBox, track_list);
     gtk.gtk_box_append(gtk.cast(gtk.Box, track_section), track_list);
 

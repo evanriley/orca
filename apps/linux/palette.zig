@@ -20,6 +20,7 @@ const lyrics = @import("lyrics.zig");
 const transport = @import("transport.zig");
 const preferences = @import("preferences.zig");
 const queue = @import("queue.zig");
+const menu = @import("menu.zig");
 
 const App = app.App;
 const SearchKind = liborca.SearchKind;
@@ -459,6 +460,7 @@ fn buildPalette(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, footer), keyHint("↑↓", "Move"));
     gtk.gtk_box_append(gtk.cast(gtk.Box, footer), keyHint("↵", "Run"));
     gtk.gtk_box_append(gtk.cast(gtk.Box, footer), keyHint("Ctrl ↵", "Play"));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, footer), keyHint("Shift ↵", "Play Next"));
     const tip = gtk.gtk_label_new("Type without › to search your library");
     gtk.gtk_widget_set_hexpand(tip, gtk.true_);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, tip), 1);
@@ -546,7 +548,7 @@ fn paletteKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uin
     switch (keyval) {
         gtk.KEY_Up => selectPalette(self, if (palette.picker.selected == 0) 0 else palette.picker.selected - 1),
         gtk.KEY_Down => selectPalette(self, palette.picker.selected + 1),
-        gtk.KEY_Return, gtk.KEY_KP_Enter, gtk.KEY_ISO_Enter => activatePalette(self, palette.picker.selected, playModifier(modifiers)),
+        gtk.KEY_Return, gtk.KEY_KP_Enter, gtk.KEY_ISO_Enter => activatePalette(self, palette.picker.selected, activation(modifiers)),
         gtk.KEY_Escape => closePalette(self, true),
         gtk.KEY_BackSpace => {
             if (editableText(palette.entry).len != 0) return gtk.false_;
@@ -558,8 +560,13 @@ fn paletteKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uin
     return gtk.true_;
 }
 
-fn playModifier(modifiers: c_uint) bool {
-    return modifiers & (gtk.MODIFIER_SHIFT | gtk.MODIFIER_CONTROL) != 0;
+const Activation = enum { open, play, play_next };
+
+fn activation(modifiers: c_uint) Activation {
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    if (held & gtk.MODIFIER_CONTROL != 0) return .play;
+    if (held == gtk.MODIFIER_SHIFT) return .play_next;
+    return .open;
 }
 
 fn refreshPalette(self: *App) void {
@@ -688,7 +695,7 @@ fn rowIndex(gesture: ?*anyopaque) ?usize {
 }
 
 fn paletteRowClicked(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
-    activatePalette(state(data), rowIndex(gesture) orelse return, false);
+    activatePalette(state(data), rowIndex(gesture) orelse return, .open);
 }
 
 fn selectPalette(self: *App, wanted: usize) void {
@@ -724,7 +731,7 @@ fn reveal(scroller: ?*gtk.ScrolledWindow, content: *gtk.Widget, row: *gtk.Widget
     }
 }
 
-fn activatePalette(self: *App, index: usize, play: bool) void {
+fn activatePalette(self: *App, index: usize, how: Activation) void {
     const palette = &self.palette.palette;
     if (index >= palette.picker.choices.items.len) return;
     switch (palette.picker.choices.items[index]) {
@@ -735,7 +742,7 @@ fn activatePalette(self: *App, index: usize, play: bool) void {
         .recent => |position| {
             const recent = self.palette.recents.items[position];
             closePalette(self, true);
-            openEntity(self, recent.kind, recent.id, recent.kind != .artist or play);
+            openEntity(self, recent.kind, recent.id, if (how == .open and recent.kind != .artist) .play else how);
         },
         .hit => {},
     }
@@ -785,7 +792,7 @@ fn buildSearch(self: *App) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_CAPTURE);
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(searchKeyPressed), self);
     gtk.gtk_widget_add_controller(entry, keys);
-    const hint = gtk.gtk_label_new("↑↓ to move · ↵ to open · Ctrl ↵ to play");
+    const hint = gtk.gtk_label_new("↑↓ to move · ↵ to open · Ctrl ↵ to play · Shift ↵ to play next");
     gtk.gtk_widget_add_css_class(hint, "search-hint");
     gtk.gtk_widget_set_hexpand(hint, gtk.true_);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, hint), 1);
@@ -907,7 +914,7 @@ fn searchKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint
         gtk.KEY_Down => selectSearch(self, search.picker.selected + 1),
         gtk.KEY_Return, gtk.KEY_KP_Enter, gtk.KEY_ISO_Enter => {
             runSearch(self, false);
-            activateSearch(self, search.picker.selected, playModifier(modifiers));
+            activateSearch(self, search.picker.selected, activation(modifiers));
         },
         gtk.KEY_Escape => closeSearch(self, true),
         else => return gtk.false_,
@@ -1321,7 +1328,7 @@ fn addTopCard(self: *App, results: *const liborca.SearchResults, hit: SearchHit,
 }
 
 fn searchRowClicked(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
-    activateSearch(state(data), rowIndex(gesture) orelse return, false);
+    activateSearch(state(data), rowIndex(gesture) orelse return, .open);
 }
 
 fn selectSearch(self: *App, wanted: usize) void {
@@ -1351,7 +1358,7 @@ pub fn markPlaying(self: *App, _: ?i64) void {
     };
 }
 
-fn activateSearch(self: *App, index: usize, play: bool) void {
+fn activateSearch(self: *App, index: usize, how: Activation) void {
     const search = &self.palette.search;
     if (index >= search.picker.choices.items.len) return;
     switch (search.picker.choices.items[index]) {
@@ -1360,19 +1367,23 @@ fn activateSearch(self: *App, index: usize, play: bool) void {
             const kind = hit.kind;
             const id = hit.id;
             closeSearch(self, false);
-            openEntity(self, kind, id, play);
+            openEntity(self, kind, id, how);
         },
         .command, .recent => {},
     }
 }
 
-fn openEntity(self: *App, kind: SearchKind, id: i64, play: bool) void {
+fn openEntity(self: *App, kind: SearchKind, id: i64, how: Activation) void {
     switch (kind) {
-        .track => transport.playIds(self, &.{id}, 0),
-        .release => if (play) albums.playRelease(self, id) else window.showAlbum(self, id),
+        .track => if (how == .play_next) menu.playTracksNext(self, &.{id}) else transport.playIds(self, &.{id}, 0),
+        .release => switch (how) {
+            .open => window.showAlbum(self, id),
+            .play => albums.playRelease(self, id),
+            .play_next => if (albums.setAlbumContext(self, id)) menu.playNext(self),
+        },
         .artist => window.showArtist(self, id),
-        .playlist => if (play) playlists.playWhole(self, id, false) else playlists.open(self, id),
-        .genre => if (play) genres.playGenreId(self, id) else genres.open(self, id),
+        .playlist => if (how == .play) playlists.playWhole(self, id, false) else playlists.open(self, id),
+        .genre => if (how == .play) genres.playGenreId(self, id) else genres.open(self, id),
     }
 }
 

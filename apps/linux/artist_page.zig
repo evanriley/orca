@@ -537,6 +537,18 @@ fn trackMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) 
     if (setTrackContext(page, position)) menu.popup(page.self, row, x, y);
 }
 
+fn trackKeyPressed(controller: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const page = pageData(data);
+    const key = menu.trackKey(keyval, modifiers) orelse return gtk.false_;
+    if (!window.plainKeysApply(page.self)) return gtk.false_;
+    const list = gtk.gtk_event_controller_get_widget(gtk.cast(gtk.EventController, controller.?));
+    const row = gtk.gtk_list_box_get_selected_row(gtk.cast(gtk.ListBox, list)) orelse return gtk.false_;
+    const position = rowPosition(gtk.cast(gtk.Widget, row)) orelse return gtk.false_;
+    if (!setTrackContext(page, position)) return gtk.false_;
+    menu.runTrackKey(page.self, key);
+    return gtk.true_;
+}
+
 fn trackMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const position = marked(button) orelse return;
@@ -678,6 +690,9 @@ fn tracksSection(page: *ArtistPage, top: []const liborca.TrackSummary, by_plays:
     gtk.gtk_widget_add_css_class(list, "artist-tracks");
     _ = gtk.signalConnect(list, "row-selected", gtk.callback(trackSelected), page);
     _ = gtk.signalConnect(list, "row-activated", gtk.callback(trackActivated), page);
+    const keys = gtk.gtk_event_controller_key_new();
+    _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(trackKeyPressed), page);
+    gtk.gtk_widget_add_controller(list, keys);
     for (top, 0..) |summary, position| gtk.gtk_list_box_append(gtk.cast(gtk.ListBox, list), trackRow(page, summary, position, by_plays));
     page.track_count = top.len;
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), list);

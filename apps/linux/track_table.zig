@@ -12,6 +12,7 @@ const strings = @import("strings.zig");
 const playlists = @import("playlists.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
+const main_window = @import("window.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -413,7 +414,6 @@ fn starClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn prepareMenu(table: *Table, widget: *gtk.Widget) bool {
-    const self = table.app;
     const selection = table.selection orelse return false;
     const item = gtk.g_object_get_data(widget, "orca-list-item") orelse return false;
     const list_item = gtk.cast(gtk.ListItem, item);
@@ -423,7 +423,31 @@ fn prepareMenu(table: *Table, widget: *gtk.Widget) bool {
     const position = gtk.gtk_list_item_get_position(list_item);
     if (gtk.gtk_selection_model_is_selected(selection, position) == 0)
         _ = gtk.gtk_selection_model_select_item(selection, position, gtk.true_);
+    return setContext(table, clicked, position);
+}
 
+fn firstSelectedPosition(selection: *gtk.SelectionModel) ?c_uint {
+    const chosen = gtk.gtk_selection_model_get_selection(selection);
+    defer gtk.gtk_bitset_unref(chosen);
+    var iter: gtk.BitsetIter = .{};
+    var index: c_uint = 0;
+    if (gtk.gtk_bitset_iter_init_first(&iter, chosen, &index) == 0) return null;
+    return index;
+}
+
+fn prepareSelection(table: *Table) bool {
+    const selection = table.selection orelse return false;
+    const position = firstSelectedPosition(selection) orelse return false;
+    const item = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, selection), position) orelse return false;
+    defer gtk.g_object_unref(item);
+    const row: *TrackObject = @ptrCast(@alignCast(item));
+    if (track_model.isPlaceholder(row)) return false;
+    return setContext(table, row, position);
+}
+
+fn setContext(table: *Table, clicked: *TrackObject, position: c_uint) bool {
+    const self = table.app;
+    const selection = table.selection orelse return false;
     if (table.playlist) {
         self.context.reset(.playlist);
         self.context.playlist_id = self.playlists.open_id orelse return false;
@@ -456,6 +480,21 @@ fn prepareMenu(table: *Table, widget: *gtk.Widget) bool {
         self.context.artist_id = null;
     }
     return true;
+}
+
+fn keyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const table = tableData(data);
+    const self = table.app;
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    const removes = table.playlist and held == 0 and (keyval == gtk.KEY_Delete or keyval == gtk.KEY_KP_Delete);
+    const key = menu.trackKey(keyval, modifiers);
+    if (!removes and key == null) return gtk.false_;
+    if (!main_window.plainKeysApply(self) or !prepareSelection(table)) return gtk.false_;
+    if (removes) {
+        if (playlists.openIsSmart(self)) return gtk.false_;
+        menu.removeFromPlaylist(self);
+    } else menu.runTrackKey(self, key.?);
+    return gtk.true_;
 }
 
 fn cellMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
@@ -1304,6 +1343,9 @@ pub fn build(table: *Table, self: *App, options: Options) *gtk.Widget {
     gtk.gtk_column_view_set_reorderable(table.view.?, gtk.true_);
     gtk.gtk_column_view_set_tab_behavior(table.view.?, gtk.LIST_TAB_ITEM);
     _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), table);
+    const keys = gtk.gtk_event_controller_key_new();
+    _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(keyPressed), table);
+    gtk.gtk_widget_add_controller(view, keys);
     _ = gtk.signalConnect(table.selection.?, "selection-changed", gtk.callback(details.selectionChanged), self);
     buildChooser(table, view);
 

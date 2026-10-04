@@ -735,6 +735,7 @@ pub extern fn gtk_list_box_set_activate_on_single_click(box: *ListBox, single: g
 pub extern fn gtk_list_box_unselect_all(box: *ListBox) void;
 pub extern fn gtk_list_box_select_row(box: *ListBox, row: ?*ListBoxRow) void;
 pub extern fn gtk_list_box_get_row_at_index(box: *ListBox, index: c_int) ?*ListBoxRow;
+pub extern fn gtk_list_box_get_selected_row(box: *ListBox) ?*ListBoxRow;
 pub extern fn gtk_list_box_set_tab_behavior(box: *ListBox, behavior: c_int) void;
 pub extern fn gtk_revealer_new() *Widget;
 pub extern fn gtk_revealer_set_child(revealer: *Revealer, child: ?*Widget) void;

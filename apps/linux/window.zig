@@ -259,7 +259,7 @@ fn windowKeyPressed(
     return gtk.false_;
 }
 
-fn plainKeysApply(self: *App) bool {
+pub fn plainKeysApply(self: *App) bool {
     const window = self.window orelse return false;
     if (adw.adw_application_window_get_visible_dialog(gtk.cast(adw.ApplicationWindow, window)) != null) return false;
     const focus = gtk.gtk_window_get_focus(window) orelse return true;
