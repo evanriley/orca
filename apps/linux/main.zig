@@ -44,6 +44,7 @@ const appearance = @import("appearance.zig");
 const first_run = @import("first_run.zig");
 const changes = @import("changes.zig");
 const audio_problems = @import("audio_problems.zig");
+const artwork_review = @import("artwork_review.zig");
 const offline = @import("offline.zig");
 
 const App = app.App;
@@ -102,6 +103,7 @@ fn tick(self: *App) void {
         artist_page.tick(self);
         changes.tick(self);
         audio_problems.tick(self);
+        artwork_review.tick(self);
     }
     armTimeout(self);
 }
@@ -716,6 +718,7 @@ pub fn main(init: std.process.Init) !u8 {
     offline.shutdown(&self);
     changes.shutdown(&self);
     audio_problems.shutdown(&self);
+    artwork_review.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};

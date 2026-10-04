@@ -114,7 +114,7 @@ fn info(row: Row) RowInfo {
             .icon = "orca-image-symbolic",
             .tone = .neutral,
             .action = "Fix",
-            .tooltip = "Show the tracks, with Fetch Cover on each",
+            .tooltip = "Review each album's artwork",
             .unit = "track",
             .kinds = &.{.artwork_problem},
         },
@@ -588,8 +588,8 @@ fn openUnmatched(self: *App) void {
     window.goTo(self, .matches);
 }
 
-fn openArtwork(view: *View) void {
-    expand(view);
+fn openArtwork(self: *App) void {
+    window.goTo(self, .artwork_review);
 }
 
 fn openMissingFiles(self: *App) void {
@@ -609,7 +609,7 @@ fn rowActionClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
             reload(self);
         },
         .unmatched => openUnmatched(self),
-        .artwork => openArtwork(view),
+        .artwork => openArtwork(self),
         .missing_files => openMissingFiles(self),
     }
 }

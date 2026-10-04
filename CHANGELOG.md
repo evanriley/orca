@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Artwork Review.** `orca-gtk` has an Artwork Review page, opened by Fix
+  on Library Health's Missing artwork row or the palette's Show Artwork
+  Review: the albums with missing, undersized or conflicting artwork, each
+  with its local cover and its Cover Art Archive candidates, a Use as menu
+  per candidate (Front, Back, Booklet, Don't use), Find Candidates, Use
+  Selected Artwork, Skip and Choose Image… for a local file. The metadata
+  editor's Replace… keeps a chosen image as the front cover of each
+  selected Release, and Remove clears a chosen or fetched one.
+  `scripts/headless-gui.sh` takes `ORCA_HEADLESS_COVERARTARCHIVE_URL` and a
+  `db:PATH` step that copies the app's library.
 - **Albums with artwork problems.** `libraryArtworkProblemReleasePage` and
   `libraryArtworkProblemReleaseCount` page and count the Releases with
   visible `artwork_problem` issues by title, each once with its worst

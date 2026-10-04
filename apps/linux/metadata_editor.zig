@@ -14,6 +14,7 @@ const jobs = @import("jobs.zig");
 const tags = @import("tags.zig");
 const window = @import("window.zig");
 const write_tags = @import("write_tags.zig");
+const artwork_review = @import("artwork_review.zig");
 
 const App = app.App;
 
@@ -74,6 +75,8 @@ const Editor = struct {
     select: *gtk.Button,
     cover: *gtk.Widget,
     cover_caption: *gtk.Label,
+    replace_cover: ?*gtk.Widget = null,
+    remove_cover: ?*gtk.Widget = null,
     loading: bool = false,
     /// The page to go back to when the editor closes, when it had to be
     /// shown in another section's navigation.
@@ -380,6 +383,7 @@ fn loadStates(editor: *Editor) void {
         };
         art.clear(self, editor.cover);
         gtk.gtk_label_set_text(editor.cover_caption, "No tracks selected");
+        setCoverButtons(editor, false, false);
         return;
     }
     const states = self.runtime.libraryTrackFieldStates(library, selected) catch return self.toast("Could not read the tracks' fields");
@@ -413,8 +417,14 @@ fn genreText(buffer: []u8, names: []const u8) []const u8 {
     return buffer[0..size];
 }
 
+fn setCoverButtons(editor: *Editor, replace: bool, remove: bool) void {
+    if (editor.replace_cover) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(replace));
+    if (editor.remove_cover) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(remove));
+}
+
 fn showCover(editor: *Editor, states: liborca.TrackFieldStates, selected: []const i64) void {
     const self = editor.self;
+    setCoverButtons(editor, true, states.cover.source == .chosen or states.cover.source == .fetched);
     art.show(self, editor.cover, art.Key.track(selected[0], .tile));
     var name_buffer: [128]u8 = undefined;
     const name: []const u8 = switch (states.cover.source) {
@@ -607,9 +617,14 @@ fn newArtwork(editor: *Editor) *gtk.Widget {
         gtk.gtk_widget_add_css_class(button, "btn-secondary");
         gtk.gtk_widget_add_css_class(button, "metadata-cover-button");
         gtk.gtk_widget_set_sensitive(button, gtk.false_);
-        gtk.gtk_widget_set_tooltip_text(button, "Changing a release's cover in the library is not available yet");
         gtk.gtk_box_append(gtk.cast(gtk.Box, buttons), button);
     }
+    gtk.gtk_widget_set_tooltip_text(replace, "Keep an image file as the front cover of these tracks' albums");
+    gtk.gtk_widget_set_tooltip_text(remove, "Forget the chosen or fetched front cover of these tracks' albums");
+    _ = gtk.signalConnect(replace, "clicked", gtk.callback(replaceCoverClicked), editor);
+    _ = gtk.signalConnect(remove, "clicked", gtk.callback(removeCoverClicked), editor);
+    editor.replace_cover = replace;
+    editor.remove_cover = remove;
 
     gtk.gtk_widget_add_css_class(editor.cover, "metadata-cover");
     gtk.gtk_widget_set_halign(editor.cover, gtk.ALIGN_START);
@@ -630,6 +645,52 @@ fn newArtwork(editor: *Editor) *gtk.Widget {
     gtk.gtk_widget_set_hexpand(clamp, gtk.false_);
     gtk.gtk_widget_set_valign(clamp, gtk.ALIGN_START);
     return clamp;
+}
+
+fn selectedReleases(editor: *Editor) ![]i64 {
+    const self = editor.self;
+    const library = self.library orelse return error.NoLibrary;
+    const selected = try selectedIds(editor);
+    defer self.allocator.free(selected);
+    var releases: std.ArrayList(i64) = .empty;
+    errdefer releases.deinit(self.allocator);
+    for (selected) |id| {
+        const summary = (try self.runtime.libraryTrackSummary(library, id)) orelse continue;
+        defer summary.deinit(self.allocator);
+        const release_id = summary.release_id orelse continue;
+        if (std.mem.indexOfScalar(i64, releases.items, release_id) == null) try releases.append(self.allocator, release_id);
+    }
+    return releases.toOwnedSlice(self.allocator);
+}
+
+fn replaceCoverClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const editor = editorOf(data);
+    const self = editor.self;
+    const releases = selectedReleases(editor) catch return self.toast("Could not read the tracks' albums");
+    defer self.allocator.free(releases);
+    if (releases.len == 0) return self.toast("These tracks are not on an album");
+    artwork_review.chooseFrontImage(self, releases, .editor);
+}
+
+fn removeCoverClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const editor = editorOf(data);
+    const self = editor.self;
+    const library = self.library orelse return;
+    const releases = selectedReleases(editor) catch return self.toast("Could not read the tracks' albums");
+    defer self.allocator.free(releases);
+    var removed: usize = 0;
+    for (releases) |release_id| {
+        if (self.runtime.libraryClearReleaseArtwork(library, release_id, .front) catch false) removed += 1;
+    }
+    if (removed == 0) return self.toast("These albums have no chosen or fetched cover");
+    self.toast(if (removed == 1) "Removed the album's cover" else "Removed the albums' covers");
+    artwork_review.coverChanged(self, releases);
+    loadStates(editor);
+}
+
+pub fn coverChanged(self: *App) void {
+    const editor = shownEditor(self) orelse return;
+    loadStates(editor);
 }
 
 fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

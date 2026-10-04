@@ -33,6 +33,7 @@ const activity = @import("activity.zig");
 const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
 const audio_problems = @import("audio_problems.zig");
+const artwork_review = @import("artwork_review.zig");
 const first_run = @import("first_run.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
@@ -474,6 +475,7 @@ pub const App = struct {
     changes: changes.State = .{},
     duplicates: duplicates.State = .{},
     audio_problems: audio_problems.State = .{},
+    artwork_review: artwork_review.State = .{},
     first_run: first_run.State = .{},
 
     matches_list: ?*gtk.ListBox = null,
@@ -1014,6 +1016,7 @@ pub const App = struct {
         self.activity.deinit(self.allocator);
         self.changes.deinit();
         self.duplicates.deinit();
+        self.artwork_review.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }

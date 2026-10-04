@@ -1053,8 +1053,7 @@ The window is an `AdwNavigationSplitView`:
     `libraryUnanalyzedCount`; Analyze starts analysis.
   - Unmatched releases: `libraryReleaseMatchCounts`' unmatched Releases;
     Review opens Matches.
-  - Missing artwork: `artwork_problem`; Fix expands the row, whose files
-    offer Fetch Cover.
+  - Missing artwork: `artwork_problem`; Fix opens Artwork Review.
   - Missing files: `libraryMissingFileCount`; Locate opens Folders.
 
   A row with nothing to show is dimmed and its action disabled. A file's
@@ -1289,8 +1288,12 @@ on the Tracks `libraryEditTracks` returns, because an edit that moves a track
 to another album gives it a new id. The note's Write to Files… link applies,
 then opens Write to Files on the checked Tracks. The Front cover column shows
 the first Track's cover and where it comes from (`cover.jpg · same on all 13
-tracks`, `Embedded JPEG`, `Cover Art Archive`, `Chosen cover`); Replace… and Remove are
-insensitive until liborca can change a Release's cover in the library.
+tracks`, `Embedded JPEG`, `Cover Art Archive`, `Chosen cover`). Replace…
+opens a file dialog and keeps the image as the front cover of every
+distinct Release among the checked Tracks, as Artwork Review's Choose
+Image… does. Remove is sensitive when the cover shown is chosen or fetched,
+and calls `libraryClearReleaseArtwork(.front)` on each of those Releases;
+embedded and folder covers stay.
 
 **Write to Files** (Write Tags to Files… in menus, or the editor's link) plans
 the write with `Runtime.planTagWrite` and shows it before anything changes, in
@@ -1464,6 +1467,32 @@ measures the file again even when nothing is owed, then toasts the outcome
 and reloads; Not a problem calls `libraryDismissHealthIssue`, with Undo.
 Missing ReplayGain also counts files not yet analysed
 (`libraryUnanalyzedCount`) with an Analyze button.
+
+**Artwork Review** is a page, opened by Fix on Library Health's Missing
+artwork row or the command palette's Show Artwork Review, under the trail
+Library Health › Artwork. Under its title, `N albums with missing,
+undersized or conflicting artwork.` is
+`libraryArtworkProblemReleaseCount`, and the left list pages
+`libraryArtworkProblemReleasePage` on a thread, 512 at a time up to 2,048
+albums, each Release once with its worst problem. Each row shows the image
+placeholder, the album's title and its problem: `Missing front`,
+`300 × 300 · undersized` or `Embedded and folder differ`. The selected
+album shows `Artist · Year · no front cover` beside its title, then two
+columns. Local shows the Release's front cover from `libraryReleaseArtwork`
+with its size and type, or `No artwork found · Folder and embedded tags
+checked`, and Choose Image…, which opens a file dialog, reads the file on a
+thread (up to `max_image_bytes`, sniffed as an image) and calls
+`librarySetReleaseArtwork(.front)`. Cover Art Archive candidates lists
+`libraryCoverArtCandidates` three across: a thumbnail, `1200 × 1200 · JPEG`,
+the kind (`Release · approved`, `Release group`, `Back cover`, `Booklet`)
+and a Use as menu of Front, Back, Booklet and Don't use. The first front
+image is Front and the first back image Back; choosing a kind on one card
+sets any other card holding it to Don't use. Find Candidates starts
+`startCoverArtCandidates` as a Job when none are stored yet. Use Selected
+Artwork runs `libraryUseCoverArtCandidate` for each chosen kind in turn,
+then moves to the next album; Skip moves on without changing anything.
+After either kind of change the album's tiles show the new cover and
+Library Health reloads.
 
 **Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title an underlined tab bar switches between eight tabs;
@@ -1909,6 +1938,7 @@ steps after the output path run in order:
 | `rclick:X,Y` | Moves the pointer there and right-clicks |
 | `scroll:N` | `N` wheel steps; positive scrolls down |
 | `wait:MS` | Waits `MS` milliseconds |
+| `db:PATH` | Copies the app's library, with its `-wal`, to `PATH` |
 
 The script waits until two consecutive frames match before writing the PNG.
 

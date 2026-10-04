@@ -20,12 +20,15 @@
 #   tree:PATH    saves sway's window tree, with window titles, to PATH as JSON
 #   log:PATH     copies orca-gtk's output so far to PATH; set ORCA_GTK_DEBUG
 #                (art, frames, reveal) to add its debug reports
+#   db:PATH      copies the app's library, with its -wal, to PATH
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
 # scripts/design-fixture.sh when missing; the app gets a copy. Settings
 # start empty and are discarded, unless ORCA_HEADLESS_CONFIG names a
 # directory to keep them in as XDG_CONFIG_HOME across runs. Output is
-# pinned to scripts/silent-sink.sh 1. Nothing reaches the user's desktop:
+# pinned to scripts/silent-sink.sh 1. Providers point at a closed port; the
+# Cover Art Archive points at ORCA_HEADLESS_COVERARTARCHIVE_URL when it is
+# set. Nothing reaches the user's desktop:
 # sway, D-Bus, the pointer and orca-gtk run with a private
 # XDG_RUNTIME_DIR, and on exit the script stops only the processes it
 # started.
@@ -33,7 +36,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '5,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '5,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -61,7 +64,7 @@ case "$page" in
 esac
 for step in "${steps[@]}"; do
     case "$step" in
-        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | dclick:*,* | rclick:*,* | drag:*,*,*,* | shot:?*.png | tree:?* | log:?*) ;;
+        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | dclick:*,* | rclick:*,* | drag:*,*,*,* | shot:?*.png | tree:?* | log:?* | db:?*) ;;
         *) fail "unknown step '$step'; see the usage in $0" ;;
     esac
 done
@@ -360,7 +363,7 @@ echo "move $((width - 1)) 0" >&4
 
 ORCA_LIBRARY="$runtime/library/library.db" ORCA_OUTPUT_DEVICE=$device PIPEWIRE_REMOTE=$pipewire_remote \
     ORCA_LISTENBRAINZ_URL=http://127.0.0.1:9 ORCA_MUSICBRAINZ_URL=http://127.0.0.1:9 \
-    ORCA_ACOUSTID_URL=http://127.0.0.1:9 ORCA_COVERARTARCHIVE_URL=http://127.0.0.1:9 \
+    ORCA_ACOUSTID_URL=http://127.0.0.1:9 ORCA_COVERARTARCHIVE_URL=${ORCA_HEADLESS_COVERARTARCHIVE_URL:-http://127.0.0.1:9} \
     ORCA_LRCLIB_URL=http://127.0.0.1:9 ORCA_WIKIDATA_URL=http://127.0.0.1:9 \
     ORCA_WIKIMEDIA_URL=http://127.0.0.1:9 ORCA_WIKIPEDIA_URL=http://127.0.0.1:9 \
     ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:9 \
@@ -423,6 +426,15 @@ drag() {
     pointer_command release
 }
 
+copy_library() {
+    local suffix
+    cp "$runtime/library/library.db" "$1"
+    for suffix in -wal -shm; do
+        rm -f "$1$suffix"
+        if [ -f "$runtime/library/library.db$suffix" ]; then cp "$runtime/library/library.db$suffix" "$1$suffix"; fi
+    done
+}
+
 run_step() {
     local step=$1 value
     value=${step#*:}
@@ -430,6 +442,7 @@ run_step() {
         shot:*) shot "$value" ;;
         tree:*) swaymsg -t get_tree >"$value" ;;
         log:*) cp "$runtime/orca-gtk.log" "$value" ;;
+        db:*) copy_library "$value" ;;
         key:*) press "$value" ;;
         type:*) type_text "$value" ;;
         wait:*) sleep "$(awk -v ms="$value" 'BEGIN { print ms / 1000 }')" ;;
