@@ -537,9 +537,7 @@ fn buildRow(self: *App, index: u8, filter: Filter) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), textLabel(strings.printZ(&number, "{d}", .{index + 1}) catch "", column_widths.get(.index), "peq-index"));
 
     const dot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    var dot_class: [16]u8 = undefined;
     gtk.gtk_widget_add_css_class(dot, "peq-dot");
-    gtk.gtk_widget_add_css_class(dot, strings.format(&dot_class, "peq-dot-{d}", .{index % graph.dot_colors.len}).ptr);
     gtk.gtk_widget_set_halign(dot, gtk.ALIGN_START);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), cell(dot, column_widths.get(.dot)));
 

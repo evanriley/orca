@@ -44,27 +44,6 @@ const frequency_marks = [_]struct { f64, [:0]const u8 }{
     .{ 20000, "20k Hz" },
 };
 
-pub const dot_colors = [_][3]f64{
-    rgb(0x5b9bf0),
-    rgb(0x5fae7f),
-    rgb(0xd9a03b),
-    rgb(0xa07bd8),
-    rgb(0xe0605a),
-    rgb(0x49b6c2),
-    rgb(0xc48ad8),
-    rgb(0x8ab6f0),
-};
-
-const accent = rgb(0x5b9bf0);
-
-fn rgb(comptime value: u24) [3]f64 {
-    return .{
-        @as(f64, @floatFromInt(value >> 16)) / 255,
-        @as(f64, @floatFromInt((value >> 8) & 0xff)) / 255,
-        @as(f64, @floatFromInt(value & 0xff)) / 255,
-    };
-}
-
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
@@ -153,6 +132,12 @@ fn textColor(widget: *gtk.Widget) gtk.GdkRGBA {
     return color;
 }
 
+fn namedColor(widget: *gtk.Widget, name: [:0]const u8) gtk.GdkRGBA {
+    var color: gtk.GdkRGBA = undefined;
+    if (gtk.gtk_style_context_lookup_color(gtk.gtk_widget_get_style_context(widget), name.ptr, &color) != 0) return color;
+    return textColor(widget);
+}
+
 fn setColor(cr: *gtk.Cairo, color: gtk.GdkRGBA, alpha: f64) void {
     gtk.cairo_set_source_rgba(cr, color.red, color.green, color.blue, color.alpha * alpha);
 }
@@ -197,7 +182,7 @@ fn drawGrid(cr: *gtk.Cairo, widget: *gtk.Widget, plot: Plot, color: gtk.GdkRGBA)
     }
 }
 
-fn drawCurve(cr: *gtk.Cairo, plot: Plot, curve: liborca.ParametricEqualizer, rate: u32) void {
+fn drawCurve(cr: *gtk.Cairo, plot: Plot, curve: liborca.ParametricEqualizer, rate: u32, accent: gtk.GdkRGBA) void {
     var frequencies: [point_count]f32 = undefined;
     for (&frequencies, 0..) |*frequency, index| {
         const fraction = @as(f64, @floatFromInt(index)) / (point_count - 1);
@@ -215,7 +200,7 @@ fn drawCurve(cr: *gtk.Cairo, plot: Plot, curve: liborca.ParametricEqualizer, rat
         const at_y = plot.y(gain);
         if (index == 0) gtk.cairo_move_to(cr, at_x, at_y) else gtk.cairo_line_to(cr, at_x, at_y);
     }
-    gtk.cairo_set_source_rgba(cr, accent[0], accent[1], accent[2], 1);
+    setColor(cr, accent, 1);
     gtk.cairo_set_line_width(cr, 2);
     gtk.cairo_stroke_preserve(cr);
     gtk.cairo_line_to(cr, plot.right(), plot.bottom());
@@ -223,26 +208,25 @@ fn drawCurve(cr: *gtk.Cairo, plot: Plot, curve: liborca.ParametricEqualizer, rat
     gtk.cairo_close_path(cr);
     const fill = gtk.cairo_pattern_create_linear(0, plot.top, 0, plot.bottom());
     defer gtk.cairo_pattern_destroy(fill);
-    gtk.cairo_pattern_add_color_stop_rgba(fill, 0, accent[0], accent[1], accent[2], 0.3);
-    gtk.cairo_pattern_add_color_stop_rgba(fill, 1, accent[0], accent[1], accent[2], 0.03);
+    gtk.cairo_pattern_add_color_stop_rgba(fill, 0, accent.red, accent.green, accent.blue, accent.alpha * 0.3);
+    gtk.cairo_pattern_add_color_stop_rgba(fill, 1, accent.red, accent.green, accent.blue, accent.alpha * 0.03);
     gtk.cairo_set_source(cr, fill);
     gtk.cairo_fill(cr);
     gtk.cairo_restore(cr);
 }
 
-fn drawDots(cr: *gtk.Cairo, self: *App, plot: Plot) void {
+fn drawDots(cr: *gtk.Cairo, self: *App, plot: Plot, accent: gtk.GdkRGBA, halo: gtk.GdkRGBA) void {
     const editor = &self.parametric;
     for (editor.curve.filterList(), 0..) |filter, index| {
         if (!filter.enabled) continue;
         const center = dotCenter(plot, editor.curve, editor.rate, filter);
         const radius = if (editor.drag_index != null and editor.drag_index.? == index) dot_radius + 1.5 else dot_radius;
-        const color = dot_colors[index % dot_colors.len];
         gtk.cairo_new_path(cr);
         gtk.cairo_arc(cr, center[0], center[1], radius + 1.5, 0, 2 * std.math.pi);
-        gtk.cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+        setColor(cr, halo, 1);
         gtk.cairo_fill(cr);
         gtk.cairo_arc(cr, center[0], center[1], radius, 0, 2 * std.math.pi);
-        gtk.cairo_set_source_rgba(cr, color[0], color[1], color[2], 1);
+        setColor(cr, accent, 1);
         gtk.cairo_fill(cr);
     }
 }
@@ -252,8 +236,9 @@ fn draw(area: ?*gtk.DrawingArea, cr: *gtk.Cairo, width: c_int, area_height: c_in
     const widget = gtk.cast(gtk.Widget, area.?);
     const plot = Plot.of(width, area_height);
     drawGrid(cr, widget, plot, textColor(widget));
-    drawCurve(cr, plot, self.parametric.curve, self.parametric.rate);
-    drawDots(cr, self, plot);
+    const accent = namedColor(widget, "orca_accent");
+    drawCurve(cr, plot, self.parametric.curve, self.parametric.rate, accent);
+    drawDots(cr, self, plot, accent, namedColor(widget, "orca_shadow"));
 }
 
 /// Three significant figures, which keeps a dragged frequency readable.

@@ -1,95 +1,123 @@
 /* Orca's palette and type. Adwaita's variables are remapped to these tokens
  * so stock widgets follow them; the app forces the dark scheme. */
 
+@define-color orca_bg_window #111315;
+@define-color orca_bg_sidebar #131619;
+@define-color orca_bg_main #16191C;
+@define-color orca_bg_raised #191C20;
+@define-color orca_bg_raised_2 #1C2024;
+@define-color orca_bg_popover #1A1E22;
+@define-color orca_bg_hover #22272C;
+@define-color orca_bg_selected #232A33;
+@define-color orca_bg_chip_on #2E3742;
+@define-color orca_border #1E2226;
+@define-color orca_border_strong #2A3036;
+@define-color orca_border_popover #2E343A;
+@define-color orca_track #2A2F34;
+@define-color orca_text #F2F2F0;
+@define-color orca_text_2 #B7B9B9;
+@define-color orca_text_3 #8A8E91;
+@define-color orca_text_dim #5C6166;
+@define-color orca_text_artist #D9DBDA;
+@define-color orca_accent #74AEEA;
+@define-color orca_accent_hover #86BAF0;
+@define-color orca_on_accent #0D1520;
+@define-color orca_accent_text #A9CCF2;
+@define-color orca_accent_ring #3A5878;
+@define-color orca_loved #E5615C;
+@define-color orca_warn #E0915A;
+@define-color orca_caution #CBB062;
+@define-color orca_diff #E5C88A;
+@define-color orca_lyric_faded #6A6E71;
+
+@define-color orca_shadow rgb(0 0 0 / 0.55);
+@define-color orca_shadow_soft rgb(0 0 0 / 0.4);
+@define-color orca_frosted alpha(@orca_bg_raised_2, 0.77);
+@define-color orca_frosted_ring alpha(@orca_text, 0.08);
+@define-color orca_scrim alpha(@orca_bg_window, 0.48);
+@define-color orca_art_overlay alpha(@orca_bg_window, 0.72);
+
 :root {
-  --orca-window: #111315;
-  --orca-sidebar: #131619;
-  --orca-surface: #16191c;
-  --orca-elevated: #1c2024;
-  --orca-hover: #22272c;
-  --orca-selected: #262e37;
-  --orca-hover-overlay: rgb(255 255 255 / 0.04);
-  --orca-border: rgb(255 255 255 / 0.07);
-  --orca-shade: rgb(0 0 0 / 0.36);
+  --orca-elevation: 0 0 0 1px @orca_border_popover, 0 24px 60px @orca_shadow;
+  --orca-art-shadow: 0 16px 40px @orca_shadow_soft;
+  --orca-art-shadow-large: 0 28px 70px @orca_shadow_soft;
 
-  --orca-text: #f2f2f0;
-  --orca-text-secondary: #b7b9b9;
-  --orca-text-tertiary: #939799;
+  --orca-space-2: 2px;
+  --orca-space-4: 4px;
+  --orca-space-6: 6px;
+  --orca-space-8: 8px;
+  --orca-space-10: 10px;
+  --orca-space-12: 12px;
+  --orca-space-14: 14px;
+  --orca-space-16: 16px;
+  --orca-space-18: 18px;
+  --orca-space-22: 22px;
+  --orca-space-26: 26px;
+  --orca-space-32: 32px;
+  --orca-space-36: 36px;
+  --orca-space-48: 48px;
+  --orca-page-padding: 32px;
 
-  --orca-accent: #5b9bf0;
-  --orca-accent-text: #7fb1f5;
-  --orca-accent-on: #0c1117;
-
-  --orca-destructive: #e0605a;
-  --orca-warning: #d9a03b;
-  --orca-success: #5fae7f;
-  --orca-love: #e35d6a;
-
-  --orca-health-duplicates: #5b9bf0;
-  --orca-health-tags: #d9a03b;
-  --orca-health-clipping: #e0605a;
-  --orca-health-loudness: #e59a4b;
-  --orca-health-identity: #7fb1f5;
-  --orca-health-artwork: #a07bd8;
-  --orca-health-files: #e0605a;
-
-  --orca-radius-control: 10px;
+  --orca-radius-control: 6px;
+  --orca-radius-button: 8px;
+  --orca-radius-row: 7px;
+  --orca-radius-art: 8px;
   --orca-radius-popover: 12px;
-  --orca-radius-art: 7px;
+  --orca-radius-dialog: 16px;
   --orca-transition: 180ms ease-out;
 
-  --window-bg-color: var(--orca-surface);
-  --window-fg-color: var(--orca-text);
-  --view-bg-color: var(--orca-surface);
-  --view-fg-color: var(--orca-text);
-  --headerbar-bg-color: var(--orca-surface);
-  --headerbar-fg-color: var(--orca-text);
-  --headerbar-border-color: var(--orca-text);
-  --headerbar-backdrop-color: var(--orca-surface);
-  --headerbar-shade-color: var(--orca-border);
-  --headerbar-darker-shade-color: var(--orca-shade);
-  --sidebar-bg-color: var(--orca-sidebar);
-  --sidebar-fg-color: var(--orca-text);
-  --sidebar-backdrop-color: var(--orca-sidebar);
-  --sidebar-border-color: var(--orca-border);
-  --sidebar-shade-color: var(--orca-border);
-  --secondary-sidebar-bg-color: var(--orca-sidebar);
-  --secondary-sidebar-fg-color: var(--orca-text);
-  --secondary-sidebar-backdrop-color: var(--orca-sidebar);
-  --secondary-sidebar-border-color: var(--orca-border);
-  --secondary-sidebar-shade-color: var(--orca-border);
-  --card-bg-color: var(--orca-elevated);
-  --card-fg-color: var(--orca-text);
-  --card-shade-color: var(--orca-shade);
-  --dialog-bg-color: var(--orca-elevated);
-  --dialog-fg-color: var(--orca-text);
-  --popover-bg-color: var(--orca-elevated);
-  --popover-fg-color: var(--orca-text);
-  --popover-shade-color: var(--orca-shade);
-  --thumbnail-bg-color: var(--orca-elevated);
-  --thumbnail-fg-color: var(--orca-text);
-  --overview-bg-color: var(--orca-window);
-  --overview-fg-color: var(--orca-text);
-  --active-toggle-bg-color: var(--orca-selected);
-  --active-toggle-fg-color: var(--orca-text);
-  --shade-color: var(--orca-shade);
-  --scrollbar-outline-color: var(--orca-shade);
+  --window-bg-color: @orca_bg_main;
+  --window-fg-color: @orca_text;
+  --view-bg-color: @orca_bg_main;
+  --view-fg-color: @orca_text;
+  --headerbar-bg-color: @orca_bg_main;
+  --headerbar-fg-color: @orca_text;
+  --headerbar-border-color: @orca_border;
+  --headerbar-backdrop-color: @orca_bg_main;
+  --headerbar-shade-color: @orca_border;
+  --headerbar-darker-shade-color: @orca_shadow_soft;
+  --sidebar-bg-color: @orca_bg_sidebar;
+  --sidebar-fg-color: @orca_text;
+  --sidebar-backdrop-color: @orca_bg_sidebar;
+  --sidebar-border-color: @orca_border;
+  --sidebar-shade-color: @orca_border;
+  --secondary-sidebar-bg-color: @orca_bg_sidebar;
+  --secondary-sidebar-fg-color: @orca_text;
+  --secondary-sidebar-backdrop-color: @orca_bg_sidebar;
+  --secondary-sidebar-border-color: @orca_border;
+  --secondary-sidebar-shade-color: @orca_border;
+  --card-bg-color: @orca_bg_raised;
+  --card-fg-color: @orca_text;
+  --card-shade-color: @orca_border;
+  --dialog-bg-color: @orca_bg_popover;
+  --dialog-fg-color: @orca_text;
+  --popover-bg-color: @orca_bg_popover;
+  --popover-fg-color: @orca_text;
+  --popover-shade-color: @orca_shadow;
+  --thumbnail-bg-color: @orca_bg_raised_2;
+  --thumbnail-fg-color: @orca_text;
+  --overview-bg-color: @orca_bg_window;
+  --overview-fg-color: @orca_text;
+  --active-toggle-bg-color: @orca_bg_chip_on;
+  --active-toggle-fg-color: @orca_text;
+  --shade-color: @orca_shadow_soft;
+  --scrollbar-outline-color: @orca_shadow_soft;
 
-  --accent-bg-color: var(--orca-accent);
-  --accent-fg-color: var(--orca-accent-on);
-  --accent-color: var(--orca-accent-text);
-  --destructive-bg-color: var(--orca-destructive);
-  --destructive-fg-color: var(--orca-accent-on);
-  --destructive-color: var(--orca-destructive);
-  --warning-bg-color: var(--orca-warning);
-  --warning-fg-color: var(--orca-accent-on);
-  --warning-color: var(--orca-warning);
-  --error-bg-color: var(--orca-destructive);
-  --error-fg-color: var(--orca-accent-on);
-  --error-color: var(--orca-destructive);
-  --success-bg-color: var(--orca-success);
-  --success-fg-color: var(--orca-accent-on);
-  --success-color: var(--orca-success);
+  --accent-bg-color: @orca_accent;
+  --accent-fg-color: @orca_on_accent;
+  --accent-color: @orca_accent_text;
+  --destructive-bg-color: @orca_warn;
+  --destructive-fg-color: @orca_on_accent;
+  --destructive-color: @orca_warn;
+  --warning-bg-color: @orca_caution;
+  --warning-fg-color: @orca_on_accent;
+  --warning-color: @orca_caution;
+  --error-bg-color: @orca_warn;
+  --error-fg-color: @orca_on_accent;
+  --error-color: @orca_warn;
+  --success-bg-color: @orca_accent;
+  --success-fg-color: @orca_on_accent;
+  --success-color: @orca_accent_text;
 }
 
 /* Type */
@@ -101,42 +129,67 @@ tooltip {
   font-family: Geist, sans-serif;
 }
 
-.display-hero,
+window {
+  font-size: 14px;
+}
+
+.title-page,
 .display-page,
-.section-title,
+.title-album,
+.display-hero,
 .album-title,
+.section-title,
 .section-heading {
   font-family: Newsreader, serif;
-  font-weight: 600;
-  color: var(--orca-text);
+  font-weight: 400;
+  color: @orca_text;
 }
 
-.display-hero {
+.title-page,
+.display-page {
+  font-size: 42px;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+
+.title-album,
+.display-hero,
+.album-title {
   font-size: 48px;
   line-height: 1.05;
-}
-
-.display-page,
-.album-title {
-  font-size: 36px;
-  line-height: 1.1;
+  letter-spacing: -0.01em;
 }
 
 .section-title,
 .section-heading {
-  font-size: 22px;
+  font-size: 24px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: @orca_text_3;
 }
 
 .meta {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .tech {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
+.mono {
+  font-family: "Geist Mono", monospace;
+  font-size: 12px;
+  font-feature-settings: "tnum";
+}
+
+.tnum,
 .numeric,
 .seek-time {
   font-variant-numeric: tabular-nums;
@@ -145,12 +198,152 @@ tooltip {
 
 .dim-label {
   opacity: 1;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .caption.dim-label {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
+
+/* Focus */
+
+*:focus-visible:not(text),
+entry:focus-within,
+spinbutton:focus-within {
+  outline: 2px solid @orca_accent;
+  outline-offset: 2px;
+}
+
+row:focus-visible,
+gridview > child:focus-visible,
+flowbox > flowboxchild:focus-visible,
+columnview > listview > row:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Control classes */
+
+button.chip,
+.chip {
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 9px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  color: @orca_text_2;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+button.chip:hover,
+.chip:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+button.chip.chip-on,
+button.chip:checked,
+.chip-on {
+  background-color: @orca_bg_chip_on;
+  box-shadow: none;
+  color: @orca_text;
+}
+
+button.btn-primary {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--orca-radius-button);
+  background-color: @orca_accent;
+  color: @orca_on_accent;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+button.btn-primary:hover {
+  background-color: @orca_accent_hover;
+}
+
+button.btn-secondary {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--orca-radius-button);
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  color: @orca_text;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+button.btn-secondary:hover {
+  background-color: @orca_bg_hover;
+}
+
+.row {
+  border-radius: var(--orca-radius-row);
+  transition: background-color var(--orca-transition);
+}
+
+.row:hover {
+  background-color: @orca_bg_hover;
+}
+
+.row:selected,
+.row.selected {
+  background-color: @orca_bg_selected;
+}
+
+.popover,
+popover.background > contents {
+  border-radius: var(--orca-radius-popover);
+  background-color: @orca_bg_popover;
+  box-shadow: var(--orca-elevation);
+}
+
+.frosted {
+  border-radius: var(--orca-radius-popover);
+  background-color: @orca_frosted;
+  box-shadow: 0 0 0 1px @orca_frosted_ring, 0 24px 60px @orca_shadow;
+}
+
+.scrim {
+  background-color: @orca_scrim;
+}
+
+dialog > .dialog-contents,
+.dialog {
+  border-radius: var(--orca-radius-dialog);
+}
+
+/* Spacing and radius utilities */
+
+.gap-2 { border-spacing: var(--orca-space-2); }
+.gap-4 { border-spacing: var(--orca-space-4); }
+.gap-6 { border-spacing: var(--orca-space-6); }
+.gap-8 { border-spacing: var(--orca-space-8); }
+.gap-10 { border-spacing: var(--orca-space-10); }
+.gap-12 { border-spacing: var(--orca-space-12); }
+.gap-14 { border-spacing: var(--orca-space-14); }
+.gap-16 { border-spacing: var(--orca-space-16); }
+.gap-18 { border-spacing: var(--orca-space-18); }
+.gap-22 { border-spacing: var(--orca-space-22); }
+.gap-26 { border-spacing: var(--orca-space-26); }
+.gap-32 { border-spacing: var(--orca-space-32); }
+.gap-36 { border-spacing: var(--orca-space-36); }
+.gap-48 { border-spacing: var(--orca-space-48); }
+
+.pad-page {
+  padding-left: var(--orca-page-padding);
+  padding-right: var(--orca-page-padding);
+}
+
+.radius-control { border-radius: var(--orca-radius-control); }
+.radius-button { border-radius: var(--orca-radius-button); }
+.radius-row { border-radius: var(--orca-radius-row); }
+.radius-art { border-radius: var(--orca-radius-art); }
+.radius-popover { border-radius: var(--orca-radius-popover); }
+.radius-dialog { border-radius: var(--orca-radius-dialog); }
+.radius-round { border-radius: 9999px; }
+
 
 /* Controls */
 
@@ -189,14 +382,14 @@ flowbox > flowboxchild {
 .navigation-sidebar > row:hover,
 listview > row:hover,
 list > row.activatable:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .navigation-sidebar > row:selected,
 listview > row:selected,
 list > row:selected,
 gridview > child:selected {
-  background-color: var(--orca-selected);
+  background-color: @orca_bg_selected;
 }
 
 /* Sidebar */
@@ -220,20 +413,20 @@ gridview > child:selected {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .navigation-sidebar > row:selected {
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .sidebar-count {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .sidebar-settings {
-  box-shadow: inset 0 1px var(--orca-border);
+  box-shadow: inset 0 1px @orca_border;
   padding-top: 4px;
 }
 
@@ -255,19 +448,18 @@ headerbar.page-header > windowhandle > box {
 .keycap-hint {
   margin-right: 8px;
   padding: 1px 6px;
-  border: 1px solid var(--orca-border);
+  border: 1px solid @orca_border;
   border-radius: 5px;
   font-size: 11px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 /* Command palette */
 
 popover.palette > contents {
   padding: 6px;
-  background-color: var(--orca-elevated);
-  border: 1px solid var(--orca-border);
-  box-shadow: 0 12px 32px var(--orca-shade);
+  background-color: @orca_bg_popover;
+  box-shadow: var(--orca-elevation);
 }
 
 .palette-entry {
@@ -279,7 +471,7 @@ popover.palette > contents {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .palette-list > .palette-heading:first-child {
@@ -294,11 +486,11 @@ popover.palette > contents {
 }
 
 .palette-row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .palette-row.selected {
-  background-color: var(--orca-selected);
+  background-color: @orca_bg_selected;
 }
 
 .palette-thumb.cover {
@@ -316,32 +508,32 @@ popover.palette > contents {
 
 .palette-icon {
   border-radius: 5px;
-  background-color: var(--orca-hover);
-  color: var(--orca-text-secondary);
+  background-color: @orca_bg_hover;
+  color: @orca_text_2;
 }
 
 .palette-title {
   font-size: 14px;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .palette-subtitle {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .palette-shortcut {
   padding: 1px 6px;
-  border: 1px solid var(--orca-border);
+  border: 1px solid @orca_border;
   border-radius: 5px;
   font-size: 11px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .palette-empty {
   margin: 16px 10px;
   font-size: 13px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .breadcrumb > button.breadcrumb-parent {
@@ -352,7 +544,7 @@ popover.palette > contents {
 .breadcrumb-parent,
 .breadcrumb-separator {
   font-size: 15px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 label.breadcrumb-parent {
@@ -360,14 +552,14 @@ label.breadcrumb-parent {
 }
 
 .breadcrumb-separator {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
   margin: 0 2px;
 }
 
 .breadcrumb-current {
   font-size: 15px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
   margin-left: 6px;
 }
 
@@ -391,18 +583,17 @@ label.breadcrumb-parent {
 
 .player-bar {
   padding: 10px 14px 10px 14px;
-  background-color: var(--orca-sidebar);
-  box-shadow: inset 0 1px var(--orca-border);
+  background-color: @orca_bg_sidebar;
+  box-shadow: inset 0 1px @orca_border;
 }
 
 .cover {
   border-radius: var(--orca-radius-art);
-  background-color: var(--orca-elevated);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+  background-color: @orca_bg_raised_2;
 }
 
 .cover-placeholder {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .now-title {
@@ -411,28 +602,28 @@ label.breadcrumb-parent {
 
 .now-detail {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .play-button {
   min-width: 42px;
   min-height: 42px;
   padding: 0;
-  background-color: var(--orca-accent);
-  color: var(--orca-accent-on);
+  background-color: @orca_accent;
+  color: @orca_on_accent;
 }
 
 .play-button:hover {
-  background-color: color-mix(in srgb, var(--orca-accent) 88%, white);
+  background-color: @orca_accent_hover;
 }
 
 .play-button:active {
-  background-color: color-mix(in srgb, var(--orca-accent) 82%, black);
+  background-color: @orca_accent;
 }
 
 button.engaged,
 togglebutton:checked {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 togglebutton.flat:checked {
@@ -441,7 +632,7 @@ togglebutton.flat:checked {
 
 .seek-time {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 scale.seek {
@@ -451,11 +642,11 @@ scale.seek {
 
 scale.seek trough {
   min-height: 4px;
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
 }
 
 scale.seek highlight {
-  background-color: var(--orca-accent);
+  background-color: @orca_accent;
 }
 
 scale.seek slider {
@@ -478,46 +669,46 @@ scale.seek:focus-visible slider {
 
 .bar-format {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .bar-format-icon {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .bar-device {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .bar-adjustments {
   font-size: 12px;
   font-weight: bold;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
   margin-left: 6px;
 }
 
 .bar-device arrow {
   -gtk-icon-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .bar-volume-icon {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 scale.volume trough {
   min-height: 4px;
   min-width: 4px;
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
 }
 
 scale.volume highlight {
-  background-color: var(--orca-text-secondary);
+  background-color: @orca_text_2;
 }
 
 scale.volume:hover highlight {
-  background-color: var(--orca-accent);
+  background-color: @orca_accent;
 }
 
 scale.volume slider {
@@ -530,21 +721,21 @@ scale.volume slider {
   margin: 8px;
   padding: 10px 8px 10px 12px;
   border-radius: var(--orca-radius-control);
-  background-color: var(--orca-elevated);
+  background-color: @orca_bg_raised_2;
 }
 
 /* Tracks */
 
 .browse-panes {
-  background-color: var(--orca-sidebar);
+  background-color: @orca_bg_sidebar;
 }
 
 .track-list {
-  background-color: var(--orca-surface);
+  background-color: @orca_bg_main;
 }
 
 .track-list > header {
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
 }
 
 .track-list > header > button {
@@ -557,11 +748,11 @@ scale.volume slider {
 }
 
 .track-list > header > button > box {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .track-list > header > button:hover > box {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .track-list > header > button.heart-header > box {
@@ -570,7 +761,7 @@ scale.volume slider {
 
 .track-list > listview > row {
   min-height: 31px;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
   border-radius: 0;
 }
 
@@ -580,11 +771,11 @@ scale.volume slider {
 }
 
 .track-list > listview > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .track-list > listview > row:selected {
-  background-color: var(--orca-selected);
+  background-color: @orca_bg_selected;
 }
 
 .track-list button.row-heart,
@@ -595,7 +786,7 @@ scale.volume slider {
 
 .track-list .song-number,
 .track-list .song-duration {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .track-list .row-stars:not(.rated) {
@@ -609,15 +800,15 @@ scale.volume slider {
 }
 
 .track-list row.playing {
-  background-color: color-mix(in srgb, var(--orca-accent) 8%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 8%, transparent);
 }
 
 .track-list row.playing:selected {
-  background-color: color-mix(in srgb, var(--orca-accent) 14%, var(--orca-selected));
+  background-color: color-mix(in srgb, @orca_accent 14%, @orca_bg_selected);
 }
 
 .track-list row.playing .song-title {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
   font-weight: 600;
 }
 
@@ -625,7 +816,7 @@ scale.volume slider {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.06em;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 /* Queue and devices */
@@ -648,12 +839,12 @@ scale.volume slider {
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .queue-heading-meta {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 button.queue-section-button {
@@ -661,7 +852,7 @@ button.queue-section-button {
   padding: 0 8px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 button.queue-section-button:checked {
@@ -683,7 +874,7 @@ button.queue-section-button:checked {
 }
 
 .queue-list > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .queue-row {
@@ -700,18 +891,18 @@ button.queue-section-button:checked {
 }
 
 .queue-now-list > row {
-  background-color: color-mix(in srgb, var(--orca-accent) 8%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 8%, transparent);
 }
 
 .queue-now-title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .queue-now-subtitle {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .queue-title {
@@ -720,18 +911,18 @@ button.queue-section-button:checked {
 
 .queue-artist {
   font-size: 14px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .queue-number,
 .queue-duration,
 .queue-played {
   font-size: 13px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .queue-handle {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
   -gtk-icon-size: 16px;
 }
 
@@ -760,7 +951,7 @@ button.queue-more:focus-visible {
 }
 
 .queue-next-row:drop(active) {
-  box-shadow: inset 0 2px var(--orca-accent);
+  box-shadow: inset 0 2px @orca_accent;
 }
 
 .device-list {
@@ -786,20 +977,20 @@ button.album-chip {
   padding: 0 18px;
   border-radius: 10px;
   background-color: transparent;
-  box-shadow: inset 0 0 0 1px var(--orca-border);
-  color: var(--orca-text-secondary);
+  box-shadow: inset 0 0 0 1px @orca_border;
+  color: @orca_text_2;
   font-weight: 500;
 }
 
 button.album-chip:hover {
-  background-color: var(--orca-hover-overlay);
-  color: var(--orca-text);
+  background-color: @orca_bg_hover;
+  color: @orca_text;
 }
 
 button.album-chip:checked {
-  background-color: var(--orca-accent);
+  background-color: @orca_accent;
   box-shadow: none;
-  color: var(--orca-accent-on);
+  color: @orca_on_accent;
 }
 
 button.album-chip:checked:focus-visible,
@@ -809,12 +1000,12 @@ button.album-chip:checked:focus-visible,
 
 dropdown.sort-dropdown > button {
   min-width: 128px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
 }
 
 dropdown.sort-dropdown > button:hover {
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
 }
 
 .album-grid {
@@ -834,7 +1025,6 @@ dropdown.sort-dropdown > button:hover {
 
 .album-cover {
   border-radius: var(--orca-radius-art);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.3);
 }
 
 .album-cover-frame {
@@ -846,7 +1036,7 @@ dropdown.sort-dropdown > button:hover {
 
 .album-grid > child:hover .album-cover-frame,
 .artist-albums > flowboxchild:hover .album-cover-frame {
-  outline-color: rgb(255 255 255 / 0.18);
+  outline-color: @orca_text;
 }
 
 .album-grid > child:selected .album-cover-frame,
@@ -854,7 +1044,7 @@ dropdown.sort-dropdown > button:hover {
 .album-grid > child:focus-within .album-cover-frame,
 .artist-albums > flowboxchild:focus-visible .album-cover-frame,
 .artist-albums > flowboxchild:focus-within .album-cover-frame {
-  outline-color: var(--orca-text);
+  outline-color: @orca_text;
 }
 
 .tile-action {
@@ -874,49 +1064,49 @@ button.tile-play {
   min-width: 48px;
   min-height: 48px;
   padding: 0;
-  background-color: rgb(0 0 0 / 0.45);
-  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.85);
-  color: white;
+  background-color: @orca_art_overlay;
+  box-shadow: inset 0 0 0 1.5px @orca_text;
+  color: @orca_text;
 }
 
 button.tile-play:hover {
-  background-color: rgb(0 0 0 / 0.6);
+  background-color: @orca_bg_window;
 }
 
 button.tile-more {
   min-width: 22px;
   min-height: 18px;
   padding: 0 2px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .hero-cover {
-  border-radius: 8px;
-  box-shadow: 0 10px 32px rgb(0 0 0 / 0.45);
+  border-radius: var(--orca-radius-art);
+  box-shadow: var(--orca-art-shadow);
 }
 
 .tile-title {
   margin-top: 8px;
   font-size: 13px;
   font-weight: 500;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .tile-artist {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .tile-year {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .cover-initials {
   font-family: Newsreader, serif;
   font-size: 2.4em;
   font-weight: 500;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .hero-cover .cover-initials {
@@ -938,24 +1128,18 @@ button.tile-more {
 
 .album-backdrop-fade {
   background-image:
-    linear-gradient(to bottom, color-mix(in srgb, var(--orca-surface) 45%, transparent), color-mix(in srgb, var(--orca-surface) 70%, transparent) 55%, var(--orca-surface));
-}
-
-.album-hero,
-.now-playing-page .now-centre {
-  --orca-text-secondary: rgb(255 255 255 / 0.78);
-  --orca-text-tertiary: rgb(255 255 255 / 0.64);
+    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 45%, transparent), color-mix(in srgb, @orca_bg_main 70%, transparent) 55%, @orca_bg_main);
 }
 
 .album-kind {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.1em;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-detail .album-kind {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .album-hero-title {
@@ -970,11 +1154,11 @@ button.tile-more {
 .album-artist {
   font-size: 1.2em;
   font-weight: 600;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .album-meta {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .album-actions {
@@ -996,11 +1180,11 @@ button.tile-more {
 
 .album-tracks-header {
   padding: 0 12px 8px 12px;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-disc {
@@ -1008,7 +1192,7 @@ button.tile-more {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.08em;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 list.album-tracks {
@@ -1018,7 +1202,7 @@ list.album-tracks {
 list.album-tracks > row {
   min-height: 0;
   padding: 0;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
   border-radius: 0;
 }
 
@@ -1029,7 +1213,7 @@ list.album-tracks .rating-stars button.star {
 }
 
 list.album-tracks > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .album-track {
@@ -1038,25 +1222,25 @@ list.album-tracks > row:hover {
 }
 
 .album-track-number {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-track-playing {
-  color: var(--orca-accent);
+  color: @orca_accent;
 }
 
 .album-track-row.now-playing {
-  background-color: color-mix(in srgb, var(--orca-accent) 8%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 8%, transparent);
 }
 
 .album-track-row.now-playing .album-track-title {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
   font-weight: 600;
 }
 
 .folder-row.now-playing,
 .genre-artist.now-playing {
-  background-color: color-mix(in srgb, var(--orca-accent) 8%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 8%, transparent);
 }
 
 .album-tile.now-playing .tile-title,
@@ -1067,7 +1251,7 @@ list.album-tracks > row:hover {
 .genre-artist.now-playing .genre-row-title,
 .folder-row.now-playing .folder-row-name,
 .palette-row.now-playing .palette-title {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
   font-weight: 600;
 }
 
@@ -1076,8 +1260,8 @@ list.album-tracks > row:hover {
   min-height: 22px;
   margin: 6px;
   border-radius: 9999px;
-  background-color: var(--orca-accent);
-  color: var(--orca-accent-on);
+  background-color: @orca_accent;
+  color: @orca_on_accent;
   -gtk-icon-size: 12px;
 }
 
@@ -1086,7 +1270,7 @@ button.row-more {
   min-height: 24px;
   padding: 0;
   opacity: 0;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 row:hover button.row-more,
@@ -1112,9 +1296,9 @@ list.album-tracks .row-stars:focus-within {
   margin: 0 0 6px 6px;
   padding: 0;
   font-size: 8px;
-  border-color: rgb(255 255 255 / 0.85);
-  background-color: rgb(0 0 0 / 0.55);
-  color: white;
+  border-color: @orca_text;
+  background-color: @orca_scrim;
+  color: @orca_text;
 }
 
 listview.album-list {
@@ -1125,16 +1309,16 @@ listview.album-list {
 listview.album-list > row {
   min-height: 44px;
   padding: 0 8px;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
   border-radius: 0;
 }
 
 listview.album-list > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 listview.album-list > row:selected {
-  background-color: color-mix(in srgb, var(--orca-accent) 10%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 10%, transparent);
 }
 
 .album-list-cover {
@@ -1150,12 +1334,12 @@ listview.album-list > row:selected {
 }
 
 .album-list-row .album-list-format {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-description {
   margin-top: 10px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
   line-height: 1.4;
 }
 
@@ -1163,13 +1347,13 @@ button.album-description-more {
   min-height: 0;
   padding: 0 4px;
   margin-left: -4px;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
   font-weight: 500;
 }
 
 .album-attribution {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-attribution button.link {
@@ -1179,14 +1363,14 @@ button.album-description-more {
 }
 
 .album-track-column {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-tracks-header button.column-chooser {
   min-width: 24px;
   min-height: 20px;
   padding: 0;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .album-track-row.now-playing button.row-more {
@@ -1203,7 +1387,7 @@ button.album-artist {
 
 .now-playing-page .album-backdrop-fade {
   background-image:
-    linear-gradient(to bottom, color-mix(in srgb, var(--orca-surface) 40%, transparent), color-mix(in srgb, var(--orca-surface) 62%, transparent) 60%, var(--orca-surface));
+    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 40%, transparent), color-mix(in srgb, @orca_bg_main 62%, transparent) 60%, @orca_bg_main);
 }
 
 .now-centre {
@@ -1220,13 +1404,13 @@ button.album-artist {
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-cover {
   border-radius: 12px;
-  background-color: var(--orca-elevated);
-  box-shadow: 0 18px 48px rgb(0 0 0 / 0.5);
+  background-color: @orca_bg_raised_2;
+  box-shadow: var(--orca-art-shadow-large);
 }
 
 .now-title-hero {
@@ -1245,13 +1429,13 @@ button.now-link {
 button.now-artist {
   font-size: 17px;
   font-weight: 600;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 button.now-album {
   font-size: 12px;
   font-weight: 600;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-actions {
@@ -1262,17 +1446,17 @@ button.now-album {
   min-width: 36px;
   min-height: 36px;
   padding: 0;
-  background-color: rgb(255 255 255 / 0.08);
+  background-color: @orca_frosted;
 }
 
 .now-seek .seek-time {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-seek scale.seek trough {
   min-height: 5px;
-  background-color: rgb(255 255 255 / 0.16);
+  background-color: @orca_track;
 }
 
 .now-transport {
@@ -1299,22 +1483,22 @@ button.now-album {
 
 .now-lyric {
   font-size: 14px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-lyric-previous {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .now-lyric.now-lyric-current {
   font-size: 17px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .now-empty > scrolledwindow > viewport > box > clamp > box > image.icon {
   -gtk-icon-size: 200px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
   opacity: 0.5;
 }
 
@@ -1326,12 +1510,12 @@ button.now-album {
 
 .now-empty .description {
   font-size: 14px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .now-panel-scroller {
-  background-color: color-mix(in srgb, var(--orca-surface) 72%, transparent);
-  box-shadow: inset 1px 0 var(--orca-border);
+  background-color: color-mix(in srgb, @orca_bg_main 72%, transparent);
+  box-shadow: inset 1px 0 @orca_border;
 }
 
 .now-panel {
@@ -1346,7 +1530,7 @@ button.now-panel-action {
   min-height: 0;
   padding: 2px 8px;
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-up-next-list {
@@ -1356,11 +1540,11 @@ button.now-panel-action {
 .now-up-next-list > row {
   padding: 0;
   border-radius: 0;
-  box-shadow: inset 0 -1px var(--orca-border);
+  box-shadow: inset 0 -1px @orca_border;
 }
 
 .now-up-next-list > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .now-up-next-row {
@@ -1371,7 +1555,7 @@ button.now-panel-action {
 .now-up-next-number,
 .now-up-next-duration {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-up-next-title {
@@ -1380,13 +1564,13 @@ button.now-panel-action {
 }
 
 .now-up-next-row.now-playing .now-up-next-title {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
   font-weight: 600;
 }
 
 .now-up-next-artist {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .now-up-next-row button.row-heart {
@@ -1397,7 +1581,7 @@ button.now-panel-action {
 
 .now-up-next-empty {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
   margin: 8px 4px;
 }
 
@@ -1406,7 +1590,7 @@ button.now-full-queue {
   padding: 0 14px;
   min-height: 40px;
   border-radius: var(--orca-radius-control);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  box-shadow: inset 0 0 0 1px @orca_border;
   font-size: 13px;
 }
 
@@ -1424,7 +1608,7 @@ button.now-full-queue image {
 }
 
 .now-info-key {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 /* Artists */
@@ -1435,7 +1619,7 @@ button.now-full-queue image {
 }
 
 .artist-list > row {
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
   border-radius: 0;
 }
 
@@ -1449,7 +1633,7 @@ button.now-full-queue image {
 
 .cover.artist-thumb {
   border-radius: 9999px;
-  background-color: var(--orca-elevated);
+  background-color: @orca_bg_raised_2;
 }
 
 .artist-thumb .cover-initials {
@@ -1466,21 +1650,20 @@ button.now-full-queue image {
 
 .cover.artist-photo {
   border-radius: 9999px;
-  background-color: var(--orca-elevated);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.3);
+  background-color: @orca_bg_raised_2;
 }
 
 .artist-tile-name {
   margin-top: 10px;
   font-size: 14px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .artist-tile-meta {
   margin-top: 2px;
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .artist-page {
@@ -1509,7 +1692,7 @@ button.now-full-queue image {
 
 .artist-hero-art {
   border-radius: 0;
-  background-color: var(--orca-elevated);
+  background-color: @orca_bg_raised_2;
 }
 
 .artist-hero-art .cover-initials {
@@ -1518,8 +1701,8 @@ button.now-full-queue image {
 
 .artist-hero-fade {
   background-image:
-    linear-gradient(to right, transparent 45%, color-mix(in srgb, var(--orca-surface) 30%, transparent) 75%, color-mix(in srgb, var(--orca-surface) 75%, transparent)),
-    linear-gradient(to bottom, transparent 60%, color-mix(in srgb, var(--orca-surface) 80%, transparent));
+    linear-gradient(to right, transparent 45%, color-mix(in srgb, @orca_bg_main 30%, transparent) 75%, color-mix(in srgb, @orca_bg_main 75%, transparent)),
+    linear-gradient(to bottom, transparent 60%, color-mix(in srgb, @orca_bg_main 80%, transparent));
 }
 
 .artist-facts {
@@ -1528,18 +1711,18 @@ button.now-full-queue image {
 
 .artist-genres {
   font-size: 15px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .artist-genre-separator {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 button.artist-biography {
   margin: 4px 0 0 -8px;
   padding: 4px 8px;
   font-weight: 400;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .artist-biography-text {
@@ -1558,12 +1741,12 @@ button.artist-biography {
 .artist-stat-number {
   font-size: 22px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .artist-stat-label {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 button.artist-photo-credit {
@@ -1571,16 +1754,16 @@ button.artist-photo-credit {
   padding: 0 4px;
   font-size: 11px;
   font-weight: 400;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .artist-section-subtitle {
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .artist-song-number {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 button.related-artist {
@@ -1591,7 +1774,7 @@ button.related-artist {
 .related-artist-name {
   font-size: 13px;
   font-weight: 500;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .related-artists > flowboxchild {
@@ -1607,7 +1790,7 @@ button.see-all {
   padding: 0 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .artist-song {
@@ -1642,8 +1825,8 @@ button.see-all {
 /* Inspector */
 
 .inspector {
-  background-color: var(--orca-surface);
-  border-left: 1px solid var(--orca-border);
+  background-color: @orca_bg_main;
+  border-left: 1px solid @orca_border;
 }
 
 .inspector-body {
@@ -1658,19 +1841,19 @@ button.see-all {
   font-size: 20px;
   font-weight: 600;
   line-height: 1.25;
-  color: var(--orca-text);
+  color: @orca_text;
   margin-bottom: 4px;
 }
 
 .inspector-subtitle {
   font-size: 16px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .inspector-section {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid var(--orca-border);
+  border-top: 1px solid @orca_border;
 }
 
 .inspector-section-header {
@@ -1679,7 +1862,7 @@ button.see-all {
 }
 
 .inspector-icon {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .inspector-heading {
@@ -1687,7 +1870,7 @@ button.see-all {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .inspector-row,
@@ -1703,17 +1886,17 @@ button.see-all {
 
 .inspector-key {
   font-size: 14px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .inspector-value {
   font-size: 14px;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .inspector-value.tech {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 button.inspector-link {
@@ -1721,7 +1904,7 @@ button.inspector-link {
   margin: -2px 0 -2px -6px;
   padding: 2px 6px;
   font-size: 14px;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 button.inspector-link image {
@@ -1731,12 +1914,12 @@ button.inspector-link image {
 .inspector-description {
   font-size: 14px;
   line-height: 1.45;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .inspector-licence {
   font-size: 11px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .inspector-links {
@@ -1747,7 +1930,7 @@ button.inspector-copy {
   min-height: 24px;
   min-width: 24px;
   padding: 0;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .inspector-proposal {
@@ -1762,7 +1945,7 @@ button.inspector-action {
   padding: 2px 8px;
   min-height: 26px;
   font-size: 13px;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .inspector-actions > button.inspector-action:first-child {
@@ -1783,18 +1966,18 @@ button.inspector-action {
 
 .signal-header-icon {
   margin-top: 2px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .signal-title {
   font-size: 22px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .signal-subtitle {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 button.signal-verdict {
@@ -1802,39 +1985,39 @@ button.signal-verdict {
   min-height: 64px;
   padding: 12px 14px;
   border-radius: 10px;
-  border: 1px solid var(--orca-border);
-  background-color: var(--orca-elevated);
+  border: 1px solid @orca_border;
+  background-color: @orca_bg_raised_2;
 }
 
 button.signal-verdict:hover {
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
 }
 
 .signal-dot {
   min-width: 10px;
   min-height: 10px;
   border-radius: 50%;
-  background-color: var(--orca-text-tertiary);
+  background-color: @orca_text_3;
 }
 
 .signal-dot.native {
-  background-color: var(--orca-success);
+  background-color: @orca_accent;
 }
 
 .signal-verdict-title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .signal-chain {
   font-size: 13px;
   font-weight: normal;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .signal-chevron {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 button.signal-chevron {
@@ -1855,15 +2038,15 @@ button.signal-chevron image {
   min-width: 48px;
   min-height: 48px;
   border-radius: 50%;
-  border: 1px solid var(--orca-border);
-  background-color: var(--orca-elevated);
-  color: var(--orca-text-secondary);
+  border: 1px solid @orca_border;
+  background-color: @orca_bg_raised_2;
+  color: @orca_text_2;
 }
 
 .signal-rail {
   min-width: 2px;
   min-height: 20px;
-  background-color: color-mix(in srgb, var(--orca-accent) 40%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 40%, transparent);
 }
 
 .signal-text {
@@ -1874,45 +2057,45 @@ button.signal-chevron image {
 .signal-stage {
   font-size: 16px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .signal-tag {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .signal-lines {
   font-size: 13px;
   line-height: 1.3;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .signal-tech {
   margin-top: 6px;
   padding: 8px 10px;
   border-radius: 8px;
-  background-color: var(--orca-elevated);
+  background-color: @orca_bg_raised_2;
   font-size: 12px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .signal-footer {
   padding: 14px;
   border-radius: 10px;
-  border: 1px solid var(--orca-border);
-  background-color: var(--orca-elevated);
-  color: var(--orca-text-secondary);
+  border: 1px solid @orca_border;
+  background-color: @orca_bg_raised_2;
+  color: @orca_text_2;
 }
 
 .signal-footer-title {
   font-size: 14px;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .signal-footer-detail {
   font-size: 11px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 list.lyrics {
@@ -1930,7 +2113,7 @@ list.lyrics > row {
 
 .lyrics-current {
   font-weight: 700;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .lyrics-plain {
@@ -1940,7 +2123,7 @@ list.lyrics > row {
 /* Love and ratings */
 
 .loved-heart {
-  color: var(--orca-love);
+  color: @orca_loved;
 }
 
 button.album-heart {
@@ -1971,7 +2154,7 @@ row:selected button.row-heart {
 }
 
 .rating-stars button.star.filled {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .row-stars {
@@ -1991,7 +2174,7 @@ row:selected .row-stars,
 
 .loved-hero {
   padding: 28px 32px 24px 32px;
-  background-image: radial-gradient(circle at 78% 45%, rgb(227 93 106 / 0.16), transparent 45%);
+  background-image: radial-gradient(circle at 78% 45%, color-mix(in srgb, @orca_loved 16%, transparent), transparent 45%);
 }
 
 .narrow .loved-hero {
@@ -2003,7 +2186,7 @@ row:selected .row-stars,
   font-size: 64px;
   font-weight: 600;
   line-height: 1.05;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .narrow .loved-title {
@@ -2013,14 +2196,14 @@ row:selected .row-stars,
 .loved-tagline {
   margin-top: 10px;
   font-size: 22px;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .loved-description {
   margin-top: 10px;
   font-size: 17px;
   line-height: 1.4;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .narrow .loved-tagline {
@@ -2037,8 +2220,8 @@ row:selected .row-stars,
 
 .loved-mosaic {
   border-radius: var(--orca-radius-art);
-  background-color: var(--orca-elevated);
-  box-shadow: 0 10px 32px rgb(0 0 0 / 0.45);
+  background-color: @orca_bg_raised_2;
+  box-shadow: var(--orca-art-shadow);
 }
 
 .loved-stat-number {
@@ -2046,7 +2229,7 @@ row:selected .row-stars,
   font-size: 30px;
   font-weight: 600;
   line-height: 1;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .loved-stats .loved-stat-number {
@@ -2057,7 +2240,7 @@ row:selected .row-stars,
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .cover.loved-artist-photo {
@@ -2087,16 +2270,16 @@ viewswitcher.underline-tabs button.toggle {
   border-radius: 0;
   background: none;
   box-shadow: inset 0 -2px transparent;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 viewswitcher.underline-tabs button.toggle:hover {
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 viewswitcher.underline-tabs button.toggle:checked {
-  color: var(--orca-text);
-  box-shadow: inset 0 -2px var(--orca-accent);
+  color: @orca_text;
+  box-shadow: inset 0 -2px @orca_accent;
 }
 
 viewswitcher.underline-tabs button.toggle:focus-visible {
@@ -2107,7 +2290,7 @@ viewswitcher.underline-tabs button.toggle:focus-visible {
 
 .playlist-tabs {
   margin: 0 28px;
-  box-shadow: inset 0 -1px var(--orca-border);
+  box-shadow: inset 0 -1px @orca_border;
 }
 
 .narrow .playlist-tabs {
@@ -2121,17 +2304,17 @@ button.playlist-tab {
   border-radius: 0;
   background: none;
   box-shadow: inset 0 -2px transparent;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
   font-weight: 500;
 }
 
 button.playlist-tab:hover {
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 button.playlist-tab:checked {
-  color: var(--orca-accent-text);
-  box-shadow: inset 0 -2px var(--orca-accent);
+  color: @orca_accent_text;
+  box-shadow: inset 0 -2px @orca_accent;
 }
 
 button.playlist-tab:focus-visible {
@@ -2155,21 +2338,21 @@ button.playlist-tab:focus-visible {
   font-family: Newsreader, serif;
   font-size: 22px;
   font-weight: 500;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .playlist-section-caption,
 .playlist-section-count {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .playlist-section-count {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 button.playlist-show-all {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .playlist-grid,
@@ -2190,18 +2373,18 @@ button.playlist-show-all {
 .playlist-card {
   padding: 6px 6px 12px 6px;
   border-radius: 10px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border;
   transition: background-color var(--orca-transition);
 }
 
 .playlist-grid > child:hover .playlist-card,
 .playlist-grid > child:focus-within .playlist-card {
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
 }
 
 .playlist-grid > child:focus-visible .playlist-card {
-  box-shadow: inset 0 0 0 2px var(--orca-text);
+  box-shadow: inset 0 0 0 2px @orca_text;
 }
 
 .playlist-grid > child:hover .tile-action,
@@ -2221,7 +2404,7 @@ button.playlist-show-all {
 .playlist-card-title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .playlist-card-wide .playlist-card-title {
@@ -2231,25 +2414,25 @@ button.playlist-show-all {
 .playlist-card-kind,
 .playlist-card-meta {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .playlist-card-meta:last-child {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .playlist-card-kind.accent {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .playlist-pin {
   -gtk-icon-size: 13px;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .playlist-art {
   border-radius: var(--orca-radius-art);
-  background-color: var(--orca-surface);
+  background-color: @orca_bg_main;
 }
 
 .playlist-art-cell,
@@ -2259,33 +2442,13 @@ button.playlist-show-all {
 }
 
 .playlist-art-empty {
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
 }
 
 .smart-tile {
-  color: white;
-  background-color: #2b2f4a;
-}
-
-.smart-tile-loved {
-  background-image: radial-gradient(circle at 50% 45%, #5b3fc4, #2a1f63 70%);
-}
-
-.smart-tile-recent {
-  background-image: radial-gradient(circle at 50% 45%, #4a5059, #22262c 70%);
-}
-
-.smart-tile-rated {
-  background-image: radial-gradient(circle at 50% 45%, #8a6a1f, #3a2c10 70%);
-}
-
-.smart-tile-repeat {
-  background-image: radial-gradient(circle at 50% 45%, #3d2a63, #1d1530 70%);
-  color: #b48cff;
-}
-
-.smart-tile-other {
-  background-image: radial-gradient(circle at 50% 45%, #1f4f63, #10262f 70%);
+  color: @orca_text_2;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
 }
 
 .playlist-list {
@@ -2336,12 +2499,12 @@ button.playlist-show-all {
 .playlist-description {
   margin-top: 4px;
   font-size: 14px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .playlist-mosaic {
   border-radius: var(--orca-radius-art);
-  background-color: var(--orca-elevated);
+  background-color: @orca_bg_raised_2;
 }
 
 .mosaic-cell,
@@ -2358,8 +2521,8 @@ button.playlist-show-all {
   min-width: 40px;
   min-height: 40px;
   border-radius: 999px;
-  background-color: var(--orca-hover);
-  color: var(--orca-text-secondary);
+  background-color: @orca_bg_hover;
+  color: @orca_text_2;
 }
 
 .inspector-tags {
@@ -2369,9 +2532,9 @@ button.playlist-show-all {
 .tag-chip {
   padding: 4px 12px;
   border-radius: 999px;
-  background-color: var(--orca-hover);
+  background-color: @orca_bg_hover;
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 /* Smart Playlist editor */
@@ -2383,7 +2546,7 @@ button.playlist-show-all {
 .smart-label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .smart-root,
@@ -2393,13 +2556,13 @@ button.playlist-show-all {
 }
 
 .smart-root {
-  background-color: var(--orca-surface);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_main;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .smart-group {
-  background-color: var(--orca-elevated);
-  box-shadow: inset 2px 0 var(--orca-accent);
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 2px 0 @orca_accent;
 }
 
 .smart-rule {
@@ -2414,16 +2577,16 @@ button.smart-add {
 
 .smart-order {
   padding-top: 12px;
-  box-shadow: inset 0 1px var(--orca-border);
+  box-shadow: inset 0 1px @orca_border;
 }
 
 .smart-count {
   font-weight: 600;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .smart-count.error {
-  color: var(--orca-destructive);
+  color: @orca_warn;
 }
 
 /* Health */
@@ -2436,7 +2599,7 @@ button.smart-add {
 .page-title .meta.health-tagline {
   margin-top: 8px;
   font-size: 17px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .narrow .health-title .display-page,
@@ -2464,11 +2627,11 @@ button.smart-add {
 .health-last-caption,
 .health-last-time {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-last-time {
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-analyze > button {
@@ -2499,13 +2662,13 @@ button.smart-add {
 .health-headline {
   font-size: 24px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-summary {
   margin-top: 6px;
   font-size: 15px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-stats {
@@ -2527,7 +2690,7 @@ button.smart-add {
 }
 
 .health-stat-divider {
-  background-color: var(--orca-border);
+  background-color: @orca_border;
   min-width: 1px;
   margin: 4px 0;
 }
@@ -2535,7 +2698,7 @@ button.smart-add {
 .health-stat-number {
   font-size: 26px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-small .health-stat-number {
@@ -2544,7 +2707,7 @@ button.smart-add {
 
 .health-stat-label {
   font-size: 14px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-small .health-stat-label {
@@ -2553,8 +2716,8 @@ button.smart-add {
 
 .health-card {
   border-radius: 10px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .health-card-header {
@@ -2571,55 +2734,55 @@ button.smart-add {
 }
 
 .health-tile.health-duplicates {
-  background-color: color-mix(in srgb, var(--orca-health-duplicates) 14%, transparent);
-  color: var(--orca-health-duplicates);
+  background-color: color-mix(in srgb, @orca_text_2 14%, transparent);
+  color: @orca_text_2;
 }
 
 .health-tile.health-tags {
-  background-color: color-mix(in srgb, var(--orca-health-tags) 14%, transparent);
-  color: var(--orca-health-tags);
+  background-color: color-mix(in srgb, @orca_caution 14%, transparent);
+  color: @orca_caution;
 }
 
 .health-tile.health-clipping {
-  background-color: color-mix(in srgb, var(--orca-health-clipping) 14%, transparent);
-  color: var(--orca-health-clipping);
+  background-color: color-mix(in srgb, @orca_warn 14%, transparent);
+  color: @orca_warn;
 }
 
 .health-tile.health-loudness {
-  background-color: color-mix(in srgb, var(--orca-health-loudness) 14%, transparent);
-  color: var(--orca-health-loudness);
+  background-color: color-mix(in srgb, @orca_warn 14%, transparent);
+  color: @orca_warn;
 }
 
 .health-tile.health-identity {
-  background-color: color-mix(in srgb, var(--orca-health-identity) 14%, transparent);
-  color: var(--orca-health-identity);
+  background-color: color-mix(in srgb, @orca_text_2 14%, transparent);
+  color: @orca_text_2;
 }
 
 .health-tile.health-artwork {
-  background-color: color-mix(in srgb, var(--orca-health-artwork) 14%, transparent);
-  color: var(--orca-health-artwork);
+  background-color: color-mix(in srgb, @orca_text_2 14%, transparent);
+  color: @orca_text_2;
 }
 
 .health-tile.health-files {
-  background-color: color-mix(in srgb, var(--orca-health-files) 14%, transparent);
-  color: var(--orca-health-files);
+  background-color: color-mix(in srgb, @orca_warn 14%, transparent);
+  color: @orca_warn;
 }
 
 .health-tile.health-panel-tile {
   border-radius: 14px;
-  background-color: color-mix(in srgb, var(--orca-accent) 16%, transparent);
-  color: var(--orca-accent-text);
+  background-color: color-mix(in srgb, @orca_accent 16%, transparent);
+  color: @orca_accent_text;
 }
 
 .health-card-title {
   font-size: 16px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-card-description {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-tally {
@@ -2635,29 +2798,29 @@ button.smart-add {
 .health-tally-number {
   font-size: 18px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-tally-unit {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-detail {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-action {
   min-width: 118px;
   min-height: 40px;
   font-weight: 600;
-  background-color: color-mix(in srgb, var(--orca-accent) 22%, transparent);
-  color: var(--orca-accent-text);
+  background-color: color-mix(in srgb, @orca_accent 22%, transparent);
+  color: @orca_accent_text;
 }
 
 .health-action:hover {
-  background-color: color-mix(in srgb, var(--orca-accent) 30%, transparent);
+  background-color: color-mix(in srgb, @orca_accent 30%, transparent);
 }
 
 .health-small .health-action {
@@ -2669,7 +2832,7 @@ button.smart-add {
   min-width: 32px;
   min-height: 32px;
   padding: 0;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-chevron image {
@@ -2678,7 +2841,7 @@ button.smart-add {
 
 .health-inline-about {
   padding: 12px 20px 12px 74px;
-  border-top: 1px solid var(--orca-border);
+  border-top: 1px solid @orca_border;
 }
 
 .health-small .health-inline-about {
@@ -2688,13 +2851,13 @@ button.smart-add {
 .health-issues {
   padding: 0 12px;
   background-color: transparent;
-  border-top: 1px solid var(--orca-border);
+  border-top: 1px solid @orca_border;
 }
 
 .health-issues > row {
   border-radius: 0;
   background-color: transparent;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
 }
 
 .health-issues > row:last-child {
@@ -2702,7 +2865,7 @@ button.smart-add {
 }
 
 .health-issues > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .health-more {
@@ -2714,18 +2877,18 @@ button.smart-add {
 }
 
 .health-quiet-toggle {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-quiet {
   border-radius: 10px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .health-quiet-row {
   padding: 10px 16px 10px 12px;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
 }
 
 .health-quiet-row:last-child {
@@ -2738,17 +2901,17 @@ button.smart-add {
 
 .health-quiet-title {
   font-size: 14px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-quiet-good {
   font-size: 13px;
-  color: var(--orca-success);
+  color: @orca_accent;
 }
 
 .health-panel {
-  border-left: 1px solid var(--orca-border);
-  background-color: var(--orca-surface);
+  border-left: 1px solid @orca_border;
+  background-color: @orca_bg_main;
 }
 
 .health-panel-column {
@@ -2759,13 +2922,13 @@ button.smart-add {
   margin-top: 22px;
   font-size: 22px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-panel-text {
   margin-top: 12px;
   font-size: 15px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-benefits {
@@ -2773,41 +2936,41 @@ button.smart-add {
 }
 
 .health-benefit-icon {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
   margin-top: 2px;
 }
 
 .health-benefit-title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-benefit-text {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-about {
   margin-top: 32px;
   padding-top: 24px;
-  border-top: 1px solid var(--orca-border);
+  border-top: 1px solid @orca_border;
 }
 
 .health-about-title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .health-about-text,
 .health-about-action {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .health-about-action {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 /* Matching */
@@ -2822,8 +2985,8 @@ button.smart-add {
 
 list.boxed-list.match-list {
   border-radius: var(--orca-radius-popover);
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 list.boxed-list.match-list > row {
@@ -2831,12 +2994,12 @@ list.boxed-list.match-list > row {
 }
 
 list.boxed-list.match-list > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .match-list list.nested {
   background-color: transparent;
-  border-top: 1px solid var(--orca-border);
+  border-top: 1px solid @orca_border;
 }
 
 .match-proposal {
@@ -2847,7 +3010,7 @@ list.boxed-list.match-list > row:hover {
 
 .settings-page-icon {
   margin-right: 14px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .page-title .settings-title {
@@ -2856,7 +3019,7 @@ list.boxed-list.match-list > row:hover {
 
 .page-title .meta.settings-subtitle {
   font-size: 17px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .narrow .page-title .settings-title {
@@ -2879,8 +3042,8 @@ list.boxed-list.match-list > row:hover {
   margin-bottom: 20px;
   padding: 4px;
   border-radius: 999px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .settings-tabs > button.settings-tab {
@@ -2890,18 +3053,18 @@ list.boxed-list.match-list > row:hover {
   border-radius: 999px;
   background: none;
   box-shadow: none;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
   font-weight: 600;
 }
 
 .settings-tabs > button.settings-tab:hover {
-  background-color: var(--orca-hover-overlay);
-  color: var(--orca-text);
+  background-color: @orca_bg_hover;
+  color: @orca_text;
 }
 
 .settings-tabs > button.settings-tab:checked {
-  background-color: color-mix(in srgb, var(--orca-text) 14%, transparent);
-  color: var(--orca-text);
+  background-color: color-mix(in srgb, @orca_text 14%, transparent);
+  color: @orca_text;
 }
 
 .settings-tab {
@@ -2911,12 +3074,12 @@ list.boxed-list.match-list > row:hover {
 .settings-card {
   padding: 24px;
   border-radius: 12px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .settings-card-icon {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 .settings-card-title {
@@ -2938,8 +3101,8 @@ list.boxed-list.match-list > row:hover {
 
 .settings-card list.boxed-list {
   border-radius: var(--orca-radius-control);
-  background-color: var(--orca-hover-overlay);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .settings-card list.boxed-list > row {
@@ -2966,9 +3129,9 @@ list.boxed-list.match-list > row:hover {
 }
 
 .settings-folder-actions > button.settings-add-folder {
-  color: var(--orca-accent-text);
-  background-color: color-mix(in srgb, var(--orca-accent) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orca-accent) 45%, transparent);
+  color: @orca_accent_text;
+  background-color: color-mix(in srgb, @orca_accent 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 45%, transparent);
 }
 
 .settings-entry-row {
@@ -2993,8 +3156,8 @@ list.boxed-list.match-list > row:hover {
 .eq-mode {
   padding: 3px;
   border-radius: 999px;
-  background-color: var(--orca-window);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_window;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .eq-mode > button {
@@ -3004,19 +3167,19 @@ list.boxed-list.match-list > row:hover {
   border-radius: 999px;
   background: none;
   box-shadow: none;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
   font-size: 13px;
   font-weight: 600;
 }
 
 .eq-mode > button:hover {
-  background-color: var(--orca-hover-overlay);
-  color: var(--orca-text);
+  background-color: @orca_bg_hover;
+  color: @orca_text;
 }
 
 .eq-mode > button:checked {
-  background-color: color-mix(in srgb, var(--orca-accent) 22%, transparent);
-  color: var(--orca-accent-text);
+  background-color: color-mix(in srgb, @orca_accent 22%, transparent);
+  color: @orca_accent_text;
 }
 
 .settings-card.eq-card {
@@ -3038,11 +3201,11 @@ list.boxed-list.match-list > row:hover {
 }
 
 .peq-controls .peq-label {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .peq-controls .peq-unit {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .peq-controls dropdown > button,
@@ -3058,8 +3221,8 @@ list.boxed-list.match-list > row:hover {
 .peq-controls spinbutton,
 .peq-controls button.peq-step,
 .peq-controls button.peq-reset {
-  background-color: var(--orca-window);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_window;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .peq-controls spinbutton > text {
@@ -3072,9 +3235,9 @@ list.boxed-list.match-list > row:hover {
 
 .peq-controls button.peq-import {
   padding: 0 14px;
-  color: var(--orca-accent-text);
-  background-color: color-mix(in srgb, var(--orca-accent) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orca-accent) 45%, transparent);
+  color: @orca_accent_text;
+  background-color: color-mix(in srgb, @orca_accent 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 45%, transparent);
 }
 
 .peq-graph {
@@ -3083,22 +3246,22 @@ list.boxed-list.match-list > row:hover {
 
 .peq-table {
   border-radius: 8px;
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  box-shadow: inset 0 0 0 1px @orca_border;
   font-size: 13px;
 }
 
 .peq-header {
   min-height: 28px;
   padding: 0 10px;
-  color: var(--orca-text-secondary);
-  border-bottom: 1px solid var(--orca-border);
+  color: @orca_text_2;
+  border-bottom: 1px solid @orca_border;
 }
 
 .peq-diamond {
   min-width: 7px;
   min-height: 7px;
   margin-left: 2px;
-  background-color: var(--orca-text-secondary);
+  background-color: @orca_text_2;
   border-radius: 1px;
   transform: rotate(45deg);
 }
@@ -3113,11 +3276,11 @@ list.peq-list > row {
 }
 
 list.peq-list > row:hover {
-  background-color: var(--orca-hover-overlay);
+  background-color: @orca_bg_hover;
 }
 
 .peq-row .peq-index {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .peq-off .peq-index,
@@ -3130,23 +3293,15 @@ list.peq-list > row:hover {
   min-width: 10px;
   min-height: 10px;
   border-radius: 999px;
+  background-color: @orca_accent;
 }
-
-.peq-dot-0 { background-color: #5b9bf0; }
-.peq-dot-1 { background-color: #5fae7f; }
-.peq-dot-2 { background-color: #d9a03b; }
-.peq-dot-3 { background-color: #a07bd8; }
-.peq-dot-4 { background-color: #e0605a; }
-.peq-dot-5 { background-color: #49b6c2; }
-.peq-dot-6 { background-color: #c48ad8; }
-.peq-dot-7 { background-color: #8ab6f0; }
 
 .peq-row dropdown.peq-type > button {
   min-height: 22px;
   padding: 0 4px;
   background: none;
   box-shadow: none;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
   font-weight: 400;
 }
 
@@ -3162,8 +3317,8 @@ list.peq-list > row:hover {
 }
 
 .peq-row spinbutton.peq-spin:focus-within {
-  background-color: var(--orca-window);
-  box-shadow: inset 0 0 0 1px var(--orca-accent);
+  background-color: @orca_bg_window;
+  box-shadow: inset 0 0 0 1px @orca_accent;
 }
 
 .peq-row switch.peq-switch {
@@ -3186,8 +3341,8 @@ button.peq-add {
   min-height: 34px;
   padding: 0 14px;
   border-radius: 8px;
-  color: var(--orca-accent-text);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orca-accent) 35%, transparent);
+  color: @orca_accent_text;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 35%, transparent);
 }
 
 /* Appearance choices */
@@ -3212,8 +3367,8 @@ button.filters-button,
 }
 
 .filters-active > button {
-  color: var(--orca-accent-text);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orca-accent) 50%, transparent);
+  color: @orca_accent_text;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 50%, transparent);
 }
 
 .song-filters {
@@ -3221,7 +3376,7 @@ button.filters-button,
 }
 
 .song-filters .filters-label {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .songs-title dropdown {
@@ -3233,7 +3388,7 @@ button.filters-button,
 }
 
 .track-list > header > button.sorted > box {
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .track-list > header > button.column-chooser > box {
@@ -3241,18 +3396,18 @@ button.filters-button,
 }
 
 .track-list .song-format {
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .explicit-badge {
   min-width: 14px;
   min-height: 14px;
   padding: 0 1px;
-  border: 1px solid var(--orca-text-tertiary);
+  border: 1px solid @orca_text_3;
   border-radius: 3px;
   font-size: 9px;
   font-weight: 600;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .track-list row.playing button.row-more,
@@ -3275,7 +3430,7 @@ button.filters-button,
 
 .page-title .meta.genres-tagline {
   font-size: 17px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .narrow .page-title .meta.genres-tagline {
@@ -3309,7 +3464,7 @@ button.filters-button,
 
 .genre-tile {
   border-radius: 10px;
-  background-color: var(--orca-elevated);
+  background-color: @orca_bg_raised_2;
 }
 
 .genre-tile .cover {
@@ -3318,7 +3473,7 @@ button.filters-button,
 }
 
 .genre-tile-shade {
-  background-image: linear-gradient(to bottom, rgb(0 0 0 / 0.3), rgb(0 0 0 / 0.55));
+  background-image: linear-gradient(to bottom, @orca_scrim, @orca_shadow);
 }
 
 .genre-tile-labels {
@@ -3328,13 +3483,13 @@ button.filters-button,
 .genre-tile-name {
   font-size: 16px;
   font-weight: 600;
-  color: #ffffff;
-  text-shadow: 0 1px 2px rgb(0 0 0 / 0.5);
+  color: @orca_text;
+  text-shadow: 0 1px 2px @orca_shadow;
 }
 
 .genre-tile-count {
   font-size: 12px;
-  color: rgb(255 255 255 / 0.78);
+  color: @orca_text_2;
 }
 
 .genre-tile-ring {
@@ -3342,15 +3497,15 @@ button.filters-button,
 }
 
 .genre-tile:hover .genre-tile-ring {
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18);
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
 }
 
 .genre-strip > row:selected .genre-tile-ring {
-  box-shadow: inset 0 0 0 2px var(--orca-accent);
+  box-shadow: inset 0 0 0 2px @orca_accent;
 }
 
 .genre-strip > row:focus-visible .genre-tile-ring {
-  box-shadow: inset 0 0 0 2px var(--orca-accent), inset 0 0 0 4px rgb(255 255 255 / 0.5);
+  box-shadow: inset 0 0 0 2px @orca_accent, inset 0 0 0 4px @orca_text;
 }
 
 .genre-hero {
@@ -3366,7 +3521,7 @@ button.filters-button,
   font-size: 56px;
   font-weight: 600;
   line-height: 1.1;
-  color: var(--orca-text);
+  color: @orca_text;
   margin-top: 4px;
 }
 
@@ -3377,7 +3532,7 @@ button.filters-button,
 .genre-hero-stats {
   margin-top: 6px;
   font-size: 15px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .genre-actions {
@@ -3395,8 +3550,8 @@ button.filters-button,
 .genre-card {
   padding: 16px 18px 14px 18px;
   border-radius: 12px;
-  background-color: var(--orca-elevated);
-  box-shadow: inset 0 0 0 1px var(--orca-border);
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_border;
 }
 
 .narrow .genre-card {
@@ -3406,7 +3561,7 @@ button.filters-button,
 .genre-card-title {
   font-size: 17px;
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 button.genre-see-all {
@@ -3414,7 +3569,7 @@ button.genre-see-all {
   padding: 0 6px;
   font-size: 13px;
   font-weight: 500;
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 flowbox.genre-albums > flowboxchild {
@@ -3434,7 +3589,7 @@ list.genre-songs > row:last-child {
 
 .genre-rank {
   font-size: 13px;
-  color: var(--orca-text-tertiary);
+  color: @orca_text_3;
 }
 
 .genre-artist {
@@ -3449,16 +3604,16 @@ list.genre-songs > row:last-child {
 
 .genre-row-title {
   font-size: 14px;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .genre-row-detail {
   font-size: 12px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 button.genre-fill-link {
-  color: var(--orca-accent-text);
+  color: @orca_accent_text;
 }
 
 button.genre-chip {
@@ -3470,8 +3625,8 @@ button.genre-chip {
 /* Folders */
 
 .folder-pane {
-  background-color: var(--orca-sidebar);
-  border-right: 1px solid var(--orca-border);
+  background-color: @orca_bg_sidebar;
+  border-right: 1px solid @orca_border;
 }
 
 .folder-tree {
@@ -3484,12 +3639,12 @@ button.genre-chip {
 }
 
 .folder-row-icon {
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }
 
 .folder-toolbar {
   padding: 10px 16px;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
 }
 
 .folder-files {
@@ -3498,7 +3653,7 @@ button.genre-chip {
 
 .folder-files > row {
   padding: 0;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
 }
 
 .folder-row {
@@ -3525,15 +3680,15 @@ button.genre-chip {
 
 .folder-release {
   padding: 16px 12px 8px 12px;
-  border-bottom: 1px solid var(--orca-border);
+  border-bottom: 1px solid @orca_border;
 }
 
 .folder-release-title {
   font-weight: 600;
-  color: var(--orca-text);
+  color: @orca_text;
 }
 
 .folder-release-detail {
   font-size: 13px;
-  color: var(--orca-text-secondary);
+  color: @orca_text_2;
 }

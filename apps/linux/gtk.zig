@@ -1118,6 +1118,7 @@ pub extern fn gtk_settings_reset_property(settings: *Settings, name: [*:0]const 
 pub extern fn g_object_set(object: *anyopaque, first_property_name: [*:0]const u8, ...) void;
 
 pub const DrawingArea = opaque {};
+pub const StyleContext = opaque {};
 pub const SpinButton = opaque {};
 pub const Cairo = opaque {};
 pub const CairoPattern = opaque {};
@@ -1134,6 +1135,8 @@ pub extern fn gtk_drawing_area_set_draw_func(
 ) void;
 pub extern fn gtk_widget_queue_draw(widget: *Widget) void;
 pub extern fn gtk_widget_get_color(widget: *Widget, color: *GdkRGBA) void;
+pub extern fn gtk_widget_get_style_context(widget: *Widget) *StyleContext;
+pub extern fn gtk_style_context_lookup_color(context: *StyleContext, name: [*:0]const u8, color: *GdkRGBA) c_int;
 pub extern fn gtk_gesture_drag_new() *EventController;
 pub extern fn gtk_event_controller_motion_new() *EventController;
 

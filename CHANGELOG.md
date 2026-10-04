@@ -401,6 +401,14 @@
   `orca-gtk` sets display titles in Newsreader and the interface in Geist,
   and bundles Geist Mono, all under the SIL Open Font License and
   installed with their licences to `share/orca/fonts`.
+- **orca-gtk colours come from one token block.** The stylesheet defines
+  the redesign's palette once, as named colours, and every rule and the
+  equaliser graph read them, so no colour is written anywhere else. The
+  palette is cooler and lighter blue, popovers carry a ring and a deep
+  shadow, Settings, Health and genre cards sit on the raised surface,
+  smart playlist tiles and equaliser filters drop their own colours, and
+  keyboard focus shows a 2 px accent ring. New type, control, spacing and
+  radius classes match the design's scale.
 - **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
   panel is one window-wide sidebar, 420 px in every mode, on every page,
   so opening it, changing its mode or changing page never moves the
