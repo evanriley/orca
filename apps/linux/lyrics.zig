@@ -1,8 +1,9 @@
-//! The lyrics page of the details sidebar: the audible Track's lyrics, which
-//! liborca resolves on a job, followed line by line while they are synced.
+//! The audible Track's lyrics, which liborca resolves on a job, followed line
+//! by line while they are synced: in the details sidebar, in the Now Playing
+//! page's panel and in its three-line quote.
 //!
-//! Every details panel carries a `View`; they all draw the one `State`, as
-//! does the Now Playing page's three-line quote. A Track's lyrics are asked
+//! Every details panel carries a `View`, as does the Now Playing page; they
+//! all draw the one `State`, as does the quote. A Track's lyrics are asked
 //! for only while a view or the quote is on screen, and a view that was off
 //! screen when they arrived is drawn when it is shown.
 
@@ -43,17 +44,28 @@ pub const State = struct {
     quote_lines: [3]?*gtk.Widget = @splat(null),
     quote_line: ?usize = null,
     quote_drawn: bool = false,
+    page_view: ?*View = null,
     /// Set at shutdown, after which widgets torn down later start nothing.
     closed: bool = false,
 };
 
+/// Where a `View` sits. The Now Playing panel's lines seek when clicked,
+/// stay a third of the way down while they scroll, and are followed by a
+/// footer that names their source and offset.
+pub const Placement = enum { details, now_playing };
+
 pub const View = struct {
     self: *App,
+    placement: Placement,
     root: *gtk.Widget,
+    stack: *gtk.Widget,
     status: *gtk.Widget,
     scroller: *gtk.Widget,
     list: *gtk.Widget,
     plain: *gtk.Widget,
+    footer: ?*gtk.Widget = null,
+    footer_source: ?*gtk.Label = null,
+    footer_offset: ?*gtk.Label = null,
     labels: std.ArrayList(*gtk.Widget) = .empty,
     line: ?usize = null,
     generation: u64 = 0,
@@ -62,12 +74,23 @@ pub const View = struct {
 
     /// Builds the view in place: its signals keep `view`'s address.
     pub fn init(view: *View, self: *App) void {
+        build(view, self, .details);
+    }
+
+    /// Builds the Now Playing panel's view in place and draws it from now on.
+    pub fn initNowPlaying(view: *View, self: *App) void {
+        build(view, self, .now_playing);
+        self.lyrics.page_view = view;
+    }
+
+    fn build(view: *View, self: *App, placement: Placement) void {
         const status = adw.adw_status_page_new();
         gtk.gtk_widget_add_css_class(status, "compact");
 
         const list = gtk.gtk_list_box_new();
         gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, list), gtk.SELECTION_NONE);
         gtk.gtk_widget_add_css_class(list, "lyrics");
+        if (placement == .now_playing) gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, list), gtk.true_);
         gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, list), gtk.ACCESSIBLE_PROPERTY_LABEL, "Lyrics", @as(c_int, -1));
         const scroller = gtk.gtk_scrolled_window_new();
         gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
@@ -92,24 +115,70 @@ pub const View = struct {
 
         view.* = .{
             .self = self,
+            .placement = placement,
             .root = root,
+            .stack = root,
             .status = status,
             .scroller = scroller,
             .list = list,
             .plain = plain,
         };
+        if (placement == .now_playing) {
+            _ = gtk.signalConnect(list, "row-activated", gtk.callback(lineActivated), view);
+            buildFooter(view);
+        }
         const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller));
         _ = gtk.signalConnect(adjustment, "changed", gtk.callback(adjustmentChanged), view);
-        _ = gtk.signalConnect(root, "map", gtk.callback(mappedChanged), view);
-        _ = gtk.signalConnect(root, "unmap", gtk.callback(mappedChanged), view);
+        _ = gtk.signalConnect(view.root, "map", gtk.callback(mappedChanged), view);
+        _ = gtk.signalConnect(view.root, "unmap", gtk.callback(mappedChanged), view);
     }
 
     pub fn deinit(view: *View) void {
+        if (view.self.lyrics.page_view == view) view.self.lyrics.page_view = null;
         if (view.margin_idle != 0) _ = gtk.g_source_remove(view.margin_idle);
         view.margin_idle = 0;
         view.labels.deinit(view.self.allocator);
     }
 };
+
+/// Wraps the stack in fades at its edges and puts the footer under it.
+fn buildFooter(view: *View) void {
+    const layers = gtk.gtk_overlay_new();
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), view.stack);
+    for ([_][*:0]const u8{ "now-lyrics-fade-top", "now-lyrics-fade-bottom" }, [_]c_int{ gtk.ALIGN_START, gtk.ALIGN_END }) |class, alignment| {
+        const fade = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+        gtk.gtk_widget_add_css_class(fade, class);
+        gtk.gtk_widget_set_valign(fade, alignment);
+        gtk.gtk_widget_set_can_target(fade, gtk.false_);
+        gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), fade);
+    }
+    gtk.gtk_widget_set_vexpand(layers, gtk.true_);
+
+    const source = gtk.gtk_label_new("");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, source), 0.0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, source), gtk.ELLIPSIZE_MIDDLE);
+    gtk.gtk_widget_set_hexpand(source, gtk.true_);
+    gtk.gtk_widget_add_css_class(source, "now-lyrics-source");
+    const icon = gtk.gtk_image_new_from_icon_name("text-x-generic-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 14);
+    const offset = gtk.gtk_label_new("");
+    gtk.gtk_widget_add_css_class(offset, "now-lyrics-offset");
+    const footer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_widget_add_css_class(footer, "now-lyrics-footer");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, footer), icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, footer), source);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, footer), offset);
+    gtk.gtk_widget_set_visible(footer, gtk.false_);
+
+    const root = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(root, "now-lyrics-panel");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, root), layers);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, root), footer);
+    view.root = root;
+    view.footer = footer;
+    view.footer_source = gtk.cast(gtk.Label, source);
+    view.footer_offset = gtk.cast(gtk.Label, offset);
+}
 
 /// Shows, in `lines`, the synced line being heard between the lines before
 /// and after it, or a plain text's first three lines, while `slot` is mapped.
@@ -153,7 +222,7 @@ pub fn shutdown(self: *App) void {
 pub fn sync(self: *App) void {
     const state = &self.lyrics;
     if (state.closed) return;
-    if ((mappedView(self) != null or quoteMapped(self)) and (state.stale or !optionalEql(state.track_id, self.shown_track_id))) {
+    if ((anyViewMapped(self) or quoteMapped(self)) and (state.stale or !optionalEql(state.track_id, self.shown_track_id))) {
         resolve(self, self.shown_track_id);
         redraw(self);
     }
@@ -214,12 +283,25 @@ fn finishJob(self: *App) void {
 fn redraw(self: *App) void {
     self.lyrics.generation +%= 1;
     drawQuote(self);
-    if (mappedView(self)) |view| render(view);
+    for (views(self)) |maybe| {
+        const view = maybe orelse continue;
+        if (viewMapped(view)) render(view);
+    }
 }
 
-fn mappedView(self: *App) ?*View {
-    const panel = self.inspector orelse return null;
-    return if (gtk.gtk_widget_get_mapped(panel.lyrics.root) != 0) &panel.lyrics else null;
+fn views(self: *App) [2]?*View {
+    return .{ if (self.inspector) |panel| &panel.lyrics else null, self.lyrics.page_view };
+}
+
+fn viewMapped(view: *const View) bool {
+    return gtk.gtk_widget_get_mapped(view.root) != 0;
+}
+
+fn anyViewMapped(self: *App) bool {
+    for (views(self)) |maybe| {
+        if (viewMapped(maybe orelse continue)) return true;
+    }
+    return false;
 }
 
 fn mappedChanged(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -321,7 +403,7 @@ fn boolean(value: bool) gtk.gboolean {
 fn adjustmentChanged(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const view: *View = @ptrCast(@alignCast(data.?));
     const half = halfPage(gtk.cast(gtk.Adjustment, adjustment));
-    if (half != view.margin and view.margin_idle == 0) view.margin_idle = gtk.g_idle_add(applyMargins, view);
+    if (view.placement == .details and half != view.margin and view.margin_idle == 0) view.margin_idle = gtk.g_idle_add(applyMargins, view);
     centre(view);
 }
 
@@ -350,7 +432,7 @@ fn syncedLyrics(self: *const App) ?liborca.Lyrics {
 fn step(self: *App) bool {
     const lyrics = syncedLyrics(self) orelse return false;
     const quote_mapped = quoteMapped(self);
-    if (!quote_mapped and mappedView(self) == null) return false;
+    if (!quote_mapped and !anyViewMapped(self)) return false;
     const status = self.runtime.playerStatus(self.player) catch return false;
     if (!optionalEql(status.track_id, self.lyrics.track_id)) {
         hideQuote(self);
@@ -358,8 +440,9 @@ fn step(self: *App) bool {
     }
     const line = lyrics.lineAt(status.position_ms);
     if (quote_mapped) showQuote(self, lyrics, line);
-    if (mappedView(self)) |view| {
-        if (view.generation == self.lyrics.generation) highlight(view, line);
+    for (views(self)) |maybe| {
+        const view = maybe orelse continue;
+        if (viewMapped(view) and view.generation == self.lyrics.generation) highlight(view, line);
     }
     return status.transport == .playing;
 }
@@ -393,6 +476,7 @@ fn render(view: *View) void {
     const self = view.self;
     const state = &self.lyrics;
     view.generation = state.generation;
+    showFooter(view);
     switch (state.resolution) {
         .nothing_playing => showStatus(view, "audio-x-generic-symbolic", "Nothing Playing", "Lyrics follow the track that is playing."),
         .resolving => showStatus(view, null, "Looking for Lyrics…", null),
@@ -424,7 +508,7 @@ fn showStatus(view: *View, icon: ?[*:0]const u8, title: [*:0]const u8, descripti
     adw.adw_status_page_set_icon_name(page, icon);
     adw.adw_status_page_set_title(page, title);
     adw.adw_status_page_set_description(page, description);
-    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.root), "status");
+    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.stack), "status");
 }
 
 fn showSynced(view: *View, lyrics: liborca.Lyrics) void {
@@ -446,12 +530,12 @@ fn showSynced(view: *View, lyrics: liborca.Lyrics) void {
         gtk.gtk_widget_add_css_class(label, "lyrics-line");
         const row = gtk.gtk_list_box_row_new();
         gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), label);
-        gtk.gtk_list_box_row_set_activatable(gtk.cast(gtk.ListBoxRow, row), gtk.false_);
+        gtk.gtk_list_box_row_set_activatable(gtk.cast(gtk.ListBoxRow, row), boolean(view.placement == .now_playing));
         gtk.gtk_list_box_append(list, row);
         view.labels.appendAssumeCapacity(label);
     }
     gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller)), 0.0);
-    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.root), "synced");
+    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.stack), "synced");
 }
 
 fn showPlain(view: *View, lyrics: liborca.Lyrics) void {
@@ -464,7 +548,7 @@ fn showPlain(view: *View, lyrics: liborca.Lyrics) void {
     }
     text.append(allocator, 0) catch return showStatus(view, "dialog-warning-symbolic", "Lyrics Could Not Be Shown", null);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.plain), @ptrCast(text.items.ptr));
-    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.root), "plain");
+    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.stack), "plain");
 }
 
 fn highlight(view: *View, line: ?usize) void {
@@ -490,7 +574,60 @@ fn centre(view: *View) void {
     const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller));
     const page = gtk.gtk_adjustment_get_page_size(adjustment);
     const middle: f64 = bounds.y + bounds.height / 2;
-    gtk.gtk_adjustment_set_value(adjustment, gtk.gtk_adjustment_get_value(adjustment) + middle - page / 2);
+    const anchor: f64 = switch (view.placement) {
+        .details => page / 2,
+        .now_playing => page / 3,
+    };
+    gtk.gtk_adjustment_set_value(adjustment, gtk.gtk_adjustment_get_value(adjustment) + middle - anchor);
+}
+
+fn showFooter(view: *View) void {
+    const footer = view.footer orelse return;
+    const lyrics = foundLyrics(view.self) orelse return gtk.gtk_widget_set_visible(footer, gtk.false_);
+    var source_buffer: [512]u8 = undefined;
+    gtk.gtk_label_set_text(view.footer_source.?, sourceText(&source_buffer, lyrics).ptr);
+    var offset_buffer: [64]u8 = undefined;
+    const offset = offsetText(&offset_buffer, lyrics.offset_ms);
+    gtk.gtk_label_set_text(view.footer_offset.?, offset.ptr);
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, view.footer_offset.?), boolean(offset.len != 0));
+    gtk.gtk_widget_set_visible(footer, gtk.true_);
+}
+
+fn sourceText(buffer: []u8, lyrics: liborca.Lyrics) [:0]const u8 {
+    const kind = switch (lyrics.kind) {
+        .synced => "Synced",
+        .plain => "Plain",
+        .instrumental => "Instrumental",
+    };
+    const name = lyrics.source_name orelse return strings.format(buffer, "{s}", .{kind});
+    if (lyrics.source == .embedded) return strings.format(buffer, "{s} · {s}", .{ kind, name });
+    return strings.format(buffer, "{s} · from {s}", .{ kind, name });
+}
+
+/// "Offset −0.2 s", with a minus sign and no trailing zeros; empty for none.
+fn offsetText(buffer: []u8, offset_ms: i64) [:0]const u8 {
+    if (offset_ms == 0) return strings.format(buffer, "", .{});
+    const magnitude = @abs(offset_ms);
+    var fraction_buffer: [3]u8 = undefined;
+    const fraction = std.fmt.bufPrint(&fraction_buffer, "{d:0>3}", .{magnitude % 1000}) catch unreachable;
+    const digits = std.mem.trimEnd(u8, fraction, "0");
+    const sign = if (offset_ms < 0) "\u{2212}" else "+";
+    if (digits.len == 0) return strings.format(buffer, "Offset {s}{d} s", .{ sign, magnitude / 1000 });
+    return strings.format(buffer, "Offset {s}{d}.{s} s", .{ sign, magnitude / 1000, digits });
+}
+
+fn lineActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const view: *View = @ptrCast(@alignCast(data.?));
+    const self = view.self;
+    if (view.generation != self.lyrics.generation) return;
+    const lyrics = syncedLyrics(self) orelse return;
+    const index = gtk.gtk_list_box_row_get_index(gtk.cast(gtk.ListBoxRow, row.?));
+    if (index < 0 or index >= lyrics.lines.len) return;
+    const status = self.runtime.playerStatus(self.player) catch return;
+    if (!optionalEql(status.track_id, self.lyrics.track_id)) return;
+    _ = self.runtime.playerSeekMs(self.player, lyrics.lines[@intCast(index)].start_ms orelse 0) catch return;
+    self.mpris.notify();
+    self.requestTick();
 }
 
 fn setClass(widget: *gtk.Widget, name: [*:0]const u8, on: bool) void {

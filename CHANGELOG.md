@@ -225,6 +225,31 @@
   `ORCA_GTK_DEBUG=reveal` logs Show in Folder's path instead of opening a
   file manager. `scripts/headless-gui.sh` takes a `dclick:X,Y` step, and
   saves the last frame instead of failing when the window never settles.
+- **Now Playing redesign in orca-gtk.** Now Playing follows the redesign:
+  a 340 px cover with a soft shadow over the artwork backdrop and its
+  vignette, which with the right column runs under a transparent top bar
+  with the Now Playing overline and the search over the centre column and
+  no back and forward buttons, a 48 px serif title, the artist,
+  `ALBUM · YEAR`, a heart, five rating stars and a more button, then three
+  synced lyric lines with Show all lyrics. A right column holds Up Next
+  (ten rows, the playing one tinted, Clear and View Full Album) and Track
+  Info (Album, Date, Genre, Track, Source); Up Next, Lyrics and Info tabs
+  switch it. The Lyrics tab scrolls the whole lyrics with the current line
+  bright, seeks when a synced line is clicked, and ends in a footer naming
+  the source and its offset, such as `Synced · from 01 Dr. Whoever.lrc`
+  and `Offset −0.2 s`. A track without a duration shows `–:––` and an
+  empty seek bar.
+- **Queue page redesign in orca-gtk.** Queue follows the redesign in a
+  980 px column: the remaining track count, the time left when the whole
+  queue is read, and `from` the first entry's album under the title, with
+  Save as Playlist and Clear. Now Playing is a tinted card with a 56 px
+  cover and `1:27 / 4:19`. Up Next rows stack title over artist, with a
+  drag handle and a more button on hover; the more button and a right
+  click open Play Next (Shift+Enter), Play Later, Love (L), Go to Album, Go
+  to Artist, Remove from Queue (Delete) and Save Queue as Playlist…, and
+  the keys act on the focused row. Previously Played rows are dimmed and
+  say `6 min ago`. The sidebar's Queue badge counts the remaining tracks.
+  `scripts/headless-gui.sh` takes a `drag:X1,Y1,X2,Y2` step.
 - **Playlist page and inspector redesign in orca-gtk.** A playlist's page
   follows the redesign: the mosaic over its backdrop, a `Playlist` overline,
   the name in 58 px Newsreader, `By you · 12 tracks · 52 min · Updated

@@ -11,6 +11,8 @@ const palette = @import("palette.zig");
 const window = @import("window.zig");
 const strings = @import("strings.zig");
 const preferences = @import("preferences.zig");
+const nowplaying = @import("nowplaying.zig");
+const smart_playlist_editor = @import("smart_playlist_editor.zig");
 
 const App = app.App;
 
@@ -158,6 +160,18 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildEditorActions(self));
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildSearch(self));
     return bar;
+}
+
+pub fn fitToPage(self: *App) void {
+    const bar = self.top_bar.widget orelse return;
+    const view = self.top_bar.view orelse return;
+    const over = self.current_page == .now_playing;
+    adw.adw_toolbar_view_set_extend_content_to_top_edge(view, @intFromBool(over));
+    const view_widget = gtk.cast(gtk.Widget, view);
+    if (over) gtk.gtk_widget_add_css_class(view_widget, "over-page") else gtk.gtk_widget_remove_css_class(view_widget, "over-page");
+    gtk.gtk_widget_set_margin_end(bar, if (over) nowplaying.panelWidth(self) else 0);
+    for ([_]?*gtk.Widget{ self.top_bar.back, self.top_bar.forward }) |button|
+        if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!over));
 }
 
 pub fn addTrail(self: *App, page: window.Page, crumbs: *gtk.Widget) void {

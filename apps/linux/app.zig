@@ -195,8 +195,6 @@ pub const Appearance = struct {
 pub const default_album_tile_pixels: c_int = 132;
 pub const album_tile_range = [2]c_int{ 88, 184 };
 
-pub const TransportSurface = enum { bar, now_playing };
-
 pub const TransportControls = struct {
     shuffle: ?*gtk.Widget = null,
     previous: ?*gtk.Widget = null,

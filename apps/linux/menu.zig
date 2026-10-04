@@ -266,6 +266,76 @@ pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
     popupModel(widget, gtk.cast(gtk.GMenuModel, menu), x, y);
 }
 
+/// Pops up the "…" menu of a track row for `self.context`.
+pub fn popupRowActions(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
+    const context = &self.context;
+    const queueing = gtk.g_menu_new();
+    defer gtk.g_object_unref(queueing);
+    gtk.g_menu_append(queueing, "Play Next", "app.ctx-play-next");
+    gtk.g_menu_append(queueing, "Play Later", "app.ctx-enqueue");
+    const navigation = gtk.g_menu_new();
+    defer gtk.g_object_unref(navigation);
+    if (context.release_id != null) gtk.g_menu_append(navigation, "Go to Album", "app.ctx-show-album");
+    if (context.artist_id != null) gtk.g_menu_append(navigation, "Go to Artist", "app.ctx-show-artist");
+    const file = gtk.g_menu_new();
+    defer gtk.g_object_unref(file);
+    gtk.g_menu_append(file, "Edit Metadata…", "app.ctx-edit-tags");
+    if (context.tracks.items.len == 1) gtk.g_menu_append(file, "Show in Folder", "app.ctx-show-in-folder");
+    const items = gtk.g_menu_new();
+    defer gtk.g_object_unref(items);
+    if (context.tracks.items.len != 0) gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, queueing));
+    if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, navigation)) != 0)
+        gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, navigation));
+    if (context.tracks.items.len != 0) gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, file));
+    popupModel(widget, gtk.cast(gtk.GMenuModel, items), x, y);
+}
+
+fn appendWithAccel(menu: *gtk.GMenu, label: [*:0]const u8, action: [*:0]const u8, accel: ?[*:0]const u8) void {
+    const item = gtk.g_menu_item_new(label, action);
+    defer gtk.g_object_unref(item);
+    if (accel) |value| gtk.g_menu_item_set_attribute_value(item, "accel", gtk.g_variant_new_string(value));
+    gtk.g_menu_append_item(menu, item);
+}
+
+pub fn popupQueueEntry(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
+    const items = queueEntryModel(self);
+    defer gtk.g_object_unref(items);
+    gtk.gtk_widget_add_css_class(present(widget, gtk.cast(gtk.GMenuModel, items), pointAt(x, y), null), "queue-menu");
+}
+
+pub fn popupQueueEntryBelow(self: *App, button: *gtk.Widget) void {
+    const items = queueEntryModel(self);
+    defer gtk.g_object_unref(items);
+    const bounds: gtk.Rectangle = .{ .x = 0, .y = 0, .width = gtk.gtk_widget_get_width(button), .height = gtk.gtk_widget_get_height(button) };
+    gtk.gtk_widget_add_css_class(present(button, gtk.cast(gtk.GMenuModel, items), bounds, gtk.ALIGN_END), "queue-menu");
+}
+
+fn queueEntryModel(self: *App) *gtk.GMenu {
+    const context = &self.context;
+    const queueing = gtk.g_menu_new();
+    defer gtk.g_object_unref(queueing);
+    appendWithAccel(queueing, "Play Next", "queue.play-next", "<Shift>Return");
+    appendWithAccel(queueing, "Play Later", "queue.play-later", null);
+    const track = gtk.g_menu_new();
+    defer gtk.g_object_unref(track);
+    const loved = context.targets.items.len != 0 and context.targets.items[0].feedback == .loved;
+    if (loved)
+        appendWithAccel(track, "Remove Love", "app.ctx-remove-love", "l")
+    else
+        appendWithAccel(track, "Love", "app.ctx-love", "l");
+    if (context.release_id != null) appendWithAccel(track, "Go to Album", "app.ctx-show-album", null);
+    if (context.artist_id != null) appendWithAccel(track, "Go to Artist", "app.ctx-show-artist", null);
+    const queue = gtk.g_menu_new();
+    defer gtk.g_object_unref(queue);
+    appendWithAccel(queue, "Remove from Queue", "app.ctx-remove", "Delete");
+    appendWithAccel(queue, "Save Queue as Playlist…", "queue.save", null);
+    const items = gtk.g_menu_new();
+    gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, queueing));
+    gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, track));
+    gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, queue));
+    return items;
+}
+
 pub fn popupModel(widget: *gtk.Widget, menu_model: *gtk.GMenuModel, x: f64, y: f64) void {
     _ = present(widget, menu_model, pointAt(x, y), null);
 }

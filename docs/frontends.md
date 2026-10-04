@@ -975,12 +975,13 @@ The window is an `AdwNavigationSplitView`:
   and Play Later, moves it with `playerQueueMove`; when the
   engine refuses with `QueueEntryInUse`, because the entry or the target is
   already lined up, a toast says so and the page reloads unchanged.
-  Previously Played lists `playerQueueHistoryTracks`, newest first, with
-  when each was played; it is shown until Hide, which `settings.ini`
-  remembers, and Clear History calls
-  `playerClearQueueHistory`. Save as Playlist… asks for a name, calls
+  Previously Played lists `playerQueueHistoryTracks`, newest first and
+  dimmed, with when each was played, such as `6 min ago`; it is shown until
+  Hide, which `settings.ini` remembers, and Clear History calls
+  `playerClearQueueHistory`. Save as Playlist asks for a name, calls
   `playerSaveQueueAsPlaylist` (the audible entry and everything after it)
-  and opens the new playlist.
+  and opens the new playlist. The sidebar's Queue badge counts the tracks
+  left.
 
 - **Health** lists what liborca found wrong with the library. The page,
   titled Library Health, opens with the issue count
