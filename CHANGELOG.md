@@ -15,6 +15,10 @@
   scan. The C ABI adds `orca_library_track_details_v3` with an
   `orca_track_details_text_view` and `ORCA_METADATA_FIELD_COMPOSER` (14) and
   `ORCA_METADATA_FIELD_COMMENT` (15).
+- **Sort artist names as written.** `ArtistQuery.name_order` sorts Artists
+  by their name as written rather than by the stored sort key that drops a
+  leading "The", "A" or "An", and `orca-cli artists --sort-as-written`
+  reaches it.
 - **Scan totals and unreadable-file reasons.** A scan now records each file
   it cannot read as an `unreadable_file` health issue with the reason, and
   clears it once the file reads. A scan or reconcile Job now counts the

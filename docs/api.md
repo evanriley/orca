@@ -386,8 +386,11 @@ defer page.deinit();
 - `ReleaseQuery.name_order` (`NameOrder`) sets how `ReleaseSort.artist`
   reads the album artist: `ignore_articles`, the default, files "The Low
   Tides" under L by skipping a leading "The ", "A " or "An "; `as_written`
-  does not. `ReleaseSort.title` and `ReleaseSort.artist` put names that do
-  not start with an ASCII letter first, so each initial is one run.
+  does not. `ArtistQuery.name_order` does the same for `ArtistSort.name`
+  and `ArtistSort.track_count`: `ignore_articles` orders by the stored sort
+  key, `as_written` by the name itself. `ReleaseSort.title` and
+  `ReleaseSort.artist` put names that do not start with an ASCII letter
+  first, so each initial is one run.
 - `libraryReleaseLetterIndex` returns a caller-owned `[]LetterBucket` for a
   `ReleaseQuery` sorted by `title` or `artist` (`error.SortHasNoLetters`
   otherwise): one bucket per initial present, in sort order, each with its

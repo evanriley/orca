@@ -275,8 +275,8 @@ const commands = [_]Command{
     .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
-    .{ .name = "artists", .usage = "artists DATABASE [--album-artists] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listArtists },
-    .{ .name = "releases", .usage = "releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--letters | --totals | --async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
+    .{ .name = "artists", .usage = "artists DATABASE [--album-artists] [--sort-as-written] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listArtists },
+    .{ .name = "releases", .usage = "releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--sort-as-written] [--letters | --totals | --async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
@@ -4782,9 +4782,12 @@ fn listArtists(context: Context) !void {
     var option_arguments: std.ArrayList([]const u8) = .empty;
     defer option_arguments.deinit(allocator);
     var role: liborca.ArtistRole = .all;
+    var name_order: liborca.NameOrder = .ignore_articles;
     for (context.arguments[1..]) |argument| {
         if (std.mem.eql(u8, argument, "--album-artists")) {
             role = .album_artists;
+        } else if (std.mem.eql(u8, argument, "--sort-as-written")) {
+            name_order = .as_written;
         } else try option_arguments.append(allocator, argument);
     }
     const options = try parseBrowseOptions(option_arguments.items);
@@ -4805,6 +4808,7 @@ fn listArtists(context: Context) !void {
         .loved_only = options.loved_only,
         .role = role,
         .sort = sort,
+        .name_order = name_order,
         .limit = options.limit,
         .offset = options.offset,
     });
@@ -4892,6 +4896,7 @@ const ReleaseFilters = struct {
     appearing_artist_id: ?i64 = null,
     own_releases_only: bool = false,
     added_days: ?u32 = null,
+    name_order: liborca.NameOrder = .ignore_articles,
     letters: bool = false,
     totals: bool = false,
     asynchronous: bool = false,
@@ -4938,6 +4943,8 @@ fn parseReleaseFilters(arguments: []const []const u8, remaining: *std.ArrayList(
             filters.own_releases_only = true;
         } else if (std.mem.startsWith(u8, name, "--added-days=")) {
             filters.added_days = try std.fmt.parseInt(u32, name["--added-days=".len..], 10);
+        } else if (std.mem.eql(u8, name, "--sort-as-written")) {
+            filters.name_order = .as_written;
         } else if (std.mem.eql(u8, name, "--letters")) {
             filters.letters = true;
         } else if (std.mem.eql(u8, name, "--totals")) {
@@ -4998,6 +5005,7 @@ fn listReleases(context: Context) !void {
         .has_artwork = filters.has_artwork,
         .added_after = addedAfter(io, filters.added_days),
         .text = if (options.filter.len == 0) null else options.filter,
+        .name_order = filters.name_order,
         .limit = options.limit,
         .offset = options.offset,
     };

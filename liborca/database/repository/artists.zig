@@ -9,6 +9,7 @@ const presentText = columns.presentText;
 const by_artist = @import("tracks.zig").by_artist;
 const by_release_artist = @import("tracks.zig").by_release_artist;
 const ReleaseSort = @import("releases.zig").ReleaseSort;
+const NameOrder = @import("releases.zig").NameOrder;
 const byAppearingArtist = @import("releases.zig").byAppearingArtist;
 const artistsOfGenre = @import("genres.zig").artistsOfGenre;
 const WriteLane = @import("write_lane.zig").WriteLane;
@@ -148,11 +149,13 @@ pub const ArtistRepository = struct {
         var folded: [text_key.key_buffer_size]u8 = undefined;
         const needle = text_key.normalizeInto(&folded, query.filter);
         var statement = switch (query.sort) {
-            inline else => |sort| switch (needle.len != 0) {
-                inline else => |by_needle| switch (query.genre_id != null) {
-                    inline else => |by_genre| switch (query.loved_only) {
-                        inline else => |by_loved| switch (query.role) {
-                            inline else => |role| try self.db.prepare(comptime artistQueryText(sort, by_needle, by_genre, by_loved, role)),
+            inline else => |sort| switch (query.name_order) {
+                inline else => |name_order| switch (needle.len != 0) {
+                    inline else => |by_needle| switch (query.genre_id != null) {
+                        inline else => |by_genre| switch (query.loved_only) {
+                            inline else => |by_loved| switch (query.role) {
+                                inline else => |role| try self.db.prepare(comptime artistQueryText(sort, name_order, by_needle, by_genre, by_loved, role)),
+                            },
                         },
                     },
                 },
@@ -264,7 +267,7 @@ const artist_from = "FROM artists LEFT JOIN artist_loves ON artist_loves.artist_
 const newest_release = "max(COALESCE((SELECT max(releases.id) FROM releases WHERE releases.album_artist_id = artists.id), 0),\n" ++
     "    COALESCE((SELECT max(tracks.release_id) FROM tracks WHERE tracks.artist_id = artists.id), 0))";
 
-fn artistQueryText(comptime sort: ArtistSort, comptime by_needle: bool, comptime by_genre: bool, comptime by_loved: bool, comptime role: ArtistRole) [:0]const u8 {
+fn artistQueryText(comptime sort: ArtistSort, comptime name_order: NameOrder, comptime by_needle: bool, comptime by_genre: bool, comptime by_loved: bool, comptime role: ArtistRole) [:0]const u8 {
     var terms: []const []const u8 = &.{};
     if (by_needle) terms = terms ++ .{"instr(artists.key, ?3) > 0"};
     if (by_genre) terms = terms ++ .{artistsOfGenre("?4")};
@@ -273,7 +276,7 @@ fn artistQueryText(comptime sort: ArtistSort, comptime by_needle: bool, comptime
     var where: []const u8 = "";
     for (terms, 0..) |term, index| where = where ++ (if (index == 0) "WHERE " else " AND ") ++ term;
     if (where.len != 0) where = where ++ "\n";
-    return artist_columns ++ artist_from ++ where ++ "ORDER BY " ++ comptime sort.terms() ++
+    return artist_columns ++ artist_from ++ where ++ "ORDER BY " ++ comptime sort.terms(name_order) ++
         "\nLIMIT ?1 OFFSET ?2;";
 }
 
@@ -329,6 +332,8 @@ pub const ArtistQuery = struct {
     loved_only: bool = false,
     role: ArtistRole = .all,
     sort: ArtistSort = .name,
+    /// How `ArtistSort.name` and `ArtistSort.track_count` read a name.
+    name_order: NameOrder = .ignore_articles,
     limit: u32 = max_page,
     offset: u32 = 0,
 };
@@ -353,10 +358,14 @@ pub const ArtistSort = enum {
     /// order, was added most recently first; Artists with no Release last.
     recently_added,
 
-    fn terms(comptime self: ArtistSort) []const u8 {
+    fn terms(comptime self: ArtistSort, comptime name_order: NameOrder) []const u8 {
+        const by_name = switch (name_order) {
+            .ignore_articles => "artists.sort_name, artists.id",
+            .as_written => "artists.name COLLATE NOCASE, artists.id",
+        };
         return switch (self) {
-            .name => "artists.sort_name, artists.id",
-            .track_count => "5 DESC, artists.sort_name, artists.id",
+            .name => by_name,
+            .track_count => "5 DESC, " ++ by_name,
             .recently_loved => "artist_loves.loved_at IS NULL, artist_loves.loved_at DESC, artists.id",
             .recently_added => newest_release ++ " DESC, artists.id DESC",
         };
@@ -397,6 +406,21 @@ test "artist totals count only the artist's own releases, sum every track their 
     const silent = (try library.artists.totals(4)).?;
     try std.testing.expectEqual(ArtistTotals{ .release_count = 0, .track_count = 0, .duration_ms = 0, .appearance_count = 0 }, silent);
     try std.testing.expectEqual(@as(?ArtistTotals, null), try library.artists.totals(99));
+}
+
+test "an artist listing skips a leading article unless asked to sort names as written" {
+    var library = try openArtistLibrary("name-order");
+    defer library.close();
+    try library.database.exec("INSERT INTO artists(id, name, sort_name) VALUES (5, 'The Beatles', 'beatles');");
+    var ignoring = try library.artists.page(std.testing.allocator, .{});
+    defer ignoring.deinit();
+    var written = try library.artists.page(std.testing.allocator, .{ .name_order = .as_written });
+    defer written.deinit();
+    var ids: [2][5]i64 = undefined;
+    for (ignoring.items, 0..) |item, index| ids[0][index] = item.id;
+    for (written.items, 0..) |item, index| ids[1][index] = item.id;
+    try std.testing.expectEqualSlices(i64, &.{ 5, 3, 1, 2, 4 }, ids[0][0..ignoring.items.len]);
+    try std.testing.expectEqualSlices(i64, &.{ 3, 1, 2, 4, 5 }, ids[1][0..written.items.len]);
 }
 
 test "artists sort by their newest release, filed under them or appeared on, newest first, then by id, with none last" {
