@@ -548,8 +548,12 @@ const help_details =
     \\source, each stage that changes the samples, the output stream,
     \\whether the path could be bit-perfect, and the ReplayGain source and
     \\settings as replay_gain_source=none|track|album|track_fallback
-    \\preamp_db= peak_protection= untagged= peak_limited=. It records listens in the
-    \\Library's play history and never sends them anywhere.
+    \\preamp_db= peak_protection= untagged= peak_limited=, then the format the
+    \\output device itself runs at as device_format=S16LE|S24LE|S24_32LE|S32LE|F32LE
+    \\device_bits= device_rate=, or device_format=- when it is unknown (the device
+    \\is suspended, virtual or not yet reported, or the backend is not PipeWire).
+    \\It records listens in the Library's play history and never sends them
+    \\anywhere.
     \\
     \\play-folder plays every Track below PATH (relative to root ROOT_ID; ""
     \\is the root itself), recursively in path order, at most 10000. It
@@ -2091,7 +2095,7 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
     }
     if (path.reasonList().len > 0) try stdout.writeByte(')');
     try stdout.print(
-        "; replay_gain_source={s} preamp_db={d:.1} peak_protection={s} untagged={s} peak_limited={s}\n",
+        "; replay_gain_source={s} preamp_db={d:.1} peak_protection={s} untagged={s} peak_limited={s}",
         .{
             @tagName(path.replay_gain_source),
             path.preamp_db,
@@ -2103,6 +2107,23 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
             if (path.peak_limited) "yes" else "no",
         },
     );
+    if (path.device_format) |device| {
+        try stdout.print(" device_format={s} device_bits={d} device_rate={d}\n", .{
+            deviceFormatName(device.sample_format),
+            device.sample_format.bitsPerSample(),
+            device.sample_rate,
+        });
+    } else try stdout.writeAll(" device_format=-\n");
+}
+
+fn deviceFormatName(sample_format: liborca.DeviceSampleFormat) []const u8 {
+    return switch (sample_format) {
+        .signed_16 => "S16LE",
+        .signed_24 => "S24LE",
+        .signed_24_32 => "S24_32LE",
+        .signed_32 => "S32LE",
+        .float_32 => "F32LE",
+    };
 }
 
 fn formatName(sample_format: liborca.SampleFormat) []const u8 {

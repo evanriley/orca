@@ -38,6 +38,10 @@ const NativeTiming = extern struct {
     buffered_frames: u64,
     quantum_frames: u32,
     graph_rate: u32,
+    device_rate: u32,
+    device_channels: u16,
+    device_format: u8,
+    reserved: u8,
 };
 extern fn orca_pw_output_timing(?*anyopaque, *NativeTiming) c_int;
 extern fn orca_pw_output_status(?*anyopaque) c_int;
@@ -206,6 +210,7 @@ pub const OutputSession = struct {
             .buffered_frames = native.buffered_frames,
             .backend_quantum_frames = native.quantum_frames,
             .graph_rate_hz = if (native.graph_rate != 0) native.graph_rate else null,
+            .device_format = deviceFormatFrom(&native),
         };
     }
 
@@ -236,9 +241,27 @@ pub const OutputSession = struct {
             else
                 null,
             .graph_rate_hz = current.graph_rate_hz,
+            .device_format = current.device_format,
         };
     }
 };
+
+fn deviceFormatFrom(native: *const NativeTiming) ?contract.DeviceFormat {
+    const sample_format: contract.DeviceSampleFormat = switch (native.device_format) {
+        1 => .signed_16,
+        2 => .signed_24,
+        3 => .signed_24_32,
+        4 => .signed_32,
+        5 => .float_32,
+        else => return null,
+    };
+    if (native.device_rate == 0 or native.device_channels == 0) return null;
+    return .{
+        .sample_format = sample_format,
+        .sample_rate = native.device_rate,
+        .channels = native.device_channels,
+    };
+}
 
 fn requestedLatency(request: contract.OpenRequest) u32 {
     if (request.requested_latency_frames != 0)
@@ -418,6 +441,117 @@ test "a PipeWire output's kind comes from its bus, Bluetooth and HDMI hints, or 
     }));
     try std.testing.expectEqual(.unknown, kindOf(&.{}));
     try std.testing.expectEqual(@as(u8, 0), orca_pw_properties_kind(null));
+}
+
+fn nativeTiming(device_format: u8, device_rate: u32, device_channels: u16) NativeTiming {
+    return .{
+        .sample_time = 0,
+        .monotonic_ns = 0,
+        .device_delay_frames = -1,
+        .queued_frames = 0,
+        .buffered_frames = 0,
+        .quantum_frames = 0,
+        .graph_rate = 0,
+        .device_rate = device_rate,
+        .device_channels = device_channels,
+        .device_format = device_format,
+        .reserved = 0,
+    };
+}
+
+test "a PipeWire device format is reported only when the shim names a format, a rate and channels" {
+    try std.testing.expectEqual(contract.DeviceFormat{
+        .sample_format = .signed_24_32,
+        .sample_rate = 96_000,
+        .channels = 2,
+    }, deviceFormatFrom(&nativeTiming(3, 96_000, 2)).?);
+    try std.testing.expectEqual(
+        contract.DeviceSampleFormat.signed_16,
+        deviceFormatFrom(&nativeTiming(1, 44_100, 2)).?.sample_format,
+    );
+    try std.testing.expectEqual(
+        contract.DeviceSampleFormat.signed_24,
+        deviceFormatFrom(&nativeTiming(2, 48_000, 2)).?.sample_format,
+    );
+    try std.testing.expectEqual(
+        contract.DeviceSampleFormat.signed_32,
+        deviceFormatFrom(&nativeTiming(4, 192_000, 2)).?.sample_format,
+    );
+    try std.testing.expectEqual(
+        contract.DeviceSampleFormat.float_32,
+        deviceFormatFrom(&nativeTiming(5, 48_000, 8)).?.sample_format,
+    );
+    try std.testing.expectEqual(null, deviceFormatFrom(&nativeTiming(0, 0, 0)));
+    try std.testing.expectEqual(null, deviceFormatFrom(&nativeTiming(0, 48_000, 2)));
+    try std.testing.expectEqual(null, deviceFormatFrom(&nativeTiming(6, 48_000, 2)));
+    try std.testing.expectEqual(null, deviceFormatFrom(&nativeTiming(3, 0, 2)));
+    try std.testing.expectEqual(null, deviceFormatFrom(&nativeTiming(3, 96_000, 0)));
+}
+
+extern fn orca_pw_format_pack(*const anyopaque) u64;
+
+const PodProperty = struct { key: u32, type: u32, value: u32 };
+const spa_type_id: u32 = 3;
+const spa_type_int: u32 = 4;
+const audio_raw = [_]PodProperty{
+    .{ .key = 1, .type = spa_type_id, .value = 1 },
+    .{ .key = 2, .type = spa_type_id, .value = 1 },
+};
+
+fn podFormat(properties: []const PodProperty) ?contract.DeviceFormat {
+    var words: [4 + 6 * 8]u32 align(8) = undefined;
+    std.debug.assert(properties.len <= 8);
+    words[0..4].* = .{ @intCast(8 + 24 * properties.len), 15, 0x40003, 4 };
+    for (properties, 0..) |property, index|
+        words[4 + index * 6 ..][0..6].* = .{ property.key, 0, 4, property.type, property.value, 0 };
+    const value = orca_pw_format_pack(&words);
+    return deviceFormatFrom(&nativeTiming(@truncate(value), @truncate(value >> 32), @truncate(value >> 8)));
+}
+
+fn rawFormat(spa_format: u32, rate: u32, channels: u32) ?contract.DeviceFormat {
+    return podFormat(&(audio_raw ++ [_]PodProperty{
+        .{ .key = 0x10001, .type = spa_type_id, .value = spa_format },
+        .{ .key = 0x10003, .type = spa_type_int, .value = rate },
+        .{ .key = 0x10004, .type = spa_type_int, .value = channels },
+    }));
+}
+
+test "a sink's SPA Format param parses to its sample format, rate and channels, and anything else is unknown" {
+    try std.testing.expectEqual(contract.DeviceFormat{
+        .sample_format = .signed_24_32,
+        .sample_rate = 96_000,
+        .channels = 2,
+    }, rawFormat(0x107, 96_000, 2).?);
+    try std.testing.expectEqual(contract.DeviceFormat{
+        .sample_format = .float_32,
+        .sample_rate = 48_000,
+        .channels = 2,
+    }, rawFormat(0x206, 48_000, 2).?);
+    try std.testing.expectEqual(.signed_16, rawFormat(0x103, 44_100, 2).?.sample_format);
+    try std.testing.expectEqual(.signed_16, rawFormat(0x202, 44_100, 2).?.sample_format);
+    try std.testing.expectEqual(.signed_24, rawFormat(0x10f, 88_200, 2).?.sample_format);
+    try std.testing.expectEqual(.signed_24, rawFormat(0x205, 88_200, 2).?.sample_format);
+    try std.testing.expectEqual(.signed_24_32, rawFormat(0x203, 96_000, 2).?.sample_format);
+    try std.testing.expectEqual(.signed_32, rawFormat(0x10b, 192_000, 2).?.sample_format);
+    try std.testing.expectEqual(.signed_32, rawFormat(0x204, 192_000, 2).?.sample_format);
+    try std.testing.expectEqual(.float_32, rawFormat(0x11b, 48_000, 6).?.sample_format);
+
+    try std.testing.expectEqual(null, rawFormat(0x104, 44_100, 2));
+    try std.testing.expectEqual(null, rawFormat(0x102, 44_100, 2));
+    try std.testing.expectEqual(null, rawFormat(0x11d, 48_000, 2));
+    try std.testing.expectEqual(null, rawFormat(0x107, 0, 2));
+    try std.testing.expectEqual(null, rawFormat(0x107, 96_000, 0));
+    try std.testing.expectEqual(null, podFormat(&(audio_raw ++ [_]PodProperty{
+        .{ .key = 0x10001, .type = spa_type_id, .value = 0x107 },
+        .{ .key = 0x10004, .type = spa_type_int, .value = 2 },
+    })));
+    try std.testing.expectEqual(null, podFormat(&.{
+        .{ .key = 1, .type = spa_type_id, .value = 2 },
+        .{ .key = 2, .type = spa_type_id, .value = 1 },
+        .{ .key = 0x10001, .type = spa_type_id, .value = 0x107 },
+        .{ .key = 0x10003, .type = spa_type_int, .value = 96_000 },
+        .{ .key = 0x10004, .type = spa_type_int, .value = 2 },
+    }));
 }
 
 const ScriptedDiscovery = struct {

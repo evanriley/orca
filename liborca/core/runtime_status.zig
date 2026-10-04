@@ -312,6 +312,7 @@ pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.Sig
         .output = if (engine) |value| value.outputFormat() else null,
         .device_rate = if (engine) |value| value.deviceRate() else null,
         .device_quantum_frames = if (engine) |value| value.deviceQuantum() else null,
+        .device_format = if (engine) |value| value.deviceFormat() else null,
     });
     if (engine) |value| path.output_kind = value.outputDeviceKind();
     return path;

@@ -49,6 +49,15 @@ struct orca_pw_device {
     uint32_t rate_max;
 };
 
+enum orca_pw_sample_format {
+    ORCA_PW_FORMAT_UNKNOWN = 0,
+    ORCA_PW_FORMAT_S16 = 1,
+    ORCA_PW_FORMAT_S24 = 2,
+    ORCA_PW_FORMAT_S24_32 = 3,
+    ORCA_PW_FORMAT_S32 = 4,
+    ORCA_PW_FORMAT_F32 = 5,
+};
+
 enum orca_pw_discovery_phase {
     ORCA_PW_DISCOVERY_LISTING = 0,
     ORCA_PW_DISCOVERY_CAPABILITIES = 1,
@@ -58,6 +67,7 @@ enum orca_pw_discovery_phase {
 struct orca_pw_discovery;
 
 struct spa_dict;
+struct spa_pod;
 
 struct orca_pw_timing {
     uint64_t sample_time;
@@ -67,6 +77,10 @@ struct orca_pw_timing {
     uint64_t buffered_frames;
     uint32_t quantum_frames;
     uint32_t graph_rate;
+    uint32_t device_rate;
+    uint16_t device_channels;
+    uint8_t device_format;
+    uint8_t reserved;
 };
 
 const char *orca_pw_library_version(void);
@@ -79,6 +93,7 @@ int orca_pw_discovery_iterate(struct orca_pw_discovery *discovery,
                               int timeout_ms);
 uint32_t orca_pw_discovery_finish(struct orca_pw_discovery *discovery);
 uint8_t orca_pw_properties_kind(const struct spa_dict *props);
+uint64_t orca_pw_format_pack(const struct spa_pod *param);
 struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
                                               uint32_t sample_rate,
                                               uint32_t channels,

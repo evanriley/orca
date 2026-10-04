@@ -186,7 +186,12 @@ defer page.deinit();
   centre frequencies, in `Equalizer.gains_db` order. `SignalPath` also
   reports the ReplayGain settings (`preamp_db`, `peak_protection`,
   `fallback`) and `peak_limited`, true when peak protection lowered the
-  audible entry's correction.
+  audible entry's correction. `device_format`, a `DeviceFormat`
+  (`DeviceSampleFormat`, rate and channels), is the format the output
+  device itself runs at, null when it is unknown: suspended, virtual, not
+  reported yet, or not on PipeWire. A known integer format adds
+  `sample_format_conversion`, and another rate `sample_rate_conversion`;
+  null leaves the reasons as they are.
 - `playerSetReplayGainMode` takes a `ReplayGainMode`: `off`, `track`, `album`,
   or `smart` (album while a neighbour in playback order shares the Release,
   track otherwise). `playerSetReplayGainPreamp` (dB, clamped to ±15),

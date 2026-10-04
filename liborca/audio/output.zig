@@ -102,6 +102,7 @@ pub const TestBackend = struct {
     /// When set, the next `open` fails. Models a device that will not reopen.
     fail_next_open: bool = false,
     fail_device_id: ?u64 = null,
+    device_format: ?contract.DeviceFormat = null,
     opens: usize = 0,
     discoveries: std.atomic.Value(usize) = .init(0),
 
@@ -241,6 +242,7 @@ pub const TestBackend = struct {
             .dsp_frames = dsp_frames,
             .hardware_frames = null,
             .graph_rate_hz = null,
+            .device_format = stream.backend.device_format,
         };
     }
 
@@ -249,7 +251,8 @@ pub const TestBackend = struct {
         stream.state_waker = waker;
     }
 
-    fn streamTiming(_: ?*anyopaque) anyerror!contract.TimingSnapshot {
+    fn streamTiming(context: ?*anyopaque) anyerror!contract.TimingSnapshot {
+        const stream: *Stream = @ptrCast(@alignCast(context.?));
         return .{
             .sample_time = 0,
             .monotonic_ns = 0,
@@ -258,6 +261,7 @@ pub const TestBackend = struct {
             .buffered_frames = 0,
             .backend_quantum_frames = 256,
             .graph_rate_hz = null,
+            .device_format = stream.backend.device_format,
         };
     }
 };

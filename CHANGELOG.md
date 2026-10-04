@@ -93,6 +93,21 @@
   `enumerateOutputDevices` takes a `DiscoveryDetail`: `.identity` skips the
   format round, and the frontend asks for `.capabilities` only when the
   picker opens.
+- **Device format in the signal path.** While a stream plays, the PipeWire
+  backend follows its links to the sink node and reads that node's
+  `SPA_PARAM_Format` on the loop thread, again whenever its params change,
+  and publishes it through an atomic. `SignalPath` gains `device_format`, a
+  `DeviceFormat` of `DeviceSampleFormat` (16, 24, 24-in-32 or 32-bit integer,
+  or 32-bit float), rate and channels; it is null while the device is
+  suspended, virtual or has not reported it, and on other backends. A known
+  integer format adds `sample_format_conversion`, and a rate other than the
+  stream's `sample_rate_conversion`. `orca-cli play-tracks` ends its
+  `signal:` line with `device_format= device_bits= device_rate=`, or
+  `device_format=-`. The C ABI appends `orca_device_format` to
+  `orca_signal_path_view` with `orca_device_sample_format`. orca-gtk's
+  Output stage shows the device's format and the float stream converted into
+  it, and the closing verdict names the conversion or says the format is
+  unknown.
 - **Folder entries with images, status and last scan.** Scans record the
   PNG, JPEG, GIF, WebP and BMP files beside the music in `folder_images`
   (schema version 45), never as Tracks, with a role from the file name

@@ -901,6 +901,60 @@ test "a Player's signal path names the open device's kind and quantum, and neith
     try runtime.destroyPlayer(player);
 }
 
+test "a Player's signal path names the device's own format while its output is open" {
+    const device_format: audio.backend.DeviceFormat = .{
+        .sample_format = .signed_24_32,
+        .sample_rate = 48_000,
+        .channels = 2,
+    };
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = device_format,
+    };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(
+        player,
+        std.testing.io,
+        "fixtures/audio/generated-reference.wav",
+    );
+
+    var path = try runtime.playerSignalPath(player);
+    try std.testing.expectEqual(@as(?audio.backend.DeviceFormat, null), path.device_format);
+
+    try runtime.zoneRequestOutput(zone, 1);
+    try runtime.playPlayer(player);
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (path.device_format == null and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        path = try runtime.playerSignalPath(player);
+    }
+    try std.testing.expectEqual(device_format, path.device_format.?);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expect(hasReason(path, .sample_format_conversion));
+    try std.testing.expect(!hasReason(path, .sample_rate_conversion));
+
+    try runtime.zoneCloseOutput(zone);
+    deadline = .init(5_000);
+    while (path.output != null and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
+        path = try runtime.playerSignalPath(player);
+    }
+    try std.testing.expectEqual(@as(?audio.backend.DeviceFormat, null), path.device_format);
+    try std.testing.expect(!hasReason(path, .sample_format_conversion));
+
+    try runtime.destroyZone(zone);
+    try runtime.destroyPlayer(player);
+}
+
 test "a Player's signal path reports sample processing only while DSP or volume is in effect" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();

@@ -273,7 +273,11 @@ The boundary covers the whole engine, not a fragment of it:
   format and codec, the output and device formats, the processing applied and
   each `orca_signal_reason` the path is not bit-perfect, with the device's
   period in `device_quantum_frames` (valid when `has_device_quantum`) and how
-  it is attached in `output_kind`, an `orca_device_kind`.
+  it is attached in `output_kind`, an `orca_device_kind`. `device_format`, an
+  `orca_device_format`, is the format the device itself runs at: an
+  `orca_device_sample_format`, bits per sample, rate and channels, or
+  `ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN` with every field zero while the device
+  is suspended, virtual or has not reported it, and off PipeWire.
 - **Parametric equalizer.** `orca_player_set_parametric_equalizer` turns it
   on with an `orca_parametric_equalizer` of up to 16 `orca_parametric_filter`s
   and a preamp, turning the ten-band equalizer off, or off with NULL;
@@ -1422,7 +1426,7 @@ to the path is left out, not shown empty:
 | Volume | below full volume | percent | |
 | Engine | always | output depth | `Orca audio engine · no resampling`, or the rates it resamples between |
 | System | an output is open | PipeWire | the device rate, or the rates PipeWire resamples between |
-| Output | an output is open | USB, PCI, Bluetooth, HDMI or Virtual | device name; what is sent, `44.1 kHz · 32-bit float · 2 ch` |
+| Output | an output is open | USB, PCI, Bluetooth, HDMI or Virtual | device name; the device's own format, `96 kHz · 24-bit · 2 ch`, and `Converted from Orca's 32-bit float` for an integer format, or while it is unknown what is sent, `44.1 kHz · 32-bit float · 2 ch` |
 
 A stage that changes the samples has an accent node and a `Changes
 samples` line. Clicking a stage shows or hides its detail; the equalizer
@@ -1435,8 +1439,12 @@ the stream has run and says that PipeWire's own volume and resampling are
 not visible to Orca. A closing card gives the verdict in words, built from
 `SignalPath.reasons`: "Bit-perfect: nothing changes the samples between
 source and output.", or "Not bit-perfect:" and what changes the samples,
-remixes, rounds or is lossy, then where resampling happens or "Nothing is
-resampled between source and output.". The player bar's format button and
+remixes, rounds, converts to the device's integer format ("the samples are
+converted to the device's 24-bit format.") or is lossy, then where resampling
+happens or "Nothing is resampled between source and output.", and "The
+device's own format is unknown." while an output is open and
+`SignalPath.device_format` is null. The Output stage changes the samples
+when the device's format is an integer one. The player bar's format button and
 the output picker's Signal Path link open it in the inspector's Signal
 Path mode on a page with an inspector, and the format button opens a
 popover on any other page. It comes from `Runtime.playerSignalPath`,

@@ -18,6 +18,28 @@ pub const DeviceCapabilities = struct {
     pub const bit_depth_32: u8 = 4;
 };
 
+pub const DeviceSampleFormat = enum(u8) {
+    signed_16,
+    signed_24,
+    signed_24_32,
+    signed_32,
+    float_32,
+
+    pub fn bitsPerSample(self: DeviceSampleFormat) u8 {
+        return switch (self) {
+            .signed_16 => 16,
+            .signed_24, .signed_24_32 => 24,
+            .signed_32, .float_32 => 32,
+        };
+    }
+};
+
+pub const DeviceFormat = struct {
+    sample_format: DeviceSampleFormat,
+    sample_rate: u32,
+    channels: u16,
+};
+
 pub const DiscoveryDetail = enum { identity, capabilities };
 
 pub const Device = struct {
@@ -53,6 +75,7 @@ pub const TimingSnapshot = struct {
     buffered_frames: u64,
     backend_quantum_frames: u32,
     graph_rate_hz: ?u32,
+    device_format: ?DeviceFormat = null,
 };
 
 /// Platform implementations own discovery and stream lifecycle. Audio callback

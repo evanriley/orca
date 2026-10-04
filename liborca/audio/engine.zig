@@ -248,6 +248,13 @@ pub const PlayerEngine = struct {
         return if (frames == 0) null else frames;
     }
 
+    /// Control lane, under `quiesce`. The sample format the clock Zone's
+    /// device node runs at, or null while it is unknown.
+    pub fn deviceFormat(self: *const PlayerEngine) ?contract.DeviceFormat {
+        const zone_value = self.clock_zone orelse return null;
+        return zone_value.publishedDeviceFormat();
+    }
+
     /// Control lane, under `quiesce`. How the clock Zone's open device is
     /// attached, resolved once when its output opened.
     pub fn outputDeviceKind(self: *const PlayerEngine) contract.DeviceKind {

@@ -67,6 +67,23 @@ pub fn streamFormat(format: pcm.Format) pcm.Format {
     };
 }
 
+fn packDeviceFormat(format: ?contract.DeviceFormat) u64 {
+    const value = format orelse return 0;
+    return @as(u64, value.sample_rate) << 32 |
+        @as(u64, value.channels) << 8 |
+        (@as(u64, @intFromEnum(value.sample_format)) + 1);
+}
+
+fn unpackDeviceFormat(bits: u64) ?contract.DeviceFormat {
+    const tag: u8 = @truncate(bits);
+    if (tag == 0) return null;
+    return .{
+        .sample_format = std.enums.fromInt(contract.DeviceSampleFormat, tag - 1) orelse return null,
+        .sample_rate = @truncate(bits >> 32),
+        .channels = @truncate(bits >> 8),
+    };
+}
+
 pub const ZoneRuntime = struct {
     allocator: std.mem.Allocator,
     zone: zone_model.Zone,
@@ -96,6 +113,7 @@ pub const ZoneRuntime = struct {
     published_recovery_attempts: std.atomic.Value(u32) = .init(0),
     published_quantum_frames: std.atomic.Value(u32) = .init(0),
     published_graph_rate_hz: std.atomic.Value(u32) = .init(0),
+    published_device_format: std.atomic.Value(u64) = .init(0),
 
     // Engine-thread-only state.
     output: ?output_api.Output = null,
@@ -186,7 +204,16 @@ pub const ZoneRuntime = struct {
         changed = self.published_recovery_attempts.swap(recovery_attempts, .release) != recovery_attempts or changed;
         changed = self.published_quantum_frames.swap(quantum_frames, .release) != quantum_frames or changed;
         changed = self.published_graph_rate_hz.swap(graph_rate_hz, .release) != graph_rate_hz or changed;
+        const device_format = if (self.zone.output_state == .active)
+            packDeviceFormat(self.zone.latency.device_format)
+        else
+            0;
+        changed = self.published_device_format.swap(device_format, .release) != device_format or changed;
         return changed;
+    }
+
+    pub fn publishedDeviceFormat(self: *const ZoneRuntime) ?contract.DeviceFormat {
+        return unpackDeviceFormat(self.published_device_format.load(.acquire));
     }
 
     /// Producer-side view of this Zone for one fanout pass. The render-ahead
@@ -338,6 +365,30 @@ test "a Zone owns the atomics its render callback reads" {
         &runtime_zone.entry_anchor,
         runtime_zone.context.entry_anchor.?,
     );
+}
+
+test "a Zone publishes its device format only while its output is active" {
+    var runtime_zone = try ZoneRuntime.create(std.testing.allocator);
+    defer runtime_zone.destroy();
+    const format: contract.DeviceFormat = .{
+        .sample_format = .signed_24_32,
+        .sample_rate = 96_000,
+        .channels = 2,
+    };
+    runtime_zone.zone.latency.device_format = format;
+
+    runtime_zone.zone.output_state = .active;
+    try std.testing.expect(runtime_zone.publishStateChanged());
+    try std.testing.expectEqual(format, runtime_zone.publishedDeviceFormat().?);
+
+    runtime_zone.zone.output_state = .failed;
+    try std.testing.expect(runtime_zone.publishStateChanged());
+    try std.testing.expectEqual(null, runtime_zone.publishedDeviceFormat());
+
+    runtime_zone.zone.output_state = .active;
+    runtime_zone.zone.latency.device_format = null;
+    _ = runtime_zone.publishStateChanged();
+    try std.testing.expectEqual(null, runtime_zone.publishedDeviceFormat());
 }
 
 test "closing an output lets a Zone reclaim every prepared block" {

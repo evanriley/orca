@@ -186,7 +186,7 @@ zig build run -- smart-playlist-count DATABASE RULES_FILE [--sample=N]   # count
 zig build run -- play AUDIO [DEVICE_ID]
 zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
     [--replay-gain=off|track|album|smart] [--preamp=DB] [--untagged=-6|as-is] [--no-peak-protection]
-    [--stop-after-current]   # stops when the first entry heard ends; the signal line ends `replay_gain_source= preamp_db= peak_protection= untagged= peak_limited=`
+    [--stop-after-current]   # stops when the first entry heard ends; the signal line ends `replay_gain_source= preamp_db= peak_protection= untagged= peak_limited= device_format=S24_32LE device_bits=24 device_rate=96000`, or `device_format=-` when the device's own format is unknown (suspended, virtual, not yet reported, or not PipeWire)
     [--volume=LINEAR] [--set-volume=MS:LINEAR]
     [--eq=PRESET|G1,...,G10[:PREAMP] | --peq=FILE] [--crossfeed=0..1]   # prints a `signal:` line; FILE is EqualizerAPO text
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min

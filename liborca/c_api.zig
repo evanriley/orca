@@ -994,6 +994,13 @@ pub const PcmFormatView = extern struct {
     _reserved: [1]u8 = @splat(0),
 };
 
+pub const DeviceFormatView = extern struct {
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u8,
+    sample_format: u8,
+};
+
 const signal_max_reasons = 8;
 
 comptime {
@@ -1034,10 +1041,11 @@ pub const SignalPathView = extern struct {
     fallback: u8,
     peak_limited: u8,
     _reserved2: [1]u8 = @splat(0),
+    device_format: DeviceFormatView,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(SignalPathView) == 408);
+    std.debug.assert(@sizeOf(SignalPathView) == 416);
 }
 
 pub const ReplayGainSettingsView = extern struct {
@@ -6898,6 +6906,26 @@ fn exportPcmFormat(format: ?audio.pcm.Format) PcmFormatView {
     };
 }
 
+pub fn exportDeviceSampleFormat(format: audio.backend.DeviceSampleFormat) u8 {
+    return switch (format) {
+        .signed_16 => 1,
+        .signed_24 => 2,
+        .signed_24_32 => 3,
+        .signed_32 => 4,
+        .float_32 => 5,
+    };
+}
+
+pub fn exportDeviceFormat(format: ?audio.backend.DeviceFormat) DeviceFormatView {
+    const value = format orelse return std.mem.zeroes(DeviceFormatView);
+    return .{
+        .sample_rate = value.sample_rate,
+        .channels = value.channels,
+        .bits_per_sample = value.sample_format.bitsPerSample(),
+        .sample_format = exportDeviceSampleFormat(value.sample_format),
+    };
+}
+
 fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
     var view: SignalPathView = .{
         .source = exportPcmFormat(path.source),
@@ -6931,6 +6959,7 @@ fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
         .peak_protection = @intFromBool(path.peak_protection),
         .fallback = exportUntaggedFallback(path.fallback),
         .peak_limited = @intFromBool(path.peak_limited),
+        .device_format = exportDeviceFormat(path.device_format),
     };
     for (path.reasonList(), 0..) |reason, index| view.reasons[index] = exportSignalReason(reason);
     return view;
@@ -8290,6 +8319,7 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(@as(u8, 0), path.has_device_quantum);
     try std.testing.expectEqual(exportReplayGainSource(.none), path.replay_gain_source);
     try std.testing.expectEqual(@as(u8, 0), path.has_replay_gain_track);
+    try std.testing.expectEqual(std.mem.zeroes(DeviceFormatView), path.device_format);
 
     try std.testing.expectEqual(Status.ok, orca_player_set_crossfeed(runtime, player, 1, 0.5));
     try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));

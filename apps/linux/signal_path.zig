@@ -104,6 +104,13 @@ fn systemResamples(path: liborca.SignalPath) bool {
     return device_rate != output.sample_rate;
 }
 
+fn deviceConvertsFormat(path: liborca.SignalPath) ?liborca.DeviceFormat {
+    const output = path.output orelse return null;
+    const device = path.device_format orelse return null;
+    if (device.sample_format == .float_32 and output.sample_format == .float_32) return null;
+    return device;
+}
+
 fn orcaRemixes(path: liborca.SignalPath) bool {
     const source = path.source orelse return false;
     const output = path.output orelse return false;
@@ -273,8 +280,10 @@ pub fn writeFooter(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writ
     if (path.source == null) return writer.writeAll(nothing_playing ++ ".");
     if (path.output == null) return writer.writeAll("No output is open yet.");
     const reasons = path.reasonList();
-    if (reasons.len == 0 and path.bit_perfect_eligible)
-        return writer.writeAll("Bit-perfect: nothing changes the samples between source and output.");
+    if (reasons.len == 0 and path.bit_perfect_eligible) {
+        try writer.writeAll("Bit-perfect: nothing changes the samples between source and output.");
+        return writeDeviceFormatUnknown(writer, path);
+    }
     try writer.writeAll("Not bit-perfect:");
     var first = true;
     for (reasons) |reason| {
@@ -290,7 +299,11 @@ pub fn writeFooter(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writ
             }),
             .sample_format_conversion => {
                 try writeStart(writer, first, "the");
-                try writer.writeAll(" samples are rounded to fit the output's format.");
+                if (deviceConvertsFormat(path)) |device| {
+                    try writer.writeAll(" samples are converted to the device's ");
+                    try writeDeviceDepth(writer, device.sample_format);
+                    try writer.writeAll(" format.");
+                } else try writer.writeAll(" samples are rounded to fit the output's format.");
             },
             .lossy_source => {
                 try writeStart(writer, first, "the");
@@ -300,6 +313,12 @@ pub fn writeFooter(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writ
         first = false;
     }
     try writeResampling(writer, path);
+    try writeDeviceFormatUnknown(writer, path);
+}
+
+fn writeDeviceFormatUnknown(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Error!void {
+    if (path.output != null and path.device_format == null)
+        try writer.writeAll(" The device's own format is unknown.");
 }
 
 fn writeChangers(writer: *std.Io.Writer, path: liborca.SignalPath, first: bool) std.Io.Writer.Error!void {
@@ -375,7 +394,8 @@ pub fn applies(path: liborca.SignalPath, stage: Stage, context: Context) bool {
 
 pub fn changesSamples(path: liborca.SignalPath, stage: Stage) bool {
     return switch (stage) {
-        .source, .output => false,
+        .source => false,
+        .output => deviceConvertsFormat(path) != null,
         .replay_gain => path.replay_gain_db != null,
         .parametric => if (path.parametric) |parametric| !parametric.isIdentity() else false,
         .graphic => if (path.equalizer) |equalizer| equalizer.isActive() else false,
@@ -493,7 +513,15 @@ pub fn writeLines(writer: *std.Io.Writer, path: liborca.SignalPath, stage: Stage
         .output => {
             try writer.writeAll(if (context.device.len != 0) context.device else "System default");
             try writer.writeByte('\n');
-            try writeSending(writer, path);
+            const device = path.device_format orelse return writeSending(writer, path);
+            try writeRate(writer, device.sample_rate);
+            try writer.writeAll(dot);
+            try writeDeviceDepth(writer, device.sample_format);
+            try writer.print(dot ++ "{d} ch", .{device.channels});
+            if (deviceConvertsFormat(path) != null) {
+                try writer.writeAll("\nConverted from Orca's ");
+                try writeDepth(writer, path.output.?);
+            }
         },
     }
 }
@@ -688,6 +716,10 @@ fn writeDepth(writer: *std.Io.Writer, format: liborca.PcmFormat) std.Io.Writer.E
         else => "",
     };
     try writer.print("{d}-bit{s}", .{ format.bits_per_sample, suffix });
+}
+
+fn writeDeviceDepth(writer: *std.Io.Writer, format: liborca.DeviceSampleFormat) std.Io.Writer.Error!void {
+    try writer.print("{d}-bit{s}", .{ format.bitsPerSample(), if (format == .float_32) " float" else "" });
 }
 
 fn writeRateNumber(writer: *std.Io.Writer, hertz: u32) std.Io.Writer.Error!void {
@@ -1102,19 +1134,19 @@ test "the System detail leads with the output's block size once it is known" {
 
 test "the closing verdict names what changes the samples and what resamples" {
     try expectWritten(
-        "Not bit-perfect: ReplayGain and EQ change the samples. Nothing is resampled between source and output.",
+        "Not bit-perfect: ReplayGain and EQ change the samples. Nothing is resampled between source and output. The device's own format is unknown.",
         writeFooter,
         .{hd650Path()},
     );
-    try expectWritten("Bit-perfect: nothing changes the samples between source and output.", writeFooter, .{flacPath()});
+    try expectWritten("Bit-perfect: nothing changes the samples between source and output. The device's own format is unknown.", writeFooter, .{flacPath()});
     var orca = withReason(flacPath(), .sample_rate_conversion);
     orca.output.?.sample_rate = 96_000;
     orca.device_rate = 96_000;
-    try expectWritten("Not bit-perfect: Orca resamples 44.1 → 96 kHz.", writeFooter, .{orca});
+    try expectWritten("Not bit-perfect: Orca resamples 44.1 → 96 kHz. The device's own format is unknown.", writeFooter, .{orca});
     var lossy = withReason(flacPath(), .lossy_source);
     lossy.device_rate = 48_000;
     try expectWritten(
-        "Not bit-perfect: the source is lossy, so no path from it is bit-perfect. PipeWire resamples 44.1 → 48 kHz.",
+        "Not bit-perfect: the source is lossy, so no path from it is bit-perfect. PipeWire resamples 44.1 → 48 kHz. The device's own format is unknown.",
         writeFooter,
         .{lossy},
     );
@@ -1123,14 +1155,62 @@ test "the closing verdict names what changes the samples and what resamples" {
     mixed.volume = 0.5;
     mixed.replay_gain_db = -1;
     try expectWritten(
-        "Not bit-perfect: the source is lossy, so no path from it is bit-perfect. ReplayGain, crossfeed and volume change the samples. Nothing is resampled between source and output.",
+        "Not bit-perfect: the source is lossy, so no path from it is bit-perfect. ReplayGain, crossfeed and volume change the samples. Nothing is resampled between source and output. The device's own format is unknown.",
         writeFooter,
         .{mixed},
     );
     var crossfeed = withReason(flacPath(), .sample_processing);
     crossfeed.crossfeed = 0.3;
     crossfeed.device_rate = null;
-    try expectWritten("Not bit-perfect: crossfeed changes the samples.", writeFooter, .{crossfeed});
+    try expectWritten("Not bit-perfect: crossfeed changes the samples. The device's own format is unknown.", writeFooter, .{crossfeed});
+}
+
+test "a known device format names the conversion into it and drops the unknown note" {
+    const float_device: liborca.DeviceFormat = .{ .sample_format = .float_32, .sample_rate = 44_100, .channels = 2 };
+    var float_path = flacPath();
+    float_path.device_format = float_device;
+    try expectWritten("Bit-perfect: nothing changes the samples between source and output.", writeFooter, .{float_path});
+    var integer = withReason(flacPath(), .sample_format_conversion);
+    integer.device_format = .{ .sample_format = .signed_24_32, .sample_rate = 44_100, .channels = 2 };
+    try expectWritten(
+        "Not bit-perfect: the samples are converted to the device's 24-bit format. Nothing is resampled between source and output.",
+        writeFooter,
+        .{integer},
+    );
+    var rounded = withReason(flacPath(), .sample_format_conversion);
+    rounded.device_format = float_device;
+    try expectWritten(
+        "Not bit-perfect: the samples are rounded to fit the output's format. Nothing is resampled between source and output.",
+        writeFooter,
+        .{rounded},
+    );
+    var closed = flacPath();
+    closed.output = null;
+    try expectWritten("No output is open yet.", writeFooter, .{closed});
+}
+
+test "the Output stage names the device's own format once it is known, and the float stream converted into it" {
+    var path = hd650Path();
+    path.device_format = .{ .sample_format = .signed_24_32, .sample_rate = 96_000, .channels = 2 };
+    path.device_rate = 96_000;
+    try expectStage(
+        path,
+        hd650_context,
+        .output,
+        "USB",
+        "Topping DX7 Pro\n96 kHz · 24-bit · 2 ch\nConverted from Orca's 32-bit float",
+        true,
+    );
+    path.device_format = .{ .sample_format = .signed_16, .sample_rate = 44_100, .channels = 2 };
+    try expectWritten("Topping DX7 Pro\n44.1 kHz · 16-bit · 2 ch\nConverted from Orca's 32-bit float", writeLines, .{ path, Stage.output, hd650_context });
+    path.device_format = .{ .sample_format = .signed_32, .sample_rate = 44_100, .channels = 2 };
+    try expectWritten("Topping DX7 Pro\n44.1 kHz · 32-bit · 2 ch\nConverted from Orca's 32-bit float", writeLines, .{ path, Stage.output, hd650_context });
+    path.device_format = .{ .sample_format = .float_32, .sample_rate = 48_000, .channels = 2 };
+    path.device_rate = 48_000;
+    try expectStage(path, hd650_context, .output, "USB", "Topping DX7 Pro\n48 kHz · 32-bit float · 2 ch", false);
+    path.device_format = null;
+    path.device_rate = 44_100;
+    try expectStage(path, hd650_context, .output, "USB", "Topping DX7 Pro\n44.1 kHz · 32-bit float · 2 ch", false);
 }
 
 test "a format names bit depth over kilohertz, dropping what is unknown" {

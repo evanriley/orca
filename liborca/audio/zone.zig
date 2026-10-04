@@ -1,3 +1,5 @@
+const backend = @import("backend.zig");
+
 pub const RenderPolicy = union(enum) {
     robust,
     interactive,
@@ -48,6 +50,7 @@ pub const Latency = struct {
     dsp_frames: u32,
     hardware_frames: ?u32,
     graph_rate_hz: ?u32,
+    device_format: ?backend.DeviceFormat = null,
 
     pub fn knownTotalFrames(self: Latency) u64 {
         return @as(u64, self.render_ahead_frames) +

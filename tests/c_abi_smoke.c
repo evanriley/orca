@@ -1294,6 +1294,8 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
     SMOKE_CHECK(heard);
     SMOKE_CHECK(path.view.device_quantum_frames != 0);
     SMOKE_CHECK(path.view.output_kind == ORCA_DEVICE_KIND_VIRTUAL);
+    SMOKE_CHECK(path.view.device_format.sample_format == ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN);
+    SMOKE_CHECK(path.view.device_format.sample_rate == 0);
     SMOKE_CHECK(path.view.has_equalizer == 1);
     SMOKE_CHECK(memcmp(&path.view.equalizer, &bass, sizeof bass) == 0);
     SMOKE_CHECK(path.view.has_crossfeed == 1 && path.view.crossfeed == 0.5f);

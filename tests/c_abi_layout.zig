@@ -87,6 +87,7 @@ const struct_pairs = .{
     .{ c_api.ParametricEqualizerView, c.orca_parametric_equalizer },
     .{ c_api.PcmFormatView, c.orca_pcm_format },
     .{ c_api.SignalPathView, c.orca_signal_path_view },
+    .{ c_api.DeviceFormatView, c.orca_device_format },
     .{ c_api.ReplayGainSettingsView, c.orca_replay_gain_settings },
     .{ c_api.JobSnapshot, c.orca_job_snapshot },
     .{ c_api.JobDetails, c.orca_job_details },
@@ -461,6 +462,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_DEVICE_SAMPLE_FORMAT_";
+        pub const Tag = audio.backend.DeviceSampleFormat;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportDeviceSampleFormat(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_DEVICE_STATE_";
         pub const Tag = audio.backend.DeviceState;
         pub fn produce(tag: Tag) ?i64 {
@@ -692,6 +700,7 @@ const non_enum_constants = [_][]const u8{
     "ORCA_DEVICE_BIT_DEPTH_16",
     "ORCA_DEVICE_BIT_DEPTH_24",
     "ORCA_DEVICE_BIT_DEPTH_32",
+    "ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN",
     "ORCA_MAX_WAITING_JOBS",
 };
 
@@ -941,6 +950,20 @@ test "the equalizer and signal path limits orca.h declares are liborca's" {
     try std.testing.expectEqual(audio.dsp.max_preamp_db, @as(f32, c.ORCA_EQUALIZER_MAX_PREAMP_DB));
     try std.testing.expect(audio.dsp.SignalPath.max_reasons <= c.ORCA_SIGNAL_MAX_REASONS);
     try std.testing.expectEqual(@as(usize, c.ORCA_SIGNAL_MAX_REASONS), @typeInfo(@FieldType(c_api.SignalPathView, "reasons")).array.len);
+}
+
+test "an unknown device format exports as ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN with every field zero" {
+    const unknown = c_api.exportDeviceFormat(null);
+    try std.testing.expectEqual(@as(u8, c.ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN), unknown.sample_format);
+    try std.testing.expectEqual(@as(u32, 0), unknown.sample_rate);
+    try std.testing.expectEqual(@as(u16, 0), unknown.channels);
+    try std.testing.expectEqual(@as(u8, 0), unknown.bits_per_sample);
+
+    const known = c_api.exportDeviceFormat(.{ .sample_format = .signed_24_32, .sample_rate = 96_000, .channels = 2 });
+    try std.testing.expectEqual(@as(u8, c.ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_24_32), known.sample_format);
+    try std.testing.expectEqual(@as(u8, 24), known.bits_per_sample);
+    try std.testing.expectEqual(@as(u32, 96_000), known.sample_rate);
+    try std.testing.expectEqual(@as(u16, 2), known.channels);
 }
 
 test "the parametric equalizer limits orca.h declares are liborca's" {

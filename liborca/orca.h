@@ -5157,6 +5157,25 @@ typedef struct orca_pcm_format {
     uint8_t reserved[1];
 } orca_pcm_format;
 
+/* The sample format an output device node runs at. UNKNOWN when the node is
+ * suspended, virtual, has not reported it yet, or the backend is not
+ * PipeWire; orca_device_format's other fields are then 0. */
+typedef enum orca_device_sample_format {
+    ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN = 0,
+    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_16 = 1,
+    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_24 = 2,
+    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_24_32 = 3,
+    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_32 = 4,
+    ORCA_DEVICE_SAMPLE_FORMAT_FLOAT_32 = 5,
+} orca_device_sample_format;
+
+typedef struct orca_device_format {
+    uint32_t sample_rate;
+    uint16_t channels;
+    uint8_t bits_per_sample;
+    uint8_t sample_format;  /* orca_device_sample_format */
+} orca_device_format;
+
 /* Why a signal path is not bit-perfect. */
 typedef enum orca_signal_reason {
     /* Either equalizer, crossfeed, a volume other than 1 or a ReplayGain
@@ -5167,7 +5186,8 @@ typedef enum orca_signal_reason {
     /* The output has another channel count than the source. */
     ORCA_SIGNAL_REASON_CHANNEL_LAYOUT_CONVERSION = 2,
     /* The output's sample format differs from the source's, other than an
-     * exact widening of 8-, 16- or 24-bit integers to float32. */
+     * exact widening of 8-, 16- or 24-bit integers to float32, or the device
+     * runs at another sample format than the output. */
     ORCA_SIGNAL_REASON_SAMPLE_FORMAT_CONVERSION = 3,
     /* The source's codec discarded audio before Orca decoded it. */
     ORCA_SIGNAL_REASON_LOSSY_SOURCE = 4,
@@ -5248,6 +5268,11 @@ typedef struct orca_signal_path_view {
     /* 1 when peak protection lowered the audible entry's correction. */
     uint8_t peak_limited;
     uint8_t reserved2[1];
+    /* The format the output device itself runs at, after the server converts
+     * the float32 stream. A known format that is not float32 at
+     * output.sample_rate is a further conversion; an unknown one leaves the
+     * verdict alone. */
+    orca_device_format device_format;
 } orca_signal_path_view;
 
 /* String views are valid only for the duration of this callback. */

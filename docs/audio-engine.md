@@ -132,12 +132,13 @@ direct-RT eligibility, and total algorithmic latency. They distinguish source
 PCM from canonical float32 working PCM and conservatively explain why a path is
 not bit-perfect. Widening an 8-, 16- or 24-bit integer source to float32 is
 exact, so it is not a reason; the report marks it `widened_exactly`. These are
-reasons: a 32-bit integer or 64-bit float source (`sample_format_conversion`),
-a lossy codec (`lossy_source`), any ReplayGain, either equalizer, crossfeed or
-volume that is not exactly 1 (`sample_processing`), and a rate or channel
-layout that changes. Eligibility ends at the stream Orca hands the backend: it
-says nothing about what PipeWire does after it, and is not an assertion that
-the device negotiated a bit-perfect native path. `Runtime.playerSignalPath`
+reasons: a 32-bit integer or 64-bit float source, or the float32 stream
+reaching an integer device (`sample_format_conversion`), a lossy codec
+(`lossy_source`), any ReplayGain, either equalizer, crossfeed or volume that is
+not exactly 1 (`sample_processing`), and a rate or channel layout that changes.
+Eligibility covers the stream Orca hands the backend and only what PipeWire
+reports of the device beyond it, its rate and format (below); it is not an
+assertion that the device negotiated a bit-perfect native path. `Runtime.playerSignalPath`
 reports the live path of one Player: the audible entry's source format, codec
 and ReplayGain (the applied gain, whether it is the track's, the album's or
 the track's in place of a missing album figure, and for an album gain the
@@ -272,6 +273,25 @@ holds the device at another rate; otherwise it resamples. The rate the device
 runs at is read back from the stream's timing, published by the Zone, and
 reported in the signal path as `device_rate`, which adds the
 `sample_rate_conversion` reason when it differs from the stream's rate.
+
+The device's own format is the format of the sink node the stream feeds, which
+PipeWire's adapter converts Orca's float32 stream into. Once the stream is
+paused or streaming, the shim watches the registry for links out of the
+stream's node, binds the node they lead to and, on the PipeWire loop thread,
+reads its current `SPA_PARAM_Format`, again whenever the node's params change.
+It packs the sample format (S16, S24, S24_32 or S32, little-endian or planar,
+or F32), rate and channels into one atomic that the timing read loads; the
+render callback never touches it. The Zone refreshes it with its latency, on
+activation and every 16 engine passes, publishes it while its output is
+active, and the signal path reports it as `device_format`. A known format adds
+`sample_format_conversion` when it is an integer format and
+`sample_rate_conversion` when its rate is not the stream's. Unknown is
+explicit, never guessed: the format is null while the node is suspended (it
+then holds no Format), before PipeWire has answered, for a virtual sink such
+as `support.null-audio-sink`, for any other sample format, and on a backend
+other than PipeWire. Null leaves the verdict as it is. A sink that is itself
+processing, such as a filter chain, reports its own input format, not that of
+the hardware behind it.
 
 PipeWire stream-state changes are translated into an atomic Orca status. A lost
 output is closed and reopened with bounded attempts while its Player epoch and

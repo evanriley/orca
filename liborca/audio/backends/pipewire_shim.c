@@ -1,10 +1,32 @@
 #include "pipewire_shim.h"
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/utils/result.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define OUTPUT_LINK_BOUND 32
+
+struct output_link {
+    uint32_t id;
+    uint32_t input_node;
+};
+
+struct output_sink {
+    struct pw_proxy *proxy;
+    struct spa_hook listener;
+    uint32_t global_id;
+    int sequence;
+    uint32_t format_flags;
+    uint8_t has_format_flags;
+    uint8_t is_sink;
+    uint8_t is_virtual;
+    uint8_t has_state;
+    enum pw_node_state state;
+    uint64_t format;
+};
 
 struct orca_pw_output {
     struct pw_thread_loop *loop;
@@ -14,8 +36,14 @@ struct orca_pw_output {
     uint32_t channels;
     _Atomic uint32_t quantum_frames;
     _Atomic int state;
+    _Atomic uint64_t device_format;
     orca_pw_wake_fn wake;
     void *wake_context;
+    struct pw_registry *registry;
+    struct spa_hook registry_listener;
+    struct output_sink sink;
+    struct output_link links[OUTPUT_LINK_BOUND];
+    uint32_t link_count;
 };
 
 #define DISCOVERY_BOUND 64
@@ -486,6 +514,200 @@ static void output_process(void *userdata) {
     pw_stream_queue_buffer(output->stream, pw_buffer);
 }
 
+static uint8_t device_sample_format(uint32_t format) {
+    switch (format) {
+    case SPA_AUDIO_FORMAT_S16_LE:
+    case SPA_AUDIO_FORMAT_S16P:
+        return ORCA_PW_FORMAT_S16;
+    case SPA_AUDIO_FORMAT_S24_LE:
+    case SPA_AUDIO_FORMAT_S24P:
+        return ORCA_PW_FORMAT_S24;
+    case SPA_AUDIO_FORMAT_S24_32_LE:
+    case SPA_AUDIO_FORMAT_S24_32P:
+        return ORCA_PW_FORMAT_S24_32;
+    case SPA_AUDIO_FORMAT_S32_LE:
+    case SPA_AUDIO_FORMAT_S32P:
+        return ORCA_PW_FORMAT_S32;
+    case SPA_AUDIO_FORMAT_F32_LE:
+    case SPA_AUDIO_FORMAT_F32P:
+        return ORCA_PW_FORMAT_F32;
+    default:
+        return ORCA_PW_FORMAT_UNKNOWN;
+    }
+}
+
+uint64_t orca_pw_format_pack(const struct spa_pod *param) {
+    uint32_t media_type = 0;
+    uint32_t media_subtype = 0;
+    struct spa_audio_info_raw raw;
+    spa_zero(raw);
+    if (spa_format_parse(param, &media_type, &media_subtype) < 0 ||
+        media_type != SPA_MEDIA_TYPE_audio ||
+        media_subtype != SPA_MEDIA_SUBTYPE_raw ||
+        spa_format_audio_raw_parse(param, &raw) < 0)
+        return 0;
+    const uint8_t format = device_sample_format(raw.format);
+    if (format == ORCA_PW_FORMAT_UNKNOWN || raw.rate == 0 || raw.channels == 0 ||
+        raw.channels > UINT16_MAX)
+        return 0;
+    return (uint64_t)raw.rate << 32 | (uint64_t)raw.channels << 8 | format;
+}
+
+static void sink_publish(struct orca_pw_output *output) {
+    const struct output_sink *sink = &output->sink;
+    const int running = sink->has_state && (sink->state == PW_NODE_STATE_RUNNING ||
+                                             sink->state == PW_NODE_STATE_IDLE);
+    const uint64_t format = sink->proxy != NULL && sink->is_sink &&
+                                    !sink->is_virtual && running
+                                ? sink->format
+                                : 0;
+    atomic_store_explicit(&output->device_format, format, memory_order_release);
+}
+
+static void sink_info(void *userdata, const struct pw_node_info *info) {
+    struct orca_pw_output *output = userdata;
+    struct output_sink *sink = &output->sink;
+    if ((info->change_mask & PW_NODE_CHANGE_MASK_PROPS) && info->props != NULL) {
+        sink->is_sink =
+            equals(spa_dict_lookup(info->props, PW_KEY_MEDIA_CLASS), "Audio/Sink");
+        sink->is_virtual =
+            orca_pw_properties_kind(info->props) == ORCA_PW_DEVICE_VIRTUAL;
+    }
+    if (info->change_mask & PW_NODE_CHANGE_MASK_STATE) {
+        sink->state = info->state;
+        sink->has_state = 1;
+    }
+    if (info->change_mask & PW_NODE_CHANGE_MASK_PARAMS) {
+        for (uint32_t index = 0; index < info->n_params; index++) {
+            const struct spa_param_info *param = &info->params[index];
+            if (param->id != SPA_PARAM_Format)
+                continue;
+            if (sink->has_format_flags && sink->format_flags == param->flags)
+                break;
+            sink->has_format_flags = 1;
+            sink->format_flags = param->flags;
+            sink->format = 0;
+            sink->sequence = -1;
+            if (param->flags & SPA_PARAM_INFO_READ) {
+                const int result = pw_node_enum_params(
+                    (struct pw_node *)sink->proxy, 0, SPA_PARAM_Format, 0,
+                    UINT32_MAX, NULL);
+                if (SPA_RESULT_IS_ASYNC(result))
+                    sink->sequence = result;
+            }
+            break;
+        }
+    }
+    sink_publish(output);
+}
+
+static void sink_param(void *userdata, int sequence, uint32_t id,
+                       uint32_t index, uint32_t next,
+                       const struct spa_pod *param) {
+    (void)index;
+    (void)next;
+    struct orca_pw_output *output = userdata;
+    if (id != SPA_PARAM_Format || param == NULL ||
+        sequence != output->sink.sequence)
+        return;
+    output->sink.format = orca_pw_format_pack(param);
+    sink_publish(output);
+}
+
+static const struct pw_node_events sink_events = {
+    PW_VERSION_NODE_EVENTS,
+    .info = sink_info,
+    .param = sink_param,
+};
+
+static void sink_unbind(struct orca_pw_output *output) {
+    if (output->sink.proxy != NULL) {
+        spa_hook_remove(&output->sink.listener);
+        pw_proxy_destroy(output->sink.proxy);
+    }
+    memset(&output->sink, 0, sizeof(output->sink));
+    sink_publish(output);
+}
+
+static void sink_bind(struct orca_pw_output *output, uint32_t id) {
+    sink_unbind(output);
+    struct pw_node *node = pw_registry_bind(output->registry, id,
+                                            PW_TYPE_INTERFACE_Node,
+                                            PW_VERSION_NODE, 0);
+    if (node == NULL)
+        return;
+    output->sink.proxy = (struct pw_proxy *)node;
+    output->sink.global_id = id;
+    pw_node_add_listener(node, &output->sink.listener, &sink_events, output);
+}
+
+static void sink_follow_links(struct orca_pw_output *output) {
+    for (uint32_t index = 0; index < output->link_count; index++) {
+        if (output->sink.proxy != NULL &&
+            output->links[index].input_node == output->sink.global_id)
+            return;
+    }
+    if (output->link_count == 0)
+        sink_unbind(output);
+    else
+        sink_bind(output, output->links[output->link_count - 1].input_node);
+}
+
+static void output_global(void *userdata, uint32_t id, uint32_t permissions,
+                          const char *type, uint32_t version,
+                          const struct spa_dict *props) {
+    (void)permissions;
+    (void)version;
+    struct orca_pw_output *output = userdata;
+    if (props == NULL || strcmp(type, PW_TYPE_INTERFACE_Link) != 0 ||
+        output->link_count >= OUTPUT_LINK_BOUND)
+        return;
+    const uint32_t node = pw_stream_get_node_id(output->stream);
+    const char *from = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_NODE);
+    const char *to = spa_dict_lookup(props, PW_KEY_LINK_INPUT_NODE);
+    if (node == SPA_ID_INVALID || from == NULL || to == NULL ||
+        strtoul(from, NULL, 10) != node)
+        return;
+    output->links[output->link_count++] = (struct output_link){
+        .id = id,
+        .input_node = (uint32_t)strtoul(to, NULL, 10),
+    };
+    sink_follow_links(output);
+}
+
+static void output_global_remove(void *userdata, uint32_t id) {
+    struct orca_pw_output *output = userdata;
+    uint32_t kept = 0;
+    for (uint32_t index = 0; index < output->link_count; index++) {
+        const struct output_link link = output->links[index];
+        if (link.id != id && link.input_node != id)
+            output->links[kept++] = link;
+    }
+    output->link_count = kept;
+    if (output->sink.proxy != NULL && output->sink.global_id == id)
+        sink_unbind(output);
+    sink_follow_links(output);
+}
+
+static const struct pw_registry_events output_registry_events = {
+    PW_VERSION_REGISTRY_EVENTS,
+    .global = output_global,
+    .global_remove = output_global_remove,
+};
+
+static void output_watch_sink(struct orca_pw_output *output) {
+    if (output->registry != NULL)
+        return;
+    struct pw_core *core = pw_stream_get_core(output->stream);
+    if (core == NULL)
+        return;
+    output->registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+    if (output->registry == NULL)
+        return;
+    pw_registry_add_listener(output->registry, &output->registry_listener,
+                             &output_registry_events, output);
+}
+
 static void output_state_changed(void *userdata, enum pw_stream_state old,
                                  enum pw_stream_state state,
                                  const char *error) {
@@ -495,6 +717,7 @@ static void output_state_changed(void *userdata, enum pw_stream_state old,
     switch (state) {
     case PW_STREAM_STATE_PAUSED:
     case PW_STREAM_STATE_STREAMING:
+        output_watch_sink(output);
         atomic_store_explicit(&output->state, ORCA_PW_OUTPUT_ACTIVE,
                               memory_order_release);
         break;
@@ -684,6 +907,11 @@ void orca_pw_output_destroy(struct orca_pw_output *output) {
     if (output == NULL)
         return;
     pw_thread_loop_stop(output->loop);
+    sink_unbind(output);
+    if (output->registry != NULL) {
+        spa_hook_remove(&output->registry_listener);
+        pw_proxy_destroy((struct pw_proxy *)output->registry);
+    }
     pw_stream_destroy(output->stream);
     pw_thread_loop_destroy(output->loop);
     free(output);
@@ -698,6 +926,8 @@ int orca_pw_output_timing(struct orca_pw_output *output,
                                              sizeof(native));
     if (result < 0)
         return result;
+    const uint64_t device_format =
+        atomic_load_explicit(&output->device_format, memory_order_acquire);
     *timing = (struct orca_pw_timing) {
         .sample_time = native.ticks,
         .monotonic_ns = native.now,
@@ -707,6 +937,9 @@ int orca_pw_output_timing(struct orca_pw_output *output,
         .quantum_frames = atomic_load_explicit(&output->quantum_frames,
                                                 memory_order_relaxed),
         .graph_rate = native.rate.num == 1 ? native.rate.denom : 0,
+        .device_rate = (uint32_t)(device_format >> 32),
+        .device_channels = (uint16_t)(device_format >> 8),
+        .device_format = (uint8_t)device_format,
     };
     return 0;
 }
