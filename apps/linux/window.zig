@@ -1282,9 +1282,6 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     adw.adw_overlay_split_view_set_sidebar_position(inspected_view, gtk.PACK_END);
     adw.adw_overlay_split_view_set_pin_sidebar(inspected_view, gtk.true_);
     adw.adw_overlay_split_view_set_enable_show_gesture(inspected_view, gtk.false_);
-    gtk.gtk_widget_set_hexpand(pages, gtk.true_);
-    adw.adw_overlay_split_view_set_content(inspected_view, pages);
-    details.build(self, inspected_view);
     const framed = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), inspected);

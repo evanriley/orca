@@ -603,20 +603,21 @@ The window is an `AdwNavigationSplitView`:
   and the list layout keep the grid and list above.
   Activating an album opens its page: a 248 px cover beside an overline naming
   the release type, else COMPILATION for a compilation and ALBUM otherwise,
-  the title, the artist as a link and a line of year, its top one or two genres joined by ` / `,
-  track count and minutes, then the album's description from
+  the title in 58 px Newsreader, the artist as a link and a line of year, its top one or two genres joined by ` / `,
+  track count and minutes separated by dim `·`, then the album's description from
   `Runtime.libraryReleaseInfo`, at most 520 px wide and three lines, with a
   More link, shown when the text wraps past three lines at the width it is
   given, that shows the rest, and under it its source and licence. With no
   description stored the page starts `Runtime.startReleaseInfoFetch` once per album per session and
   shows the description when the job ends. Then come Play, Shuffle, a heart
   in the love colour that loves the album (Love Album, Remove Album Love)
-  and a more button with the album menu; the page opens with focus on Play.
+  and a more button with the album menu, both faint round buttons; the page opens with focus on Play.
   Behind the top 600 px of the page the cover's artwork backdrop scrolls
-  with it; an album without a cover has no backdrop. Its tracks follow by disc under
-  a # / Title / clock header, one thin-ruled row each: the playing track
-  shows a play mark in place of its number and an accent title, and the more
+  with it, dimmer and more heavily shaded than on other pages; an album without a cover has no backdrop. Its tracks follow by disc under
+  a # / Title / clock header, one 38 px row each with a rule above it: the playing track's
+  row is tinted and shows a play mark in place of its number and an accent title, and the more
   button with the track menu shows on the hovered, selected and playing row.
+  A track's heart shows only when it is loved or its row is hovered.
   A button in the header chooses extra columns, Rating, Format and Sample
   rate, saved as `[view] album_columns`. A narrow window shrinks the grid and
   stacks the album page's cover above its title.
@@ -1373,13 +1374,19 @@ rules, each under an icon and a heading and hidden when it has nothing to
 show: Audio (format with bit depth, sample rate, channels, bitrate,
 duration), Loudness (integrated loudness, sample peak, ReplayGain), Identity
 (the MusicBrainz and AcoustID rows, with the matching actions below),
-Metadata (album artist, album, date, genre, track and disc number as "1 of 13",
-compilation, explicit when known, play count and last play in local time,
-read again whenever `Runtime.libraryListensRecorded` reports a newly
-recorded listen) and File (folder, file name, size, modified and added in
-local time, with a copy button for the path in its heading). A track total
+Metadata (album artist, date, genre, track and disc as "1 of 13",
+compilation) and File (the folder's last two components as `…/Artist/Album`
+with the full folder in a tooltip, file name, size and modified in local
+time, with a copy button for the path in its heading). A track total
 counted from the album's tracks rather than read from a tag says so in a
-tooltip.
+tooltip. When `Runtime.planTagWrite` for the track finds something to write
+or a conflict, a card under File reads `Orca metadata differs from file`
+with Compare, a popover of Field / File / Orca rows holding the same changes,
+genres and conflicts as `orca-cli write-tags`, and Write to File…, which
+opens the tag write confirmation. Each plan is discarded once read, and
+the card's answer is kept until the track, or its file's size or modified
+time, changes, so other refreshes plan nothing; files
+that cannot be written now show no card.
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the device list; see

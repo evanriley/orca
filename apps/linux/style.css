@@ -1876,23 +1876,250 @@ button.album-artist {
   min-height: 0;
 }
 
+/* Album page and track inspector */
+
+.album-detail {
+  margin: 24px 32px 48px 32px;
+}
+
+.album-detail .hero-cover {
+  border-radius: 8px;
+}
+
+.album-detail .album-kind {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  color: @orca_text_3;
+}
+
+.album-detail .album-hero-title {
+  font-size: 58px;
+  line-height: 1;
+  margin-top: 0;
+}
+
+.album-detail button.album-artist {
+  font-size: 18px;
+  font-weight: 500;
+  color: @orca_text_artist;
+}
+
+.album-detail button.album-artist:hover {
+  color: @orca_text;
+  background-color: transparent;
+}
+
+.album-detail .album-meta {
+  font-size: 13.5px;
+  color: @orca_text_2;
+}
+
+.album-detail .album-tracks-header {
+  padding: 0 14px 10px 14px;
+  border-bottom: none;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.album-detail .album-tracks-header button.column-chooser {
+  min-width: 28px;
+  min-height: 28px;
+  margin: -6px 0 -6px 0;
+  border-radius: 8px;
+}
+
+.album-detail .album-tracks-header button.column-chooser image {
+  -gtk-icon-size: 15px;
+}
+
+.album-detail list.album-tracks {
+  font-size: 13.5px;
+}
+
+.album-detail list.album-tracks > row {
+  border-top: 1px solid @orca_border;
+  border-bottom: none;
+}
+
+.album-detail list.album-tracks > row:hover {
+  background-color: color-mix(in srgb, @orca_bg_hover 55%, @orca_bg_main);
+}
+
+.album-detail .album-track {
+  min-height: 37px;
+  padding: 0 14px;
+}
+
+.album-detail .album-track-number {
+  color: @orca_text_3;
+}
+
+.album-detail .album-track-playing {
+  color: @orca_accent;
+  -gtk-icon-size: 13px;
+}
+
+.album-detail .album-track-row.now-playing,
+.album-detail list.album-tracks > row.album-track-row.now-playing:hover {
+  background-color: color-mix(in srgb, @orca_accent 10%, @orca_bg_main);
+}
+
+.album-detail .album-track-row.now-playing .album-track-title {
+  font-weight: 500;
+}
+
+.album-detail list.album-tracks button.row-more image {
+  -gtk-icon-size: 16px;
+}
+
+.album-detail list.album-tracks button.row-heart {
+  opacity: 0;
+}
+
+.album-detail list.album-tracks button.row-heart.loved,
+.album-detail list.album-tracks button.row-heart:focus-visible,
+.album-detail list.album-tracks > row:hover button.row-heart {
+  opacity: 1;
+}
+
+.album-detail .album-actions > button.album-heart,
+.album-detail .album-actions > button.album-more {
+  background-color: color-mix(in srgb, @orca_bg_raised_2 35%, transparent);
+  box-shadow: none;
+}
+
+.album-detail .album-actions > button.album-heart:hover,
+.album-detail .album-actions > button.album-more:hover {
+  background-color: @orca_bg_hover;
+}
+
+.album-backdrop .art-backdrop-picture {
+  opacity: 0.3;
+}
+
+.album-backdrop .art-backdrop-shade {
+  background-image:
+    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 40%, transparent), color-mix(in srgb, @orca_bg_main 78%, transparent) 50%, @orca_bg_main);
+}
+
+.inspector-body .inspector-row {
+  padding: 2px 0;
+}
+
+.inspector-body .inspector-section-header {
+  margin-bottom: 4px;
+}
+
+.inspector-row button.inspector-link {
+  color: @orca_text;
+}
+
+.inspector-row button.inspector-link image {
+  -gtk-icon-size: 13px;
+  color: @orca_text_3;
+}
+
+.inspector-row button.inspector-link:hover image {
+  color: @orca_text;
+}
+
+.inspector-caution {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border-radius: 9px;
+  background-color: @orca_bg_popover;
+}
+
+.inspector-caution-text {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.inspector-caution button {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: @orca_text;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+}
+
+.inspector-caution button:hover,
+.inspector-caution menubutton > button:checked {
+  background-color: @orca_bg_hover;
+}
+
+.inspector-compare {
+  padding: 10px 12px;
+}
+
+.inspector-compare-heading {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: @orca_text_3;
+}
+
+.inspector-compare-name {
+  margin-top: 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: @orca_text_2;
+}
+
+.inspector-compare-file {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
 /* Now Playing */
 
+@define-color orca_now_row #202832;
+@define-color orca_now_button #1F2429;
+@define-color orca_now_star #3A4046;
+@define-color orca_lyric_past #4E5357;
+@define-color orca_lyric_future #7A7E81;
+@define-color orca_now_shadow rgb(0 0 0 / 0.5);
+
+.now-playing-page {
+  background-color: @orca_bg_main;
+}
+
 .now-centre {
-  margin: 8px 32px 28px 32px;
+  padding: 50px 32px 28px 32px;
 }
 
 .narrow .now-centre {
-  margin: 8px 16px 20px 16px;
+  padding: 50px 16px 20px 16px;
 }
 
-.now-eyebrow,
-.now-panel-title {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+toolbarview.over-page .library-search > entry {
+  background-color: color-mix(in srgb, @orca_bg_raised_2 80%, transparent);
+}
+
+.now-eyebrow {
+  font-size: 11.5px;
+  font-weight: 500;
   color: @orca_text_2;
+}
+
+.now-panel-title {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: @orca_text_2;
+}
+
+.now-body {
+  margin-top: 12px;
+}
+
+.now-cover-clamp {
+  margin-bottom: 26px;
 }
 
 .now-cover {

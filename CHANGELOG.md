@@ -186,6 +186,19 @@
   origin), In your library (albums, loved tracks, last played), Identity
   (MusicBrainz match and ID, photo source) and Links (MusicBrainz,
   Wikipedia, Official website).
+- **Album page and track inspector redesign in orca-gtk.** An album's page
+  follows the redesign: a 248 px cover over its blurred backdrop, `Album`,
+  the title in 58 px Newsreader, the album artist, `2018 · Hip Hop / Rap ·
+  13 tracks · 35 min`, Play, a dark Shuffle, love and more, and a table of
+  `#`, Title and duration in 38 px rows with the playing row tinted and
+  marked by a play glyph. The track inspector follows it too: a Track
+  actions menu beside close, a 104 px label column, Loudness as
+  Integrated, Sample peak and ReplayGain, Metadata as Album artist, Date,
+  Genre, Track, Disc and Compilation, and File as Path (the last two
+  folders), File, Size and Modified. When Orca's values differ from the
+  file's tags, an `Orca metadata differs from file` card offers Compare, a
+  Field / File / Orca table of the `write-tags` preview, and Write to
+  File…, which opens the tag write confirmation.
 - **Full-height inspector in orca-gtk.** The inspector runs from the top of
   the window beside the main column, which now holds the header bar and
   search, with a header of title, dim subtitle and close button, small

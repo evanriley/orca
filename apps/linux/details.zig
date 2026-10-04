@@ -20,6 +20,7 @@ const track_table = @import("track_table.zig");
 const matches = @import("matches.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
+const mpris = @import("mpris.zig");
 const transport = @import("transport.zig");
 const window = @import("window.zig");
 const nowplaying = @import("nowplaying.zig");
@@ -161,19 +162,17 @@ pub const Panel = struct {
     track_row: Row,
     disc_row: Row,
     compilation_row: Row,
-    explicit_row: Row,
-    plays_row: Row,
-    last_played_row: Row,
     folder_row: Row,
     file_row: Row,
     size_row: Row,
     modified_row: Row,
-    added_row: Row,
     copy_button: *gtk.Widget,
+    caution: *gtk.Widget,
+    caution_key: ?CautionKey = null,
+    caution_shown: bool = false,
     album_view: Album,
     signal_status: *gtk.Label,
     signal_content: *gtk.Widget,
-    signal_dot: *gtk.Widget,
     signal_verdict_label: *gtk.Label,
     signal_chain_label: *gtk.Label,
     signal_stages: [signal_path.all_stages.len]StageView,
@@ -504,6 +503,7 @@ fn show(panel: *Panel, track_id: ?i64) void {
 fn showOnly(panel: *Panel, shown: *gtk.Widget) void {
     for ([_]*gtk.Widget{ panel.placeholder, panel.content, panel.album_view.content, panel.artist_view.content, panel.playlist_view.content }) |view|
         gtk.gtk_widget_set_visible(view, boolean(view == shown));
+    fitWidth(panel);
 }
 
 fn showPlaceholder(panel: *Panel) void {
@@ -646,7 +646,7 @@ fn dateText(buffer: []u8, unix_seconds: i64) ?[:0]const u8 {
     if (unix_seconds <= 0) return null;
     const moment = gtk.g_date_time_new_from_unix_local(unix_seconds) orelse return null;
     defer gtk.g_date_time_unref(moment);
-    const text = gtk.g_date_time_format(moment, "%-d %b %Y") orelse return null;
+    const text = gtk.g_date_time_format(moment, "%Y-%m-%d") orelse return null;
     defer gtk.g_free(text);
     return strings.terminated(buffer, std.mem.span(text));
 }
@@ -764,11 +764,6 @@ fn yearsText(buffer: []u8, record: liborca.ArtistInfoRecord) ?[:0]const u8 {
 
 fn newExternalLink(uri: [*:0]const u8, name: [*:0]const u8) *gtk.Widget {
     const link = gtk.gtk_link_button_new_with_label(uri, name);
-    const inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
-    const label = gtk.gtk_label_new(name);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), gtk.gtk_image_new_from_icon_name("adw-external-link-symbolic"));
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, link), inner);
     gtk.gtk_widget_add_css_class(link, "inspector-link");
     gtk.gtk_widget_set_halign(link, gtk.ALIGN_START);
     return link;
@@ -912,13 +907,6 @@ fn stageChevronClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void
     expandStage(panel, index, !stageExpanded(panel, index));
 }
 
-fn verdictClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const panel = panelData(data);
-    var all = true;
-    for (0..panel.signal_stages.len) |index| all = all and stageExpanded(panel, index);
-    for (0..panel.signal_stages.len) |index| expandStage(panel, index, !all);
-}
-
 fn closeClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     showSidebar(panelData(data).self, .hidden);
 }
@@ -1040,16 +1028,6 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     _ = setRow(panel.disc_row, ofText(&disc_buffer, details.disc_number, details.disc_total));
     const compilation: ?[:0]const u8 = if (details.compilation) |flag| (if (flag) "Yes" else "No") else null;
     _ = setRow(panel.compilation_row, compilation);
-    _ = setRow(panel.explicit_row, switch (details.explicit) {
-        .unknown => null,
-        .none => "No",
-        .explicit => "Yes",
-        .clean => "Clean",
-    });
-    var plays_buffer: [24]u8 = undefined;
-    _ = setRow(panel.plays_row, strings.printZ(&plays_buffer, "{d}", .{details.play_count}) catch null);
-    var played_buffer: [64]u8 = undefined;
-    _ = setRow(panel.last_played_row, recentMomentText(&played_buffer, details.last_played_at));
 
     if (details.path) |path| {
         const split = std.mem.lastIndexOfScalar(u8, path, '/');
@@ -1069,8 +1047,197 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     _ = setRow(panel.size_row, if (details.size_bytes) |bytes| sizeText(&size_buffer, bytes) else null);
     var modified_buffer: [64]u8 = undefined;
     _ = setRow(panel.modified_row, momentText(&modified_buffer, details.modified_at));
-    var added_buffer: [64]u8 = undefined;
-    _ = setRow(panel.added_row, momentText(&added_buffer, details.added_at));
+    showCaution(panel, .{
+        .track_id = details.track_id,
+        .size_bytes = details.size_bytes,
+        .modified_at = details.modified_at,
+        .metadata = metadataHash(details),
+    });
+}
+
+const CautionKey = struct {
+    track_id: i64,
+    size_bytes: ?i64,
+    modified_at: ?i64,
+    metadata: u64,
+};
+
+fn metadataHash(details: liborca.TrackDetails) u64 {
+    var hasher: std.hash.Wyhash = .init(0);
+    for ([_][]const u8{ details.title, details.artist, details.album, details.album_artist, details.date orelse "" }) |text| {
+        hasher.update(text);
+        hasher.update(&.{0});
+    }
+    for (details.genres) |genre| {
+        hasher.update(genre);
+        hasher.update(&.{0});
+    }
+    std.hash.autoHash(&hasher, details.track_number);
+    std.hash.autoHash(&hasher, details.disc_number);
+    std.hash.autoHash(&hasher, details.compilation);
+    return hasher.final();
+}
+
+fn showCaution(panel: *Panel, key: CautionKey) void {
+    if (panel.caution_key == null or !std.meta.eql(panel.caution_key.?, key)) {
+        const differs = differsFromFile(panel, key.track_id) catch {
+            panel.caution_key = null;
+            gtk.gtk_widget_set_visible(panel.caution, gtk.false_);
+            return;
+        };
+        panel.caution_shown = differs;
+        panel.caution_key = key;
+    }
+    gtk.gtk_widget_set_visible(panel.caution, boolean(panel.caution_shown));
+}
+
+fn shortFolderText(buffer: []u8, folder: []const u8) ?[:0]const u8 {
+    const last = std.mem.lastIndexOfScalar(u8, folder, '/') orelse return optionalText(buffer, folder);
+    const parent = std.mem.lastIndexOfScalar(u8, folder[0..last], '/') orelse return optionalText(buffer, folder);
+    if (parent == 0) return optionalText(buffer, folder);
+    return strings.printZ(buffer, "…{s}", .{folder[parent..]}) catch null;
+}
+
+fn differsFromFile(panel: *Panel, track_id: i64) error{TooManyPendingTagWrites}!bool {
+    const self = panel.self;
+    const library = self.library orelse return false;
+    const plan = self.runtime.planTagWrite(library, self.io, &.{track_id}) catch |err| switch (err) {
+        error.TooManyPendingTagWrites => return error.TooManyPendingTagWrites,
+        else => return false,
+    };
+    defer plan.deinit();
+    if (plan.plan_id != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch {};
+    return plan.files.len != 0 or plan.conflicts.len != 0;
+}
+
+fn compareShown(popover: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    gtk.gtk_popover_set_child(gtk.cast(gtk.Popover, popover.?), newComparison(panelData(data)));
+}
+
+fn newComparison(panel: *Panel) *gtk.Widget {
+    const grid = gtk.gtk_grid_new();
+    gtk.gtk_widget_add_css_class(grid, "inspector-compare");
+    gtk.gtk_grid_set_column_spacing(gtk.cast(gtk.Grid, grid), 14);
+    gtk.gtk_grid_set_row_spacing(gtk.cast(gtk.Grid, grid), 6);
+    for ([_][*:0]const u8{ "Field", "File", "Orca" }, 0..) |heading, column| {
+        const label = attachCell(grid, heading, @intCast(column), 0, 1, "inspector-compare-heading");
+        gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, label), gtk.false_);
+    }
+    var row: c_int = 1;
+    const self = panel.self;
+    const library = self.library orelse return grid;
+    const id = panel.shown orelse return grid;
+    const plan = self.runtime.planTagWrite(library, self.io, &.{id}) catch return grid;
+    defer plan.deinit();
+    if (plan.plan_id != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch {};
+    var buffer: [1024]u8 = undefined;
+    for (plan.files) |file| {
+        if (plan.files.len > 1) {
+            const split = std.mem.lastIndexOfScalar(u8, file.path, '/');
+            const name = if (split) |index| file.path[index + 1 ..] else file.path;
+            _ = attachCell(grid, strings.terminated(&buffer, name).ptr, 0, row, 3, "inspector-compare-name");
+            row += 1;
+        }
+        for (file.changes) |change| {
+            attachComparison(grid, row, fieldName(change.field), change.before, change.after, null);
+            row += 1;
+        }
+        if (file.genres) |genres| {
+            var before_buffer: [512]u8 = undefined;
+            var after_buffer: [512]u8 = undefined;
+            attachComparison(grid, row, "Genre", genresText(&before_buffer, genres.before), genresText(&after_buffer, genres.after), null);
+            row += 1;
+        }
+    }
+    for (plan.conflicts) |conflict| {
+        attachComparison(grid, row, fieldName(conflict.field), conflict.file_value, conflict.orca_value, "The file keeps its own value until you edit this field");
+        row += 1;
+    }
+    return grid;
+}
+
+fn attachComparison(grid: *gtk.Widget, row: c_int, field: [*:0]const u8, file: ?[]const u8, orca: ?[]const u8, tooltip: ?[*:0]const u8) void {
+    _ = attachCell(grid, field, 0, row, 1, "inspector-key");
+    var buffer: [1024]u8 = undefined;
+    _ = attachCell(grid, strings.terminated(&buffer, file orelse "—").ptr, 1, row, 1, "inspector-compare-file");
+    const orca_cell = attachCell(grid, strings.terminated(&buffer, orca orelse "—").ptr, 2, row, 1, "inspector-value");
+    if (tooltip) |text| gtk.gtk_widget_set_tooltip_text(orca_cell, text);
+}
+
+fn attachCell(grid: *gtk.Widget, text: [*:0]const u8, column: c_int, row: c_int, width: c_int, css_class: [*:0]const u8) *gtk.Widget {
+    const label = gtk.gtk_label_new(text);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, label), gtk.true_);
+    gtk.gtk_label_set_wrap_mode(gtk.cast(gtk.Label, label), gtk.WRAP_WORD_CHAR);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 28);
+    gtk.gtk_widget_set_valign(label, gtk.ALIGN_START);
+    gtk.gtk_widget_add_css_class(label, css_class);
+    gtk.gtk_grid_attach(gtk.cast(gtk.Grid, grid), label, column, row, width, 1);
+    return label;
+}
+
+fn fieldName(field: liborca.MetadataField) [*:0]const u8 {
+    return switch (field) {
+        .title => "Title",
+        .artist => "Artist",
+        .album => "Album",
+        .track_number => "Track",
+        .album_artist => "Album artist",
+        .disc_number => "Disc",
+        .date => "Date",
+        .compilation => "Compilation",
+        .musicbrainz_recording_id => "Recording ID",
+        .musicbrainz_release_id => "Release ID",
+        .musicbrainz_release_group_id => "Release group ID",
+        .musicbrainz_release_track_id => "Release track ID",
+        .musicbrainz_album_artist_id => "Album artist ID",
+        .explicit => "Explicit",
+    };
+}
+
+fn writeToFileClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    tag_editor.confirmWrite(panel.self, &.{panel.shown orelse return});
+}
+
+fn trackActionsClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    const self = panel.self;
+    const id = panel.shown orelse return;
+    const library = self.library orelse return;
+    const summary = (self.runtime.libraryTrackSummary(library, id) catch null) orelse return;
+    defer summary.deinit(self.allocator);
+    self.context.reset(.tracks);
+    self.context.addTrack(self.allocator, id, summary.recording_id, summary.feedback) catch return;
+    self.context.release_id = summary.release_id;
+    self.context.artist_id = summary.artist_id;
+    albums.popupBelow(self, gtk.cast(gtk.Widget, button.?));
+}
+
+fn newCaution(panel: *Panel) *gtk.Widget {
+    const text = gtk.gtk_label_new("Orca metadata differs from file");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, text), 0.0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, text), gtk.true_);
+    gtk.gtk_widget_add_css_class(text, "inspector-caution-text");
+    const popover = gtk.gtk_popover_new();
+    gtk.gtk_widget_add_css_class(popover, "inspector-compare-popover");
+    gtk.gtk_popover_set_position(gtk.cast(gtk.Popover, popover), gtk.POS_TOP);
+    _ = gtk.signalConnect(popover, "show", gtk.callback(compareShown), panel);
+    const compare = gtk.gtk_menu_button_new();
+    gtk.gtk_menu_button_set_child(gtk.cast(gtk.MenuButton, compare), gtk.gtk_label_new("Compare"));
+    gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, compare), popover);
+    gtk.gtk_widget_set_tooltip_text(compare, "Compare the file's tags with Orca's values");
+    const write = gtk.gtk_button_new_with_label("Write to File…");
+    _ = gtk.signalConnect(write, "clicked", gtk.callback(writeToFileClicked), panel);
+    const buttons = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, buttons), compare);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, buttons), write);
+    const card = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
+    gtk.gtk_widget_add_css_class(card, "inspector-caution");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, card), text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, card), buttons);
+    gtk.gtk_widget_set_visible(card, gtk.false_);
+    return card;
 }
 
 fn setPathRow(row: Row, text: []const u8, buffer: []u8) void {
@@ -1401,7 +1568,7 @@ fn newKey(key: [*:0]const u8) *gtk.Widget {
 }
 
 fn newRowWith(key: [*:0]const u8, value: *gtk.Widget) *gtk.Widget {
-    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(row, "inspector-row");
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), newKey(key));
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), value);
@@ -1469,13 +1636,13 @@ fn newLine(css_class: ?[*:0]const u8) Row {
 
 fn newSection(icon: [*:0]const u8, heading: [*:0]const u8, children: []const *gtk.Widget, trailing: ?*gtk.Widget) *gtk.Widget {
     const image = gtk.gtk_image_new_from_icon_name(icon);
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), 20);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), 15);
     gtk.gtk_widget_add_css_class(image, "inspector-icon");
     const title = gtk.gtk_label_new(heading);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
     gtk.gtk_widget_set_hexpand(title, gtk.true_);
     gtk.gtk_widget_add_css_class(title, "inspector-heading");
-    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(header, "inspector-section-header");
     gtk.gtk_box_append(gtk.cast(gtk.Box, header), image);
     gtk.gtk_box_append(gtk.cast(gtk.Box, header), title);
@@ -1485,6 +1652,24 @@ fn newSection(icon: [*:0]const u8, heading: [*:0]const u8, children: []const *gt
     gtk.gtk_box_append(gtk.cast(gtk.Box, section), header);
     for (children) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, section), child);
     return section;
+}
+
+fn newHeader(panel: *Panel, labels: []const *gtk.Widget, actions: ?*gtk.Widget) *gtk.Widget {
+    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 3);
+    gtk.gtk_widget_set_hexpand(text, gtk.true_);
+    for (labels) |label| gtk.gtk_box_append(gtk.cast(gtk.Box, text), label);
+    const close = gtk.gtk_button_new_from_icon_name("orca-close-symbolic");
+    gtk.gtk_widget_add_css_class(close, "flat");
+    gtk.gtk_widget_add_css_class(close, "inspector-close");
+    gtk.gtk_widget_set_valign(close, gtk.ALIGN_START);
+    gtk.gtk_widget_set_tooltip_text(close, "Close inspector");
+    _ = gtk.signalConnect(close, "clicked", gtk.callback(closeClicked), panel);
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_add_css_class(header, "inspector-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), text);
+    if (actions) |button| gtk.gtk_box_append(gtk.cast(gtk.Box, header), button);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), close);
+    return header;
 }
 
 fn newLabel(css_class: ?[*:0]const u8) *gtk.Widget {
@@ -1802,7 +1987,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const duration_row = newRow("Duration");
     const loudness_missing = newLine("inspector-key");
     const integrated_row = newRow("Integrated");
-    const peak_row = newRow("Peak");
+    const peak_row = newRow("Sample peak");
     const replay_gain_row = newRow("ReplayGain");
 
     const musicbrainz_row = newLinkRow("MusicBrainz");
@@ -1834,22 +2019,19 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const track_row = newRow("Track");
     const disc_row = newRow("Disc");
     const compilation_row = newRow("Compilation");
-    const explicit_row = newRow("Explicit");
-    const plays_row = newRow("Plays");
-    const last_played_row = newRow("Last played");
 
     const folder_row = newPathRow("Path", gtk.ELLIPSIZE_START);
     const file_row = newPathRow("File", gtk.ELLIPSIZE_MIDDLE);
     const size_row = newRow("Size");
     const modified_row = newRow("Modified");
-    const added_row = newRow("Date added");
+    const caution = newCaution(panel);
     const copy_button = gtk.gtk_button_new_from_icon_name("edit-copy-symbolic");
     gtk.gtk_widget_set_valign(copy_button, gtk.ALIGN_CENTER);
     gtk.gtk_widget_add_css_class(copy_button, "flat");
     gtk.gtk_widget_add_css_class(copy_button, "inspector-copy");
     gtk.gtk_widget_set_tooltip_text(copy_button, "Copy path");
 
-    const audio_section = newSection("audio-x-generic-symbolic", "Audio", &.{
+    const audio_section = newSection("orca-signal-symbolic", "Audio", &.{
         format_row.root,
         sample_rate_row.root,
         channels_row.root,
@@ -1879,16 +2061,12 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         track_row.root,
         disc_row.root,
         compilation_row.root,
-        explicit_row.root,
-        plays_row.root,
-        last_played_row.root,
     }, null);
     const file_section = newSection("folder-symbolic", "File", &.{
         folder_row.root,
         file_row.root,
         size_row.root,
         modified_row.root,
-        added_row.root,
     }, copy_button);
 
     const album_view = newAlbum();
@@ -1897,7 +2075,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, file_section }) |section|
+    for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, file_section, caution }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
 
     const placeholder = gtk.gtk_label_new("Select a track to see its details.");
@@ -1913,8 +2091,8 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), artist_view.content);
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), playlist_view.content);
 
-    const signal_icon = gtk.gtk_image_new_from_icon_name("network-cellular-signal-excellent-symbolic");
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, signal_icon), 24);
+    const signal_icon = gtk.gtk_image_new_from_icon_name("orca-signal-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, signal_icon), 26);
     gtk.gtk_widget_set_valign(signal_icon, gtk.ALIGN_START);
     gtk.gtk_widget_add_css_class(signal_icon, "signal-header-icon");
     const signal_title = newLabel("signal-title");
@@ -1925,46 +2103,40 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     gtk.gtk_widget_set_hexpand(signal_titles, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_titles), signal_title);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_titles), signal_subtitle);
-    const signal_close = gtk.gtk_button_new_from_icon_name("window-close-symbolic");
+    const signal_close = gtk.gtk_button_new_from_icon_name("orca-close-symbolic");
     gtk.gtk_widget_add_css_class(signal_close, "flat");
+    gtk.gtk_widget_add_css_class(signal_close, "signal-close");
     gtk.gtk_widget_set_valign(signal_close, gtk.ALIGN_START);
     gtk.gtk_widget_set_tooltip_text(signal_close, "Close");
     const signal_header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(signal_header, "signal-header");
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_icon);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_titles);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_close);
 
     const signal_status = newLabel("dim-label");
-    gtk.gtk_widget_set_margin_top(signal_status, 12);
 
     const signal_dot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(signal_dot, "signal-dot");
     gtk.gtk_widget_set_valign(signal_dot, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_halign(signal_dot, gtk.ALIGN_CENTER);
     const signal_verdict_label = newLabel("signal-verdict-title");
+    gtk.gtk_widget_set_hexpand(signal_verdict_label, gtk.true_);
+    const verdict_line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 9);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_line), signal_dot);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_line), signal_verdict_label);
     const signal_chain_label = newLabel("signal-chain");
-    const verdict_text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_set_hexpand(verdict_text, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_text), signal_verdict_label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_text), signal_chain_label);
-    const verdict_chevron = gtk.gtk_image_new_from_icon_name("go-next-symbolic");
-    gtk.gtk_widget_add_css_class(verdict_chevron, "signal-chevron");
-    const verdict_inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_inner), signal_dot);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_inner), verdict_text);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_inner), verdict_chevron);
-    const signal_verdict = gtk.gtk_button_new();
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, signal_verdict), verdict_inner);
+    const signal_verdict = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 5);
     gtk.gtk_widget_add_css_class(signal_verdict, "signal-verdict");
-    gtk.gtk_widget_set_tooltip_text(signal_verdict, "Show every stage's details");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_verdict), verdict_line);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_verdict), signal_chain_label);
 
     const signal_flow = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(signal_flow, "signal-flow");
+    gtk.gtk_widget_set_vexpand(signal_flow, gtk.true_);
+    gtk.gtk_widget_set_valign(signal_flow, gtk.ALIGN_START);
     var signal_stages: [signal_path.all_stages.len]StageView = undefined;
     for (&signal_stages, 0..) |*view, index| view.* = newStage(panel, index, gtk.cast(gtk.Box, signal_flow));
 
-    const footer_icon = gtk.gtk_image_new_from_icon_name("dialog-information-symbolic");
+    const footer_icon = gtk.gtk_image_new_from_icon_name("orca-info-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, footer_icon), 16);
     gtk.gtk_widget_set_valign(footer_icon, gtk.ALIGN_START);
     const signal_footer_label = newLabel("signal-footer-title");
     const footer_detail = newLabel("signal-footer-detail");
@@ -1975,14 +2147,17 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     gtk.gtk_box_append(gtk.cast(gtk.Box, footer_text), footer_detail);
     const signal_footer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(signal_footer, "signal-footer");
+    gtk.gtk_widget_set_valign(signal_footer, gtk.ALIGN_END);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_footer), footer_icon);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_footer), footer_text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_footer), signal_footer_label);
 
-    const signal_content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const signal_content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
+    gtk.gtk_widget_set_vexpand(signal_content, gtk.true_);
     for ([_]*gtk.Widget{ signal_verdict, signal_flow, signal_footer }) |widget|
         gtk.gtk_box_append(gtk.cast(gtk.Box, signal_content), widget);
-    const signal_body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const signal_body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
     gtk.gtk_widget_add_css_class(signal_body, "signal-body");
+    gtk.gtk_widget_set_vexpand(signal_body, gtk.true_);
     for ([_]*gtk.Widget{ signal_header, signal_status, signal_content }) |widget|
         gtk.gtk_box_append(gtk.cast(gtk.Box, signal_body), widget);
 
@@ -1991,8 +2166,6 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     gtk.gtk_widget_set_vexpand(root, gtk.true_);
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(body), "details");
 
-    adw.adw_overlay_split_view_set_min_sidebar_width(split, inspector_width);
-    adw.adw_overlay_split_view_set_max_sidebar_width(split, inspector_width);
     adw.adw_overlay_split_view_set_sidebar(split, root);
 
     panel.* = .{
@@ -2035,21 +2208,17 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         .track_row = track_row,
         .disc_row = disc_row,
         .compilation_row = compilation_row,
-        .explicit_row = explicit_row,
-        .plays_row = plays_row,
-        .last_played_row = last_played_row,
         .folder_row = folder_row,
         .file_row = file_row,
         .size_row = size_row,
         .modified_row = modified_row,
-        .added_row = added_row,
         .copy_button = copy_button,
+        .caution = caution,
         .album_view = album_view,
         .artist_view = artist_view,
         .playlist_view = playlist_view,
         .signal_status = gtk.cast(gtk.Label, signal_status),
         .signal_content = signal_content,
-        .signal_dot = signal_dot,
         .signal_verdict_label = gtk.cast(gtk.Label, signal_verdict_label),
         .signal_chain_label = gtk.cast(gtk.Label, signal_chain_label),
         .signal_stages = signal_stages,
