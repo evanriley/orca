@@ -463,6 +463,23 @@ column is null for every file, a tag write is refused for each one as
 `observed_file_tags.composer` was already observed and is unchanged. See
 [metadata.md](metadata.md#composer-and-comment).
 
+Migration 51 rebuilds `release_artwork` with the primary key `(release_id,
+kind)` and the columns `kind`, `source`, `width` and `height`, copying every
+row, null images included, as a front cover (`kind` 0) that was fetched
+(`source` 2) with its bytes, release ID, MIME type and `fetched_at` unchanged.
+It adds `cover_art_candidates`, the measurement columns
+`observed_file_tags.artwork_width`, `artwork_height` and `artwork_hash` and
+`folder_images.width`, `height` and `hash`, and three partial indexes over
+the covers left unmeasured: `observed_file_tags_artwork_unmeasured`
+(`artwork_byte_size > 0 AND artwork_hash IS NULL`), `folder_images_unmeasured`
+(`hash IS NULL`) and `release_artwork_unmeasured` (`image IS NOT NULL AND
+width IS NULL`). Every cover in a library opened at version 50 starts
+unmeasured, and an unmeasured cover raises no `undersized` or `conflicting`
+problem. Property backfill measures them, as described under
+[Artwork problems](#artwork-problems). The rewind to version 25 rebuilds
+the version-20 table from the front rows that name a release ID and drops
+the rest.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the
@@ -922,17 +939,76 @@ file does.
 
 ## Release artwork
 
-`release_artwork` (version 20) holds a Release's front cover fetched from the
-Cover Art Archive, one row per Release: `release_id` is its primary key and
-references `releases(id)` with `ON DELETE CASCADE`, so a pruned Release loses
-its row; one reprojected under a new id hands it over as
-[Album love](#album-love) describes. `musicbrainz_release_id` is the
-release ID it was fetched for, `image` and `mime` the cover, and
-`fetched_at` Unix seconds. A null `image` records that the archive had no
-cover, which stands for 30 days. `ReleaseArtworkRepository.coverReleaseMbid`
-chooses the release ID: the Release's tagged one, else the one most of its
-accepted proposals name. See
-[providers.md](providers.md#cover-art-archive).
+`release_artwork` (version 20, rebuilt in version 51) holds the covers the
+Library keeps for a Release, one row per kind: the primary key is
+`(release_id, kind)`, and `release_id` references `releases(id)` with
+`ON DELETE CASCADE`, so a pruned Release loses its rows; one reprojected
+under a new id hands them over as [Album love](#album-love) describes.
+
+- `kind` is 0 front, 1 back or 2 booklet (`ReleaseArtworkKind`).
+- `source` is 2 for a cover fetched from the Cover Art Archive and 3 for one
+  a person chose, from a candidate or a file (`ReleaseArtworkSource`; 0
+  embedded and 1 folder are never stored, because those covers are read
+  from their files). A fetched cover never replaces a chosen one, so a
+  person's choice survives every later fetch.
+- `musicbrainz_release_id` is the archive release the image came from, null
+  for a cover chosen from a file.
+- `image` and `mime` are the cover, and `width` and `height` its pixel size,
+  measured from the image header when it is stored, -1 when the header does
+  not read (`unreadable_cover_side`), and null only on a cover stored before
+  version 51 that is not yet measured. A cover of unknown size raises no
+  `undersized` problem. A null `image` records that the archive had no front
+  cover, which stands for 30 days.
+- `fetched_at` is Unix seconds.
+
+`ReleaseArtworkRepository.coverReleaseMbid` chooses the release ID to fetch
+under: the Release's tagged one, else the one most of its accepted proposals
+name. See [providers.md](providers.md#cover-art-archive).
+
+`cover_art_candidates` (version 51), primary key `(release_id, caa_id)`,
+holds the images the archive offered the last time a person asked for a
+Release's candidates, at most `max_cover_art_candidates` (8), replaced as a
+whole by the next request: the archive's image ID, the
+`musicbrainz_release_id` it belongs to, `kind` (0 front, 1 back, 2 booklet,
+3 an image of the release the archive picks for the Release's release group,
+4 anything else), `width`, `height` and `mime` measured from the full image,
+null when it was not fetched or did not read, `approved` and the 250-pixel
+`thumbnail`. The full image is never stored here; using a candidate fetches
+it again into `release_artwork` as a chosen cover. It cascades and is handed
+over with the Release like `release_artwork`, and clearing fetched provider
+data deletes it with the fetched rows of `release_artwork`.
+
+### Artwork problems
+
+`artwork_problem` health issues are settled from the database alone, never
+from image bytes, so the scanner records each local cover's size when it
+reads its bytes: `observed_file_tags.artwork_width`, `artwork_height` and
+`artwork_hash` for the embedded picture `artwork_mime_type` describes, and `folder_images.width`,
+`height` and `hash` for a folder image. `hash` is the first 8 bytes of the
+image's BLAKE3 digest, little-endian, as a signed integer, and 0 when the bytes would not
+read, with `width` and `height` null; a readable image's hash is never 0.
+An unchanged rescan reads neither,
+and projection only reads these columns.
+
+A Release's front cover in effect is the chosen one, else an embedded one,
+else a front folder image, else the fetched one. Each of its files carries
+at most one problem: `missing_front` when none of them exists,
+`conflicting` when its embedded cover and the folder's front image have
+different hashes, and `undersized` when the front in effect is under
+`minimum_cover_pixels` (500) on either side, with the size in the details.
+An unmeasured cover raises nothing.
+
+Covers stored before version 51 are repaired by `ArtworkBackfill`
+(`library/artwork_backfill.zig`), which property backfill runs after the
+files missing properties and in the same manner as migration 10's repair: it
+pages the three partial indexes by id, never walking a filesystem. It reads an embedded
+cover's picture and a folder image's header from their files when their size
+and modification time are those observed, and passes over one that changed
+or is unreachable; a file whose picture will not read is stored with hash 0
+and is not read again. It measures a kept `release_artwork` cover from the
+stored bytes; one whose header will not read is stored with `width` and
+`height` -1 and is not read again. Each batch settles the problems of the Releases it
+measured in its own commit.
 
 ## Album love
 
@@ -1246,7 +1322,9 @@ Version 45 adds the folder's pictures and its last scan:
   first 16 bytes; a file with no PNG, JPEG, GIF, WebP or BMP signature is not
   recorded), `role` (0 front for a name stem of `cover`, `front` or
   `folder`, 1 `back`, 2 `booklet`, 3 anything else; compared without case),
-  `size_bytes`, `modified_ns` and `last_seen_generation`. An image is never
+  `size_bytes`, `modified_ns`, `last_seen_generation`, and since version 51
+  `width`, `height` and `hash` (see [Artwork problems](#artwork-problems)).
+  An image is never
   a `files` row, so it never reaches projection, backfill, analysis or
   stats. An unchanged size and modification time skip the read, as for
   audio. The sweeps after an uncancelled run delete the rows the run did not
@@ -1352,7 +1430,7 @@ provider data a Library keeps, all of which can be fetched again:
 
 | `CacheSize` field | Tables |
 | --- | --- |
-| `artwork_bytes` | `release_artwork.image` (Cover Art Archive covers of Releases), `release_group_covers.image` |
+| `artwork_bytes` | `release_artwork.image` of fetched covers (`source = 2`; a chosen cover is kept), `cover_art_candidates.thumbnail`, `release_group_covers.image` |
 | `photo_bytes` | `artist_info.photo` unless it came from the Artist's folder (`photo_source = 0`), `related_artist_photos.photo` |
 | `lyrics_bytes` | `track_lyrics.synced` and `plain` (LRCLIB) |
 | `info_bytes` | the text of `artist_info`, `release_info`, `artist_links`, `artist_related` and `artist_release_groups` |

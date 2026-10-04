@@ -1,5 +1,6 @@
 const std = @import("std");
 const id3v1 = @import("id3v1.zig");
+const image_header = @import("image_header.zig");
 const lrc = @import("lrc.zig");
 const lyrics = @import("lyrics.zig");
 const model = @import("model.zig");
@@ -571,10 +572,14 @@ fn applyPicture(
     if (tags.artwork) |existing| {
         if (existing.kind == .front_cover or picture.kind != .front_cover) return;
     }
+    const measured = image_header.measure(picture.data);
     tags.artwork = .{
         .mime_type = try id3v1.latin1ToUtf8(allocator, picture.mime),
         .byte_size = picture.data.len,
         .kind = picture.kind,
+        .width = measured.width,
+        .height = measured.height,
+        .hash = measured.hash,
     };
 }
 

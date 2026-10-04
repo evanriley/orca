@@ -6,6 +6,7 @@
 //! spellings and canonical mapping stay in one place.
 
 const std = @import("std");
+const image_header = @import("image_header.zig");
 const lyrics = @import("lyrics.zig");
 const model = @import("model.zig");
 const source = @import("../storage/source.zig");
@@ -41,10 +42,14 @@ pub fn read(allocator: std.mem.Allocator, readable: source.ReadableSource) !?mod
     var tags = try vorbis_comment.parse(allocator, comment.payload);
     if (try choosePicture(allocator, comment.payload)) |picture| {
         defer allocator.free(picture.block);
+        const measured = image_header.measure(picture.view.data);
         tags.artwork = .{
             .mime_type = try allocator.dupe(u8, picture.view.mime_type),
             .byte_size = picture.view.data.len,
             .kind = picture.view.kind,
+            .width = measured.width,
+            .height = measured.height,
+            .hash = measured.hash,
         };
     }
     return tags;

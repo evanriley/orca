@@ -1,11 +1,14 @@
 const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const WriteLane = @import("write_lane.zig").WriteLane;
+const artwork_problems = @import("artwork_problems.zig");
+const ReleaseArtworkSource = @import("release_artwork.zig").ReleaseArtworkSource;
 
 /// The bytes of provider data a Library keeps, by kind. Nothing here was
 /// read from a file or chosen by a person, so all of it can be fetched again.
 pub const CacheSize = struct {
-    /// Cover Art Archive covers of Releases and of release groups.
+    /// Cover Art Archive covers of Releases and of release groups, and the
+    /// thumbnails of cover art candidates.
     artwork_bytes: u64 = 0,
     /// Wikimedia Commons photos of Artists and of related artists.
     photo_bytes: u64 = 0,
@@ -22,6 +25,8 @@ pub const CacheSize = struct {
 
 const local_photo = "(photo IS NOT NULL AND photo_source = 0)";
 
+const fetched_artwork = std.fmt.comptimePrint("source = {d}", .{@intFromEnum(ReleaseArtworkSource.fetched)});
+
 const artist_info_text =
     "COALESCE(length(CAST(wikidata_id AS BLOB)), 0) + COALESCE(length(CAST(artist_type AS BLOB)), 0) + " ++
     "COALESCE(length(CAST(biography AS BLOB)), 0) + COALESCE(length(CAST(biography_url AS BLOB)), 0) + " ++
@@ -29,8 +34,9 @@ const artist_info_text =
 
 const cache_size_sql =
     "SELECT\n" ++
-    "  (SELECT COALESCE(sum(length(image)), 0) FROM release_artwork) +\n" ++
-    "  (SELECT COALESCE(sum(length(image)), 0) FROM release_group_covers),\n" ++
+    "  (SELECT COALESCE(sum(length(image)), 0) FROM release_artwork WHERE " ++ fetched_artwork ++ ") +\n" ++
+    "  (SELECT COALESCE(sum(length(image)), 0) FROM release_group_covers) +\n" ++
+    "  (SELECT COALESCE(sum(length(thumbnail)), 0) FROM cover_art_candidates),\n" ++
     "  (SELECT COALESCE(sum(length(photo)), 0) FROM artist_info WHERE NOT " ++ local_photo ++ ") +\n" ++
     "  (SELECT COALESCE(sum(length(photo)), 0) FROM related_artist_photos),\n" ++
     "  (SELECT COALESCE(sum(COALESCE(length(CAST(synced AS BLOB)), 0) + COALESCE(length(CAST(plain AS BLOB)), 0)), 0)\n" ++
@@ -48,8 +54,12 @@ const cache_size_sql =
 /// that holds it, with everything fetched taken out and `fetched_at` zero so
 /// the next look fetches again.
 const clear_sql =
-    "BEGIN IMMEDIATE;\n" ++
-    "DELETE FROM release_artwork;\n" ++
+    "CREATE TEMP TABLE IF NOT EXISTS cleared_cover_releases(id INTEGER PRIMARY KEY);\n" ++
+    "DELETE FROM temp.cleared_cover_releases;\n" ++
+    "INSERT INTO temp.cleared_cover_releases(id)\n" ++
+    "    SELECT release_id FROM release_artwork WHERE kind = 0 AND " ++ fetched_artwork ++ ";\n" ++
+    "DELETE FROM release_artwork WHERE " ++ fetched_artwork ++ ";\n" ++
+    "DELETE FROM cover_art_candidates;\n" ++
     "DELETE FROM release_group_covers;\n" ++
     "DELETE FROM related_artist_photos;\n" ++
     "DELETE FROM track_lyrics;\n" ++
@@ -61,8 +71,7 @@ const clear_sql =
     "UPDATE artist_info SET wikidata_id = NULL, begin_year = NULL, end_year = NULL, ended = 0,\n" ++
     "    artist_type = NULL, biography = NULL, biography_source = NULL, biography_url = NULL,\n" ++
     "    biography_licence = NULL, biography_language = NULL, requested_language = NULL,\n" ++
-    "    listeners = NULL, listeners_fetched_at = NULL, origin = NULL, fetched_at = 0;\n" ++
-    "COMMIT;";
+    "    listeners = NULL, listeners_fetched_at = NULL, origin = NULL, fetched_at = 0;";
 
 /// Provider data kept in the Library: what `CacheSize` counts.
 pub const FetchedCacheRepository = struct {
@@ -81,17 +90,22 @@ pub const FetchedCacheRepository = struct {
         };
     }
 
-    /// Deletes every fetched cover, photo, lyric and description in one
-    /// transaction, and returns what they held. Embedded and folder images,
-    /// local lyrics and anything a person chose live elsewhere and stay.
+    /// Deletes every fetched cover, cover art candidate, photo, lyric and
+    /// description in one transaction, and returns what they held. Embedded
+    /// and folder images, local lyrics and covers a person chose stay.
     pub fn clear(self: *FetchedCacheRepository) !CacheSize {
         self.write_lane.acquire();
         defer self.write_lane.release();
         const before = try self.size();
-        self.db.exec(clear_sql) catch |err| {
-            self.db.exec("ROLLBACK;") catch {};
-            return err;
-        };
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        try self.db.exec(clear_sql);
+        {
+            var cleared = try self.db.prepare("SELECT id FROM temp.cleared_cover_releases;");
+            defer cleared.deinit();
+            while (try cleared.step() == .row) try artwork_problems.settleReleaseLocked(self.db, cleared.columnInt64(0));
+        }
+        try self.db.exec("DELETE FROM temp.cleared_cover_releases; COMMIT;");
         return before;
     }
 };
@@ -105,7 +119,7 @@ fn scalar(db: sqlite.Database, sql: [:0]const u8) !i64 {
     return statement.columnInt64(0);
 }
 
-test "clearing the cache removes fetched covers, photos, lyrics and info, and keeps folder artist photos and folder covers" {
+test "clearing the cache removes fetched covers, candidates, photos, lyrics and info, and keeps folder artist photos, folder covers and chosen covers" {
     var library = try LibraryDatabase.open(
         std.testing.allocator,
         std.testing.io,
@@ -117,6 +131,9 @@ test "clearing the cache removes fetched covers, photos, lyrics and info, and ke
         \\INSERT INTO releases(id, title, has_folder_cover) VALUES (1, 'Covered', 1);
         \\INSERT INTO tracks(id, release_id, title) VALUES (1, 1, 'Song');
         \\INSERT INTO release_artwork(release_id, musicbrainz_release_id, image, mime, fetched_at) VALUES (1, 'r', x'0102030405', 'image/jpeg', 1);
+        \\INSERT INTO release_artwork(release_id, kind, source, image, mime, fetched_at) VALUES (1, 1, 3, x'01020304050607', 'image/png', 1);
+        \\INSERT INTO cover_art_candidates(release_id, caa_id, musicbrainz_release_id, kind, approved, thumbnail, fetched_at)
+        \\    VALUES (1, 7, 'r', 0, 1, x'0102', 1);
         \\INSERT INTO release_group_covers(mbid, image, mime, fetched_at) VALUES ('g', x'010203', 'image/jpeg', 1);
         \\INSERT INTO artist_release_groups(artist_id, mbid, title, position) VALUES (1, 'g', 'Away', 0);
         \\INSERT INTO artist_info(artist_id, biography, photo, photo_mime, photo_source, fetched_at, outcome) VALUES
@@ -130,7 +147,7 @@ test "clearing the cache removes fetched covers, photos, lyrics and info, and ke
     );
 
     const before = try library.fetched_cache.size();
-    try std.testing.expectEqual(@as(u64, 8), before.artwork_bytes);
+    try std.testing.expectEqual(@as(u64, 5 + 3 + 2), before.artwork_bytes);
     try std.testing.expectEqual(@as(u64, 5), before.photo_bytes);
     try std.testing.expectEqual(@as(u64, 11), before.lyrics_bytes);
     try std.testing.expectEqual(@as(u64, 3 + 4 + 5 + 9 + 1 + 5 + 1 + 4), before.info_bytes);
@@ -138,7 +155,9 @@ test "clearing the cache removes fetched covers, photos, lyrics and info, and ke
     try std.testing.expectEqual(before, try library.fetched_cache.clear());
 
     try std.testing.expectEqual(CacheSize{}, try library.fetched_cache.size());
-    try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM release_artwork;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM release_artwork WHERE kind = 1 AND source = 3;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM release_artwork;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM cover_art_candidates;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM track_lyrics;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM artist_info;"));
     try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT length(photo) FROM artist_info WHERE artist_id = 2 AND biography IS NULL AND fetched_at = 0;"));

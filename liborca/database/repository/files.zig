@@ -16,6 +16,9 @@ const DuplicatePeer = @import("duplicates.zig").DuplicatePeer;
 const StorageIdentityKey = @import("locations.zig").StorageIdentityKey;
 const refresh_swept_folder_covers_sql = @import("locations.zig").refresh_swept_folder_covers_sql;
 const ArtworkRole = @import("locations.zig").ArtworkRole;
+const settleReleaseArtworkLocked = @import("artwork_problems.zig").settleReleaseLocked;
+const available_location = @import("roots.zig").available_location;
+const HealthIssueKind = @import("health.zig").HealthIssueKind;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
 pub const FileUpsert = struct {
@@ -45,6 +48,13 @@ pub const FileUpsert = struct {
 /// gap, and including it would re-probe every lossy file on every run for ever.
 pub const incomplete_properties_predicate =
     "duration_ms IS NULL OR sample_rate IS NULL OR channels IS NULL OR codec = ''";
+
+pub const repairable_properties_count_sql =
+    "SELECT count(*) FROM files WHERE files.id > 0 AND (" ++ incomplete_properties_predicate ++ ")\n" ++
+    "  AND (?2 >> files.audio_format) & 1 = 0\n" ++
+    "  AND NOT EXISTS (SELECT 1 FROM library_health_issues AS failed\n" ++
+    "      WHERE failed.file_id = files.id AND failed.kind = ?3)\n" ++
+    "  AND EXISTS (" ++ available_location ++ " held.file_id = files.id);";
 
 /// `uri` in `[prefix/, prefix0)` is exactly the uris below `prefix/`, because
 /// `0` is the byte after `/`, and as a range on the `(volume_id, uri)` unique
@@ -299,6 +309,27 @@ pub const FileRepository = struct {
         else
             "SELECT count(*) FROM files WHERE " ++ incomplete_properties_predicate ++ ";");
         defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// How many of the files `incompletePropertiesCount` counts a default
+    /// backfill could repair now. It leaves out a file whose probe already
+    /// failed on the bytes it has, an `unreadable_file` issue the scanner
+    /// settles again when they change; one whose `audio_format` has its bit
+    /// set in `undecodable_formats`; and one with no location that is neither
+    /// missing nor under a root in `offline_roots`, as
+    /// `LibraryRootRepository.offlineCounts` takes them.
+    pub fn repairablePropertiesCount(
+        self: *const FileRepository,
+        offline_roots: []const u8,
+        undecodable_formats: u64,
+    ) !u64 {
+        var statement = try self.db.prepare(repairable_properties_count_sql);
+        defer statement.deinit();
+        try statement.bindText(1, offline_roots);
+        try statement.bindInt64(2, @bitCast(undecodable_formats));
+        try statement.bindInt64(3, @intFromEnum(HealthIssueKind.unreadable_file));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -666,6 +697,11 @@ pub const FileRepository = struct {
         const marked = try scope.run(self.db, sql.mark);
         _ = try scope.run(self.db, sql.forget);
         try self.db.exec(refresh_swept_folder_covers_sql);
+        {
+            var swept = try self.db.prepare("SELECT id FROM temp.swept_cover_releases;");
+            defer swept.deinit();
+            while (try swept.step() == .row) try settleReleaseArtworkLocked(self.db, swept.columnInt64(0));
+        }
         try self.db.exec("DELETE FROM temp.swept_cover_releases; RELEASE sweep;");
         return marked;
     }

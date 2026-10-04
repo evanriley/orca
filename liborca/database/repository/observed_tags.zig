@@ -75,11 +75,12 @@ pub const ObservedTagsRepository = struct {
             \\    musicbrainz_recording_id, musicbrainz_release_id,
             \\    musicbrainz_release_group_id, musicbrainz_release_track_id,
             \\    musicbrainz_artist_id, musicbrainz_album_artist_id,
-            \\    artwork_mime_type, artwork_byte_size, artwork_kind, explicit, comment, observed_at
+            \\    artwork_mime_type, artwork_byte_size, artwork_kind, explicit, comment, observed_at,
+            \\    artwork_width, artwork_height, artwork_hash
             \\) VALUES (
             \\    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
             \\    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            \\    unixepoch()
+            \\    unixepoch(), ?31, ?32, ?33
             \\) ON CONFLICT(file_id) DO UPDATE SET
             \\    title=excluded.title, artist=excluded.artist, album=excluded.album,
             \\    album_artist=excluded.album_artist, composer=excluded.composer,
@@ -100,6 +101,9 @@ pub const ObservedTagsRepository = struct {
             \\    artwork_mime_type=excluded.artwork_mime_type,
             \\    artwork_byte_size=excluded.artwork_byte_size,
             \\    artwork_kind=excluded.artwork_kind,
+            \\    artwork_width=excluded.artwork_width,
+            \\    artwork_height=excluded.artwork_height,
+            \\    artwork_hash=excluded.artwork_hash,
             \\    explicit=excluded.explicit,
             \\    comment=excluded.comment,
             \\    observed_at=excluded.observed_at;
@@ -147,10 +151,16 @@ pub const ObservedTagsRepository = struct {
                 try statement.bindText(26, artwork.mime_type);
                 try statement.bindInt64(27, @intCast(artwork.byte_size));
                 try statement.bindInt64(28, @intFromEnum(artwork.kind));
+                try statement.bindOptionalInt64(31, optionalCount(artwork.width));
+                try statement.bindOptionalInt64(32, optionalCount(artwork.height));
+                try statement.bindOptionalInt64(33, artwork.hash);
             } else {
                 try statement.bindOptionalText(26, null);
                 try statement.bindOptionalInt64(27, null);
                 try statement.bindOptionalInt64(28, null);
+                try statement.bindOptionalInt64(31, null);
+                try statement.bindOptionalInt64(32, null);
+                try statement.bindOptionalInt64(33, null);
             }
             try statement.bindOptionalInt64(29, if (tags.explicit) |advisory| @intFromEnum(advisory) else null);
             try statement.bindOptionalText(30, presentText(tags.comment));
@@ -199,7 +209,8 @@ pub const ObservedTagsRepository = struct {
             \\       musicbrainz_recording_id, musicbrainz_release_id,
             \\       musicbrainz_release_group_id, musicbrainz_release_track_id,
             \\       musicbrainz_artist_id, musicbrainz_album_artist_id,
-            \\       artwork_mime_type, artwork_byte_size, artwork_kind, explicit, comment
+            \\       artwork_mime_type, artwork_byte_size, artwork_kind, explicit, comment,
+            \\       artwork_width, artwork_height, artwork_hash
             \\FROM observed_file_tags WHERE file_id=?1;
         );
         defer statement.deinit();
@@ -250,6 +261,9 @@ pub const ObservedTagsRepository = struct {
             .byte_size = @intCast(statement.columnInt64(25)),
             .kind = std.enums.fromInt(metadata.ArtworkKind, statement.columnInt64(26)) orelse
                 .other,
+            .width = countColumn(statement, 29),
+            .height = countColumn(statement, 30),
+            .hash = if (statement.columnIsNull(31)) null else statement.columnInt64(31),
         };
         values.genres = try self.genres(scratch, file_id);
         return .{ .arena = arena, .values = values };

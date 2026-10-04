@@ -422,6 +422,7 @@ fn showCover(editor: *Editor, states: liborca.TrackFieldStates, selected: []cons
         .folder => states.cover.file_name orelse "Folder image",
         .embedded => strings.format(&name_buffer, "Embedded {s}", .{imageType(states.cover.mime_type)}),
         .fetched => "Cover Art Archive",
+        .chosen => "Chosen cover",
     };
     var buffer: [256]u8 = undefined;
     const caption = if (states.track_count == 1)

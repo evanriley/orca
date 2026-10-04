@@ -3437,6 +3437,263 @@ test "a cover fetch without a release ID asks nothing, and a second redirect to 
     try std.testing.expect((try library_database.release_artwork.get(tagged)) == null);
 }
 
+const candidate_group_mbid = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+const candidate_group_release_mbid = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
+
+const candidate_release_index =
+    \\{"images": [
+    \\  {"id": 101, "types": ["Front"], "front": true, "approved": true},
+    \\  {"id": 102, "types": ["Back"], "back": true, "approved": true},
+    \\  {"id": 103, "types": ["Booklet"], "approved": false}
+    \\], "release": "https://musicbrainz.org/release/
+++ bryter_layter_mbid ++ "\"}";
+
+const candidate_group_index =
+    \\{"images": [
+    \\  {"id": 101, "types": ["Front"], "front": true, "approved": true},
+    \\  {"id": 201, "types": ["Front"], "front": true, "approved": true},
+    \\  {"id": 202, "types": ["Back"], "back": true, "approved": true}
+    \\], "release": "https://musicbrainz.org/release/
+++ candidate_group_release_mbid ++ "\"}";
+
+fn candidatePng(comptime width: u32, comptime height: u32) []const u8 {
+    return comptime png: {
+        var bytes: [33]u8 = undefined;
+        @memcpy(bytes[0..8], "\x89PNG\r\n\x1a\n");
+        std.mem.writeInt(u32, bytes[8..12], 13, .big);
+        @memcpy(bytes[12..16], "IHDR");
+        std.mem.writeInt(u32, bytes[16..20], width, .big);
+        std.mem.writeInt(u32, bytes[20..24], height, .big);
+        @memcpy(bytes[24..33], "\x08\x02\x00\x00\x00\x00\x00\x00\x00");
+        const final = bytes;
+        break :png &final;
+    };
+}
+
+/// The Cover Art Archive holding a release's images and its release group's,
+/// answered by URL: each full image by its ID, every thumbnail alike, and
+/// image 103's full image no longer held.
+const FakeCandidateArchive = struct {
+    http: network.testing.ScriptedTransport = .{},
+    group_status: u16 = 200,
+
+    fn attach(self: *FakeCandidateArchive, hooks: *MatchingHooks) void {
+        self.http.keep_history = true;
+        self.http.responder = .{ .context = self, .respond_fn = respond };
+        hooks.cover_art_transport = self.http.transport();
+    }
+
+    fn deinit(self: *FakeCandidateArchive) void {
+        self.http.deinit();
+    }
+
+    fn requestCount(self: *const FakeCandidateArchive) u32 {
+        return self.http.requestCount();
+    }
+
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *FakeCandidateArchive = @ptrCast(@alignCast(context));
+        const url = exchange.request.url;
+        if (std.mem.indexOf(u8, url, "/release-group/" ++ candidate_group_mbid ++ "/") != null) {
+            if (self.group_status != 200) return .{ .respond = .{ .status = self.group_status, .body = "" } };
+            return .{ .respond = .{ .body = candidate_group_index } };
+        }
+        const name = url[std.mem.lastIndexOfScalar(u8, url, '/').? + 1 ..];
+        if (name.len == 0) return .{ .respond = .{ .body = candidate_release_index } };
+        if (std.mem.endsWith(u8, name, "-250")) return .{ .respond = .{ .body = jpeg_cover } };
+        const body: []const u8 = if (std.mem.eql(u8, name, "101"))
+            candidatePng(1200, 1200)
+        else if (std.mem.eql(u8, name, "201"))
+            candidatePng(600, 600)
+        else if (std.mem.eql(u8, name, "102"))
+            candidatePng(300, 300)
+        else
+            return .{ .respond = .{ .status = 404, .body = "" } };
+        return .{ .respond = .{ .body = body } };
+    }
+};
+
+/// A Release named by `bryter_layter_mbid` whose one file names
+/// `candidate_group_mbid`, with its candidates listed.
+fn listCandidates(runtime: *OrcaRuntime, archive: *FakeCandidateArchive, fake: *FakeMusicBrainz, name: [:0]const u8) !struct { library: LibraryHandle, album: i64, listing: runtime_module.JobHandle } {
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    archive.attach(&runtime.matching_hooks);
+    const library = try runtime.openLibrary(std.testing.io, name);
+    const library_database = try libraryDatabase(runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", bryter_layter_mbid);
+    _ = try addAlbumTrack(library_database, album, "Northern Sky");
+    try library_database.database.exec("UPDATE observed_file_tags SET musicbrainz_release_group_id = '" ++ candidate_group_mbid ++ "';");
+    const listing = try runtime.startCoverArtCandidates(library, album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, listing));
+    return .{ .library = library, .album = album, .listing = listing };
+}
+
+test "a Release's cover art candidates are its release's images and its release group's other fronts, each measured from its full image and kept only as a thumbnail" {
+    var fake: FakeMusicBrainz = .{};
+    var archive: FakeCandidateArchive = .{};
+    defer archive.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const listed = try listCandidates(&runtime, &archive, &fake, "file:orca-cover-candidates?mode=memory&cache=shared");
+
+    const stats = try runtime.jobMatchStats(listed.listing);
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, stats.cover_art);
+    try std.testing.expectEqual(@as(u64, 4), stats.cover_art_candidates);
+    try std.testing.expectEqual(@as(u64, 4), stats.cover_art_candidates_examined);
+    try std.testing.expectEqual(@as(u64, 1), stats.cover_art_candidates_unmeasured);
+    try std.testing.expectEqual(@as(u32, 2 + 4 * 2), archive.requestCount());
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+
+    const candidates = try runtime.libraryCoverArtCandidates(listed.library, std.testing.allocator, listed.album);
+    defer {
+        for (candidates) |candidate| candidate.deinit(std.testing.allocator);
+        std.testing.allocator.free(candidates);
+    }
+    const Expected = struct { caa_id: i64, kind: database.CoverArtCandidateKind, release: []const u8, size: ?u32 };
+    const expected = [_]Expected{
+        .{ .caa_id = 101, .kind = .front, .release = bryter_layter_mbid, .size = 1200 },
+        .{ .caa_id = 201, .kind = .release_group, .release = candidate_group_release_mbid, .size = 600 },
+        .{ .caa_id = 102, .kind = .back, .release = bryter_layter_mbid, .size = 300 },
+        .{ .caa_id = 103, .kind = .booklet, .release = bryter_layter_mbid, .size = null },
+    };
+    try std.testing.expectEqual(expected.len, candidates.len);
+    for (expected, candidates) |want, candidate| {
+        try std.testing.expectEqual(want.caa_id, candidate.caa_id);
+        try std.testing.expectEqual(want.kind, candidate.kind);
+        try std.testing.expectEqualStrings(want.release, &candidate.musicbrainz_release_id);
+        try std.testing.expectEqual(want.size, candidate.width);
+        try std.testing.expectEqual(want.size, candidate.height);
+        try std.testing.expectEqualStrings(if (want.size == null) "" else "image/png", candidate.mime orelse "");
+        try std.testing.expectEqualStrings(jpeg_cover, candidate.thumbnail.?);
+    }
+    try std.testing.expect((try runtime.libraryStoredReleaseArtwork(listed.library, listed.album, .front)) == null);
+}
+
+test "a release group index that will not come keeps the release's own candidates and says the group's are missing" {
+    var fake: FakeMusicBrainz = .{};
+    var archive: FakeCandidateArchive = .{ .group_status = 503 };
+    defer archive.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const listed = try listCandidates(&runtime, &archive, &fake, "file:orca-cover-candidates-partial?mode=memory&cache=shared");
+
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.partial, (try runtime.jobMatchStats(listed.listing)).cover_art);
+    const candidates = try runtime.libraryCoverArtCandidates(listed.library, std.testing.allocator, listed.album);
+    defer {
+        for (candidates) |candidate| candidate.deinit(std.testing.allocator);
+        std.testing.allocator.free(candidates);
+    }
+    const expected = [_]i64{ 101, 102, 103 };
+    try std.testing.expectEqual(expected.len, candidates.len);
+    for (expected, candidates) |caa_id, candidate| {
+        try std.testing.expectEqual(caa_id, candidate.caa_id);
+        try std.testing.expectEqualStrings(bryter_layter_mbid, &candidate.musicbrainz_release_id);
+    }
+}
+
+test "a candidate used as a Release's front is fetched again in full and outranks every other cover, and one the archive lost stores nothing" {
+    var fake: FakeMusicBrainz = .{};
+    var archive: FakeCandidateArchive = .{};
+    defer archive.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const listed = try listCandidates(&runtime, &archive, &fake, "file:orca-cover-candidate-use?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, listed.library);
+    const listed_requests = archive.requestCount();
+
+    try std.testing.expectError(error.UnknownCoverArtCandidate, runtime.libraryUseCoverArtCandidate(listed.library, listed.album, 999, .front));
+
+    runtime.reapFinishedJobs();
+    const lost = try runtime.libraryUseCoverArtCandidate(listed.library, listed.album, 103, .booklet);
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, lost));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.not_found, (try runtime.jobMatchStats(lost)).cover_art);
+    try std.testing.expect((try runtime.libraryStoredReleaseArtwork(listed.library, listed.album, .booklet)) == null);
+
+    runtime.reapFinishedJobs();
+    const used = try runtime.libraryUseCoverArtCandidate(listed.library, listed.album, 102, .front);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, used));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, (try runtime.jobMatchStats(used)).cover_art);
+    try std.testing.expectEqualStrings(
+        "https://coverartarchive.org/release/" ++ bryter_layter_mbid ++ "/102",
+        archive.http.history.items[archive.http.history.items.len - 1].url,
+    );
+    const stored = (try runtime.libraryStoredReleaseArtwork(listed.library, listed.album, .front)).?;
+    defer stored.deinit();
+    try std.testing.expectEqualStrings(candidatePng(300, 300), stored.bytes);
+    const shown = (try runtime.libraryReleaseArtwork(listed.library, std.testing.io, listed.album)).?;
+    defer shown.deinit();
+    try std.testing.expectEqualStrings(candidatePng(300, 300), shown.bytes);
+
+    var issues = try library_database.health_issues.page(std.testing.allocator, 16, 0);
+    defer issues.deinit();
+    try std.testing.expectEqual(@as(usize, 1), issues.items.len);
+    try std.testing.expectEqual(
+        database.ArtworkFinding{ .problem = .undersized, .width = 300, .height = 300 },
+        runtime.libraryArtworkProblem(issues.items[0]).?,
+    );
+
+    runtime.reapFinishedJobs();
+    const fetch = try runtime.startReleaseCoverArtFetch(listed.library, listed.album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, fetch));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.chosen, (try runtime.jobMatchStats(fetch)).cover_art);
+    try std.testing.expectEqual(listed_requests + 2, archive.requestCount());
+
+    try std.testing.expect(try runtime.libraryClearReleaseArtwork(listed.library, listed.album, .front));
+    try std.testing.expect((try runtime.libraryStoredReleaseArtwork(listed.library, listed.album, .front)) == null);
+    var cleared = try library_database.health_issues.page(std.testing.allocator, 16, 0);
+    defer cleared.deinit();
+    try std.testing.expectEqual(@as(usize, 1), cleared.items.len);
+    try std.testing.expectEqual(
+        database.ArtworkFinding{ .problem = .missing_front },
+        runtime.libraryArtworkProblem(cleared.items[0]).?,
+    );
+}
+
+test "a cover a person sets is kept under its own kind, settles the front's artwork problem, and must be the image its type names" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-cover-set?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", bryter_layter_mbid);
+    _ = try addAlbumTrack(library_database, album, "Northern Sky");
+
+    try std.testing.expectError(
+        error.ArtworkTypeMismatch,
+        runtime.librarySetReleaseArtwork(library, album, .front, candidatePng(800, 800), "image/jpeg"),
+    );
+    try std.testing.expectError(
+        error.UnrecognizedArtworkImage,
+        runtime.librarySetReleaseArtwork(library, album, .front, "not an image", "image/png"),
+    );
+    try std.testing.expect((try runtime.libraryStoredReleaseArtwork(library, album, .front)) == null);
+
+    try runtime.librarySetReleaseArtwork(library, album, .back, candidatePng(300, 300), "image/png");
+    try runtime.librarySetReleaseArtwork(library, album, .front, candidatePng(800, 800), "image/png");
+    const back = (try runtime.libraryStoredReleaseArtwork(library, album, .back)).?;
+    defer back.deinit();
+    try std.testing.expectEqualStrings(candidatePng(300, 300), back.bytes);
+    try std.testing.expectEqual(metadata.ArtworkKind.back_cover, back.kind);
+    const front = (try runtime.libraryStoredReleaseArtwork(library, album, .front)).?;
+    defer front.deinit();
+    try std.testing.expectEqualStrings(candidatePng(800, 800), front.bytes);
+    try std.testing.expectEqual(metadata.ArtworkKind.front_cover, front.kind);
+    var settled = try library_database.health_issues.page(std.testing.allocator, 16, 0);
+    defer settled.deinit();
+    try std.testing.expectEqual(@as(usize, 0), settled.items.len);
+
+    try library_database.release_artwork.put(album, bryter_layter_mbid, .{ .bytes = jpeg_cover, .mime_type = "image/jpeg" }, 0);
+    const kept = (try runtime.libraryStoredReleaseArtwork(library, album, .front)).?;
+    defer kept.deinit();
+    try std.testing.expectEqualStrings(candidatePng(800, 800), kept.bytes);
+
+    try std.testing.expect(try runtime.libraryClearReleaseArtwork(library, album, .back));
+    try std.testing.expect(!try runtime.libraryClearReleaseArtwork(library, album, .booklet));
+    try std.testing.expect((try runtime.libraryStoredReleaseArtwork(library, album, .back)) == null);
+    const remaining = (try runtime.libraryStoredReleaseArtwork(library, album, .front)).?;
+    defer remaining.deinit();
+}
+
 test "a Release's cover release ID is the one most of its accepted matches name" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();

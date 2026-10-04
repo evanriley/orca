@@ -393,6 +393,18 @@ pub const MatchingRequest = struct {
     accept_minimum_confidence: ?f32 = null,
     /// With a Release scope: then fetch its front cover.
     cover_art: bool = false,
+    /// What a `cover_art` Job does with the Release.
+    cover_art_task: CoverArtTask = .front,
+};
+
+/// What a cover art Job does with its Release.
+pub const CoverArtTask = union(enum) {
+    /// Fetches its front cover when nothing else shows one.
+    front,
+    /// Lists the archive's images for it as candidates.
+    candidates,
+    /// Uses a stored candidate as one of its covers.
+    use: struct { caa_id: i64, kind: database.ReleaseArtworkKind },
 };
 
 pub const Request = union(enum) {
@@ -623,6 +635,14 @@ pub const MatchStats = struct {
     /// Matches the job accepted after its lookups.
     accepted: u64 = 0,
     cover_art: CoverArtOutcome = .not_requested,
+    /// A candidates Job's candidates asked for so far, of
+    /// `cover_art_candidates`, which stays zero until the archive's indexes
+    /// are read.
+    cover_art_candidates_examined: u64 = 0,
+    cover_art_candidates: u64 = 0,
+    /// Candidates kept without a size, their full image not fetched or not
+    /// read.
+    cover_art_candidates_unmeasured: u64 = 0,
 };
 
 const LiveMatchStats = struct {
@@ -652,6 +672,7 @@ const LiveMatchStats = struct {
     busy: std.atomic.Value(BusyService) = .init(.none),
     accepted: std.atomic.Value(u64) = .init(0),
     cover_art: std.atomic.Value(CoverArtOutcome) = .init(.not_requested),
+    cover_art_candidates: cover_art.CandidateProgress = .{},
     /// A running matching pass's counters.
     progress: library_pass.matching.Progress = .{},
     /// The Release a Match Album's files are on once it is done. Written by
@@ -687,6 +708,9 @@ const LiveMatchStats = struct {
             .busy = self.busy.load(.acquire),
             .accepted = self.accepted.load(.acquire),
             .cover_art = self.cover_art.load(.acquire),
+            .cover_art_candidates_examined = self.cover_art_candidates.examined.load(.acquire),
+            .cover_art_candidates = self.cover_art_candidates.total.load(.acquire),
+            .cover_art_candidates_unmeasured = self.cover_art_candidates.unmeasured.load(.acquire),
         };
     }
 };
@@ -1053,6 +1077,9 @@ pub const JobWorker = struct {
     /// fixed nothing a user can see. It is scoped to the repaired ids, exactly
     /// as a scan batch is, so repairing 104 rows reprojects the handful of
     /// folders they live in rather than the whole library.
+    ///
+    /// The covers observed before Orca measured covers are measured after,
+    /// in the same Job, and their counts join the files'.
     fn runPropertyBackfill(self: *JobWorker, request: BackfillRequest) void {
         const stats = &self.stats.scan;
         var pass: library_pass.Projection = .{
@@ -1085,8 +1112,32 @@ pub const JobWorker = struct {
         _ = stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
         _ = stats.errors.fetchAdd(result.errors, .acq_rel);
         _ = stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
-        if (result.cancelled) stats.cancelled.store(true, .release);
         self.noteProjection(result.projection);
+        if (result.cancelled) {
+            stats.cancelled.store(true, .release);
+            return;
+        }
+        var covers: library_pass.ArtworkBackfill = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .locations = &self.database.locations,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .cancellation = &self.token,
+            .current_item = &self.current_item,
+            .progress = &self.progress,
+            .batch_size = request.batch_size,
+        };
+        const measured = covers.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = stats.files_seen.fetchAdd(measured.covers_seen, .acq_rel);
+        _ = stats.changed.fetchAdd(measured.measured, .acq_rel);
+        _ = stats.unsupported.fetchAdd(measured.skipped, .acq_rel);
+        _ = stats.batches_committed.fetchAdd(measured.batches_committed, .acq_rel);
+        if (measured.cancelled) stats.cancelled.store(true, .release);
     }
 
     /// Decodes every file the Library has not measured yet and stores the
@@ -1203,7 +1254,7 @@ pub const JobWorker = struct {
             if (self.cancelled()) {
                 stats.cancelled.store(true, .release);
             } else {
-                self.runCoverArt(setup, services, release_id);
+                self.runCoverArt(setup, services, release_id, request.cover_art_task);
             }
         }
         self.reproject(written.items);
@@ -1261,7 +1312,7 @@ pub const JobWorker = struct {
         shared_state: network.client.StateStore,
     };
 
-    fn runCoverArt(self: *JobWorker, setup: MatchingSetup, services: Services, release_id: i64) void {
+    fn runCoverArt(self: *JobWorker, setup: MatchingSetup, services: Services, release_id: i64, task: CoverArtTask) void {
         const stats = &self.stats.matching;
         var gateway: network.Gateway = .{
             .transport = setup.hooks.cover_art_transport orelse services.transport,
@@ -1270,7 +1321,10 @@ pub const JobWorker = struct {
             .random = services.random,
             .config = .{
                 .identity = setup.identity.view(),
-                .max_response_bytes = providers.coverartarchive.max_image_bytes,
+                .max_response_bytes = switch (task) {
+                    .front => providers.coverartarchive.max_image_bytes,
+                    .candidates, .use => metadata.model.max_image_bytes,
+                },
             },
             .cancel = &self.registration.cancel,
             .sharing = .{ .store = services.shared_state, .service = providers.coverartarchive.service },
@@ -1280,14 +1334,38 @@ pub const JobWorker = struct {
             .gateway = &gateway,
             .server = setup.cover_art_server.view(),
         };
-        var fetch: cover_art.Fetch = .{
-            .allocator = self.allocator,
-            .io = self.threaded.io(),
-            .library = self.database,
-            .archive = &archive,
-            .wall_clock = services.wall_clock,
+        const ran: anyerror!CoverArtOutcome = switch (task) {
+            .front => front: {
+                var fetch: cover_art.Fetch = .{
+                    .allocator = self.allocator,
+                    .io = self.threaded.io(),
+                    .library = self.database,
+                    .archive = &archive,
+                    .wall_clock = services.wall_clock,
+                };
+                break :front fetch.run(release_id);
+            },
+            .candidates => candidates: {
+                var fetch: cover_art.Candidates = .{
+                    .allocator = self.allocator,
+                    .library = self.database,
+                    .archive = &archive,
+                    .wall_clock = services.wall_clock,
+                    .progress = &stats.cover_art_candidates,
+                };
+                break :candidates fetch.run(release_id);
+            },
+            .use => |use| use: {
+                var fetch: cover_art.Use = .{
+                    .allocator = self.allocator,
+                    .library = self.database,
+                    .archive = &archive,
+                    .wall_clock = services.wall_clock,
+                };
+                break :use fetch.run(release_id, use.caa_id, use.kind);
+            },
         };
-        const outcome = fetch.run(release_id) catch {
+        const outcome = ran catch {
             self.failed.store(true, .release);
             return;
         };
@@ -1295,7 +1373,8 @@ pub const JobWorker = struct {
         switch (outcome) {
             .cancelled => stats.cancelled.store(true, .release),
             .refused, .unavailable, .busy => self.failed.store(true, .release),
-            .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id, .folder => {},
+            .not_found => if (task == .use) self.failed.store(true, .release),
+            .not_requested, .embedded, .fetched, .cached, .cached_miss, .no_release_id, .folder, .chosen, .partial => {},
         }
     }
 
@@ -1795,7 +1874,10 @@ pub const JobWorker = struct {
 
     pub fn filesProcessed(self: *const JobWorker) u64 {
         return switch (self.stats) {
-            .matching => self.matchStats().tracks_examined,
+            .matching => matching: {
+                const stats = self.matchStats();
+                break :matching stats.tracks_examined + stats.cover_art_candidates_examined;
+            },
             .submission => self.submissionStats().files_examined,
             .scan => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
             .duplicates => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
@@ -1813,7 +1895,11 @@ pub const JobWorker = struct {
                 @max(stats.total_files.load(.acquire), completed_units)
             else
                 null,
-            .duplicates, .matching, .submission, .lyrics, .artist_info => null,
+            .matching => |*stats| switch (stats.cover_art_candidates.total.load(.acquire)) {
+                0 => null,
+                else => |total| @max(total, completed_units),
+            },
+            .duplicates, .submission, .lyrics, .artist_info => null,
         };
     }
 

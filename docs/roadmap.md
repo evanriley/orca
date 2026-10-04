@@ -557,7 +557,13 @@ are sniffed or not recognized until then:
   leave unable to play (`libraryAvailability`, `libraryReleasesAvailable`),
   and a root's `volume` and `last_seen_at`; a selection's shared, mixed and
   edited field values and its cover (`libraryTrackFieldStates`), and the tag
-  block a tag write replaces in each file (`TagWriteFile.format`). The command lane (`submit`,
+  block a tag write replaces in each file (`TagWriteFile.format`); a
+  Release's cover art candidates and chosen covers
+  (`startCoverArtCandidates`, `libraryCoverArtCandidates`,
+  `libraryUseCoverArtCandidate`, `librarySetReleaseArtwork`,
+  `libraryStoredReleaseArtwork`, `libraryClearReleaseArtwork`), what an
+  `artwork_problem` issue found (`libraryArtworkProblem`) and a candidates
+  Job's counts (`MatchStats.cover_art_candidates`). The command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump` and the
   request-correlated functions that use it.
 - Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain

@@ -74,18 +74,20 @@ const CarriedTable = struct {
     }
 };
 
-/// A Release left without Tracks hands its fetched cover and its love to the
-/// Release that took most of them, each only when that one has none of its
-/// own, so a cover fetched or an album loved before a regrouping survives it.
-/// Both tables cascade on the Release row, so whatever is not handed over
-/// goes with it.
+/// A Release left without Tracks hands its stored covers, its cover art
+/// candidates and its love to the Release that took most of them, each only
+/// when that one has none of its own, so a cover fetched or chosen or an
+/// album loved before a regrouping survives it. The tables cascade on the
+/// Release row, so whatever is not handed over goes with it.
 fn carryReleaseState(db: database.sqlite.Database, allocator: std.mem.Allocator, moved: []const MovedTrack) !void {
     if (moved.len == 0) return;
     var artwork = try CarriedTable.prepare(db, "release_artwork");
     defer artwork.deinit();
+    var candidates = try CarriedTable.prepare(db, "cover_art_candidates");
+    defer candidates.deinit();
     var loves = try CarriedTable.prepare(db, "release_loves");
     defer loves.deinit();
-    const carried = [_]*CarriedTable{ &artwork, &loves };
+    const carried = [_]*CarriedTable{ &artwork, &candidates, &loves };
     var in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
     defer in_use.deinit();
     var now_on = try db.prepare(
@@ -286,7 +288,8 @@ const Entry = struct {
     disc_total: ?i64 = null,
     explicit: ?metadata.Explicit = null,
     release_type: ?[]const u8 = null,
-    embedded_artwork: bool = false,
+    /// The cover the file's tags embed, as the scan measured it.
+    embedded_artwork: ?database.repository.ArtworkMeasurement = null,
     genres: []const []const u8 = &.{},
     /// Decided on the tags before the filename stands in for a missing title.
     missing_metadata: ?database.HealthIssueInput = null,
@@ -542,17 +545,13 @@ pub const Projection = struct {
         while (release_ids.next()) |release_id|
             _ = try database.repository.refreshFolderCoverLocked(self.library.database, release_id.*);
 
-        var covered = try self.library.database.prepare(
-            "SELECT 1 FROM releases WHERE id = ?1 AND " ++ database.repository.releaseCoverSql("releases") ++ ";",
-        );
-        defer covered.deinit();
+        var facts: std.AutoHashMapUnmanaged(i64, database.repository.ReleaseArtworkFacts) = .empty;
+        defer facts.deinit(allocator);
         for (entries) |entry| {
-            const release_has_cover = !entry.embedded_artwork and try exists(&covered, entry.release_id);
-            try self.library.health_issues.settleLocked(
-                entry.file_id,
-                .artwork_problem,
-                health.artworkProblem(entry.embedded_artwork, release_has_cover),
-            );
+            const release = try facts.getOrPut(allocator, entry.release_id);
+            if (!release.found_existing)
+                release.value_ptr.* = try database.repository.loadReleaseArtworkFacts(self.library.database, entry.release_id);
+            try database.repository.settleFileArtworkLocked(self.library.database, entry.file_id, entry.embedded_artwork, release.value_ptr.*);
         }
     }
 
@@ -679,7 +678,8 @@ pub const Projection = struct {
             \\       t.musicbrainz_release_id, t.musicbrainz_recording_id,
             \\       t.musicbrainz_artist_id, t.musicbrainz_album_artist_id,
             \\       COALESCE(t.artwork_byte_size, 0) > 0 AND t.artwork_mime_type IS NOT NULL,
-            \\       t.track_total, t.disc_total, t.explicit, t.release_type
+            \\       t.track_total, t.disc_total, t.explicit, t.release_type,
+            \\       t.artwork_width, t.artwork_height, t.artwork_hash
             \\FROM locations l
             \\JOIN files f ON f.id = l.file_id
             \\LEFT JOIN observed_file_tags t ON t.file_id = l.file_id
@@ -777,7 +777,11 @@ pub const Projection = struct {
                     statement.columnInt64(15) != 0,
                 .musicbrainz_release_id = try dupeNullable(allocator, statement, 16),
                 .musicbrainz_recording_id = try dupeNullable(allocator, statement, 17),
-                .embedded_artwork = statement.columnInt64(20) != 0,
+                .embedded_artwork = if (statement.columnInt64(20) == 0) null else .{
+                    .width = database.columns.countColumn(statement, 25),
+                    .height = database.columns.countColumn(statement, 26),
+                    .hash = optionalInt64(statement, 27),
+                },
                 .track_total = optionalInt64(statement, 21),
                 .disc_total = optionalInt64(statement, 22),
                 .explicit = if (statement.columnIsNull(23))

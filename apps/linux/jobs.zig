@@ -1,8 +1,8 @@
 //! Background jobs — scans, loudness analysis, duplicate finding, tag writes,
-//! matching and AcoustID submission — started from this frontend, and what
-//! each reports when it ends. A Job started while another holds the
-//! Library's slot waits its turn in liborca; the Activity page and the
-//! sidebar widget (`activity.zig`) show both.
+//! matching, AcoustID submission and the property backfill — started from
+//! this frontend, and what each reports when it ends. A Job started while
+//! another holds the Library's slot waits its turn in liborca; the Activity
+//! page and the sidebar widget (`activity.zig`) show both.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -88,6 +88,7 @@ pub fn retry(self: *App, history_id: i64) void {
         .duplicate_scan => .duplicates,
         .metadata_lookup => .matching,
         .acoustid_submission => .submission,
+        .property_backfill => .backfill,
         else => {
             activity.refresh(self);
             return self.requestTick();
@@ -471,9 +472,10 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
         .fetched => "Found the album's cover",
         .embedded => "The album's files already carry a cover",
         .folder => "The album's folder already has a cover",
+        .chosen => "The album already has a cover you chose",
         .cached => "The album's cover was already fetched",
         .cached_miss, .not_found => "The Cover Art Archive has no cover for this album",
-        .not_requested, .refused, .unavailable, .busy, .cancelled => "Done",
+        .not_requested, .refused, .unavailable, .busy, .cancelled, .partial => "Done",
     };
     if (result.accepted == 0) return self.toast(cover);
     var buffer: [160]u8 = undefined;
@@ -584,6 +586,12 @@ fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca
     }) catch "Submitted to AcoustID");
 }
 
+fn backfillFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.ScanStats) void {
+    if (state_value != .succeeded) return;
+    const repaired = if (stats) |value| value.changed else 0;
+    if (repaired != 0) reloadLibraryViews(self);
+}
+
 fn report(self: *App, text: [:0]const u8) void {
     self.toast(text);
     notify.taskEnded(self, text.ptr);
@@ -603,6 +611,7 @@ fn finished(
     if (task == .tag_write) self.tag_write_group = tracked.tag_write_group;
     if (task == .matching) return matchingFinished(self, tracked, state_value, match_stats, match_release);
     if (task == .submission) return submissionFinished(self, state_value, submission_stats);
+    if (task == .backfill) return backfillFinished(self, state_value, stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
     if (state_value != .succeeded) return report(self, switch (task) {
@@ -610,7 +619,7 @@ fn finished(
         .analysis => "Measuring stopped with an error",
         .duplicates => "Looking for duplicates failed",
         .tag_write => tagWriteFailedText(tag_write_failure),
-        .matching, .submission => unreachable,
+        .matching, .submission, .backfill => unreachable,
     });
     switch (task) {
         .scan => {
@@ -645,7 +654,7 @@ fn finished(
             _ = gtk.signalConnect(item, "button-clicked", gtk.callback(undoClicked), self);
             adw.adw_toast_overlay_add_toast(overlay, item);
         },
-        .matching, .submission => unreachable,
+        .matching, .submission, .backfill => unreachable,
     }
 }
 
@@ -672,7 +681,19 @@ pub fn tick(self: *App) void {
     while (index < self.task_count) {
         if (tickTask(self, index)) index += 1;
     }
+    startBackfillIfPending(self);
     activity.refresh(self);
+}
+
+fn startBackfillIfPending(self: *App) void {
+    if (self.backfill_checked or active(self, .scan)) return;
+    const library = self.library orelse return;
+    const availability = if (self.offline.availability) |*known| known else return;
+    self.backfill_checked = true;
+    const pending = self.runtime.libraryBackfillPending(library, availability) catch return;
+    if (pending.files == 0 and pending.covers == 0) return;
+    const job = self.runtime.startLibraryPropertyBackfill(library, .{}) catch return;
+    begin(self, .{ .task = .backfill, .job = job });
 }
 
 /// Shows one tracked Job's progress, and reports it when it has ended.
@@ -712,7 +733,7 @@ fn tickTask(self: *App, index: usize) bool {
     const ended = untrack(self, index);
     finished(self, ended, snapshot.state, stats, match_stats, match_release, submission_stats, tag_write_failure);
     switch (task) {
-        .analysis, .duplicates, .matching => health.reload(self),
+        .analysis, .duplicates, .matching, .backfill => health.reload(self),
         .scan, .tag_write, .submission => health.updateBanner(self),
     }
     if (task == .analysis) health.analysisEnded(self, snapshot.state);

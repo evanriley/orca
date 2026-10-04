@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 
 pub const acoustid_submission = @import("acoustid_submission.zig");
 pub const analysis_pass = @import("analysis_pass.zig");
+pub const artwork_backfill = @import("artwork_backfill.zig");
 pub const duplicate_pass = @import("duplicate_pass.zig");
 pub const folder_estimate = @import("folder_estimate.zig");
 pub const lyrics_lookup = @import("lyrics_lookup.zig");
@@ -18,6 +19,7 @@ pub const watch_hints = @import("watch_hints.zig");
 pub const watch_linux = if (builtin.os.tag == .linux) @import("watch_linux.zig") else struct {};
 
 pub const AcoustIdSubmission = acoustid_submission.AcoustIdSubmission;
+pub const ArtworkBackfill = artwork_backfill.ArtworkBackfill;
 pub const CancellationToken = scanner.CancellationToken;
 pub const CurrentItem = scanner.CurrentItem;
 pub const DuplicateScan = duplicate_pass.DuplicateScan;
@@ -33,6 +35,7 @@ pub const Tags = tag_reader.Tags;
 test {
     _ = @import("acoustid_submission.zig");
     _ = @import("analysis_pass.zig");
+    _ = @import("artwork_backfill.zig");
     _ = @import("duplicate_pass.zig");
     _ = @import("folder_estimate.zig");
     _ = @import("lyrics_lookup.zig");

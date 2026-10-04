@@ -2,6 +2,7 @@ const std = @import("std");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const metadata_model = @import("../metadata/root.zig").model;
+const image_header = @import("../metadata/root.zig").image_header;
 const storage = @import("../storage/root.zig");
 const projection = @import("projection.zig");
 const tag_reader = @import("tag_reader.zig");
@@ -376,6 +377,8 @@ pub const Scanner = struct {
         var header: [16]u8 = undefined;
         const header_len = local.readable().readAt(0, &header) catch return false;
         const mime = metadata_model.sniffImageMimeType(header[0..header_len]) orelse return false;
+        const measured = image_header.measureAt(local.readable(), 0, storage_identity.size) catch
+            image_header.Measurement{ .hash = image_header.unreadable_hash };
         const uri = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(uri);
         try self.pending_images.append(self.allocator, .{
@@ -387,6 +390,9 @@ pub const Scanner = struct {
             .size_bytes = size_bytes,
             .modified_ns = modified_ns,
             .last_seen_generation = self.generation,
+            .width = measured.width,
+            .height = measured.height,
+            .hash = measured.hash,
         });
         result.images += 1;
         return true;
@@ -2101,6 +2107,96 @@ test "an image in a scanned folder is listed as a front cover beside the music, 
     const kept = try library.locations.folderPage(std.testing.allocator, binding.root_id, "Album/Scans", 512, 0);
     defer kept.deinit();
     try std.testing.expectEqual(@as(usize, 1), kept.items.len);
+}
+
+test "an unchanged rescan and a projection read no cover bytes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album");
+    const flac = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "fixtures/audio/covered-reference.flac",
+        std.testing.allocator,
+        .limited(4 * 1024 * 1024),
+    );
+    defer std.testing.allocator.free(flac);
+    const png = flac[std.mem.indexOf(u8, flac, "\x89PNG").? .. std.mem.indexOf(u8, flac, "IEND").? + 8];
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/song.flac", .data = flac });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.png", .data = png });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unread-covers?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:covers" });
+    var target: projection.Projection = .{ .allocator = std.testing.allocator, .library = &library };
+
+    const ScanOnce = struct {
+        fn run(lib: *database.LibraryDatabase, bind: database.RootBinding, path: []const u8, pass: *projection.Projection) !Result {
+            const scan_run = try lib.scan_runs.begin(bind.root_id);
+            var scanner = Scanner{
+                .allocator = std.testing.allocator,
+                .io = std.testing.io,
+                .files = &lib.files,
+                .locations = &lib.locations,
+                .observed_tags = &lib.observed_tags,
+                .write_lane = lib.write_lane,
+                .database_handle = lib.database,
+                .volume_id = bind.volume_id,
+                .root_id = bind.root_id,
+                .generation = scan_run.generation,
+                .projection = pass,
+            };
+            defer scanner.deinit();
+            return scanner.scan(path);
+        }
+
+        fn details(lib: *database.LibraryDatabase, buffer: []u8) ![]const u8 {
+            var statement = try lib.database.prepare("SELECT details FROM library_health_issues WHERE kind = ?1;");
+            defer statement.deinit();
+            try statement.bindInt64(1, @intFromEnum(database.HealthIssueKind.artwork_problem));
+            if (try statement.step() != .row) return error.TestExpectedEqual;
+            const text = statement.columnText(0);
+            @memcpy(buffer[0..text.len], text);
+            return buffer[0..text.len];
+        }
+
+        /// Gives the cover a larger size in place, keeping the file's size
+        /// and modification time, so only a read of its bytes would see it.
+        fn enlarge(directory: std.Io.Dir, sub_path: []const u8, ihdr: usize) !void {
+            const file = try directory.openFile(std.testing.io, sub_path, .{ .mode = .read_write });
+            defer file.close(std.testing.io);
+            const before = try file.stat(std.testing.io);
+            var size: [8]u8 = undefined;
+            std.mem.writeInt(u32, size[0..4], 900, .big);
+            std.mem.writeInt(u32, size[4..8], 900, .big);
+            try file.writePositionalAll(std.testing.io, &size, ihdr + 4);
+            try file.setTimestamps(std.testing.io, .{ .modify_timestamp = .{ .new = before.mtime } });
+        }
+    };
+
+    _ = try ScanOnce.run(&library, binding, root_path, &target);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(
+        library.database,
+        "SELECT count(*) FROM observed_file_tags AS t, folder_images AS f WHERE t.artwork_hash = f.hash AND f.width = 16;",
+    ));
+    var buffer: [database.ArtworkFinding.max_details]u8 = undefined;
+    try std.testing.expectEqualStrings("problem=undersized width=16 height=16", try ScanOnce.details(&library, &buffer));
+
+    try ScanOnce.enlarge(temporary.dir, "Album/song.flac", std.mem.indexOf(u8, flac, "IHDR").?);
+    try ScanOnce.enlarge(temporary.dir, "Album/cover.png", std.mem.indexOf(u8, png, "IHDR").?);
+    const rescan = try ScanOnce.run(&library, binding, root_path, &target);
+    try std.testing.expectEqual(@as(u64, 1), rescan.unchanged);
+    try std.testing.expectEqual(@as(u64, 0), rescan.changed);
+    _ = try target.run(.all);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(
+        library.database,
+        "SELECT count(*) FROM observed_file_tags AS t, folder_images AS f WHERE t.artwork_width = 16 AND f.width = 16;",
+    ));
+    try std.testing.expectEqualStrings("problem=undersized width=16 height=16", try ScanOnce.details(&library, &buffer));
 }
 
 test "a cancelled walk records no scan time for the folders it did not finish" {

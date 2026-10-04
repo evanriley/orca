@@ -6,6 +6,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const id3v1 = @import("id3v1.zig");
+const image_header = @import("image_header.zig");
 const lrc = @import("lrc.zig");
 const lyrics = @import("lyrics.zig");
 const source = @import("../storage/source.zig");
@@ -44,11 +45,17 @@ pub fn read(allocator: std.mem.Allocator, readable: source.ReadableSource) !?mod
     while (try boxes.next()) |item| {
         if (item.is("covr")) {
             const value = try firstValue(item.body) orelse continue;
-            if (tags.artwork == null) tags.artwork = .{
-                .mime_type = model.sniffImageMimeType(value.bytes) orelse "",
-                .byte_size = value.bytes.len,
-                .kind = .front_cover,
-            };
+            if (tags.artwork == null) {
+                const measured = image_header.measure(value.bytes);
+                tags.artwork = .{
+                    .mime_type = model.sniffImageMimeType(value.bytes) orelse "",
+                    .byte_size = value.bytes.len,
+                    .kind = .front_cover,
+                    .width = measured.width,
+                    .height = measured.height,
+                    .hash = measured.hash,
+                };
+            }
             any = true;
             continue;
         }

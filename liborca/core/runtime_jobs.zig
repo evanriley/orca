@@ -187,6 +187,27 @@ pub fn startLibraryMatching(
 }
 
 pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
+    return startCoverArtJob(self, library, release_id, .front);
+}
+
+pub fn startCoverArtCandidates(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
+    return startCoverArtJob(self, library, release_id, .candidates);
+}
+
+pub fn useCoverArtCandidate(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    release_id: i64,
+    caa_id: i64,
+    kind: database.ReleaseArtworkKind,
+) !JobHandle {
+    try runtime.requireRunning(self);
+    const db = try runtime.libraryDatabase(self, library);
+    _ = try db.release_artwork.candidateRelease(release_id, caa_id) orelse return error.UnknownCoverArtCandidate;
+    return startCoverArtJob(self, library, release_id, .{ .use = .{ .caa_id = caa_id, .kind = kind } });
+}
+
+fn startCoverArtJob(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, task: job_worker.CoverArtTask) !JobHandle {
     try runtime.requireRunning(self);
     const identity = self.client_identity orelse return error.ClientIdentityRequired;
     try requireRelease(self, library, release_id);
@@ -204,6 +225,7 @@ pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, rel
         },
         .lookups = false,
         .cover_art = true,
+        .cover_art_task = task,
     } };
     if (providerJobWaiting(self)) return error.MatchingAlreadyRunning;
     if (maintenanceUnitRunning(self)) |unit| return queueBehindUnit(self, library, job_request, unit);
@@ -791,7 +813,8 @@ fn checkBatchSize(request: job_worker.Request) !void {
 fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDatabase, request: job_worker.Request) !?u64 {
     return switch (request) {
         .property_backfill => |backfill| try library_database.files
-            .incompletePropertiesCount(backfill.force),
+            .incompletePropertiesCount(backfill.force) +
+            try database.repository.unmeasuredCoverCount(library_database.database),
         .analysis => try library_database.files.unanalyzedCount(
             analysis_service.diagnosticsSelector(.{}),
         ),

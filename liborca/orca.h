@@ -1491,6 +1491,18 @@ typedef struct orca_backfill_options {
     uint8_t reserved[3];
 } orca_backfill_options;
 
+/* What orca_library_start_property_backfill could repair now. `files` counts
+ * the files that declare no duration, sample rate, channels or codec, less
+ * those missing, on an offline root, in a format no codec decodes, or already
+ * found unreadable with the bytes they have; `covers` the embedded covers,
+ * folder images and kept covers not yet measured, less embedded covers of
+ * files missing or on an offline root and folder images on an offline root.
+ * The backfill itself still examines what these leave out. */
+typedef struct orca_backfill_pending {
+    uint64_t files;
+    uint64_t covers;
+} orca_backfill_pending;
+
 /* ---------------------------------------------------------------- events */
 
 typedef enum orca_event_kind {
@@ -4176,7 +4188,9 @@ typedef enum orca_busy_service {
  * the archive, another 4xx, or a body that is not a JPEG or PNG of at most
  * 4 MiB. BUSY: another Orca process holds the archive. FOLDER: a front cover
  * image in the Release's folder is shown before a fetched one, so nothing was
- * fetched. */
+ * fetched. CHOSEN: a person chose the Release's front cover, so nothing was
+ * fetched. PARTIAL: a candidates fetch stored the release's own candidates
+ * but could not read its release group's index. */
 typedef enum orca_cover_art_outcome {
     ORCA_COVER_ART_OUTCOME_NOT_REQUESTED = 0,
     ORCA_COVER_ART_OUTCOME_EMBEDDED = 1,
@@ -4190,6 +4204,8 @@ typedef enum orca_cover_art_outcome {
     ORCA_COVER_ART_OUTCOME_BUSY = 9,
     ORCA_COVER_ART_OUTCOME_CANCELLED = 10,
     ORCA_COVER_ART_OUTCOME_FOLDER = 11,
+    ORCA_COVER_ART_OUTCOME_CHOSEN = 12,
+    ORCA_COVER_ART_OUTCOME_PARTIAL = 13,
 } orca_cover_art_outcome;
 
 /* How a file's recording ID compared with what AcoustID heard in its
@@ -4883,13 +4899,24 @@ orca_status orca_library_maintenance_status(
  * orca_library_scan_stats. In those stats `files_seen` counts rows examined,
  * `changed` rows repaired, `errors` files that opened and would not decode,
  * and `unsupported` files that are not reachable or are not audio - the last
- * of which is not a failure of the pass.
+ * of which is not a failure of the pass. It then measures the covers left
+ * unmeasured: each counts in `files_seen`, one measured or found unreadable
+ * in `changed`, and one whose file is unreachable or changed in
+ * `unsupported`.
  */
 orca_status orca_library_start_property_backfill(
     orca_runtime *runtime,
     orca_handle library,
     const orca_backfill_options *options,
     orca_handle *job
+);
+/* Writes what a property backfill could repair now, checking which roots are
+ * offline on the calling thread. A host starts one when either count is
+ * nonzero and no scan is running. */
+orca_status orca_library_backfill_pending(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_backfill_pending *output
 );
 
 /*

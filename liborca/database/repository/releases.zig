@@ -295,12 +295,13 @@ pub const release_year =
 const release_track_files = "tracks LEFT JOIN files AS play ON play.id = " ++ track_play_file ++ "\n" ++
     "    WHERE tracks.release_id = releases.id";
 
-/// True when the Release row `release` has a cover of its own: a fetched
-/// Cover Art Archive image or a front image in its folder. Every artwork
-/// check adds a file's embedded picture to this one definition.
+/// True when the Release row `release` has a front cover of its own: one a
+/// person chose, a fetched Cover Art Archive image or a front image in its
+/// folder. Every artwork check adds a file's embedded picture to this one
+/// definition.
 pub inline fn releaseCoverSql(comptime release: []const u8) []const u8 {
     return "(" ++ release ++ ".has_folder_cover IS 1 OR EXISTS (SELECT 1 FROM release_artwork\n" ++
-        "    WHERE release_artwork.release_id = " ++ release ++ ".id AND release_artwork.image IS NOT NULL))";
+        "    WHERE release_artwork.release_id = " ++ release ++ ".id AND release_artwork.kind = 0 AND release_artwork.image IS NOT NULL))";
 }
 
 pub const has_cover = "(" ++ releaseCoverSql("releases") ++ " OR EXISTS (SELECT 1 FROM " ++ release_track_files ++ "\n" ++

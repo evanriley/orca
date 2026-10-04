@@ -109,6 +109,7 @@ const struct_pairs = .{
     .{ c_api.AnalysisOptions, c.orca_analysis_options },
     .{ c_api.DuplicateScanOptions, c.orca_duplicate_scan_options },
     .{ c_api.BackfillOptions, c.orca_backfill_options },
+    .{ c_api.BackfillPendingView, c.orca_backfill_pending },
     .{ c_api.CommandCompletedEvent, c.orca_command_completed_event },
     .{ c_api.JobProgressEvent, c.orca_job_progress_event },
     .{ c_api.JobFinishedEvent, c.orca_job_finished_event },

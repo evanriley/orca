@@ -1,5 +1,6 @@
 pub const artwork = @import("artwork.zig");
 pub const id3v1 = @import("id3v1.zig");
+pub const image_header = @import("image_header.zig");
 pub const id3v2 = @import("id3v2.zig");
 pub const file_mutation = @import("file_mutation.zig");
 pub const genre_alias = @import("genre_alias.zig");
@@ -35,6 +36,7 @@ pub const resolveValue = model.resolveValue;
 test {
     _ = @import("artwork.zig");
     _ = @import("id3v1.zig");
+    _ = @import("image_header.zig");
     _ = @import("id3v2.zig");
     _ = @import("file_mutation.zig");
     _ = @import("genre_alias.zig");

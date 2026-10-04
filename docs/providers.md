@@ -583,13 +583,13 @@ ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 
 `Runtime.startReleaseCoverArtFetch(library, release_id)`, and a matching job
 with `MatchRequest.cover_art`, fetch a Release's front cover from the Cover
-Art Archive into the Library. Nothing is fetched for a Release one of whose
-files carries a readable cover, or whose folder holds a readable front image,
-and media files are never written. The
+Art Archive into the Library. Nothing is fetched for a Release whose front
+cover a person chose, one of whose files carries a readable cover, or whose
+folder holds a readable front image, and media files are never written. The
 cover is stored in `release_artwork` ([database.md](database.md#release-artwork)),
 and `libraryReleaseArtwork`, `libraryTrackArtwork` and the artwork loader
-return it when no file of the Release has one: an embedded cover always
-wins.
+return it when no file of the Release has one and no cover was chosen: a
+chosen cover always wins, then an embedded one.
 
 - **Release ID.** The Release's tagged MusicBrainz release ID; without one,
   the release ID most of its accepted matches name, a tie going to the
@@ -613,13 +613,50 @@ wins.
   ID is not asked about again for 30 days of wall time; a fetched cover is
   not asked for again while its release ID stays the same.
 
-`jobMatchStats(job).cover_art` reports the `CoverArtOutcome`: `embedded`,
-`folder`, `fetched`, `cached`, `cached_miss`, `not_found`, `no_release_id`, or, failing
-the job, `refused`, `unavailable` or `busy`.
+`jobMatchStats(job).cover_art` reports the `CoverArtOutcome`: `chosen`,
+`embedded`, `folder`, `fetched`, `cached`, `cached_miss`, `not_found`,
+`no_release_id`, or, failing the job, `refused`, `unavailable` or `busy`.
+
+### Cover candidates
+
+`Runtime.startCoverArtCandidates(library, release_id)` lists the images the
+archive holds for a Release so a person can pick one. It runs only when a
+person asks for it, never from a scan, a match or a maintenance pass, and
+makes at most 18 requests, each through the gateway as `coverartarchive`
+under the same rate, backoff, identity and redirect rules:
+
+1. `GET /release/{mbid}/`, the release's index, when the Release has a
+   release ID, chosen as for the front cover.
+2. `GET /release-group/{rgid}/`, the release group's index, only when the
+   Release's files carry exactly one MusicBrainz release group ID. Only its
+   front images are kept, as `release_group` candidates.
+3. For each of at most 8 candidates (`max_cover_art_candidates`), fronts
+   first, then release group fronts, backs, booklets and the rest, each in
+   the archive's ID order, with an image listed by both indexes kept once:
+   `GET /release/{mbid}/{id}`, the full image, whose header is measured for
+   its size and whose bytes are then discarded, and
+   `GET /release/{mbid}/{id}-250`, the thumbnail, which is kept.
+
+An index is at most 1 MiB and lists at most 64 images; an image is at most
+12 MiB, the bound on a cover a person sets, and only a JPEG or PNG by its
+bytes. A full image that fails, is too large or will not read leaves its
+candidate without a size, and `MatchStats.cover_art_candidates_unmeasured`
+counts it; a missing thumbnail leaves it without one. Progress counts
+candidates. The list replaces the Release's last one in
+`cover_art_candidates` ([database.md](database.md#release-artwork)). When
+the release's index was read but the release group's would not come, the
+release's own candidates are stored and the Job succeeds with the outcome
+`partial`; when there are none to keep, it fails as the request did.
+
+`Runtime.libraryUseCoverArtCandidate(library, release_id, caa_id, kind)`
+fetches the candidate's full image again, one request, and stores it as the
+Release's chosen front, back or booklet. A candidate the Release no longer
+lists is `error.UnknownCoverArtCandidate`; an image the archive no longer
+holds fails the Job as `not_found` and stores nothing.
 
 ```sh
 orca-cli match DATABASE --release=ID [--accept-min-score=SCORE] [--cover-art]
-orca-cli cover-art DATABASE RELEASE_ID
+orca-cli cover-art DATABASE RELEASE_ID [--candidates | --use=CAA_ID[:front|back|booklet]]
 orca-cli artwork DATABASE --release=ID --out=PATH
 ```
 

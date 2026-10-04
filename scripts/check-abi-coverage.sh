@@ -51,6 +51,13 @@ declare -A reasons=(
     [libraryReshufflePlaylists]="later: drawing new random smart playlist orders (docs/roadmap.md, Later)"
     [librarySmartPlaylistPreview]="later: a smart playlist preview with its length and a sample (docs/roadmap.md, Later)"
     [libraryReleasesAvailable]="later: offline roots and what they leave unable to play (docs/roadmap.md, Later)"
+    [startCoverArtCandidates]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
+    [libraryCoverArtCandidates]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
+    [libraryUseCoverArtCandidate]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
+    [librarySetReleaseArtwork]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
+    [libraryStoredReleaseArtwork]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
+    [libraryClearReleaseArtwork]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
+    [libraryArtworkProblem]="later: what an artwork_problem issue found; its details text already crosses the ABI (docs/roadmap.md, Later)"
     [libraryTrackFieldStates]="later: a selection's shared, mixed and edited field values and cover, for a metadata editor (docs/roadmap.md, Later)"
 )
 

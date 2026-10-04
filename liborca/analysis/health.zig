@@ -34,15 +34,6 @@ pub fn albumArtistAnomaly(album: []const u8, album_artist: ?[]const u8) ?databas
     };
 }
 
-pub fn artworkProblem(embedded: bool, fetched: bool) ?database.HealthIssueInput {
-    if (embedded or fetched) return null;
-    return .{
-        .kind = .artwork_problem,
-        .severity = .information,
-        .details = "artwork is missing",
-    };
-}
-
 pub fn clipping(
     buffer: *DetailsBuffer,
     clipped_runs: u64,
@@ -105,12 +96,6 @@ test "an album without an album artist is an anomaly and a blank album is not" {
     try std.testing.expect(albumArtistAnomaly("Album", " ") != null);
     try std.testing.expect(albumArtistAnomaly("Album", "Orca") == null);
     try std.testing.expect(albumArtistAnomaly("", null) == null);
-}
-
-test "artwork is a problem only when neither the file nor its release has a cover" {
-    try std.testing.expect(artworkProblem(false, false) != null);
-    try std.testing.expect(artworkProblem(true, false) == null);
-    try std.testing.expect(artworkProblem(false, true) == null);
 }
 
 test "audio findings follow the clipping and silence thresholds" {

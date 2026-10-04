@@ -60,10 +60,12 @@ pub const CoverSource = enum {
     folder,
     /// The cover fetched for the Release from the Cover Art Archive.
     fetched,
+    /// The front cover a person chose for the Release.
+    chosen,
 };
 
 /// The cover the first selected Track shows, in the order artwork resolves
-/// it: embedded, then folder, then fetched.
+/// it: chosen, then embedded, then folder, then fetched.
 pub const Cover = struct {
     source: CoverSource = .none,
     /// The folder image's file name, for a `folder` cover.
@@ -71,7 +73,7 @@ pub const Cover = struct {
     /// The embedded image's MIME type, for an `embedded` cover.
     mime_type: ?[]const u8 = null,
     /// How many selected Tracks show the same cover: the same folder image,
-    /// the same Release's fetched cover, or an embedded image of
+    /// the same Release's chosen or fetched cover, or an embedded image of
     /// the same type and byte size.
     tracks: u32 = 0,
 };
@@ -208,6 +210,8 @@ fn trackCover(
     release_id: ?i64,
     embedded: ?metadata.Artwork,
 ) !TrackCover {
+    if (release_id) |release| if (try library.release_artwork.hasChosenFront(release))
+        return .{ .source = .chosen, .release_id = release };
     if (embedded) |artwork| return .{ .source = .embedded, .identity = artwork.mime_type, .size = artwork.byte_size };
     const images = try library.locations.trackReleaseFrontImages(scratch, track_id, 1);
     if (images.len != 0) return .{ .source = .folder, .identity = images[0] };
@@ -223,7 +227,7 @@ fn sameCover(first: TrackCover, other: TrackCover) bool {
         .none => false,
         .embedded => first.size == other.size and std.mem.eql(u8, first.identity, other.identity),
         .folder => std.mem.eql(u8, first.identity, other.identity),
-        .fetched => first.release_id == other.release_id,
+        .fetched, .chosen => first.release_id == other.release_id,
     };
 }
 

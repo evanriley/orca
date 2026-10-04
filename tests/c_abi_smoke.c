@@ -4386,6 +4386,9 @@ int main(int argc, char **argv) {
     orca_backfill_options backfill_options;
     memset(&backfill_options, 0, sizeof backfill_options);
     backfill_options.batch_size = 16;
+    orca_backfill_pending backfill_pending;
+    if (orca_library_backfill_pending(runtime, library, &backfill_pending) != ORCA_STATUS_OK)
+        return 236;
     if (orca_library_start_property_backfill(runtime, library, &backfill_options,
                                              &backfill_job) != ORCA_STATUS_OK)
         return 139;
@@ -4397,6 +4400,7 @@ int main(int argc, char **argv) {
     if (orca_library_scan_stats(runtime, backfill_job, &backfill_stats) != ORCA_STATUS_OK)
         return 142;
     if (backfill_stats.changed != 0) return 143;
+    if (backfill_stats.files_seen != backfill_pending.files + backfill_pending.covers) return 237;
 
     backfill_options.force = 1;
     if (orca_library_start_property_backfill(runtime, library, &backfill_options,

@@ -287,8 +287,8 @@ defer page.deinit();
 - `libraryTrackFieldStates` returns `TrackFieldStates` for up to 512 Tracks:
   per `EditableTrackField` the value they share, whether they are `mixed`, and
   whether Orca's value is `edited` (differs from a file's tag), the disc
-  total they share, and the first Track's `TrackFieldCover` (`embedded`,
-  `folder` or `fetched`, in that order of preference) with how
+  total they share, and the first Track's `TrackFieldCover` (`chosen`,
+  `embedded`, `folder` or `fetched`, in that order of preference) with how
   many of them show the same one. It reads the
   database only. The caller frees it with `deinit`.
 - `planTagWrite` returns a `TagWritePlan`: each file's `TagWriteChange`s with
@@ -498,8 +498,8 @@ defer page.deinit();
   same search finds, under every filter and sort, and
   `libraryReleaseCountMatching` counts them.
 - Cover art is read either on the caller's thread (`libraryTrackArtwork`,
-  `libraryReleaseArtwork`) or off it. Both return the front cover embedded in
-  a file first, then a front image (`folder_images` role `front`) in the
+  `libraryReleaseArtwork`) or off it. Both return the front cover a person
+  chose first, then the front cover embedded in a file, then a front image (`folder_images` role `front`) in the
   folder holding most of the Release's Tracks, ties to the lowest path,
   preferring the stems `cover`, `front` and `folder` in that order, then the
   largest; then the cover the Cover Art Archive fetch kept. The folder image
@@ -515,9 +515,53 @@ defer page.deinit();
   as `[36]u8`, asks for the cover an Artist fetch kept for the group, with
   no image when none is; the loader makes no request. The C ABI has no
   such subject yet. `startReleaseCoverArtFetch` sends no request for a
-  Release with an embedded or a folder cover and reports `embedded` or
-  `folder` as its `CoverArtOutcome`; the other outcomes are listed in
-  [providers.md](providers.md#cover-art-archive).
+  Release with a chosen, an embedded or a folder cover and reports
+  `chosen`, `embedded` or `folder` as its `CoverArtOutcome`; the other
+  outcomes are listed in [providers.md](providers.md#cover-art-archive).
+- A Release keeps at most one cover of each `ReleaseArtworkKind` (`front`,
+  `back`, `booklet`) in the Library, fetched or chosen. Media files are never
+  written. `librarySetReleaseArtwork` keeps image bytes a person chose; the
+  MIME type must be what the bytes sniff as, and an image over
+  `max_image_bytes` is `error.ArtworkTooLarge`. `libraryClearReleaseArtwork`
+  forgets the kept cover of a kind, returning false when none was kept, and
+  `libraryStoredReleaseArtwork` reads it without looking at files or
+  folders. `startCoverArtCandidates` is a Job that lists the Cover Art
+  Archive's images for a Release: its release's index, then the index of
+  its release group when its files name exactly one, deduplicated by
+  image ID and capped at `max_cover_art_candidates` (8). Each candidate's
+  full image is fetched through the Gateway to measure its size and then
+  dropped; only its 250-pixel thumbnail is kept. A candidate whose full
+  image would not come keeps a null size, and `MatchStats` counts it in
+  `cover_art_candidates_unmeasured`; `cover_art_candidates` and
+  `cover_art_candidates_examined` give the Job's progress in candidates.
+  When the release group's index will not come after the release's was
+  read, the release's own candidates are stored and the Job succeeds with
+  `CoverArtOutcome.partial`. `libraryCoverArtCandidates` reads the stored list as
+  `CoverArtCandidate`s, fronts first, then the release group's fronts,
+  backs, booklets and the rest (`CoverArtCandidateKind`).
+  `libraryUseCoverArtCandidate` fetches a listed candidate's full image
+  again and keeps it as the cover of the kind asked for; a candidate the
+  Release does not list is `error.UnknownCoverArtCandidate`, and an image
+  the archive no longer holds fails the Job with `not_found`. A successful
+  use reports `fetched`; the cover it keeps is `chosen`.
+- The `artwork_problem` health issue names what is wrong with a file's front
+  cover, in the order checked: `missing_front` (no chosen, embedded, folder
+  or fetched front), `conflicting` (the file's embedded cover and its
+  folder's front image differ by content hash), `undersized` (the front in
+  effect, chosen before embedded before folder before fetched, is under
+  `minimum_cover_pixels`, 500, on a side). A size or hash never measured,
+  or a kept cover whose header would not read, raises nothing.
+  `libraryArtworkProblem` reads an issue's details as an
+  `ArtworkFinding`: its `ArtworkProblem` and, for `undersized`, the width
+  and height; it is null for any other kind of issue.
+- `libraryBackfillPending` takes a `LibraryAvailability` and returns a
+  `BackfillPending`: the `files` that declare no duration, sample rate,
+  channels or codec and the `covers` not yet measured, less what
+  `startLibraryPropertyBackfill` cannot repair now. It leaves out files that
+  are missing, on an offline root, in a format no codec decodes, or already
+  found unreadable with the bytes they have, and covers of missing files or
+  on an offline root. The Job still examines those. A host starts it when
+  either count is non-zero, outside a scan.
 - Track and Release listings can also be read off the caller's thread:
   `libraryRequestBrowse` queues a `BrowseRequest` on the Library's browse
   loader and returns its id, `libraryTakeBrowse` collects a finished

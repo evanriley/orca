@@ -27,6 +27,7 @@ const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_zones = @import("runtime_zones.zig");
+const storage = @import("../storage/root.zig");
 const tag_write_history = @import("tag_write_history.zig");
 const runtime_queue = @import("runtime_queue.zig");
 const runtime_roots = @import("runtime_roots.zig");
@@ -360,6 +361,19 @@ pub const ScanRequest = job_worker.ScanRequest;
 pub const ReconcileRequest = job_worker.ReconcileRequest;
 pub const ReconcileScope = job_worker.ReconcileScope;
 pub const BackfillRequest = job_worker.BackfillRequest;
+
+/// What a default property backfill could repair now. The backfill itself
+/// still examines every row these leave out.
+pub const BackfillPending = struct {
+    /// Files that declare no duration, sample rate, channels or codec, less
+    /// those it cannot repair: missing, on an offline root, in a format no
+    /// codec decodes, or already found unreadable with the bytes they have.
+    files: u64,
+    /// Embedded covers, folder images and kept covers not yet measured, less
+    /// embedded covers of files that are missing or on an offline root and
+    /// folder images on an offline root.
+    covers: u64,
+};
 pub const AnalysisRequest = job_worker.AnalysisRequest;
 pub const DuplicateScanRequest = job_worker.DuplicateScanRequest;
 
@@ -731,6 +745,27 @@ pub const OrcaRuntime = struct {
         }
     }
 
+    /// What `startLibraryPropertyBackfill` could repair now, with the roots
+    /// `availability` names offline. A host starts it when either count is
+    /// non-zero, outside a scan.
+    pub fn libraryBackfillPending(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        availability: *const LibraryAvailability,
+    ) !BackfillPending {
+        const library_database = try libraryDatabase(self, library);
+        return .{
+            .files = try library_database.files.repairablePropertiesCount(
+                availability.offline_ids,
+                undecodableFormats(),
+            ),
+            .covers = try database.repository.measurableCoverCount(
+                library_database.database,
+                availability.offline_ids,
+            ),
+        };
+    }
+
     /// Files that still owe the default loudness and fingerprint measurement.
     pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
@@ -997,6 +1032,67 @@ pub const OrcaRuntime = struct {
         release_id: i64,
     ) !?metadata.EmbeddedImage {
         return artwork.releaseArtwork(self.allocator, io, try libraryDatabase(self, library), release_id);
+    }
+
+    /// Keeps `bytes` as one of a Release's covers, chosen by a person: shown
+    /// before any embedded, folder or fetched cover, and never replaced by a
+    /// fetch. `mime_type` must name what the bytes are, a JPEG, PNG, GIF,
+    /// BMP or WebP image of at most 12 MiB. No media file is written.
+    pub fn librarySetReleaseArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        kind: database.ReleaseArtworkKind,
+        bytes: []const u8,
+        mime_type: []const u8,
+    ) !void {
+        try requireRunning(self);
+        const now_s = std.Io.Clock.real.now(self.control_threaded.io()).toSeconds();
+        try (try libraryDatabase(self, library)).release_artwork.set(release_id, kind, bytes, mime_type, null, now_s);
+    }
+
+    /// The cover of `kind` the Library keeps for a Release, chosen or
+    /// fetched, without looking at its files or folder; null when it keeps
+    /// none. `libraryReleaseArtwork` is the front cover a host shows.
+    pub fn libraryStoredReleaseArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        kind: database.ReleaseArtworkKind,
+    ) !?metadata.EmbeddedImage {
+        return (try libraryDatabase(self, library)).release_artwork.stored(self.allocator, release_id, kind);
+    }
+
+    /// Forgets the cover of `kind` the Library keeps for a Release, chosen
+    /// or fetched. Embedded and folder covers stay. False when it kept none.
+    pub fn libraryClearReleaseArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        kind: database.ReleaseArtworkKind,
+    ) !bool {
+        try requireRunning(self);
+        return (try libraryDatabase(self, library)).release_artwork.clear(release_id, kind);
+    }
+
+    /// The Cover Art Archive images `startCoverArtCandidates` last listed for
+    /// a Release, its release's fronts first, then its release group's, then
+    /// backs, booklets and the rest. Free each with `CoverArtCandidate.deinit`
+    /// and the slice with `allocator`.
+    pub fn libraryCoverArtCandidates(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+    ) ![]database.CoverArtCandidate {
+        return (try libraryDatabase(self, library)).release_artwork.candidates(allocator, release_id);
+    }
+
+    /// What an `artwork_problem` issue found, or null for any other issue.
+    pub fn libraryArtworkProblem(self: *const OrcaRuntime, issue: database.HealthIssue) ?database.ArtworkFinding {
+        _ = self;
+        if (issue.kind != .artwork_problem) return null;
+        return database.ArtworkFinding.parse(issue.details);
     }
 
     /// Asks for a cover without waiting for it. The lookup runs on the
@@ -2594,7 +2690,9 @@ pub const OrcaRuntime = struct {
 
     /// Starts the property backfill: probes the headers of `files` rows whose
     /// declared audio properties are missing, and reprojects each repaired
-    /// batch so the Tracks derived from them stop reading zero.
+    /// batch so the Tracks derived from them stop reading zero. Then it
+    /// measures the embedded covers and folder images observed before Orca
+    /// measured covers, and settles their Releases' `artwork_problem` issues.
     ///
     /// Unlike a scan this job has an honest denominator before it starts —
     /// which rows still owe a probe is one indexed count — so its snapshot
@@ -2667,6 +2765,35 @@ pub const OrcaRuntime = struct {
     /// `startLibraryMatching` beside a maintenance unit.
     pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
         return runtime_jobs.startReleaseCoverArtFetch(self, library, release_id);
+    }
+
+    /// Lists a Release's Cover Art Archive images as candidates, replacing
+    /// the ones listed before: its release's images under the release ID
+    /// `startReleaseCoverArtFetch` would use, and its release group's front
+    /// when its files name exactly one release group. At most
+    /// `max_cover_art_candidates` are kept, each with a 250 px thumbnail and
+    /// the size of its full image, which is fetched to be measured and then
+    /// dropped; a full image that cannot be fetched leaves the size null.
+    /// Progress counts candidates. `jobMatchStats` reports the
+    /// `CoverArtOutcome`; `libraryCoverArtCandidates` reads the list.
+    /// Refused and queued like `startReleaseCoverArtFetch`.
+    pub fn startCoverArtCandidates(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
+        return runtime_jobs.startCoverArtCandidates(self, library, release_id);
+    }
+
+    /// Fetches a listed candidate's full image and keeps it as the Release's
+    /// cover of `kind`, as `librarySetReleaseArtwork` does. Refused with
+    /// `error.UnknownCoverArtCandidate` when the Release lists no such
+    /// candidate; the Job reports `.not_found` and fails when the archive
+    /// no longer holds the image.
+    pub fn libraryUseCoverArtCandidate(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        caa_id: i64,
+        kind: database.ReleaseArtworkKind,
+    ) !JobHandle {
+        return runtime_jobs.useCoverArtCandidate(self, library, release_id, caa_id, kind);
     }
 
     /// Reads a Track's lyrics on a job worker: a synced `.lrc` sidecar beside
@@ -3325,6 +3452,17 @@ pub fn libraryDatabase(
 ) !*database.LibraryDatabase {
     try requireRunning(self);
     return (try self.libraries.get(library)).database orelse error.LibraryHasNoDatabase;
+}
+
+/// A bit per `storage.AudioFormat` value no builtin codec decodes.
+fn undecodableFormats() u64 {
+    const codecs = codec.CodecRegistry.builtins();
+    var formats: u64 = 0;
+    for (std.enums.values(storage.AudioFormat)) |format|
+        formats |= std.math.shl(u64, 1, @intFromEnum(format));
+    for (codecs.entries[0..codecs.count]) |entry|
+        formats &= ~std.math.shl(u64, 1, @intFromEnum(entry.format));
+    return formats;
 }
 
 /// Destroying a Player or a Zone carries the same requirement as shutdown:

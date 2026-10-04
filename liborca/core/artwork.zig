@@ -188,6 +188,7 @@ pub fn trackArtwork(
     library_database: *database.LibraryDatabase,
     track_id: i64,
 ) !?metadata.EmbeddedImage {
+    if (try library_database.release_artwork.chosenFrontForTrack(allocator, track_id)) |image| return image;
     if (try trackEmbeddedArtwork(allocator, io, library_database, track_id)) |image| return image;
     if (try trackFolderArtwork(allocator, io, library_database, track_id)) |image| return image;
     return library_database.release_artwork.imageForTrack(allocator, track_id);
@@ -219,6 +220,7 @@ fn trackEmbeddedArtwork(
 /// would have to read every file in the Release, and "the largest image" would
 /// too, and both change their answer when one track is re-tagged.
 ///
+/// A front cover a person chose for the Release comes before all of these.
 /// A Release none of whose files carries a readable cover shows its folder's
 /// front cover image (`releaseFolderArtwork`), else the one fetched for it
 /// from the Cover Art Archive, if any.
@@ -228,6 +230,7 @@ pub fn releaseArtwork(
     library_database: *database.LibraryDatabase,
     release_id: i64,
 ) !?metadata.EmbeddedImage {
+    if (try library_database.release_artwork.chosenFront(allocator, release_id)) |image| return image;
     if (try releaseEmbeddedArtwork(allocator, io, library_database, release_id)) |image| return image;
     if (try releaseFolderArtwork(allocator, io, library_database, release_id)) |image| return image;
     return library_database.release_artwork.imageForRelease(allocator, release_id);

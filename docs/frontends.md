@@ -132,8 +132,10 @@ The boundary covers the whole engine, not a fragment of it:
   counted, the advisory, and the dates the file was added and modified;
   `orca_library_track_details_v3` adds an `orca_track_details_text_view` of
   the composer and comment, empty when none is stated. `orca_library_track_play_stats`,
-  `orca_library_listens_recorded` and `orca_library_unanalyzed_count` are
-  plain reads.
+  `orca_library_listens_recorded`, `orca_library_unanalyzed_count` and
+  `orca_library_backfill_pending` (an `orca_backfill_pending` of the files
+  and covers a property backfill could repair, which checks the roots'
+  volumes) are plain reads.
 - **Listen settings.** `orca_library_set_listen_policy` and
   `orca_library_listen_policy` keep an `orca_listen_policy`;
   `orca_library_set_listen_recording` and `orca_library_listen_recording`
@@ -1272,7 +1274,7 @@ on the Tracks `libraryEditTracks` returns, because an edit that moves a track
 to another album gives it a new id. The note's Write to Files… link applies,
 then opens Write to Files on the checked Tracks. The Front cover column shows
 the first Track's cover and where it comes from (`cover.jpg · same on all 13
-tracks`, `Embedded JPEG`, `Cover Art Archive`); Replace… and Remove are
+tracks`, `Embedded JPEG`, `Cover Art Archive`, `Chosen cover`); Replace… and Remove are
 insensitive until liborca can change a Release's cover in the library.
 
 **Write to Files** (Write Tags to Files… in menus, or the editor's link) plans
@@ -1377,6 +1379,13 @@ tag write with an undo group (`undoTagWrite`) or Retry for a retryable Job
 (`jobRetry`), and Details, a popover of its start, finish, result, progress,
 reason and summary. The page refreshes on each tick and rereads the history
 when it is shown.
+
+Once per launch, after the Library opens, its roots' availability is known
+and no scan runs (a First Run scan finishes first), the app asks
+`libraryBackfillPending` and, when it counts files or covers to repair,
+starts `startLibraryPropertyBackfill`.
+The Job shows in Activity like any other; when it repaired something, the
+library views and Health reload.
 
 The **activity popover**, opened from the sidebar widget, has Running,
 Waiting and Recently finished sections: the running Job with its bar, time

@@ -165,6 +165,13 @@ pub const Artwork = struct {
     mime_type: []const u8,
     byte_size: u64,
     kind: ArtworkKind = .other,
+    /// From the image's own header; null when the reader did not see the
+    /// bytes or could not parse them.
+    width: ?u32 = null,
+    height: ?u32 = null,
+    /// `image_header.hash` of the payload, `image_header.unreadable_hash` when
+    /// the payload could not be read, null when it was not measured.
+    hash: ?i64 = null,
 };
 
 /// The largest embedded image Orca will read into memory.

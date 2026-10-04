@@ -13,6 +13,31 @@
   and Ignore act on the group; nothing is deleted.
   `libraryDuplicateCopyPlaylists` names the playlists holding a copy's
   recording, and the C ABI adds `orca_library_duplicate_copy_playlists`.
+- **Cover art candidates and artwork kinds.** `startCoverArtCandidates`
+  lists up to 8 Cover Art Archive images for a Release, from its release
+  and, when its files name one release group, the group's fronts, each
+  measured from its full image and kept only as a thumbnail;
+  `libraryUseCoverArtCandidate` fetches one again as the Release's front,
+  back or booklet. When the group's index will not come, the release's own
+  candidates are kept and the Job reports `partial`.
+  `librarySetReleaseArtwork` and `libraryClearReleaseArtwork` set and clear
+  a chosen cover, which outranks embedded, folder and fetched ones, in
+  `libraryTrackFieldStates` and `orca-cli fields` too. Migration 51 keys
+  `release_artwork` on `(release_id, kind)`, keeping every stored cover as a
+  fetched front. Embedded covers and folder images are measured when
+  scanned, and property backfill measures those observed earlier, kept
+  covers included, recording one whose header will not read so it is not
+  read again; an `artwork_problem` health issue now names `missing_front`,
+  `conflicting` or `undersized` (under 500 px), settled from the database
+  alone (`libraryArtworkProblem`). `libraryBackfillPending` counts the files
+  and covers a backfill could repair, leaving out files missing, offline,
+  undecodable or already found unreadable, and `orca-gtk` starts the
+  backfill once per launch, outside a scan, when it counts any.
+  `orca-cli cover-art --candidates` and `--use=CAA_ID[:KIND]`,
+  `orca-cli artwork --set=PATH`, `--clear` and `--kind`, and
+  `orca-cli health --kind=artwork_problem` reach them; the C ABI adds
+  `orca_library_backfill_pending` and the `chosen` and `partial` cover
+  outcomes.
 - **Edit Metadata and Write to Files pages.** `orca-gtk`'s tag editor is a
   page: a checklist of the selected tracks, fields with `Mixed` placeholders
   and Edited badges, Apply to Orca, and the front cover with where it comes

@@ -1,4 +1,5 @@
 const std = @import("std");
+const image_header = @import("image_header.zig");
 const lrc = @import("lrc.zig");
 const lyrics = @import("lyrics.zig");
 const model = @import("model.zig");
@@ -429,11 +430,18 @@ fn readPictureHeader(
     errdefer allocator.free(mime);
     if (try readExact(readable, picture.mime_offset, mime) != mime.len)
         return error.TruncatedFlacStream;
+    const measured = image_header.measureAt(readable, picture.data_offset, picture.data_length) catch |err| switch (err) {
+        error.TruncatedImage => return error.TruncatedFlacStream,
+        else => return err,
+    };
     if (tags.artwork) |existing| allocator.free(existing.mime_type);
     tags.artwork = .{
         .mime_type = mime,
         .byte_size = picture.data_length,
         .kind = picture.kind,
+        .width = measured.width,
+        .height = measured.height,
+        .hash = measured.hash,
     };
 }
 

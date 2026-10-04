@@ -6,6 +6,7 @@ const max_page = @import("../columns.zig").max_page;
 const scalar = @import("../columns.zig").scalar;
 const max_playlist_entries = @import("playlists.zig").max_playlist_entries;
 const health = @import("health.zig");
+const artwork_problems = @import("artwork_problems.zig");
 const HealthIssueKind = health.HealthIssueKind;
 
 pub const LocationState = enum {
@@ -81,6 +82,11 @@ pub const FolderImageUpsert = struct {
     size_bytes: i64,
     modified_ns: i64,
     last_seen_generation: i64,
+    /// `metadata.image_header`'s measurement of the bytes; a null hash leaves
+    /// the image for the property backfill to measure.
+    width: ?u32 = null,
+    height: ?u32 = null,
+    hash: ?i64 = null,
 };
 
 /// One child of a folder under a library root. A folder's counts cover every
@@ -201,8 +207,8 @@ inline fn releaseHasFolderCoverSql(comptime release_id: []const u8) []const u8 {
         " AND " ++ folder_image_folder ++ " = " ++ releaseCoverFolderSql(release_id) ++ ")";
 }
 
-fn releaseFrontImagesSql(comptime release_id: []const u8) [:0]const u8 {
-    return "SELECT cover_image.uri FROM folder_images AS cover_image\n" ++
+fn releaseFrontImagesSql(comptime select: []const u8, comptime release_id: []const u8) [:0]const u8 {
+    return "SELECT " ++ select ++ " FROM folder_images AS cover_image\n" ++
         "WHERE cover_image.role = " ++ front_role ++ " AND " ++ folder_image_folder ++ " = " ++
         releaseCoverFolderSql(release_id) ++ "\n" ++
         "ORDER BY CASE lower(substr(cover_image.uri,\n" ++
@@ -212,8 +218,10 @@ fn releaseFrontImagesSql(comptime release_id: []const u8) [:0]const u8 {
         "LIMIT ?2;";
 }
 
-const release_front_images_sql = releaseFrontImagesSql("?1");
-const track_release_front_images_sql = releaseFrontImagesSql("(SELECT release_id FROM tracks WHERE id = ?1)");
+const release_front_images_sql = releaseFrontImagesSql("cover_image.uri", "?1");
+const track_release_front_images_sql = releaseFrontImagesSql("cover_image.uri", "(SELECT release_id FROM tracks WHERE id = ?1)");
+/// `releaseFrontImages` as the width, height and hash the scan measured.
+pub const release_front_measurements_sql = releaseFrontImagesSql("cover_image.width, cover_image.height, cover_image.hash", "?1");
 const folder_releases_sql =
     "SELECT DISTINCT tracks.release_id FROM locations JOIN tracks ON tracks.preferred_file_id = locations.file_id\n" ++
     "WHERE locations.uri >= ?2 AND locations.uri < ?3 AND locations.volume_id = ?1\n" ++
@@ -896,15 +904,19 @@ pub const LocationRepository = struct {
     pub fn upsertImageLocked(self: *LocationRepository, input: FolderImageUpsert) !void {
         var statement = try self.db.prepare(
             \\INSERT INTO folder_images(
-            \\    volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            \\    volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation,
+            \\    width, height, hash
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             \\ON CONFLICT(volume_id, uri) DO UPDATE SET
             \\    root_id=COALESCE(excluded.root_id, folder_images.root_id),
             \\    mime=excluded.mime,
             \\    role=excluded.role,
             \\    size_bytes=excluded.size_bytes,
             \\    modified_ns=excluded.modified_ns,
-            \\    last_seen_generation=excluded.last_seen_generation;
+            \\    last_seen_generation=excluded.last_seen_generation,
+            \\    width=excluded.width,
+            \\    height=excluded.height,
+            \\    hash=excluded.hash;
         );
         defer statement.deinit();
         try statement.bindInt64(1, input.volume_id);
@@ -915,6 +927,9 @@ pub const LocationRepository = struct {
         try statement.bindInt64(6, input.size_bytes);
         try statement.bindInt64(7, input.modified_ns);
         try statement.bindInt64(8, input.last_seen_generation);
+        try statement.bindOptionalInt64(9, if (input.width) |width| width else null);
+        try statement.bindOptionalInt64(10, if (input.height) |height| height else null);
+        try statement.bindOptionalInt64(11, input.hash);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -942,8 +957,8 @@ pub const LocationRepository = struct {
             while (try statement.step() == .row) try release_ids.append(allocator, statement.columnInt64(0));
         }
         for (release_ids.items) |release_id| {
-            if (try refreshFolderCoverLocked(self.db, release_id))
-                try health.clearReleaseLocked(self.db, release_id, .artwork_problem);
+            _ = try refreshFolderCoverLocked(self.db, release_id);
+            try artwork_problems.settleReleaseLocked(self.db, release_id);
         }
     }
 

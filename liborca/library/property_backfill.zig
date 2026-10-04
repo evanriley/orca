@@ -537,6 +537,67 @@ test "a backfill counts a file that is not there without reporting it as a defec
     try testing.expectEqual(@as(u64, 0), try fixture.library.health_issues.count());
 }
 
+test "the repairable count leaves out what a backfill cannot repair, and the backfill still examines it" {
+    var fixture = try Fixture.init("file:orca-backfill-repairable?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("tagged-reference.flac");
+    try fixture.writeBytes("broken.flac", "fLaC but not a stream");
+    const flac: database.FileUpsert = .{ .audio_format = @intFromEnum(storage.AudioFormat.flac) };
+    _ = try fixture.record("tagged-reference.flac", flac, reference_tags);
+    _ = try fixture.record("broken.flac", flac, reference_tags);
+    const missing = try fixture.record("missing.flac", flac, reference_tags);
+    const offline = try fixture.record("offline.flac", flac, reference_tags);
+    _ = try fixture.record("planned.wv", .{
+        .audio_format = @intFromEnum(storage.AudioFormat.wavpack),
+    }, reference_tags);
+    const root_id = try fixture.library.library_roots.add(database.LibraryDatabase.null_volume, fixture.root);
+    {
+        var statement = try fixture.library.database.prepare(
+            \\UPDATE locations SET
+            \\    state = CASE WHEN file_id = ?1 THEN 'missing' ELSE state END,
+            \\    root_id = CASE WHEN file_id = ?2 THEN ?3 ELSE root_id END;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, missing);
+        try statement.bindInt64(2, offline);
+        try statement.bindInt64(3, root_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+    var offline_ids: [32]u8 = undefined;
+    const offline_roots = try std.fmt.bufPrint(&offline_ids, ",{d},", .{root_id});
+    const wavpack = @as(u64, 1) << @intFromEnum(storage.AudioFormat.wavpack);
+
+    try testing.expectEqual(@as(u64, 5), try fixture.library.files.incompletePropertiesCount(false));
+    try testing.expectEqual(@as(u64, 4), try fixture.library.files.repairablePropertiesCount("", 0));
+    try testing.expectEqual(@as(u64, 2), try fixture.library.files.repairablePropertiesCount(offline_roots, wavpack));
+
+    var pass = fixture.backfill();
+    defer pass.deinit();
+    const first = try pass.run();
+    try testing.expectEqual(@as(u64, 5), first.files_seen);
+    try testing.expectEqual(@as(u64, 1), first.changed);
+    try testing.expectEqual(@as(u64, 1), first.errors);
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.repairablePropertiesCount(offline_roots, wavpack));
+
+    const second = try pass.run();
+    try testing.expectEqual(@as(u64, 4), second.files_seen);
+    try testing.expectEqual(@as(u64, 1), second.errors);
+}
+
+test "the repairable count is an index search, not a table scan" {
+    var fixture = try Fixture.init("file:orca-backfill-repairable-plan?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const plan = try queryPlan(
+        &fixture.library,
+        "EXPLAIN QUERY PLAN " ++ database.repository.repairable_properties_count_sql,
+    );
+    defer testing.allocator.free(plan);
+    try testing.expect(std.mem.indexOf(u8, plan, "files_incomplete_properties") != null);
+    try testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+    try testing.expect(std.mem.indexOf(u8, plan, "SCAN held") == null);
+    try testing.expect(std.mem.indexOf(u8, plan, "SCAN failed") == null);
+}
+
 /// A decoder that cancels the pass part-way through a batch.
 ///
 /// Racing a watcher thread against a probe would decide *between batches* most

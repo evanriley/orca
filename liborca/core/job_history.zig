@@ -93,7 +93,10 @@ pub const RetryRequest = union(enum) {
 fn matchingRetry(matching: job_worker.MatchingRequest) ?RetryRequest {
     const setup = matching.setup;
     if (!matching.lookups) return switch (setup.scope) {
-        .release => |release_id| if (matching.cover_art) .{ .cover_art = .{ .release_id = release_id } } else null,
+        .release => |release_id| if (matching.cover_art and matching.cover_art_task == .front)
+            .{ .cover_art = .{ .release_id = release_id } }
+        else
+            null,
         .library, .track => null,
     };
     return .{ .matching = .{
@@ -193,7 +196,14 @@ fn writeSummary(worker: *const JobWorker, writer: *std.Io.Writer) !void {
             try parts.optional(stats.verified, "verified");
             try parts.optional(stats.disagreed, "disagreed");
             try parts.optional(stats.accepted, "accepted");
-            if (stats.cover_art == .fetched) try parts.text("cover fetched");
+            switch (matching.cover_art_task) {
+                .front => if (stats.cover_art == .fetched) try parts.text("cover fetched"),
+                .candidates => {
+                    try parts.count(stats.cover_art_candidates_examined, "candidate", "candidates");
+                    try parts.optional(stats.cover_art_candidates_unmeasured, "without a size");
+                },
+                .use => if (stats.cover_art == .fetched) try parts.text("cover used"),
+            }
         },
         .acoustid_submission => {
             const stats = worker.submissionStats();

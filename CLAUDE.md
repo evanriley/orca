@@ -134,7 +134,7 @@ zig build run -- folders DATABASE [ROOT_ID [PATH]]   # roots with totals; or a `
 zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]] [--pause-after=MS] [--resume-after=MS]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle; --pause-after/--resume-after pause and resume the Library's Jobs, printing `jobs: state=paused|running`
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them
 zig build run -- project DATABASE
-zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
+zig build run -- backfill DATABASE [--force] [--cancel-after=MS]   # probes files missing properties, then measures covers observed before covers were measured
 zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
 zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
 zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file
@@ -166,11 +166,11 @@ zig build run -- genres DATABASE [--filter TEXT] [--sort name|tracks] [--limit N
 zig build run -- genre DATABASE ID   # counts, top artists, most played releases
 zig build run -- genres DATABASE --fill-from-musicbrainz [--limit N] [--offline]   # provider genres on Tracks with none from a file or an edit
 zig build run -- genre-fill DATABASE [on|off]   # automatic MusicBrainz genre fill in artist-info and release-info; on by default
-zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
+zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH] [--kind=front|back|booklet] [--set=PATH | --clear]   # --kind, --set, --clear with --release; --set keeps a chosen cover, shown before any other
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--composer=…] [--comment=…] [--genre=A;B] [--clear=FIELD]…   # library only; FIELD includes composer and comment
-zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|embedded|folder|fetched file= mime= tracks=N/M`
+zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|chosen|embedded|folder|fetched file= mime= tracks=N/M`
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone
@@ -239,7 +239,9 @@ zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-a
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
 # localhost); stores the cover in the library, never in a file
-zig build run -- cover-art DATABASE RELEASE_ID   # prints source=embedded|folder|fetched|cached|cached-miss|not-found|no-release-id and bytes
+zig build run -- cover-art DATABASE RELEASE_ID   # prints source=chosen|embedded|folder|fetched|cached|cached-miss|not-found|no-release-id and bytes
+zig build run -- cover-art DATABASE RELEASE_ID --candidates   # up to 8 archive images, release's then release group's fronts: candidate= kind= size=WxH|- mime= approved= thumbnail_bytes= release=; each full image fetched to measure, then dropped; source=partial when the group's index would not come
+zig build run -- cover-art DATABASE RELEASE_ID --use=CAA_ID[:front|back|booklet]   # fetches a listed image again in full and keeps it as the chosen cover of that kind; prints source=chosen
 
 # LRCLIB -- server from ORCA_LRCLIB_URL (https, or http to localhost); caches in
 # the library, never writes a file

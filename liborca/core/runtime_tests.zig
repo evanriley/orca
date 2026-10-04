@@ -261,6 +261,92 @@ test "library stats after a scan agree with the browse counts and gain an analys
     try std.testing.expectEqual(scanned.files, analysed.files);
 }
 
+test "backfill pending counts the files and covers a backfill would repair, and the backfill leaves only what it cannot" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scanFixtureLibrary(&runtime, "file:orca-backfill-pending?mode=memory&cache=shared");
+    const availability = try runtime.libraryAvailability(library, std.testing.io);
+    defer availability.deinit();
+    const scanned = try runtime.libraryBackfillPending(library, &availability);
+
+    const library_database = try libraryDatabase(&runtime, library);
+    try library_database.database.exec(
+        \\UPDATE observed_file_tags SET artwork_width = NULL, artwork_height = NULL, artwork_hash = NULL
+        \\WHERE artwork_byte_size > 0;
+        \\UPDATE files SET duration_ms = NULL
+        \\WHERE id = (SELECT min(file_id) FROM observed_file_tags WHERE artwork_byte_size > 0);
+    );
+    const covers: u64 = @intCast(try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM observed_file_tags WHERE artwork_byte_size > 0;",
+    ));
+    try std.testing.expect(covers > 0);
+    try std.testing.expectEqual(runtime_module.BackfillPending{
+        .files = scanned.files + 1,
+        .covers = scanned.covers + covers,
+    }, try runtime.libraryBackfillPending(library, &availability));
+
+    const job_handle = try runtime.startLibraryPropertyBackfill(library, .{});
+    while (true) {
+        runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        if (snapshot.state == .succeeded) break;
+        if (snapshot.state == .failed or snapshot.state == .cancelled)
+            return error.BackfillDidNotSucceed;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(scanned, try runtime.libraryBackfillPending(library, &availability));
+}
+
+test "backfill pending leaves out a file the backfill already found unreadable, while the backfill still tries it" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "music");
+    {
+        const reference = try std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            "fixtures/audio/generated-reference.flac",
+            std.testing.allocator,
+            .limited(1 << 22),
+        );
+        defer std.testing.allocator.free(reference);
+        const music = try temporary.dir.openDir(std.testing.io, "music", .{});
+        defer music.close(std.testing.io);
+        try music.writeFile(std.testing.io, .{ .sub_path = "truncated.flac", .data = reference[0..30] });
+    }
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/music", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-backfill-pending-unreadable?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const availability = try runtime.libraryAvailability(library, std.testing.io);
+    defer availability.deinit();
+
+    const library_database = try libraryDatabase(&runtime, library);
+    try library_database.database.exec("DELETE FROM library_health_issues;");
+    try std.testing.expectEqual(
+        runtime_module.BackfillPending{ .files = 1, .covers = 0 },
+        try runtime.libraryBackfillPending(library, &availability),
+    );
+
+    const first = try runtime.startLibraryPropertyBackfill(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, first));
+    const tried = try runtime.jobScanStats(first);
+    try std.testing.expectEqual(@as(u64, 1), tried.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), tried.errors);
+    try std.testing.expectEqual(
+        runtime_module.BackfillPending{ .files = 0, .covers = 0 },
+        try runtime.libraryBackfillPending(library, &availability),
+    );
+
+    const second = try runtime.startLibraryPropertyBackfill(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, second));
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobScanStats(second)).files_seen);
+}
+
 test "a scanned track's details match the format of its file" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -3106,6 +3192,44 @@ test "field states mark an unwritten edit as edited and shared, and a tag-write 
     }
     try runtime.discardTagWrite(library, plan.plan_id);
 }
+
+test "a chosen front outranks a Track's embedded cover in its field states until it is cleared" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-chosen-field-cover?mode=memory&cache=shared");
+    var page = try runtime.libraryTrackQuery(library, "", .{ .limit = 16 });
+    defer page.deinit();
+
+    var covered: ?struct { track_id: i64, release_id: i64 } = null;
+    for (page.items) |item| {
+        const states = try runtime.libraryTrackFieldStates(library, &.{item.id});
+        defer states.deinit();
+        if (states.cover.source == .embedded) covered = .{ .track_id = item.id, .release_id = item.release_id.? };
+    }
+    const track = covered orelse return error.TestExpectedEmbeddedCover;
+
+    var png: [33]u8 = undefined;
+    @memcpy(png[0..8], "\x89PNG\r\n\x1a\n");
+    std.mem.writeInt(u32, png[8..12], 13, .big);
+    @memcpy(png[12..16], "IHDR");
+    std.mem.writeInt(u32, png[16..20], 600, .big);
+    std.mem.writeInt(u32, png[20..24], 600, .big);
+    @memcpy(png[24..33], "\x08\x02\x00\x00\x00\x00\x00\x00\x00");
+    try runtime.librarySetReleaseArtwork(library, track.release_id, .front, &png, "image/png");
+    const chosen = try runtime.libraryTrackFieldStates(library, &.{track.track_id});
+    defer chosen.deinit();
+    try std.testing.expectEqual(runtime_module.TrackFieldCoverSource.chosen, chosen.cover.source);
+    try std.testing.expectEqual(@as(u32, 1), chosen.cover.tracks);
+    try std.testing.expect(chosen.cover.mime_type == null and chosen.cover.file_name == null);
+
+    try std.testing.expect(try runtime.libraryClearReleaseArtwork(library, track.release_id, .front));
+    const cleared = try runtime.libraryTrackFieldStates(library, &.{track.track_id});
+    defer cleared.deinit();
+    try std.testing.expectEqual(runtime_module.TrackFieldCoverSource.embedded, cleared.cover.source);
+}
+
 test "a value stored under a field number this build does not know is skipped by edits, tag-write planning and the projection" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

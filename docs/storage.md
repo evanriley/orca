@@ -84,6 +84,14 @@ scan continues, exactly as an unreadable tag is handled — malformed and
 truncated audio is normal in a real library. A transform codec such as MPEG has
 no sample width to declare, and that stays unknown rather than being invented.
 
+Covers are measured on the same changed-bytes path. When the scanner reads a
+changed file's tags it records the embedded picture's pixel size and a hash
+of its bytes, and when it reads a changed folder image it records the same
+for the image; an unchanged file or image is not read again. Settling a
+Release's `artwork_problem` then reads only those columns, never image bytes,
+so a projection costs no I/O for covers. See
+[database.md](database.md#artwork-problems).
+
 The walk skips the files a tag write puts beside the music, because each is a
 temporary of Orca's and a scan that recorded one would list a second Track with
 the old tags:
@@ -315,6 +323,25 @@ projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
 
 A FLAC whose STREAMINFO declares `total_samples = 0` keeps a null duration: the
 length is honestly unknown rather than missing.
+
+Covers have the same hole: a library scanned before version 51 has every
+embedded cover and folder image unmeasured, and the scanner will not read
+their unchanged bytes again. After the files missing properties, the same
+Job runs `library/artwork_backfill.zig`, which pages the partial indexes over
+the unmeasured covers by id, reads each one whose size and modification time
+are those observed, records its size and hash, and settles the Releases of
+each batch in its commit. A cover whose file changed or is unreachable is
+passed over for the next scan to observe; one whose bytes will not read is
+recorded as unreadable and not read again. Covers the Library kept from the
+Cover Art Archive are measured from their stored bytes. The Job's totals
+count the covers with the files, and the Job examines every row its
+predicates select. `Runtime.libraryBackfillPending`
+(`orca_library_backfill_pending`) counts only what it could repair now: it
+leaves out files that are missing, on an offline root, in a format no codec
+decodes, or carry an `unreadable_file` issue, which the scanner settles again
+when their bytes change, and covers of missing files or on an offline root.
+`orca-gtk` starts the Job once per launch when either count is non-zero, so
+a library whose only gaps are files it cannot read starts none.
 
 `library/analysis_pass.zig` is the same shape one level deeper: also keyed on
 `files.id`, also a runtime job with bounded commits and no walk, but decoding

@@ -810,6 +810,24 @@ test "opening a Library leaves another process's in-flight write alone" {
 
 fn rewindToVersion25(db: sqlite.Database) !void {
     try db.exec(
+        \\DROP INDEX folder_images_unmeasured;
+        \\DROP INDEX observed_file_tags_artwork_unmeasured;
+        \\ALTER TABLE observed_file_tags DROP COLUMN artwork_hash;
+        \\ALTER TABLE observed_file_tags DROP COLUMN artwork_height;
+        \\ALTER TABLE observed_file_tags DROP COLUMN artwork_width;
+        \\DROP TABLE cover_art_candidates;
+        \\CREATE TABLE release_artwork_v20 (
+        \\    release_id INTEGER PRIMARY KEY REFERENCES releases(id) ON DELETE CASCADE,
+        \\    musicbrainz_release_id TEXT NOT NULL,
+        \\    image BLOB,
+        \\    mime TEXT,
+        \\    fetched_at INTEGER NOT NULL
+        \\);
+        \\INSERT INTO release_artwork_v20(release_id, musicbrainz_release_id, image, mime, fetched_at)
+        \\SELECT release_id, musicbrainz_release_id, image, mime, fetched_at FROM release_artwork
+        \\WHERE kind = 0 AND musicbrainz_release_id IS NOT NULL;
+        \\DROP TABLE release_artwork;
+        \\ALTER TABLE release_artwork_v20 RENAME TO release_artwork;
         \\ALTER TABLE observed_file_tags DROP COLUMN comment;
         \\ALTER TABLE library_health_issues DROP COLUMN similarity;
         \\ALTER TABLE listens DROP COLUMN syncable;

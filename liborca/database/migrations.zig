@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 50;
+pub const current_version = 51;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1460,6 +1460,54 @@ const migration_50 =
     \\
 ;
 
+/// Until version 51 only the Cover Art Archive fetch wrote `release_artwork`,
+/// so every row it holds is a fetched front cover (kind 0, source 2). Images
+/// observed before it have no measurement; the property backfill measures the
+/// rows the two partial indexes select, so no rescan is forced.
+const migration_51 =
+    \\CREATE TABLE release_artwork_v51 (
+    \\    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    \\    kind INTEGER NOT NULL DEFAULT 0 CHECK (kind BETWEEN 0 AND 2),
+    \\    source INTEGER NOT NULL DEFAULT 2 CHECK (source BETWEEN 0 AND 3),
+    \\    musicbrainz_release_id TEXT,
+    \\    image BLOB,
+    \\    mime TEXT,
+    \\    width INTEGER,
+    \\    height INTEGER,
+    \\    fetched_at INTEGER NOT NULL,
+    \\    PRIMARY KEY (release_id, kind)
+    \\);
+    \\INSERT INTO release_artwork_v51(release_id, kind, source, musicbrainz_release_id, image, mime, fetched_at)
+    \\SELECT release_id, 0, 2, musicbrainz_release_id, image, mime, fetched_at FROM release_artwork;
+    \\DROP TABLE release_artwork;
+    \\ALTER TABLE release_artwork_v51 RENAME TO release_artwork;
+    \\CREATE TABLE cover_art_candidates (
+    \\    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    \\    caa_id INTEGER NOT NULL,
+    \\    musicbrainz_release_id TEXT NOT NULL,
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 4),
+    \\    width INTEGER,
+    \\    height INTEGER,
+    \\    mime TEXT,
+    \\    approved INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1)),
+    \\    thumbnail BLOB,
+    \\    fetched_at INTEGER NOT NULL,
+    \\    PRIMARY KEY (release_id, caa_id)
+    \\);
+    \\ALTER TABLE observed_file_tags ADD COLUMN artwork_width INTEGER;
+    \\ALTER TABLE observed_file_tags ADD COLUMN artwork_height INTEGER;
+    \\ALTER TABLE observed_file_tags ADD COLUMN artwork_hash INTEGER;
+    \\CREATE INDEX observed_file_tags_artwork_unmeasured ON observed_file_tags(file_id)
+    \\    WHERE artwork_byte_size > 0 AND artwork_hash IS NULL;
+    \\ALTER TABLE folder_images ADD COLUMN width INTEGER;
+    \\ALTER TABLE folder_images ADD COLUMN height INTEGER;
+    \\ALTER TABLE folder_images ADD COLUMN hash INTEGER;
+    \\CREATE INDEX folder_images_unmeasured ON folder_images(id) WHERE hash IS NULL;
+    \\CREATE INDEX release_artwork_unmeasured ON release_artwork(release_id, kind)
+    \\    WHERE image IS NOT NULL AND width IS NULL;
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -1994,6 +2042,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 48 and target_version >= 48) try db.exec(migration_48);
     if (version < 49 and target_version >= 49) try db.exec(migration_49);
     if (version < 50 and target_version >= 50) try db.exec(migration_50);
+    if (version < 51 and target_version >= 51) try db.exec(migration_51);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -3883,5 +3932,62 @@ test "a version-49 library gains an empty observed comment and re-observes every
     try std.testing.expectEqual(@as(i64, 500), try scalar(db, "SELECT modified_ns FROM locations WHERE file_id = 2;"));
     try db.exec("UPDATE observed_file_tags SET comment = 'Ripped from vinyl';");
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM observed_file_tags WHERE comment = 'Ripped from vinyl';"));
+    try checkForeignKeys(db);
+}
+
+test "a version-50 library keeps every fetched cover byte for byte as a fetched front" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v50-artwork.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 50);
+    try db.exec(
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'One', 'one'), (2, 'Two', 'two'), (3, 'Three', 'three');
+        \\INSERT INTO release_artwork(release_id, musicbrainz_release_id, image, mime, fetched_at) VALUES
+        \\    (1, '2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', X'FFD8FFE000104A464946000100FFD9', 'image/jpeg', 1800000000),
+        \\    (2, '3e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', X'89504E470D0A1A0A0000000D49484452', 'image/png', 1800000001),
+        \\    (3, '4e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', NULL, NULL, 1800000002);
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10), (2, 1, 10);
+        \\INSERT INTO observed_file_tags(file_id, title, artwork_mime_type, artwork_byte_size, artwork_kind) VALUES
+        \\    (1, 'Covered', 'image/jpeg', 2048, 0),
+        \\    (2, 'Bare', NULL, NULL, NULL);
+        \\INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation)
+        \\VALUES (1, NULL, '/m/a/cover.jpg', 'image/jpeg', 1, 4096, 7, 1);
+    );
+    const rows_sql = "SELECT group_concat(release_id || ':' || musicbrainz_release_id || ':' || " ++
+        "COALESCE(hex(image), 'null') || ':' || COALESCE(mime, 'null') || ':' || fetched_at, ' ') " ++
+        "FROM (SELECT * FROM release_artwork ORDER BY release_id);";
+    const before = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(before);
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    const after = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM release_artwork;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM release_artwork WHERE kind = 0 AND source = 2 AND width IS NULL AND height IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM release_artwork WHERE image IS NULL;"));
+
+    try db.exec(
+        \\INSERT INTO release_artwork(release_id, kind, source, image, mime, width, height, fetched_at)
+        \\VALUES (1, 1, 3, X'FFD8FF', 'image/jpeg', 1400, 1400, 1800000003);
+        \\INSERT INTO cover_art_candidates(release_id, caa_id, musicbrainz_release_id, kind, width, height, mime, approved, thumbnail, fetched_at)
+        \\VALUES (1, 1234, 'mbid', 0, 1200, 1200, 'image/jpeg', 1, X'FFD8FF', 1800000004);
+    );
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM release_artwork WHERE release_id = 1;"));
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO release_artwork(release_id, kind, source, fetched_at) VALUES (1, 0, 3, 0);",
+    ));
+    try db.exec("DELETE FROM releases WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM release_artwork WHERE release_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM cover_art_candidates;"));
+
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM observed_file_tags WHERE artwork_byte_size > 0 AND artwork_hash IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM folder_images WHERE hash IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT modified_ns FROM folder_images;"));
     try checkForeignKeys(db);
 }

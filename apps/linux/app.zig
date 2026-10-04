@@ -276,7 +276,7 @@ pub const TotalsRequest = union(enum) {
 
 pub const Failure = enum { none, unreported, reported };
 
-pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission };
+pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission, backfill };
 
 /// A Job this frontend started or retried, with what its end should report.
 pub const TrackedTask = struct {
@@ -310,6 +310,7 @@ pub const App = struct {
     /// The background Jobs this frontend started, running or waiting.
     tasks: [activity.max_cards]TrackedTask = undefined,
     task_count: usize = 0,
+    backfill_checked: bool = false,
     /// The undo group of the last tag write, for the toast's Undo.
     tag_write_group: u64 = 0,
     /// The Track whose own search last found nothing, so its details say so.

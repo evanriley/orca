@@ -256,7 +256,7 @@ const commands = [_]Command{
         .run = matchLibrary,
     },
     .{ .name = "matches", .usage = "matches DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = listMatches },
-    .{ .name = "cover-art", .usage = "cover-art DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = fetchCoverArt, .shares_usage_line = true },
+    .{ .name = "cover-art", .usage = "cover-art DATABASE RELEASE_ID [--candidates | --use=CAA_ID[:front|back|booklet]]", .min_arguments = 2, .max_arguments = 3, .run = fetchCoverArt },
     .{
         .name = "verify",
         .usage = "verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N]\n" ++ usage_indent ++
@@ -282,7 +282,14 @@ const commands = [_]Command{
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
-    .{ .name = "artwork", .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]", .min_arguments = 1, .max_arguments = null, .run = showArtwork },
+    .{
+        .name = "artwork",
+        .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]\n" ++ usage_indent ++
+            "  [--kind=front|back|booklet] [--set=PATH | --clear] (--kind, --set, --clear with --release)",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = showArtwork,
+    },
     .{ .name = "covers", .usage = "covers DATABASE [--limit N] [--offset N]", .min_arguments = 1, .max_arguments = null, .run = loadCovers },
     .{ .name = "lyrics", .usage = "lyrics DATABASE TRACK_ID [--fetch]", .min_arguments = 2, .max_arguments = 3, .run = showLyrics, .shares_usage_line = true },
     .{
@@ -757,9 +764,23 @@ const help_details =
     \\the Library, unless one of its files carries a cover or its folder holds a
     \\cover.jpg, front.jpg or folder.jpg, under the release ID its tags give or
     \\most of its accepted matches name. It prints where the cover comes from
-    \\(embedded, folder, fetched, cached, cached-miss, not-found or
+    \\(chosen, embedded, folder, fetched, cached, cached-miss, not-found or
     \\no-release-id) and its size; artwork --release=ID then reads it. A
     \\release the archive has no cover for is not asked again for 30 days.
+    \\--candidates lists the archive's images for the Release instead, its
+    \\release's and its release group's fronts when its files name one group,
+    \\up to 8: candidate=, kind=, size= (- when the full image would not
+    \\come), mime=, approved=, thumbnail_bytes=, release=. Each full image is
+    \\fetched to measure it and dropped; only a thumbnail is kept. The last
+    \\line says source=partial when the release group's index would not come
+    \\and only the release's own images were kept.
+    \\--use=CAA_ID[:front|back|booklet] fetches a listed image again in full
+    \\and keeps it as the Release's chosen cover of that kind, front by
+    \\default, printing source=chosen; a chosen front is shown before any
+    \\other. artwork --release=ID
+    \\--set=PATH keeps a PNG, JPEG, GIF, WebP or BMP file as a chosen cover,
+    \\--clear forgets the kept cover of --kind, and --kind=back|booklet
+    \\reads those covers.
     \\Media files are never written. ORCA_COVERARTARCHIVE_URL selects another
     \\server (https, or http to localhost only).
     \\
@@ -825,8 +846,11 @@ const help_details =
     \\are missing and reprojects the Tracks derived from them, without walking
     \\a filesystem. --force also re-probes rows that already declare
     \\properties, which is for a probe implementation that improved rather
-    \\than for ordinary use. --cancel-after=MS interrupts the job cooperatively
-    \\once it has run that long; a later run resumes what it did not finish.
+    \\than for ordinary use. It then measures the embedded covers and folder
+    \\images a scan observed before Orca measured covers, and settles their
+    \\artwork problems; their counts join the files'. --cancel-after=MS
+    \\interrupts the job cooperatively once it has run that long; a later run
+    \\resumes what it did not finish.
     \\
     \\The host-independent Orca control client.
     \\
@@ -1433,8 +1457,9 @@ fn parseThreads(text: []const u8) !u16 {
     return threads;
 }
 
-/// Repairs `files` rows whose declared audio properties are missing, with no
-/// filesystem walk. The job reprojects each repaired batch itself, which is
+/// Repairs `files` rows whose declared audio properties are missing, and
+/// measures covers observed before Orca measured covers, with no filesystem
+/// walk. The job reprojects each repaired batch itself, which is
 /// why there is no `project` step after this one. `--cancel-after=MS` is the
 /// same kind of affordance `play-tracks` carries: the CLI is the
 /// architectural test client, and a cooperative cancellation nothing outside
@@ -1449,7 +1474,7 @@ fn backfillProperties(context: Context) !void {
         .force = options.force,
     });
     const planned = try runtime.jobSnapshotSynced(job_handle);
-    try stdout.print("{d} files to probe\n", .{planned.total_units orelse 0});
+    try stdout.print("{d} files and covers to probe\n", .{planned.total_units orelse 0});
     try stdout.flush();
     try awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms);
     try printBackfillStats(stdout, try runtime.jobScanStats(job_handle));
@@ -4028,6 +4053,8 @@ fn coverArtSource(outcome: liborca.CoverArtOutcome) []const u8 {
         .busy => "busy",
         .cancelled => "cancelled",
         .folder => "folder",
+        .chosen => "chosen",
+        .partial => "partial",
     };
 }
 
@@ -4036,40 +4063,109 @@ fn coverArtError(outcome: liborca.CoverArtOutcome) ?anyerror {
         .refused => error.CoverArtRefused,
         .unavailable => error.CoverArtUnavailable,
         .busy => error.CoverArtArchiveInUse,
-        .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id, .cancelled, .folder => null,
+        .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id, .cancelled, .folder, .chosen, .partial => null,
     };
 }
 
-/// `orca-cli cover-art DATABASE RELEASE_ID`: the Release's cover from the
-/// Cover Art Archive, through the job the GTK app's Fetch Cover Art starts.
+const CoverArtCommand = union(enum) {
+    front,
+    candidates,
+    use: struct { caa_id: i64, kind: liborca.ReleaseArtworkKind },
+
+    fn parse(arguments: []const []const u8) !CoverArtCommand {
+        if (arguments.len == 0) return .front;
+        const argument = arguments[0];
+        if (std.mem.eql(u8, argument, "--candidates")) return .candidates;
+        if (!std.mem.startsWith(u8, argument, "--use=")) return error.UnknownOption;
+        const value = argument["--use=".len..];
+        const colon = std.mem.indexOfScalar(u8, value, ':');
+        return .{ .use = .{
+            .caa_id = try std.fmt.parseInt(i64, value[0 .. colon orelse value.len], 10),
+            .kind = if (colon) |at| try parseArtworkKind(value[at + 1 ..]) else .front,
+        } };
+    }
+};
+
+fn parseArtworkKind(text: []const u8) !liborca.ReleaseArtworkKind {
+    return std.meta.stringToEnum(liborca.ReleaseArtworkKind, text) orelse error.InvalidArtworkKind;
+}
+
+/// `orca-cli cover-art DATABASE RELEASE_ID [--candidates | --use=CAA_ID[:KIND]]`:
+/// the Release's cover from the Cover Art Archive, through the job the GTK
+/// app's Fetch Cover Art starts; or the archive's images for it, or one of
+/// them used as its front, back or booklet cover.
 fn fetchCoverArt(context: Context) !void {
     const allocator = context.allocator;
     const io = context.io;
     const stdout = context.stdout;
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const command = try CoverArtCommand.parse(context.arguments[2..]);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     try configureCoverArtArchive(allocator, &runtime, context.environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
-    const job_handle = try runtime.startReleaseCoverArtFetch(library, release_id);
+    const job_handle = switch (command) {
+        .front => try runtime.startReleaseCoverArtFetch(library, release_id),
+        .candidates => try runtime.startCoverArtCandidates(library, release_id),
+        .use => |use| try runtime.libraryUseCoverArtCandidate(library, release_id, use.caa_id, use.kind),
+    };
     const failed = if (awaitJob(&runtime, stdout, job_handle, null)) false else |err| switch (err) {
         error.JobFailed => true,
         else => return err,
     };
-    const outcome = (try runtime.jobMatchStats(job_handle)).cover_art;
-    const image = try runtime.libraryReleaseArtwork(library, io, release_id);
-    defer if (image) |present| present.deinit();
-    const bytes: usize = switch (outcome) {
-        .embedded, .fetched, .cached, .folder => if (image) |present| present.bytes.len else 0,
-        else => 0,
-    };
-    try stdout.print("cover-art: source={s} bytes={d}\n", .{ coverArtSource(outcome), bytes });
+    const stats = try runtime.jobMatchStats(job_handle);
+    const outcome = stats.cover_art;
+    switch (command) {
+        .front => {
+            const image = try runtime.libraryReleaseArtwork(library, io, release_id);
+            defer if (image) |present| present.deinit();
+            const bytes: usize = switch (outcome) {
+                .embedded, .fetched, .cached, .folder, .chosen => if (image) |present| present.bytes.len else 0,
+                else => 0,
+            };
+            try stdout.print("cover-art: source={s} bytes={d}\n", .{ coverArtSource(outcome), bytes });
+        },
+        .candidates => {
+            const candidates = try runtime.libraryCoverArtCandidates(library, allocator, release_id);
+            defer {
+                for (candidates) |candidate| candidate.deinit(allocator);
+                allocator.free(candidates);
+            }
+            for (candidates) |candidate| try printCoverArtCandidate(stdout, candidate);
+            try stdout.print("cover-art: source={s} candidates={d} unmeasured={d}\n", .{
+                coverArtSource(outcome),
+                candidates.len,
+                stats.cover_art_candidates_unmeasured,
+            });
+        },
+        .use => |use| {
+            const image = try runtime.libraryStoredReleaseArtwork(library, release_id, use.kind);
+            defer if (image) |present| present.deinit();
+            const bytes: usize = if (outcome == .fetched) if (image) |present| present.bytes.len else 0 else 0;
+            const source = if (outcome == .fetched) "chosen" else coverArtSource(outcome);
+            try stdout.print("cover-art: source={s} kind={t} bytes={d}\n", .{ source, use.kind, bytes });
+        },
+    }
     if (outcome == .no_release_id) try stdout.writeAll(no_release_id_hint);
     if (failed) {
         try stdout.flush();
         return coverArtError(outcome) orelse error.JobFailed;
     }
+}
+
+fn printCoverArtCandidate(stdout: *std.Io.Writer, candidate: liborca.CoverArtCandidate) !void {
+    try stdout.print("candidate={d} kind={t} size=", .{ candidate.caa_id, candidate.kind });
+    if (candidate.width != null and candidate.height != null)
+        try stdout.print("{d}x{d}", .{ candidate.width.?, candidate.height.? })
+    else
+        try stdout.writeAll("-");
+    try stdout.print(" mime={s} approved={s} thumbnail_bytes={d} release={s}\n", .{
+        candidate.mime orelse "-",
+        if (candidate.approved) "yes" else "no",
+        if (candidate.thumbnail) |thumbnail| thumbnail.len else 0,
+        &candidate.musicbrainz_release_id,
+    });
 }
 
 fn configureArtistInfo(allocator: std.mem.Allocator, runtime: *liborca.Runtime, environ: *std.process.Environ.Map) !void {
@@ -4700,7 +4796,8 @@ fn printOptionalDetail(
     return printDetail(stdout, key, "{s}", .{"-"});
 }
 
-/// `orca-cli artwork DATABASE (--track ID | --release ID) [--out PATH]`.
+/// `orca-cli artwork DATABASE (--track ID | --release ID) [--out PATH]
+/// [--kind=KIND] [--set=PATH | --clear]`.
 ///
 /// The reachability check for embedded cover art: it goes through the same
 /// `OrcaRuntime` entry points the GTK frontend calls, so a cover that cannot
@@ -4715,6 +4812,9 @@ fn showArtwork(context: Context) !void {
     var track_id: ?i64 = null;
     var release_id: ?i64 = null;
     var out_path: ?[]const u8 = null;
+    var kind: ?liborca.ReleaseArtworkKind = null;
+    var set_path: ?[]const u8 = null;
+    var clear = false;
     var index: usize = 0;
     while (index < option_arguments.len) : (index += 1) {
         const argument = option_arguments[index];
@@ -4724,19 +4824,43 @@ fn showArtwork(context: Context) !void {
             release_id = try std.fmt.parseInt(i64, argument["--release=".len..], 10);
         } else if (std.mem.startsWith(u8, argument, "--out=")) {
             out_path = argument["--out=".len..];
+        } else if (std.mem.startsWith(u8, argument, "--kind=")) {
+            kind = try parseArtworkKind(argument["--kind=".len..]);
+        } else if (std.mem.startsWith(u8, argument, "--set=")) {
+            set_path = argument["--set=".len..];
+        } else if (std.mem.eql(u8, argument, "--clear")) {
+            clear = true;
         } else return error.UnknownOption;
     }
     // One subject per call. Asking for both would make "which id did this
     // image come from" unanswerable from the output.
     if ((track_id == null) == (release_id == null)) return error.MissingSubject;
+    if (release_id == null and (kind != null or set_path != null or clear)) return error.UnknownOption;
+    if (set_path != null and clear) return error.UnknownOption;
 
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    if (set_path) |path| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(liborca.max_image_bytes + 1)) catch |err| switch (err) {
+            error.StreamTooLong => return error.ArtworkTooLarge,
+            else => return err,
+        };
+        defer allocator.free(bytes);
+        const mime_type = liborca.sniffImageMimeType(bytes) orelse return error.UnrecognizedArtworkImage;
+        try runtime.librarySetReleaseArtwork(library, release_id.?, kind orelse .front, bytes, mime_type);
+        try stdout.print("set {t} {s}\t{d} bytes\n", .{ kind orelse .front, mime_type, bytes.len });
+    }
+    if (clear) {
+        const cleared = try runtime.libraryClearReleaseArtwork(library, release_id.?, kind orelse .front);
+        try stdout.print("cleared {t} {s}\n", .{ kind orelse .front, if (cleared) "yes" else "no" });
+    }
     const image = if (track_id) |id|
         try runtime.libraryTrackArtwork(library, io, id)
-    else
-        try runtime.libraryReleaseArtwork(library, io, release_id.?);
+    else switch (kind orelse .front) {
+        .front => try runtime.libraryReleaseArtwork(library, io, release_id.?),
+        .back, .booklet => |stored_kind| try runtime.libraryStoredReleaseArtwork(library, release_id.?, stored_kind),
+    };
     const present = image orelse {
         try stdout.print("no artwork\n", .{});
         return;

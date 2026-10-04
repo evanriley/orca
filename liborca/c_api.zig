@@ -1276,6 +1276,11 @@ pub const BackfillOptions = extern struct {
     _reserved: [3]u8 = @splat(0),
 };
 
+pub const BackfillPendingView = extern struct {
+    files: u64,
+    covers: u64,
+};
+
 pub const EventKind = enum(u8) {
     none = 0,
     command_completed = 1,
@@ -5086,6 +5091,8 @@ pub fn exportCoverArtOutcome(outcome: core.runtime.CoverArtOutcome) u8 {
         .busy => 9,
         .cancelled => 10,
         .folder => 11,
+        .chosen => 12,
+        .partial => 13,
     };
 }
 
@@ -5461,6 +5468,22 @@ pub export fn orca_library_start_property_backfill(
         request,
     ) catch |err| return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_library_backfill_pending(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*BackfillPendingView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const availability = box.runtime.libraryAvailability(importLibrary(library), box.io()) catch |err|
+        return box.fail(@src(), err);
+    defer availability.deinit();
+    const pending = box.runtime.libraryBackfillPending(importLibrary(library), &availability) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .files = pending.files, .covers = pending.covers };
     return .ok;
 }
 
@@ -8187,6 +8210,7 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_play_stats(runtime, library, 1, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_listens_recorded(runtime, library, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_unanalyzed_count(runtime, library, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_backfill_pending(runtime, library, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_get(runtime, library, 1, null, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_details(runtime, library, 1, null, null));
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));

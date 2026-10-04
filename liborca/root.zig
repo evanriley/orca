@@ -136,6 +136,15 @@ pub const RemovedRoot = runtime.RemovedRoot;
 pub const LibraryAvailability = runtime.LibraryAvailability;
 pub const EmbeddedImage = internal.metadata.EmbeddedImage;
 pub const ArtworkSubject = runtime.ArtworkSubject;
+pub const ReleaseArtworkKind = database.ReleaseArtworkKind;
+pub const CoverArtCandidate = database.CoverArtCandidate;
+pub const CoverArtCandidateKind = database.CoverArtCandidateKind;
+pub const max_cover_art_candidates = database.repository.max_cover_art_candidates;
+pub const ArtworkProblem = database.ArtworkProblem;
+pub const ArtworkFinding = database.ArtworkFinding;
+pub const minimum_cover_pixels = database.repository.minimum_cover_pixels;
+pub const max_image_bytes = internal.metadata.model.max_image_bytes;
+pub const sniffImageMimeType = internal.metadata.model.sniffImageMimeType;
 pub const ArtworkResult = runtime.ArtworkResult;
 pub const BrowseKind = runtime.BrowseKind;
 pub const BrowseTrackListing = runtime.BrowseTrackListing;
@@ -336,6 +345,7 @@ pub const ScanRequest = runtime.ScanRequest;
 pub const ReconcileRequest = runtime.ReconcileRequest;
 pub const ReconcileScope = runtime.ReconcileScope;
 pub const BackfillRequest = runtime.BackfillRequest;
+pub const BackfillPending = runtime.BackfillPending;
 pub const AnalysisRequest = runtime.AnalysisRequest;
 /// Logical processors: the most `AnalysisRequest.threads` that can each have
 /// one of their own.
