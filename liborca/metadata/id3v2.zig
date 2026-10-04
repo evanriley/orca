@@ -306,6 +306,7 @@ fn parseFrames(
     var genres: std.ArrayList([]const u8) = .empty;
     defer genres.deinit(allocator);
     var pending_day_month: ?[]const u8 = null;
+    var user_text_comment: ?[]const u8 = null;
 
     var frames: FrameIterator = .{ .body = body, .major = major };
     while (try frames.next()) |frame| try applyFrame(
@@ -315,9 +316,11 @@ fn parseFrames(
         &tags,
         &genres,
         &pending_day_month,
+        &user_text_comment,
     );
 
     if (pending_day_month) |day_month| try applyDayMonth(allocator, &tags, day_month);
+    if (tags.comment == null) tags.comment = user_text_comment;
     tags.genres = try genres.toOwnedSlice(allocator);
     return tags;
 }
@@ -343,11 +346,12 @@ fn applyFrame(
     tags: *model.ObservedTags,
     genres: *std.ArrayList([]const u8),
     pending_day_month: *?[]const u8,
+    user_text_comment: *?[]const u8,
 ) !void {
     const id = identifier.*;
     if (std.mem.eql(u8, &id, "APIC")) return applyPicture(allocator, data, tags);
     if (std.mem.eql(u8, &id, "UFID")) return applyUniqueFileIdentifier(allocator, data, tags);
-    if (std.mem.eql(u8, &id, "TXXX")) return applyUserText(allocator, data, tags);
+    if (std.mem.eql(u8, &id, "TXXX")) return applyUserText(allocator, data, tags, user_text_comment);
     if (std.mem.eql(u8, &id, "COMM")) return applyComment(allocator, data, tags);
     if (id[0] != 'T') return;
 
@@ -406,6 +410,7 @@ fn applyUserText(
     allocator: std.mem.Allocator,
     data: []const u8,
     tags: *model.ObservedTags,
+    user_text_comment: *?[]const u8,
 ) !void {
     var values = try decodeTextValues(allocator, data);
     defer values.deinit(allocator);
@@ -443,11 +448,13 @@ fn applyUserText(
         if (tags.explicit == null) tags.explicit = model.Explicit.fromAdvisoryText(value);
         return;
     }
+    if (eqlAny(description, comment_descriptions)) return claim(user_text_comment, value);
 }
 
 /// The comment is the first `COMM` frame with an empty description and some
 /// text, in any language. Described frames, such as iTunes' `iTunNORM`, are
-/// other data and are never read as the comment.
+/// other data and are never read as the comment. With no such `COMM`, the
+/// comment is the first `TXXX` described `comment`, as ffmpeg writes it.
 fn applyComment(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -503,6 +510,7 @@ const release_group_id_descriptions: []const []const u8 = &.{ "MusicBrainz Relea
 const release_track_id_descriptions: []const []const u8 = &.{ "MusicBrainz Release Track Id", "MUSICBRAINZ_RELEASETRACKID" };
 const album_artist_id_descriptions: []const []const u8 = &.{ "MusicBrainz Album Artist Id", "MUSICBRAINZ_ALBUMARTISTID" };
 const advisory_descriptions: []const []const u8 = &.{"ITUNESADVISORY"};
+const comment_descriptions: []const []const u8 = &.{"comment"};
 const musicbrainz_ufid_owner = "http://musicbrainz.org";
 
 fn applyUniqueFileIdentifier(
@@ -955,8 +963,8 @@ fn userTextDescriptions(field: mutation.Field) []const []const u8 {
 /// under a description the reader accepts, and a recording ID also in a `UFID`
 /// frame owned by MusicBrainz, so those two frame types are told apart by
 /// description and owner, and every other description or owner is kept. The
-/// comment replaces every `COMM` frame with an empty description and keeps
-/// described ones.
+/// comment replaces every `COMM` frame with an empty description and every
+/// `TXXX` described `comment`, and keeps described `COMM` frames.
 fn replaced(
     allocator: std.mem.Allocator,
     frame: []const u8,
@@ -974,6 +982,7 @@ fn replaced(
         if (change.field == .musicbrainz_recording_id and try carriesMusicBrainzUfid(allocator, frame, major))
             return true;
         if (change.field == .comment and try carriesUndescribedComment(allocator, frame, major)) return true;
+        if (change.field == .comment and try carriesUserText(allocator, frame, major, comment_descriptions)) return true;
     }
     return false;
 }
@@ -1756,6 +1765,56 @@ test "a described COMM such as iTunNORM is never read as the comment" {
 
     const described_only = try buildFrame(allocator, "COMM", 4, "\x03eng" ++ "iTunNORM\x00 00000A2B");
     try std.testing.expect((try expectTags(allocator, try buildTag(allocator, 4, 0, described_only))).?.comment == null);
+}
+
+test "a TXXX described comment in any case is the comment when no undescribed COMM has one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const frames = try std.mem.concat(allocator, u8, &.{
+        try buildFrame(allocator, "COMM", 4, "\x03engiTunNORM\x00 00000A2B"),
+        try buildFrame(allocator, "TXXX", 4, "\x03Comment\x00From ffmpeg"),
+    });
+    const tags = (try expectTags(allocator, try buildTag(allocator, 4, 0, frames))).?;
+    try std.testing.expectEqualStrings("From ffmpeg", tags.comment.?);
+}
+
+test "an undescribed COMM wins over a TXXX described comment that comes before it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const frames = try std.mem.concat(allocator, u8, &.{
+        try buildFrame(allocator, "TXXX", 3, "\x00comment\x00From ffmpeg"),
+        try buildFrame(allocator, "COMM", 3, "\x00eng\x00From COMM"),
+    });
+    const tags = (try expectTags(allocator, try buildTag(allocator, 3, 0, frames))).?;
+    try std.testing.expectEqualStrings("From COMM", tags.comment.?);
+}
+
+test "a comment write replaces a TXXX described comment and keeps other TXXX frames" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const replay_gain = try buildFrame(allocator, "TXXX", 4, "\x03REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
+    const frames = try std.mem.concat(allocator, u8, &.{
+        try buildFrame(allocator, "TIT2", 4, "\x03Kept"),
+        try buildFrame(allocator, "TXXX", 4, "\x03COMMENT\x00From ffmpeg"),
+        replay_gain,
+    });
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, 4, 0, frames), "\xff\xfb\x90\x64audio" });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .comment, .before = "From ffmpeg", .after = "New note" },
+    });
+    try std.testing.expectEqualStrings("New note", (try expectTags(allocator, written)).?.comment.?);
+    try std.testing.expect(std.mem.indexOf(u8, written, "From ffmpeg") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, replay_gain) != null);
+
+    const cleared = try applyRewrite(allocator, original, &.{
+        .{ .field = .comment, .before = "From ffmpeg", .after = null },
+    });
+    try std.testing.expect((try expectTags(allocator, cleared)).?.comment == null);
+    try std.testing.expect(std.mem.indexOf(u8, cleared, "From ffmpeg") == null);
 }
 
 test "clearing the comment removes the undescribed COMM and leaves the composer and the described COMM" {

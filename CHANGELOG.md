@@ -1422,6 +1422,11 @@
   command's output overwrote the first's. Both now write at the file's
   current offset. `zig build test` checks it with
   `scripts/check-cli-stdio.sh`.
+- **An MP3 comment written by ffmpeg is read.** ffmpeg stores an MP3's
+  comment as a `TXXX` frame described `comment`, so those files showed none.
+  With no undescribed `COMM`, the ID3v2 reader takes the comment from that
+  `TXXX`, in any case; a `COMM` wins. A tag write that changes the comment
+  replaces that `TXXX` with the `COMM` frame.
 
 ## 0.8.1 - 2026-10-02
 

@@ -249,9 +249,10 @@ into `observed_file_tags.composer` and `.comment`. The readers take them from:
 
 - ID3v2: `TCOM`, and the first `COMM` frame with an empty description, in any
   language. A described `COMM`, such as iTunes' `iTunNORM`, is other data and
-  is never the comment. An ID3v2 tag that holds only a cover, a comment or
-  both reads the ID3v1 trailer's values beside them. The ID3v1 comment is
-  neither read nor written.
+  is never the comment. With no such `COMM`, the comment is the first
+  `TXXX` described `comment`, in any case, as ffmpeg writes it. An ID3v2 tag
+  that holds only a cover, a comment or both reads the ID3v1 trailer's values
+  beside them. The ID3v1 comment is neither read nor written.
 - Vorbis comments: `COMPOSER` and `COMMENT`, in any case; `DESCRIPTION` is the
   comment only when no `COMMENT` has text.
 - MP4: the `©wrt` and `©cmt` atoms.
@@ -813,8 +814,9 @@ Writers keep what they do not understand:
   in parentheses without them (`(Live)` as `Live`), and `RX` and `CR` as
   `Remix` and `Cover`. This is a known, minor limitation. The composer
   replaces every `TCOM` frame. The comment replaces every `COMM` frame with an
-  empty description, in any language, with one in language `eng`; described
-  `COMM` frames are kept byte for byte. The ID3v1 trailer's comment is kept.
+  empty description, in any language, and every `TXXX` described `comment`,
+  with one `COMM` in language `eng`; described `COMM` frames are kept byte for
+  byte. The ID3v1 trailer's comment is kept.
 - Vorbis comments in FLAC match fields by the same aliases and canonical values
   the reader uses, so a write never duplicates a field under another spelling.
   The release-level IDs are `MUSICBRAINZ_ALBUMID`,
