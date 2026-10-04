@@ -3140,56 +3140,31 @@ row:selected .row-stars,
   box-shadow: none;
 }
 
-viewswitcher.underline-tabs {
-  margin: 0 32px;
-}
-
-.narrow viewswitcher.underline-tabs {
-  margin: 0 16px;
-}
-
-viewswitcher.underline-tabs button.toggle {
-  margin: 0 24px 0 0;
-  padding: 8px 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: inset 0 -2px transparent;
-  color: @orca_text_2;
-}
-
-viewswitcher.underline-tabs button.toggle:hover {
-  color: @orca_text;
-}
-
-viewswitcher.underline-tabs button.toggle:checked {
-  color: @orca_text;
-  box-shadow: inset 0 -2px @orca_accent;
-}
-
-viewswitcher.underline-tabs button.toggle:focus-visible {
-  outline-offset: -2px;
-}
-
 /* Playlists */
 
+button.playlist-header-button {
+  min-height: 36px;
+}
+
 .playlist-tabs {
-  margin: 0 28px;
+  margin: 4px 32px 0 32px;
   box-shadow: inset 0 -1px @orca_border;
 }
 
 .narrow .playlist-tabs {
-  margin: 0 16px;
+  margin: 4px 16px 0 16px;
 }
 
 button.playlist-tab {
-  margin: 0 28px 0 0;
-  padding: 10px 2px;
+  margin: 0 26px 0 0;
+  padding: 6px 0 12px 0;
   min-height: 0;
   border-radius: 0;
   background: none;
   box-shadow: inset 0 -2px transparent;
   color: @orca_text_2;
-  font-weight: 500;
+  font-size: 13.5px;
+  font-weight: 400;
 }
 
 button.playlist-tab:hover {
@@ -3197,7 +3172,7 @@ button.playlist-tab:hover {
 }
 
 button.playlist-tab:checked {
-  color: @orca_accent_text;
+  color: @orca_text;
   box-shadow: inset 0 -2px @orca_accent;
 }
 
@@ -3206,37 +3181,22 @@ button.playlist-tab:focus-visible {
 }
 
 .playlist-sections {
-  padding: 20px 20px 28px 20px;
+  padding: 22px 32px 48px 32px;
 }
 
 .narrow .playlist-sections {
-  padding: 14px 8px 20px 8px;
-}
-
-.playlist-section > box:first-child,
-.playlist-section > wrap-box:first-child {
-  margin: 0 8px;
+  padding: 16px 16px 28px 16px;
 }
 
 .playlist-section-title {
-  font-family: Newsreader, serif;
-  font-size: 22px;
+  font-size: 15px;
   font-weight: 500;
   color: @orca_text;
 }
 
-.playlist-section-caption,
-.playlist-section-count {
-  font-size: 13px;
-  color: @orca_text_2;
-}
-
-.playlist-section-count {
+.playlist-section-icon {
+  -gtk-icon-size: 16px;
   color: @orca_text_3;
-}
-
-button.playlist-show-all {
-  color: @orca_text_2;
 }
 
 .playlist-grid,
@@ -3244,9 +3204,29 @@ button.playlist-show-all {
   background-color: transparent;
 }
 
+.playlist-grid {
+  padding: 0;
+}
+
+.playlist-grid-pinned {
+  margin: -12px;
+}
+
+.playlist-grid-listed {
+  margin: -12px -10px;
+}
+
 .playlist-grid > child {
-  padding: 8px;
-  border-radius: 12px;
+  border-radius: 0;
+  background-color: transparent;
+}
+
+.playlist-grid-pinned > child {
+  padding: 12px;
+}
+
+.playlist-grid-listed > child {
+  padding: 12px 10px;
 }
 
 .playlist-grid > child:hover,
@@ -3254,21 +3234,15 @@ button.playlist-show-all {
   background-color: transparent;
 }
 
-.playlist-card {
-  padding: 6px 6px 12px 6px;
-  border-radius: 10px;
-  background-color: @orca_bg_raised_2;
-  box-shadow: inset 0 0 0 1px @orca_border;
-  transition: background-color var(--orca-transition);
+.playlist-cover-frame {
+  border-radius: var(--orca-radius-art);
+  outline: 2px solid transparent;
+  outline-offset: 0;
 }
 
-.playlist-grid > child:hover .playlist-card,
-.playlist-grid > child:focus-within .playlist-card {
-  background-color: @orca_bg_hover;
-}
-
-.playlist-grid > child:focus-visible .playlist-card {
-  box-shadow: inset 0 0 0 2px @orca_text;
+.playlist-grid > child:hover .playlist-cover-frame,
+.playlist-grid > child:focus-visible .playlist-cover-frame {
+  outline-color: @orca_text;
 }
 
 .playlist-grid > child:hover .tile-action,
@@ -3276,47 +3250,55 @@ button.playlist-show-all {
   opacity: 1;
 }
 
-.playlist-card > .album-cover-frame {
-  margin-bottom: 8px;
+.playlist-tile > .playlist-cover-frame {
+  margin-bottom: 10px;
 }
 
-.playlist-card > label,
-.playlist-card-heading {
-  margin: 0 6px;
+.playlist-tile > label + label {
+  margin-top: 3px;
 }
 
-.playlist-card-title {
-  font-size: 14px;
-  font-weight: 600;
+.playlist-tile button.tile-play {
+  margin: 10px;
+}
+
+.playlist-tile-title {
+  font-size: 13.5px;
+  font-weight: 500;
   color: @orca_text;
 }
 
-.playlist-card-wide .playlist-card-title {
-  font-size: 15px;
+.playlist-tile-pinned .playlist-tile-title {
+  font-size: 14px;
 }
 
-.playlist-card-kind,
-.playlist-card-meta {
+.playlist-tile-meta {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.playlist-tile-kind {
   font-size: 12px;
   color: @orca_text_2;
 }
 
-.playlist-card-meta:last-child {
-  color: @orca_text_3;
+.playlist-tile-kind.smart {
+  color: @orca_accent_text;
 }
 
-.playlist-card-kind.accent {
-  color: @orca_accent_text;
+.playlist-tile-detail {
+  font-size: 12px;
+  color: @orca_text_3;
 }
 
 .playlist-pin {
   -gtk-icon-size: 13px;
-  color: @orca_accent_text;
+  color: @orca_text_3;
 }
 
 .playlist-art {
   border-radius: var(--orca-radius-art);
-  background-color: @orca_bg_main;
+  background-color: @orca_bg_raised_2;
 }
 
 .playlist-art-cell,
@@ -3326,25 +3308,36 @@ button.playlist-show-all {
 }
 
 .playlist-art-empty {
-  background-color: @orca_bg_hover;
+  color: @orca_text_3;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border;
+  border-radius: var(--orca-radius-art);
 }
 
 .smart-tile {
   color: @orca_text_2;
   background-color: @orca_bg_raised_2;
-  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  box-shadow: inset 0 0 0 1px @orca_border;
+  border-radius: var(--orca-radius-art);
 }
 
-.playlist-list {
-  padding: 0 12px;
+listview.playlist-list {
+  margin: 0 -8px;
+  padding: 0;
 }
 
 .playlist-list-row {
-  padding: 6px 4px;
+  padding: 8px 0;
 }
 
-.playlist-list-row .playlist-art {
-  border-radius: 5px;
+.playlist-list-row .playlist-art,
+.playlist-list-row .smart-tile,
+.playlist-list-row .playlist-art-empty {
+  border-radius: 6px;
+}
+
+.playlist-list-row .album-list-detail {
+  margin: 0 8px;
 }
 
 .playlist-hero {
@@ -3359,16 +3352,11 @@ button.playlist-show-all {
   margin: 0 36px;
 }
 
-.loved-tracks {
-  margin: 0 20px;
-}
-
 .tracks-page {
-  margin: 0 16px;
+  margin: 0 28px;
 }
 
-.narrow .playlist-tracks,
-.narrow .loved-tracks {
+.narrow .playlist-tracks {
   margin: 0 16px;
 }
 
@@ -3421,56 +3409,319 @@ button.playlist-show-all {
   color: @orca_text_2;
 }
 
-/* Smart Playlist editor */
+/* Playlist page */
 
-.smart-editor {
-  padding: 16px 20px 20px 20px;
-}
-
-.smart-label {
-  font-size: 12px;
-  font-weight: 600;
+.playlist-page .album-kind {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
   color: @orca_text_3;
 }
 
-.smart-root,
-.smart-group {
-  padding: 10px 12px;
-  border-radius: var(--orca-radius-control);
+.playlist-page .album-hero-title {
+  font-size: 58px;
+  line-height: 1;
+  margin-top: 0;
 }
 
-.smart-root {
-  background-color: @orca_bg_main;
-  box-shadow: inset 0 0 0 1px @orca_border;
+.narrow .playlist-page .album-hero-title {
+  font-size: 32px;
 }
 
-.smart-group {
-  background-color: @orca_bg_raised_2;
-  box-shadow: inset 2px 0 @orca_accent;
+.playlist-page .album-meta {
+  font-size: 13.5px;
+  color: @orca_text_2;
 }
 
-.smart-rule {
-  padding: 2px 0;
+.playlist-page .playlist-description {
+  margin-top: 0;
 }
 
-button.smart-add {
-  min-height: 28px;
-  padding: 0 10px;
-  font-size: 13px;
+.playlist-page .playlist-actions {
+  margin-top: 10px;
 }
 
-.smart-order {
-  padding-top: 12px;
-  box-shadow: inset 0 1px @orca_border;
+.playlist-backdrop .art-backdrop-picture {
+  opacity: 0.22;
 }
 
-.smart-count {
-  font-weight: 600;
+.playlist-backdrop .art-backdrop-shade {
+  background-image:
+    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 55%, transparent), color-mix(in srgb, @orca_bg_main 85%, transparent) 50%, @orca_bg_main);
+}
+
+.playlist-actions > button.album-more {
+  min-width: 38px;
+  min-height: 38px;
+  background-color: color-mix(in srgb, @orca_bg_raised_2 65%, transparent);
+  box-shadow: none;
+  color: @orca_text_2;
+}
+
+.playlist-actions > button.album-more.playlist-reorder {
+  background-color: transparent;
+}
+
+.playlist-actions > button.album-more:hover,
+.playlist-actions > button.album-more.playlist-reorder:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+.playlist-actions > button.album-more.playlist-reorder:checked {
+  background-color: @orca_bg_selected;
   color: @orca_accent_text;
 }
 
-.smart-count.error {
+.track-list.playlist-table {
+  background-color: transparent;
+}
+
+.track-list.playlist-table > header {
+  border-bottom: none;
+}
+
+.track-list.playlist-table > header > button {
+  padding-top: 0;
+  padding-bottom: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.track-list.playlist-table > header > button,
+.track-list.playlist-table > header > button:hover,
+.track-list.playlist-table > header > button:active {
+  background: none;
+  box-shadow: none;
+}
+
+.track-list.playlist-table > listview {
+  background-color: transparent;
+}
+
+.track-list.playlist-table > listview > row {
+  min-height: 44px;
+  border-top: 1px solid @orca_border;
+  border-bottom: none;
+}
+
+.track-list.playlist-table .track-secondary {
+  color: @orca_text_2;
+}
+
+.track-list.playlist-table .playlist-track-artist {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.track-list.playlist-table .playlist-handle {
+  margin-left: 4px;
+  color: @orca_text_3;
+}
+
+.track-list.playlist-table .playlist-handle:hover {
+  color: @orca_text;
+}
+
+/* Smart Playlist editor */
+
+@define-color orca_smart_group_edge #2E3A4C;
+@define-color orca_smart_control #1F2328;
+@define-color orca_smart_card_edge #1F2327;
+@define-color orca_smart_divider #23282D;
+@define-color orca_smart_tile_edge #262B30;
+
+button.btn-primary.smart-save {
+  min-height: 38px;
+  padding: 0 20px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.smart-columns {
+  padding: 22px 32px 48px 32px;
+}
+
+.smart-editor-tile {
+  border-radius: 10px;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_smart_tile_edge;
+  color: @orca_text_2;
+}
+
+.smart-overline {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: @orca_text_3;
+}
+
+entry.smart-name {
+  min-height: 48px;
+  padding: 0 2px;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: inset 0 -1px @orca_border_strong;
+  font-family: Newsreader, serif;
+  font-size: 36px;
+  color: @orca_text;
+}
+
+.smart-card,
+.smart-options {
+  border-radius: 12px;
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_smart_card_edge;
+}
+
+.smart-card {
+  padding: 18px 20px;
+}
+
+.smart-options {
+  padding: 4px 20px;
+}
+
+.smart-group {
+  margin-left: 24px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background-color: @orca_bg_main;
+  box-shadow: inset 2px 0 @orca_smart_group_edge;
+}
+
+.smart-match,
+.smart-caption {
+  font-size: 13.5px;
+  color: @orca_text_2;
+}
+
+.smart-group .smart-match,
+.smart-group .smart-caption {
+  font-size: 13px;
+}
+
+entry.smart-control,
+dropdown.smart-control > button {
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background-color: @orca_smart_control;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 13px;
+  font-weight: 400;
+  color: @orca_text;
+}
+
+dropdown.smart-control > button:hover {
+  background-color: @orca_bg_hover;
+}
+
+dropdown.smart-control arrow {
+  -gtk-icon-source: -gtk-icontheme("orca-chevron-down-symbolic");
+  -gtk-icon-size: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  color: @orca_text_2;
+}
+
+button.smart-icon-button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+  -gtk-icon-size: 15px;
+}
+
+.smart-group > .smart-match button.smart-icon-button {
+  min-width: 28px;
+  min-height: 28px;
+  -gtk-icon-size: 14px;
+}
+
+button.smart-icon-button:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+.smart-add-row {
+  padding-top: 4px;
+}
+
+.smart-option {
+  padding: 14px 0;
+}
+
+.smart-option-divided {
+  box-shadow: inset 0 1px @orca_smart_divider;
+}
+
+.smart-option-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.smart-option-detail {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.smart-preview {
+  padding: 18px;
+  border-radius: 12px;
+  background-color: @orca_bg_sidebar;
+  box-shadow: inset 0 0 0 1px @orca_border;
+}
+
+.smart-preview-heading {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: @orca_text_2;
+}
+
+.smart-preview-count {
+  font-family: Newsreader, serif;
+  font-size: 40px;
+  color: @orca_text;
+}
+
+.smart-preview-summary {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.smart-preview-summary.error {
   color: @orca_warn;
+}
+
+.smart-preview-row {
+  padding: 8px;
+  border-radius: 7px;
+  box-shadow: inset 0 1px @orca_bg_raised_2;
+}
+
+.smart-preview-row:hover {
+  background-color: @orca_bg_hover;
+}
+
+.smart-preview-title {
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.smart-preview-byline {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.smart-preview-length {
+  font-size: 12px;
+  color: @orca_text_2;
 }
 
 /* Health */

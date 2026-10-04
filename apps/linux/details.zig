@@ -196,16 +196,15 @@ const PlaylistView = struct {
     content: *gtk.Widget,
     title: *gtk.Widget,
     subtitle: *gtk.Widget,
-    creator: *gtk.Widget,
     tracks_row: Row,
     unavailable_row: Row,
     duration_row: Row,
-    mixed_row: Row,
-    genre_row: Row,
+    artists_row: Row,
     created_row: Row,
     updated_row: Row,
-    description_section: *gtk.Widget,
-    description: *gtk.Widget,
+    formats_section: *gtk.Widget,
+    formats: *gtk.Widget,
+    duplicate: *gtk.Widget,
     tags_section: *gtk.Widget,
     tags: *gtk.Widget,
 };
@@ -601,11 +600,8 @@ fn populatePlaylist(panel: *Panel, playlist_id: i64) bool {
     const view = panel.playlist_view;
     var buffer: [1024]u8 = undefined;
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.title), strings.terminated(&buffer, summary.name).ptr);
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.subtitle), if (summary.kind == .smart) "Smart Playlist" else "Playlist");
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.creator), switch (summary.creator) {
-        .user => "You",
-        .imported => "Imported from a file",
-    });
+    var subtitle_buffer: [64]u8 = undefined;
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.subtitle), playlistKindText(&subtitle_buffer, self, &summary).ptr);
 
     var tracks_buffer: [32]u8 = undefined;
     _ = setRow(view.tracks_row, strings.format(&tracks_buffer, "{d}", .{summary.entries}));
@@ -613,22 +609,16 @@ fn populatePlaylist(panel: *Panel, playlist_id: i64) bool {
     const missing = summary.entries -| summary.available;
     _ = setRow(view.unavailable_row, if (missing != 0) strings.format(&unavailable_buffer, "{d}", .{missing}) else null);
     var duration_buffer: [32]u8 = undefined;
-    var duration_text: [40]u8 = undefined;
-    _ = setRow(view.duration_row, if (summary.duration_ms > 0)
-        strings.terminated(&duration_text, strings.totalDuration(&duration_buffer, summary.duration_ms))
-    else
-        null);
-    _ = setRow(view.mixed_row, if (summary.entries == 0) null else if (summary.mixed_artists) "Yes" else "No");
-    var genre_buffer: [256]u8 = undefined;
-    _ = setRow(view.genre_row, genresText(&genre_buffer, summary.top_genres));
+    _ = setRow(view.duration_row, if (summary.duration_ms > 0) clockText(&duration_buffer, summary.duration_ms) else null);
+    var artists_buffer: [32]u8 = undefined;
+    _ = setRow(view.artists_row, if (summary.entries != 0) strings.format(&artists_buffer, "{d}", .{summary.artist_count}) else null);
     var created_buffer: [64]u8 = undefined;
     _ = setRow(view.created_row, dateText(&created_buffer, summary.created_at));
     var updated_buffer: [64]u8 = undefined;
-    _ = setRow(view.updated_row, dateText(&updated_buffer, summary.updated_at));
+    _ = setRow(view.updated_row, if (summary.updated_at > 0) recentDayText(&updated_buffer, summary.updated_at) else null);
 
-    gtk.gtk_widget_set_visible(view.description_section, boolean(summary.description.len != 0));
-    var description_buffer: [4096]u8 = undefined;
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.description), strings.terminated(&description_buffer, summary.description).ptr);
+    showFormats(panel, playlist_id);
+    gtk.gtk_widget_set_visible(view.duplicate, boolean(summary.kind == .manual));
 
     const tags = gtk.cast(adw.WrapBox, view.tags);
     adw.adw_wrap_box_remove_all(tags);
@@ -640,6 +630,64 @@ fn populatePlaylist(panel: *Panel, playlist_id: i64) bool {
     }
     gtk.gtk_widget_set_visible(view.tags_section, boolean(summary.tags.len != 0));
     return true;
+}
+
+/// `Playlist · manual order`, or `Smart playlist · 3 rules`.
+fn playlistKindText(buffer: []u8, self: *App, summary: *const liborca.PlaylistSummary) [:0]const u8 {
+    if (summary.kind == .manual) return "Playlist · manual order";
+    const rules = playlists.ruleCount(self, summary.id) orelse return "Smart playlist";
+    return strings.format(buffer, "Smart playlist · {d} {s}", .{ rules, if (rules == 1) "rule" else "rules" });
+}
+
+/// `51:47`, or `1:02:05` from an hour.
+fn clockText(buffer: []u8, duration_ms: i64) [:0]const u8 {
+    const seconds: u64 = @intCast(@divTrunc(@max(duration_ms, 0) + 500, 1000));
+    if (seconds < 3600) return strings.format(buffer, "{d}:{d:0>2}", .{ seconds / 60, seconds % 60 });
+    return strings.format(buffer, "{d}:{d:0>2}:{d:0>2}", .{ seconds / 3600, seconds / 60 % 60, seconds % 60 });
+}
+
+fn showFormats(panel: *Panel, playlist_id: i64) void {
+    const self = panel.self;
+    const view = panel.playlist_view;
+    const box = gtk.cast(gtk.Box, view.formats);
+    while (gtk.gtk_widget_get_first_child(view.formats)) |child| gtk.gtk_box_remove(box, child);
+    const library = self.library orelse return gtk.gtk_widget_set_visible(view.formats_section, gtk.false_);
+    const formats = self.runtime.libraryPlaylistFormats(library, self.allocator, playlist_id) catch
+        return gtk.gtk_widget_set_visible(view.formats_section, gtk.false_);
+    defer formats.deinit(self.allocator);
+    for (formats.codecs) |item| {
+        var key_buffer: [64]u8 = undefined;
+        const key = strings.terminated(&key_buffer, item.codec);
+        for (key_buffer[0..key.len]) |*byte| byte.* = std.ascii.toUpper(byte.*);
+        const row = newRow(key.ptr);
+        var value_buffer: [32]u8 = undefined;
+        _ = setRow(row, strings.format(&value_buffer, "{d} {s}", .{ item.count, if (item.count == 1) "track" else "tracks" }));
+        gtk.gtk_box_append(box, row.root);
+    }
+    if (formats.analyzed + formats.unanalyzed != 0) {
+        const row = newRow("ReplayGain");
+        var value_buffer: [48]u8 = undefined;
+        _ = setRow(row, if (formats.unanalyzed == 0) "All analyzed" else strings.format(&value_buffer, "{d} not analyzed", .{formats.unanalyzed}));
+        gtk.gtk_box_append(box, row.root);
+    }
+    gtk.gtk_widget_set_visible(view.formats_section, boolean(gtk.gtk_widget_get_first_child(view.formats) != null));
+}
+
+fn shownPlaylist(panel: *Panel) ?i64 {
+    return switch (panel.source) {
+        .playlist => |playlist| playlist.playlist_id,
+        else => null,
+    };
+}
+
+fn exportPlaylistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    playlists.chooseExport(panel.self, shownPlaylist(panel) orelse return);
+}
+
+fn duplicatePlaylistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    playlists.duplicateAsSmart(panel.self, shownPlaylist(panel) orelse return);
 }
 
 fn dateText(buffer: []u8, unix_seconds: i64) ?[:0]const u8 {
@@ -1832,43 +1880,46 @@ fn newAlbum(panel: *Panel) Album {
     };
 }
 
-fn newPlaylistView() PlaylistView {
-    const title = newLabel("inspector-title");
-    gtk.gtk_widget_add_css_class(title, "inspector-title-upper");
-    const subtitle = newLabel("inspector-subtitle");
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_add_css_class(heading, "inspector-header");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), subtitle);
+fn newPlaylistLink(panel: *Panel, label: [*:0]const u8, handler: gtk.GCallback) *gtk.Widget {
+    const button = gtk.gtk_button_new_with_label(label);
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "inspector-link");
+    gtk.gtk_widget_set_halign(button, gtk.ALIGN_START);
+    _ = gtk.signalConnect(button, "clicked", handler, panel);
+    return button;
+}
 
-    const avatar = gtk.gtk_image_new_from_icon_name("avatar-default-symbolic");
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, avatar), 20);
-    gtk.gtk_widget_add_css_class(avatar, "playlist-creator-avatar");
-    const creator = newLabel("inspector-value");
-    const creator_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
-    gtk.gtk_widget_add_css_class(creator_row, "inspector-row");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, creator_row), avatar);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, creator_row), creator);
-    const creator_section = newSection("avatar-default-symbolic", "Created by", &.{creator_row}, null);
+fn newPlaylistView(panel: *Panel) PlaylistView {
+    const title = newLabel("inspector-title");
+    const subtitle = newLabel("inspector-subtitle");
+    gtk.gtk_widget_add_css_class(subtitle, "dim");
+    const heading = newHeader(panel, &.{ title, subtitle }, null);
 
     const tracks_row = newRow("Tracks");
     const unavailable_row = newRow("Unavailable");
     const duration_row = newRow("Duration");
-    const mixed_row = newRow("Mixed artists");
-    const genre_row = newRow("Genre");
+    const artists_row = newRow("Artists");
     const created_row = newRow("Created");
-    const updated_row = newRow("Last updated");
-    const overview = newSection("x-office-document-symbolic", "Details", &.{
+    const updated_row = newRow("Updated");
+    const overview = newSection("orca-playlists-symbolic", "Details", &.{
         tracks_row.root,
         unavailable_row.root,
         duration_row.root,
-        mixed_row.root,
-        genre_row.root,
+        artists_row.root,
         created_row.root,
         updated_row.root,
     }, null);
-    const description = newLabel("inspector-description");
-    const description_section = newSection("format-justify-left-symbolic", "Description", &.{description}, null);
+    const formats = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const formats_section = newSection("orca-signal-symbolic", "Formats", &.{formats}, null);
+
+    const links = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 7);
+    gtk.gtk_widget_add_css_class(links, "inspector-links");
+    const export_link = newPlaylistLink(panel, "Export as M3U8…", gtk.callback(exportPlaylistClicked));
+    const duplicate = newPlaylistLink(panel, "Duplicate as smart playlist…", gtk.callback(duplicatePlaylistClicked));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, links), export_link);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, links), duplicate);
+    const export_section = newSection("x-office-document-symbolic", "Export", &.{links}, null);
+
     const tags = adw.adw_wrap_box_new();
     adw.adw_wrap_box_set_child_spacing(gtk.cast(adw.WrapBox, tags), 8);
     adw.adw_wrap_box_set_line_spacing(gtk.cast(adw.WrapBox, tags), 8);
@@ -1877,22 +1928,21 @@ fn newPlaylistView() PlaylistView {
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, creator_section, overview, description_section, tags_section }) |section|
+    for ([_]*gtk.Widget{ heading, overview, formats_section, export_section, tags_section }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
     return .{
         .content = content,
         .title = title,
         .subtitle = subtitle,
-        .creator = creator,
         .tracks_row = tracks_row,
         .unavailable_row = unavailable_row,
         .duration_row = duration_row,
-        .mixed_row = mixed_row,
-        .genre_row = genre_row,
+        .artists_row = artists_row,
         .created_row = created_row,
         .updated_row = updated_row,
-        .description_section = description_section,
-        .description = description,
+        .formats_section = formats_section,
+        .formats = formats,
+        .duplicate = duplicate,
         .tags_section = tags_section,
         .tags = tags,
     };
@@ -2069,9 +2119,9 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         modified_row.root,
     }, copy_button);
 
-    const album_view = newAlbum();
-    const artist_view = newArtistView();
-    const playlist_view = newPlaylistView();
+    const album_view = newAlbum(panel);
+    const artist_view = newArtistView(panel);
+    const playlist_view = newPlaylistView(panel);
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_visible(content, gtk.false_);

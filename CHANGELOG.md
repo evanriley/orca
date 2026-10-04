@@ -225,6 +225,20 @@
   `ORCA_GTK_DEBUG=reveal` logs Show in Folder's path instead of opening a
   file manager. `scripts/headless-gui.sh` takes a `dclick:X,Y` step, and
   saves the last frame instead of failing when the window never settles.
+- **Playlist page and inspector redesign in orca-gtk.** A playlist's page
+  follows the redesign: the mosaic over its backdrop, a `Playlist` overline,
+  the name in 58 px Newsreader, `By you · 12 tracks · 52 min · Updated
+  today`, the description, Play, Shuffle, Reorder, Edit and more, and a
+  borderless table of #, Title over artist, Album and Time. Reorder shows
+  drag grips that move a row onto another. A smart playlist ordered at
+  random gets Shuffle Again in its menu. The inspector shows `Playlist ·
+  manual order` or `Smart playlist · N rules`, Details with Artists and
+  `YYYY-MM-DD` dates, Formats (tracks per codec and how many lack
+  ReplayGain analysis) and Export with Export as M3U8… and Duplicate as
+  smart playlist…, which opens the Smart Playlist editor with one
+  `in_playlist` rule. The editor gains a Playlist field. The page's heart
+  is gone, as Love stays in its menu, and the inspector drops Created by
+  and Description, which the page shows.
 - **Albums at scale in orca-gtk.** From 2,000 albums, Albums shows the
   library's count, artists and size, facet chips for Lossless, Added,
   Genre, Decade and More filters with an `N match` count, and, sorted by
@@ -664,6 +678,33 @@
 
 ### Changed
 
+- **Smart Playlist editor redesign in orca-gtk.** The editor follows the
+  new design as a page pushed in the Playlists section instead of a dialog:
+  the top bar holds the breadcrumb with Cancel and Save Smart Playlist,
+  both of which return to the previous page, and back and forward reach it
+  like any other page. It has the name in serif, thin minus remove
+  buttons (a new bundled icon), a rules card with an indented card per
+  nested group, Limit to N tracks or hours selected by an order (random,
+  most recently added, highest rated and others), a fixed Live updating row, and a Live preview
+  of the count, length and first seven tracks from
+  `librarySmartPlaylistPreview`. A loaded order left unchanged, such as a
+  `random` sort, is saved exactly as read. Rules gain a `playlist_position`
+  sort with a manual playlist's id in `playlist`, ordering Tracks by their
+  place in it, Tracks it does not hold last; Duplicate as smart playlist…
+  uses it, so the copy keeps the manual order. Rules stay version 1.
+- **Playlists overview redesign in orca-gtk.** The overview follows the new
+  design: "Your playlists and smart collections.", New Smart Playlist and
+  New Playlist in the header (Import… moves into the New Playlist dialog),
+  All, Created by Me and Smart tabs, every pinned playlist as a square
+  mosaic tile with its track count and length, and All Playlists as a tile
+  grid with a Recently updated sort menu and a grid or list switch. Smart
+  playlist tiles show a glyph for their first rule and a summary of their
+  rules, such as "Loved, never played" or "Last played over a year ago";
+  other tiles show By you or Imported and when they were updated ("Updated
+  last week"). Smart playlists use a new sparkle icon and Pinned a new pin
+  icon, both bundled. The type menu and Show all are gone. The design
+  fixture gains five smart playlists, Loved & Unplayed, 5 Stars, Recently
+  Added, Hi-Res and Not Played in a Year, for ten playlists, seven smart.
 - **Tracks no longer freeze on slow sorts and filters in orca-gtk.** The
   Tracks list reads its pages and its count and duration on the Library's
   browse loader instead of the main thread, so a sort by path or a broad

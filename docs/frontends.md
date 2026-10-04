@@ -841,87 +841,138 @@ The window is an `AdwNavigationSplitView`:
   Artist opens the artist menu, and a track plays on activation. The page is
   read again each time it is shown, so a heart cleared on it leaves its row
   in place until then.
-- **Playlists** opens with its title block, New Smart Playlist and
-  Import… beside it, and the header's Search playlists entry and New
-  Playlist. Tabs (All Playlists, Created by Me, Smart Playlists; one Tab
-  stop, Left and Right move between them) choose which playlists both
-  sections show. Pinned shows the four most recently updated pinned
-  playlists, with Show all when there are more. All Playlists shows the
-  count, a type menu (All Types, Playlists, Smart Playlists), a Sort by menu
-  (Recently Updated, Name, Recently Created, Most Tracks) and a Grid or List
-  switch; the tab, sort and layout are kept in the settings file. liborca
-  filters, sorts and counts every section (`libraryPlaylistPage`,
-  `libraryPlaylistCount`); the search matches names case-insensitively.
-  A card shows a mosaic of the first four distinct album covers among the
-  playlist's tracks, or for a smart playlist a tile whose icon follows the
-  field its first rule tests (loved, dates, rating, play count), then the
-  name with a pin when pinned, Smart Playlist, By You or Imported, the
-  track count and length with how many tracks are unavailable, and when it
-  was last updated (relative within 30 days, a date after that). The list
-  shows the same in rows. Hovering or focusing a card shows a play button;
-  its more button and right click open Play, Shuffle, Pin or Unpin, Love or
-  Remove Love, Edit Rules… (smart) or Edit Details…, Rename…, Export… and
-  Delete…. Edit Details… sets the description and up to eight
-  comma-separated tags through `libraryUpdatePlaylist`. With no playlists
-  the page offers Import…, New Smart Playlist and New Playlist.
+- **Playlists** opens with its title block, "Your playlists and smart
+  collections.", New Smart Playlist and New Playlist; the New Playlist
+  dialog also offers Import… for an M3U file. Tabs (All, Created by Me,
+  Smart; one Tab stop, Left and Right move between them) choose which
+  playlists both sections show. Pinned shows every pinned playlist as a
+  square tile with its name and track count and length. All Playlists has
+  a sort menu (Recently updated, Name, Recently created, Most tracks) and a
+  Grid or List switch; the tab, sort and layout are kept in the settings
+  file. Both grids fit as many columns as the width allows, Pinned at
+  196 pixels or more and All Playlists at 150, and stretch the tiles to
+  fill the row. liborca filters, sorts and counts every section
+  (`libraryPlaylistPage`, `libraryPlaylistCount`); the search matches
+  names case-insensitively. A tile's art is the 2×2 mosaic of the first
+  four distinct album covers among the playlist's tracks, one cover when
+  there are fewer, or for a smart playlist a glyph that follows the field
+  its first rule tests (a heart for loved, a signal for sample rate, bit
+  depth, lossless or codec, a star otherwise). Below it an All Playlists
+  tile shows the name, Smart playlist, By you or Imported, and for a smart
+  playlist a summary of its rules, such as "Loved, never played" or
+  "Sample rate above 48 kHz", or else when it was last updated ("Updated
+  last week"). The summary reads `librarySmartPlaylistRules`, joins the
+  first two rules with ", " (all) or " or " (any), adds "+ N more" for the
+  rest, and falls back to "N rules" for a rule it has no words for. The
+  list shows the same three lines in rows beside the track count, length,
+  a pin and a more button. Hovering or focusing a tile outlines its art and
+  shows a play button; right click, and a row's more button, open Play,
+  Shuffle, Pin or Unpin, Love or Remove Love, Edit Rules… (smart) or Edit
+  Details…, Rename…, Export… and Delete…. Edit Details… sets the
+  description and up to eight comma-separated tags through
+  `libraryUpdatePlaylist`. With no playlists the page offers Import…, New
+  Smart Playlist and New Playlist.
 
   A playlist's page shows its mosaic or smart tile beside a Playlist or
-  Smart Playlist overline, the name in capitals, a line of who made it, the
-  track count, length and how many tracks are unavailable, and the
-  description, then Play, Shuffle, a heart for playlist love, Edit Rules
-  for a smart playlist and the playlist menu. Below 900sp the heading
-  stacks the art above the name. The tracks follow in the Tracks list's
-  table, numbered by their position in the playlist; below 900sp it drops
-  its album and the other columns a narrow window drops on Tracks. Activating a track plays the
+  Smart Playlist overline, the name in 58 px serif, a line of who made it
+  (By you, Imported or Smart playlist), the track count, length, how many
+  tracks are unavailable and when it was last updated, joined by dots, and
+  the description, then Play, Shuffle and round buttons: Reorder on a
+  manual playlist, Edit Rules or Edit Details, and the playlist menu, which
+  starts with Shuffle Again on a smart playlist ordered at random
+  (`libraryReshufflePlaylists`). Below 900sp the heading stacks the art
+  above the name. The tracks follow in a borderless table of #, Title with
+  the artist beneath it, Album and Time, numbered by their position in the
+  playlist; below 900sp it drops the album. Reorder shows a grip at the
+  start of each row; dragging a row by its grip onto another moves it
+  there (`libraryPlaylistMove`). Activating a track plays the
   playlist from it; its menu adds Remove from Playlist, Move Up and Move
-  Down on a manual playlist. An
-  entry whose recording has no track left reads Not in your library, is
-  dimmed and does not play. While no track is selected the inspector shows
-  the playlist: its name, Created by, Details (tracks, unavailable,
-  duration, mixed artists, top genres, created, last updated), the
-  description and the tags.
+  Down on a manual playlist. An entry whose recording has no track left
+  reads Not in your library, is dimmed and does not play. While no track
+  is selected the inspector shows the playlist: its name, a "Playlist ·
+  manual order" or "Smart playlist · N rules" subtitle, Details (tracks,
+  unavailable, duration, artists, created and updated, dates as
+  `YYYY-MM-DD`), Formats (tracks per codec from
+  `libraryPlaylistFormats`, then ReplayGain as All analyzed or N not
+  analyzed), Export (Export as M3U8…, and on a manual playlist Duplicate as
+  smart playlist…, which opens the Smart Playlist editor with the one rule
+  Playlist is this playlist, selected by playlist order, a
+  `playlist_position` sort on it, so the copy keeps the manual order) and
+  the tags.
 
-  The **Smart Playlist editor** (New Smart Playlist, Edit Rules) is a dialog
-  with the name, a root group (Match all or any of the following rules),
-  its rules and nested groups, each with Add Rule and Add Group, down to
-  four levels, then Order by, Descending and Limit to. A rule is a field, a
-  comparison fitting the field's type and a value: text, a number, a
-  `YYYY-MM-DD` date, or Yes or No. The editor writes version 1 rules JSON
-  (`docs/playlists.md`) and, a quarter of a second after the last change,
-  asks `librarySmartPlaylistCount` how many tracks match; when liborca rejects
-  the rules, the line shows its reason instead. Create saves with
-  `libraryCreateSmartPlaylist` and opens the new playlist; Save on an
-  existing one uses `librarySetSmartPlaylistRules`. Opening it on a smart
-  playlist reads `librarySmartPlaylistRules` back into the groups.
-- **Now Playing** is the audible track's cover, large, over its artwork
-  backdrop filling the page under a radial vignette, with a Now Playing overline, the title in serif, the
-  artist and the album with its year as links, a heart, a more button with
-  the track menu, a seek bar and the transport. Clicking the title opens its
-  album. Its transport and seek bar are a second set of the player bar's,
-  refreshed from the same tick, so both show the same state and either can
-  drive playback. Under the transport sit three centred lyric lines: the
-  previous line dimmed, the line being heard, and the next. Plain lyrics
-  show their first three lines, the page looks lyrics up itself when the
-  track changes, the space collapses when the track has none, and clicking
-  the lines opens the Lyrics inspector. A 340 px column at the end holds
-  Up Next, five queue entries from the audible one with Clear and View Full
-  Queue, and Track Info (title, artist, album, date, genre, track number as
-  "1 of 16", disc number only when the disc total is above one, and format
-  as "FLAC 16-bit / 44.1 kHz"), whose more button opens the track
-  inspector. An inspector mode replaces that column; below 900sp the page
-  shows only the centre column. With nothing playing it shows a large
-  glyph, Nothing playing and Pick an album or press Play. Clicking the
-  cover in the player bar opens it.
-- **Queue** is the Player's queue as the engine resolves it, under the page
-  title, the track count (and length when the whole queue is shown) and Save
-  as Playlist… and Clear buttons, in three sections. Now Playing is the
-  audible entry on an accent tint: cover, title in the accent colour, artist
-  and album, heart and duration. Up Next lists the entries after it with
-  their count and length: on hover a drag handle, then the number, a
-  thumbnail, the title and artist on one line, the heart, the duration and,
-  on hover, a remove button. Activating an entry plays it, and Delete
-  removes the focused one. Dragging an entry onto another, or Play Next
-  and Play Later in its menu, moves it with `playerQueueMove`; when the
+  The **Smart Playlist editor** (New Smart Playlist, Edit Rules) is a page
+  pushed in the Playlists section, so the sidebar keeps Playlists selected
+  and the player bar stays live. Its top bar shows the history buttons, a
+  breadcrumb from the previous page's title to Edit Smart Playlist (or New
+  Smart Playlist), and Cancel and Save Smart Playlist where the search
+  field sits on other pages. Cancel pops back to the previous page without
+  asking, and back and forward treat the editor like any other pushed
+  page; a revisited editor reloads the playlist's stored rules. The page
+  opens with the sparkle tile and the name in 36 px serif. The rules card
+  reads Match all or any of the following rules, then one row per rule:
+  field, comparison and value, a remove button (a thin minus) and an
+  add-below button. A nested group is an indented card with its own Match
+  all or any of. Add Rule and Add Group
+  end the card; Add Group adds a group one level down with one rule, and
+  rules JSON with groups up to four levels deep loads as nested cards. A
+  rule's value is text, a number, a `YYYY-MM-DD` date, a count of days,
+  weeks, months or years for is in the last, Yes or No in the field's
+  words (Loved, Lossless), or for Playlist one of the manual playlists
+  (`in_playlist`). The options card holds Limit to N tracks or hours,
+  selected by an order (library order, random, most recently added,
+  highest rated, most played and others), and a fixed Live updating row:
+  Re-evaluates as your library and listening change, Smart playlists
+  always reflect your library. The Live preview column, a quarter of a
+  second after the last change, asks `librarySmartPlaylistPreview` for the
+  count, total length and first seven tracks, then and N more; when liborca
+  rejects the rules it shows the reason instead. An order the menu does not
+  list, such as playlist order, shows as its own entry, and a loaded order
+  left unchanged is saved exactly as it was read. Save creates with
+  `libraryCreateSmartPlaylist`, pops the editor and opens the new playlist,
+  or uses `librarySetSmartPlaylistRules`, renames an existing one and pops
+  back to the previous page. Opening it on
+  a smart playlist reads `librarySmartPlaylistRules` back into the cards.
+- **Now Playing** is the audible track's cover, 340 px with a soft shadow,
+  over its artwork backdrop filling the page under a radial vignette, with
+  the title in 48 px serif, the artist and the album with its year as
+  links, a heart, five rating stars and a more button with the track menu.
+  Clicking the title opens its album. The transport stays in the player
+  bar. Under the buttons sit three centred lyric lines: the previous line
+  faded, the line being heard, and the next, then Show all lyrics. Plain
+  lyrics show their first three lines, the page looks lyrics up itself
+  when the track changes, and the space collapses when the track has none.
+  A 340 px column at the end holds Up Next, ten queue entries from the
+  audible one, the playing one tinted, with Clear and View Full Album, and
+  Track Info (Album, Date, Genre, Track as "1 of 13", and Source as "FLAC
+  · 16-bit · 44.1 kHz" with the path as its tooltip). The backdrop and the
+  column run under the top bar, which turns transparent and ends at the
+  column, so the Now Playing overline and the search sit over the centre
+  column, and hides the back and forward buttons (Alt+Left and Alt+Right
+  still work); every other page keeps the top bar above its content. Show
+  all lyrics turns the column into 380 px with Up Next, Lyrics and Info
+  tabs: Lyrics scrolls the whole lyrics with the current line bright and a
+  third of the way down, seeks to a synced line when it is clicked, and
+  ends in a footer naming the source ("Synced · from 01 Dr. Whoever.lrc",
+  "Synced · embedded") and its `[offset:]` ("Offset −0.2 s", left out when
+  zero); Info shows Track Info alone; Up Next returns to the column. An
+  inspector replaces that column; below 900sp the page shows only the
+  centre column. With nothing playing it shows a large glyph, Nothing
+  playing and Pick an album or press Play. Clicking the cover in the
+  player bar opens it.
+- **Queue** is the Player's queue as the engine resolves it, in a column at
+  most 980 px wide. Under the page title are the tracks left from the
+  audible entry, the time they take when the whole queue is read, and
+  `from` the album of the queue's first entry, beside Save as Playlist and
+  Clear. Now Playing is the audible entry on an accent-tinted card: a
+  56 px cover, the title in the accent colour, artist and album, and the
+  position over the duration. Up Next lists the entries after it, each a
+  number and the title over the artist and its duration, with a drag
+  handle and a more button on hover. Activating an entry plays it.
+  The more button and a right click open its menu: Play Next, Play Later,
+  Love or Remove Love, Go to Album, Go to Artist, Remove from Queue and
+  Save Queue as Playlist…. On the focused entry Shift+Enter plays it next,
+  L toggles its love and Delete removes it. Dragging an entry onto another, or Play Next
+  and Play Later, moves it with `playerQueueMove`; when the
   engine refuses with `QueueEntryInUse`, because the entry or the target is
   already lined up, a toast says so and the page reloads unchanged.
   Previously Played lists `playerQueueHistoryTracks`, newest first, with
@@ -1463,7 +1514,7 @@ which `scripts/design-fixture.sh` builds when it is missing; the app opens a
 copy, so a run never changes it. Run `scripts/design-fixture.sh` inside the dev
 shell to rebuild it after a schema change. It scans `fixtures/audio`, regroups
 the Tracks into 26 albums by eight artists with `orca-cli edit`, and adds
-genres, loves, ratings and five playlists, two of them smart, through
+genres, loves, ratings and ten playlists, seven of them smart, through
 `orca-cli`. Covers and three artist photos are gradients generated by FFmpeg
 and stored with `sqlite3`, because no command stores a local image. Six
 fixture files carry an embedded cover, which wins over the generated one. The

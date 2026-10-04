@@ -115,6 +115,32 @@ fn buildSearch(self: *App) *gtk.Widget {
     return switcher;
 }
 
+fn editorCancelClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    smart_playlist_editor.cancelShown(state(data));
+}
+
+fn editorSaveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    smart_playlist_editor.saveShown(state(data));
+}
+
+fn buildEditorActions(self: *App) *gtk.Widget {
+    const cancel = gtk.gtk_button_new_with_label("Cancel");
+    gtk.gtk_widget_add_css_class(cancel, "btn-secondary");
+    gtk.gtk_widget_set_valign(cancel, gtk.ALIGN_CENTER);
+    _ = gtk.signalConnect(cancel, "clicked", gtk.callback(editorCancelClicked), self);
+    const save = gtk.gtk_button_new_with_label("Save Smart Playlist");
+    gtk.gtk_widget_add_css_class(save, "btn-primary");
+    gtk.gtk_widget_add_css_class(save, "smart-save");
+    gtk.gtk_widget_set_valign(save, gtk.ALIGN_CENTER);
+    _ = gtk.signalConnect(save, "clicked", gtk.callback(editorSaveClicked), self);
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), cancel);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), save);
+    gtk.gtk_widget_set_visible(actions, gtk.false_);
+    self.top_bar.editor_actions = actions;
+    return actions;
+}
+
 pub fn build(self: *App) *gtk.Widget {
     const bar = adw.adw_header_bar_new();
     adw.adw_header_bar_set_show_title(gtk.cast(adw.HeaderBar, bar), gtk.false_);

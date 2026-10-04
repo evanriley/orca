@@ -5,11 +5,12 @@
 # Usage:
 #   scripts/design-fixture.sh [DATABASE]
 #
-# Scans fixtures/audio, regroups its Tracks into 26 albums by 8 artists with
-# library-only edits, and adds genres, loves, ratings and five playlists (two
-# smart) through orca-cli. Covers and artist photos are generated with FFmpeg
-# and stored with sqlite3, because no command stores a local image. Any
-# existing DATABASE is replaced, so every run gives the same library.
+# Scans and analyses fixtures/audio, regroups its Tracks into 26 albums by 8
+# artists with library-only edits, and adds genres, loves, ratings and ten
+# playlists (seven smart) through orca-cli. Covers and artist photos are
+# generated with FFmpeg and stored with sqlite3, because no command stores a
+# local image. Any existing DATABASE is replaced, so every run gives the same
+# library.
 
 set -euo pipefail
 
@@ -181,5 +182,16 @@ cat >"$images/favourites.json" <<'EOF'
 {"v":1,"match":"any","rules":[{"field":"loved","op":"is","value":true},{"field":"rating","op":"gte","value":80}],"sort":{"field":"rating","descending":true},"limit":100}
 EOF
 cli smart-playlist-create "$database" "Favourites" "$images/favourites.json"
+
+smart_playlist() {
+    printf '%s\n' "$2" >"$images/smart.json"
+    cli smart-playlist-create "$database" "$1" "$images/smart.json"
+}
+
+smart_playlist "Loved & Unplayed" '{"v":1,"match":"all","rules":[{"field":"loved","op":"is","value":true},{"field":"play_count","op":"is","value":0}]}'
+smart_playlist "5 Stars" '{"v":1,"match":"all","rules":[{"field":"rating","op":"is","value":100}],"sort":{"field":"added_at","descending":true}}'
+smart_playlist "Recently Added" '{"v":1,"match":"all","rules":[{"field":"added_at","op":"in_last_days","value":30}],"sort":{"field":"added_at","descending":true}}'
+smart_playlist "Hi-Res" '{"v":1,"match":"all","rules":[{"field":"sample_rate","op":"gt","value":48000}]}'
+smart_playlist "Not Played in a Year" '{"v":1,"match":"all","rules":[{"field":"last_played_at","op":"not_in_last_days","value":365}],"sort":{"field":"random"}}'
 
 "$orca_cli" stats "$database"

@@ -23,6 +23,7 @@ const ratings = @import("ratings.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
+const smart_playlist_editor = @import("smart_playlist_editor.zig");
 const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
@@ -157,7 +158,7 @@ fn filterTracks(self: *App, text: []const u8) void {
 
 pub fn filterTarget(self: *App) ?Page {
     return switch (self.current_page) {
-        .albums, .artists, .tracks, .playlists => |page| if (pushedPage(self, page) == null) page else null,
+        .albums, .artists, .tracks, .genres, .folders, .playlists, .loved => |page| if (pushedPage(self, page) == null) page else null,
         else => null,
     };
 }
@@ -352,6 +353,7 @@ pub const Pushed = union(enum) {
     album: i64,
     artist: i64,
     playlist: i64,
+    smart_rules: ?i64,
 };
 
 fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
@@ -360,7 +362,8 @@ fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
 
 pub fn markPushed(page: *adw.NavigationPage, pushed: Pushed) void {
     switch (pushed) {
-        inline else => |id, kind| {
+        .smart_rules => {},
+        inline .album, .artist, .playlist => |id, kind| {
             const value = std.math.cast(usize, id) orelse return;
             gtk.g_object_set_data(page, pushedKey(kind), @ptrFromInt(value));
         },
@@ -372,6 +375,7 @@ fn pushedOf(self: *App, page: *adw.NavigationPage) ?Pushed {
         if (gtk.g_object_get_data(page, pushedKey(kind))) |value|
             return @unionInit(Pushed, @tagName(kind), @intCast(@intFromPtr(value)));
     }
+    if (smart_playlist_editor.pushedOf(page)) |pushed| return pushed;
     if (adw.adw_navigation_page_get_tag(page)) |tag| {
         if (std.mem.eql(u8, std.mem.span(tag), playlists.page_tag))
             return .{ .playlist = self.playlists.open_id orelse return null };
@@ -483,6 +487,7 @@ fn pushedSource(self: *App, page: *adw.NavigationPage) ?details.Source {
             .selection = self.playlists.tracks.selection orelse return null,
             .playlist_id = id,
         } },
+        .smart_rules => null,
     };
 }
 
@@ -547,12 +552,14 @@ fn open(self: *App, navigation: *adw.NavigationView, pushed: Pushed) void {
         .album => |release_id| albums.openAlbum(self, navigation, release_id),
         .artist => |artist_id| artist_page.openArtist(self, navigation, artist_id),
         .playlist => |playlist_id| playlists.open(self, playlist_id),
+        .smart_rules => |playlist_id| smart_playlist_editor.present(self, playlist_id),
     }
 }
 
 fn revisit(self: *App, visit: Visit) bool {
     if (visit.pushed) |pushed| switch (pushed) {
         .playlist => |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
+        .smart_rules => |editing| if (editing) |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
         else => {},
     };
     switchTo(self, visit.page);
