@@ -200,9 +200,9 @@ for variable in DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS 
     unset "$variable"
 done
 export XDG_RUNTIME_DIR=$runtime
-export HOME=$runtime/home XDG_CONFIG_HOME=${ORCA_HEADLESS_CONFIG:-$runtime/config} XDG_DATA_HOME=$runtime/data XDG_CACHE_HOME=$runtime/cache
+export HOME=$runtime/home XDG_CONFIG_HOME=${ORCA_HEADLESS_CONFIG:-$runtime/config} XDG_DATA_HOME=$runtime/data XDG_CACHE_HOME=$runtime/cache XDG_STATE_HOME=$runtime/state
 export PATH="$tools/bin:$PATH"
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$runtime/library" "$runtime/no-services"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$runtime/library" "$runtime/no-services"
 
 cp "$library" "$runtime/library/library.db"
 for suffix in -wal -shm; do
