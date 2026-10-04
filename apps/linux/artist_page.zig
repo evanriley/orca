@@ -17,6 +17,7 @@ const details = @import("details.zig");
 const feedback = @import("feedback.zig");
 const track_model = @import("track_model.zig");
 const window = @import("window.zig");
+const page_ui = @import("page.zig");
 
 const App = app.App;
 
@@ -1286,6 +1287,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(pageDestroyed), page);
     _ = gtk.signalConnect(gtk.gtk_scrolled_window_get_hadjustment(gtk.cast(gtk.ScrolledWindow, scroller)), "changed", gtk.callback(pageResized), page);
     page.scroller = scroller;
+    page_ui.extendUnderBar(self, scroller, scroller);
     registerPage(page);
     markPlaying(self, self.shown_track_id);
 

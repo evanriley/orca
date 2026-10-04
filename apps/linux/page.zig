@@ -176,16 +176,52 @@ pub fn build(self: *App) *gtk.Widget {
     return bar;
 }
 
+const under_bar_key = "orca-under-bar";
+const under_bar_scroller_key = "orca-under-bar-scroller";
+
+pub fn extendUnderBar(self: *App, page_root: *gtk.Widget, scroller: ?*gtk.Widget) void {
+    gtk.g_object_set_data(page_root, under_bar_key, page_root);
+    const scrolls_under = scroller orelse return;
+    gtk.g_object_set_data(page_root, under_bar_scroller_key, scrolls_under);
+    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scrolls_under));
+    _ = gtk.signalConnect(adjustment, "value-changed", gtk.callback(underBarScrolled), self);
+}
+
+fn underBarScrolled(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const view = self.top_bar.view orelse return;
+    setClass(gtk.cast(gtk.Widget, view), "over-scrolled", scrolledUnderBar(self));
+}
+
+fn scrolledUnderBar(self: *App) bool {
+    const page_root = shownUnderBarPage(self) orelse return false;
+    const scroller = gtk.g_object_get_data(page_root, under_bar_scroller_key) orelse return false;
+    return gtk.gtk_adjustment_get_value(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller))) > 0;
+}
+
+fn shownUnderBarPage(self: *App) ?*gtk.Widget {
+    const pushed = window.pushedPage(self, self.current_page) orelse return null;
+    const page_root = adw.adw_navigation_page_get_child(pushed) orelse return null;
+    if (gtk.g_object_get_data(page_root, under_bar_key) == null) return null;
+    return page_root;
+}
+
+fn setClass(widget: *gtk.Widget, class: [*:0]const u8, shown: bool) void {
+    if (shown) gtk.gtk_widget_add_css_class(widget, class) else gtk.gtk_widget_remove_css_class(widget, class);
+}
+
 pub fn fitToPage(self: *App) void {
     const bar = self.top_bar.widget orelse return;
     const view = self.top_bar.view orelse return;
-    const over = self.current_page == .now_playing;
+    const playing = self.current_page == .now_playing;
+    const over = playing or shownUnderBarPage(self) != null;
     adw.adw_toolbar_view_set_extend_content_to_top_edge(view, @intFromBool(over));
     const view_widget = gtk.cast(gtk.Widget, view);
-    if (over) gtk.gtk_widget_add_css_class(view_widget, "over-page") else gtk.gtk_widget_remove_css_class(view_widget, "over-page");
-    gtk.gtk_widget_set_margin_end(barRow(bar, view_widget), if (over) nowplaying.panelWidth(self) else 0);
+    setClass(view_widget, "over-page", over);
+    setClass(view_widget, "over-scrolled", scrolledUnderBar(self));
+    gtk.gtk_widget_set_margin_end(barRow(bar, view_widget), if (playing) nowplaying.panelWidth(self) else 0);
     for ([_]?*gtk.Widget{ self.top_bar.back, self.top_bar.forward }) |button|
-        if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!over));
+        if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!playing));
     gtk.gtk_widget_set_visible(bar, @intFromBool(self.current_page != .scan));
 }
 

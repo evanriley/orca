@@ -2163,6 +2163,7 @@ fn buildPlaylistPage(self: *App) *adw.NavigationPage {
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), column);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), column, gtk.true_);
+    page_ui.extendUnderBar(self, layers, null);
 
     const group = gtk.g_simple_action_group_new();
     const reshuffle = gtk.g_simple_action_new("reshuffle", null).?;

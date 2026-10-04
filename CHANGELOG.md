@@ -1485,6 +1485,12 @@
   window over the panel and took those clicks, so after Show all lyrics
   the panel stayed on the lyrics and the three-line quote under the cover
   did not come back.
+- **Album, artist and playlist pages have no top bar band.** In orca-gtk,
+  an album, artist or playlist page draws its blurred backdrop to the top
+  of the window, with back, forward, the breadcrumb and the search field
+  over it, as the design shows, instead of under a solid bar. Once an
+  album or artist page scrolls, the bar fades to the page colour so its
+  controls stay legible over the content.
 - **Headless GUI runs keep their state private.** `scripts/headless-gui.sh`
   sets `XDG_STATE_HOME` to a directory inside its private runtime
   directory, as it already did for `HOME` and the XDG config, data and

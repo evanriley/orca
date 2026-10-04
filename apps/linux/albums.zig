@@ -3382,6 +3382,7 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(pageDestroyed), page);
     page.scroller = scroller;
     _ = gtk.signalConnect(gtk.gtk_scrolled_window_get_hadjustment(gtk.cast(gtk.ScrolledWindow, scroller)), "changed", gtk.callback(pageResized), page);
+    page_ui.extendUnderBar(self, scroller, scroller);
     queueMoreCheck(page);
     registerPage(page);
 

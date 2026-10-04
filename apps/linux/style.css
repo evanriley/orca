@@ -2615,6 +2615,22 @@ toolbarview.over-page .library-search > entry {
   background-color: color-mix(in srgb, @orca_bg_raised_2 80%, transparent);
 }
 
+toolbarview.over-page .album-detail,
+toolbarview.over-page .artist-page,
+toolbarview.over-page .playlist-hero {
+  margin-top: 72px;
+}
+
+.narrow toolbarview.over-page .album-detail,
+.narrow toolbarview.over-page .artist-page,
+.narrow toolbarview.over-page .playlist-hero {
+  margin-top: 64px;
+}
+
+toolbarview.over-scrolled headerbar.page-header {
+  background-image: linear-gradient(to bottom, @orca_bg_main 70%, transparent);
+}
+
 .now-eyebrow {
   font-size: 11.5px;
   font-weight: 500;
