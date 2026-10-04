@@ -729,7 +729,7 @@ fn artistGenres(panel: *Panel, artist_id: i64, buffer: []u8) ?[:0]const u8 {
     if (genres.items.len == 0) return null;
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
     for (genres.items, 0..) |genre, index| {
-        if (index != 0) writer.writeAll("\n") catch {};
+        if (index != 0) writer.writeAll(", ") catch {};
         writer.writeAll(genre.name) catch {};
     }
     return finish(buffer, &writer);

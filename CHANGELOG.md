@@ -199,6 +199,14 @@
   file's tags, an `Orca metadata differs from file` card offers Compare, a
   Field / File / Orca table of the `write-tags` preview, and Write to
   File…, which opens the tag write confirmation.
+- **Genres page redesign in orca-gtk.** Genres follows the redesign: a
+  230 px list of genres with track counts, filtered by the header search
+  (`Search genres…`), beside the selected genre with its name in
+  Newsreader, `8 tracks · 4 albums · 1 artist · 13s`, Play, a dark Shuffle
+  and more, six album tiles with See all N opening Albums filtered to the
+  genre, Artists with round photos or initials and their track counts, and
+  Representative Tracks. The strip of genre tiles, the cards and the
+  Artists page's unreachable genre chip are gone.
 - **Full-height inspector in orca-gtk.** The inspector runs from the top of
   the window beside the main column, which now holds the header bar and
   search, with a header of title, dim subtitle and close button, small

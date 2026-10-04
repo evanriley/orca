@@ -5,36 +5,27 @@ const adw = @import("adw.zig");
 const app = @import("app.zig");
 const art = @import("art.zig");
 const albums = @import("albums.zig");
-const artists = @import("artists.zig");
-const browse = @import("browse.zig");
-const browse_model = @import("browse_model.zig");
+const artist_page = @import("artist_page.zig");
 const details = @import("details.zig");
 const feedback = @import("feedback.zig");
-const page_ui = @import("page.zig");
+const menu = @import("menu.zig");
 const playlists = @import("playlists.zig");
 const settings = @import("settings.zig");
-const track_filters = @import("track_filters.zig");
 const strings = @import("strings.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
 const window = @import("window.zig");
 
 const App = app.App;
-const BrowseObject = browse_model.BrowseObject;
 
 pub const navigation_tag = "genres";
 
-const tile_width: c_int = 165;
-const tile_height: c_int = 128;
-const album_pixels: c_int = 128;
+const index_pixels: c_int = 230;
+const album_pixels: c_int = 132;
 const artist_pixels: c_int = 36;
-const track_cover_pixels: c_int = 32;
-const album_limit = 4;
+const album_limit = 6;
 const artist_limit = 5;
 const track_limit = 5;
-const mosaic_cells = 4;
-const wheel_step: f64 = 120;
-const cell_keys = [mosaic_cells][*:0]const u8{ "orca-cell-0", "orca-cell-1", "orca-cell-2", "orca-cell-3" };
 
 const Summary = struct {
     id: i64,
@@ -54,15 +45,9 @@ const Summary = struct {
     }
 };
 
-const Covers = struct {
-    ids: [mosaic_cells]i64 = @splat(0),
-    len: u8 = 0,
-};
-
 const Track = struct {
     target: feedback.Target,
     row: ?*gtk.Widget = null,
-    heart: ?*gtk.Widget = null,
 };
 
 pub const State = struct {
@@ -70,22 +55,23 @@ pub const State = struct {
     selected: ?i64 = null,
     stale: bool = true,
     idle: c_uint = 0,
-    store: ?*gtk.ListStore = null,
-    selection: ?*gtk.SingleSelection = null,
-    strip: ?*gtk.Widget = null,
+    list: ?*gtk.ListBox = null,
     summaries: std.ArrayList(Summary) = .empty,
     loaded: u32 = 0,
     exhausted: bool = false,
     suppress: bool = false,
-    artwork: std.AutoHashMapUnmanaged(i64, Covers) = .empty,
     body: ?*gtk.Stack = null,
+    empty: ?*adw.StatusPage = null,
+    fill_link: ?*gtk.Widget = null,
+    filter: app.OwnedText = .{},
     current: ?Summary = null,
     current_name: app.OwnedText = .{},
     hero_name: ?*gtk.Label = null,
-    hero_stats: ?*gtk.Label = null,
-    album_card: ?*gtk.Widget = null,
-    artist_card: ?*gtk.Widget = null,
-    track_card: ?*gtk.Widget = null,
+    hero_stats: ?*gtk.Box = null,
+    album_section: ?*gtk.Widget = null,
+    artist_section: ?*gtk.Widget = null,
+    track_section: ?*gtk.Widget = null,
+    see_all: ?*gtk.Widget = null,
     album_grid: ?*gtk.FlowBox = null,
     artist_list: ?*gtk.ListBox = null,
     track_list: ?*gtk.ListBox = null,
@@ -102,8 +88,8 @@ pub const State = struct {
         if (self.idle != 0) _ = gtk.g_source_remove(self.idle);
         self.idle = 0;
         self.summaries.deinit(allocator);
-        self.artwork.deinit(allocator);
         self.current_name.clear(allocator);
+        self.filter.clear(allocator);
     }
 };
 
@@ -111,9 +97,14 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-fn part(widget: *gtk.Widget, key: [*:0]const u8) ?*gtk.Widget {
-    const found = gtk.g_object_get_data(widget, key) orelse return null;
-    return @ptrCast(@alignCast(found));
+fn marked(widget: ?*anyopaque) ?usize {
+    const position = @intFromPtr(gtk.g_object_get_data(widget.?, "orca-position"));
+    if (position == 0) return null;
+    return position - 1;
+}
+
+fn markPosition(widget: *gtk.Widget, position: usize) void {
+    gtk.g_object_set_data(widget, "orca-position", @ptrFromInt(position + 1));
 }
 
 pub fn shown(self: *App) void {
@@ -153,12 +144,11 @@ fn loadIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
 fn load(self: *App) void {
     const genres = &self.genres;
     genres.stale = false;
-    const store = genres.store orelse return;
+    const list = genres.list orelse return;
     genres.suppress = true;
-    gtk.g_list_store_remove_all(store);
+    gtk.gtk_list_box_remove_all(list);
     genres.suppress = false;
     genres.summaries.clearRetainingCapacity();
-    genres.artwork.clearRetainingCapacity();
     genres.loaded = 0;
     genres.exhausted = false;
     loadNext(self);
@@ -166,6 +156,7 @@ fn load(self: *App) void {
     if (genres.summaries.items.len == 0) {
         genres.current = null;
         genres.current_name.clear(self.allocator);
+        showEmpty(self);
         gtk.gtk_stack_set_visible_child_name(body, "empty");
         return;
     }
@@ -173,15 +164,33 @@ fn load(self: *App) void {
     restoreSelection(self);
 }
 
+pub fn setFilter(self: *App, text: []const u8) void {
+    const genres = &self.genres;
+    if (std.mem.eql(u8, text, genres.filter.value)) return;
+    genres.filter.set(self.allocator, text);
+    if (genres.idle != 0) _ = gtk.g_source_remove(genres.idle);
+    genres.idle = 0;
+    load(self);
+}
+
+fn showEmpty(self: *App) void {
+    const empty = self.genres.empty orelse return;
+    const searching = self.genres.filter.value.len != 0;
+    adw.adw_status_page_set_title(empty, if (searching) "No matching genres" else "No genres yet");
+    adw.adw_status_page_set_description(empty, if (searching) "Try another search." else "Genres come from your files\u{2019} tags.");
+    if (self.genres.fill_link) |link| gtk.gtk_widget_set_visible(link, @intFromBool(!searching));
+}
+
 fn loadNext(self: *App) void {
     const genres = &self.genres;
-    const store = genres.store orelse return;
+    const list = genres.list orelse return;
     if (genres.exhausted) return;
     const library = self.library orelse {
         genres.exhausted = true;
         return;
     };
     var page = self.runtime.libraryGenrePage(library, .{
+        .filter = genres.filter.value,
         .sort = .track_count,
         .limit = app.page_size,
         .offset = genres.loaded,
@@ -191,85 +200,89 @@ fn loadNext(self: *App) void {
     };
     defer page.deinit();
     if (page.items.len < app.page_size) genres.exhausted = true;
-    var additions: std.ArrayList(?*anyopaque) = .empty;
-    defer {
-        for (additions.items) |row| gtk.g_object_unref(row);
-        additions.deinit(self.allocator);
-    }
-    var buffer: [48]u8 = undefined;
     for (page.items) |genre| {
-        const detail = std.fmt.bufPrint(&buffer, "{d} {s}", .{
-            genre.track_count,
-            if (genre.track_count == 1) "track" else "tracks",
-        }) catch "";
-        const row = browse_model.new(genre.id, genre.name, detail) orelse continue;
-        additions.append(self.allocator, row) catch {
-            gtk.g_object_unref(row);
-            break;
-        };
         genres.summaries.append(self.allocator, Summary.of(genre)) catch {
-            _ = additions.pop();
-            gtk.g_object_unref(row);
+            genres.exhausted = true;
             break;
         };
-    }
-    if (additions.items.len != 0) {
-        genres.suppress = true;
-        gtk.g_list_store_splice(
-            store,
-            gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store)),
-            0,
-            additions.items.ptr,
-            @intCast(additions.items.len),
-        );
-        genres.suppress = false;
+        gtk.gtk_list_box_append(list, indexRow(genre));
     }
     genres.loaded += @intCast(page.items.len);
+}
+
+fn indexRow(genre: liborca.GenreSummary) *gtk.Widget {
+    const row = gtk.gtk_list_box_row_new();
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(box, "genre-index-row");
+    var buffer: [512]u8 = undefined;
+    const name = label(strings.terminated(&buffer, genre.name).ptr, "genre-index-name");
+    gtk.gtk_widget_set_hexpand(name, gtk.true_);
+    const count = gtk.gtk_label_new(strings.format(&buffer, "{d}", .{genre.track_count}).ptr);
+    gtk.gtk_widget_add_css_class(count, "genre-index-count");
+    gtk.gtk_widget_add_css_class(count, "numeric");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), name);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), count);
+    gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
+    gtk.g_object_set_data(row, "orca-name", name);
+    return row;
 }
 
 fn restoreSelection(self: *App) void {
     const genres = &self.genres;
     if (genres.selected) |wanted| {
         for (genres.summaries.items, 0..) |summary, position| {
-            if (summary.id == wanted) return select(self, @intCast(position));
+            if (summary.id == wanted) return select(self, position);
         }
-        if (showById(self, wanted)) return;
+        if (genres.filter.value.len == 0 and showById(self, wanted)) return;
     }
     select(self, 0);
 }
 
-fn select(self: *App, position: c_uint) void {
+fn select(self: *App, position: usize) void {
     const genres = &self.genres;
-    if (genres.selection) |selection| {
-        genres.suppress = true;
-        gtk.gtk_single_selection_set_selected(selection, position);
-        genres.suppress = false;
-    }
-    showAt(self, position, false);
-    if (genres.strip) |strip| gtk.gtk_list_view_scroll_to(gtk.cast(gtk.ListView, strip), position, gtk.LIST_SCROLL_NONE, null);
+    const list = genres.list orelse return;
+    const row = gtk.gtk_list_box_get_row_at_index(list, @intCast(position)) orelse return;
+    genres.suppress = true;
+    gtk.gtk_list_box_select_row(list, row);
+    genres.suppress = false;
+    showAt(self, row, false);
 }
 
-fn showAt(self: *App, position: c_uint, persist: bool) void {
+fn showAt(self: *App, row: *gtk.ListBoxRow, persist: bool) void {
     const genres = &self.genres;
-    if (position >= genres.summaries.items.len) return;
-    const store = genres.store orelse return;
-    const object = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), position) orelse return;
-    defer gtk.g_object_unref(object);
-    const genre: *BrowseObject = @ptrCast(@alignCast(object));
-    showGenre(self, genres.summaries.items[position], genre.name(), persist);
+    const index = gtk.gtk_list_box_row_get_index(row);
+    if (index < 0 or @as(usize, @intCast(index)) >= genres.summaries.items.len) return;
+    const name = gtk.g_object_get_data(gtk.cast(gtk.Widget, row), "orca-name") orelse return;
+    const text = std.mem.span(gtk.gtk_label_get_text(gtk.cast(gtk.Label, name)));
+    showGenre(self, genres.summaries.items[@intCast(index)], text, persist);
 }
 
 fn showById(self: *App, genre_id: i64) bool {
     const library = self.library orelse return false;
     const genre = (self.runtime.libraryGenre(library, genre_id) catch null) orelse return false;
     defer genre.deinit(self.allocator);
-    if (self.genres.selection) |selection| {
+    if (self.genres.list) |list| {
         self.genres.suppress = true;
-        gtk.gtk_single_selection_set_selected(selection, gtk.INVALID_LIST_POSITION);
+        gtk.gtk_list_box_unselect_all(list);
         self.genres.suppress = false;
     }
     showGenre(self, Summary.of(genre), genre.name, false);
     return true;
+}
+
+fn rowSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.genres.suppress) return;
+    showAt(self, gtk.cast(gtk.ListBoxRow, row orelse return), true);
+}
+
+fn listMoved(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.genres.exhausted or self.genres.stale) return;
+    const value = gtk.cast(gtk.Adjustment, adjustment);
+    const page = gtk.gtk_adjustment_get_page_size(value);
+    const remaining = gtk.gtk_adjustment_get_upper(value) - (gtk.gtk_adjustment_get_value(value) + page);
+    if (remaining < page) loadNext(self);
 }
 
 fn showGenre(self: *App, summary: Summary, name: []const u8, persist: bool) void {
@@ -281,215 +294,55 @@ fn showGenre(self: *App, summary: Summary, name: []const u8, persist: bool) void
         settings.save(self);
     }
     var buffer: [512]u8 = undefined;
-    if (genres.hero_name) |label| gtk.gtk_label_set_text(label, strings.terminated(&buffer, name).ptr);
-    if (genres.hero_stats) |label| gtk.gtk_label_set_text(label, statsText(&buffer, summary).ptr);
+    if (genres.hero_name) |hero_name| gtk.gtk_label_set_text(hero_name, strings.terminated(&buffer, name).ptr);
+    if (genres.hero_stats) |stats| showStats(stats, summary);
     const library = self.library orelse return;
-    fillAlbums(self, library, summary.id);
+    fillAlbums(self, library, summary);
     fillArtists(self, library, summary.id);
     fillTracks(self, library, summary.id);
 }
 
-fn statsText(buffer: []u8, summary: Summary) [:0]const u8 {
-    const minutes: u64 = if (summary.total_duration_ms > 0) @intCast(@divTrunc(summary.total_duration_ms, 60_000)) else 0;
-    var duration_buffer: [32]u8 = undefined;
-    const duration = if (minutes >= 60)
-        std.fmt.bufPrint(&duration_buffer, " • {d}h {d}m", .{ minutes / 60, minutes % 60 }) catch ""
-    else if (minutes > 0)
-        std.fmt.bufPrint(&duration_buffer, " • {d}m", .{minutes}) catch ""
-    else
-        "";
-    return strings.printZ(buffer, "{d} {s} • {d} {s} • {d} {s}{s}", .{
-        summary.track_count,
-        if (summary.track_count == 1) "track" else "tracks",
-        summary.release_count,
-        if (summary.release_count == 1) "album" else "albums",
-        summary.artist_count,
-        if (summary.artist_count == 1) "artist" else "artists",
-        duration,
-    }) catch "";
+fn durationText(buffer: []u8, milliseconds: i64) ?[:0]const u8 {
+    if (milliseconds <= 0) return null;
+    const seconds: u64 = @intCast(@divTrunc(milliseconds, 1000));
+    const minutes = seconds / 60;
+    if (minutes >= 60) return strings.format(buffer, "{d}h {d}m", .{ minutes / 60, minutes % 60 });
+    if (minutes > 0) return strings.format(buffer, "{d}m", .{minutes});
+    if (seconds > 0) return strings.format(buffer, "{d}s", .{seconds});
+    return null;
 }
 
-fn coversFor(self: *App, genre_id: i64) Covers {
-    const genres = &self.genres;
-    if (genres.artwork.get(genre_id)) |covers| return covers;
-    var covers: Covers = .{};
-    const library = self.library orelse return covers;
-    const found = self.runtime.libraryGenreArtwork(library, genre_id, mosaic_cells) catch return covers;
-    defer found.deinit();
-    for (found.ids[0..@min(found.ids.len, mosaic_cells)], 0..) |id, index| covers.ids[index] = id;
-    covers.len = @intCast(@min(found.ids.len, mosaic_cells));
-    genres.artwork.put(self.allocator, genre_id, covers) catch {};
-    return covers;
-}
-
-fn paintMosaic(self: *App, mosaic: *gtk.Widget, covers: Covers) void {
-    const single = part(mosaic, "orca-single") orelse return;
-    const tiled = covers.len == mosaic_cells;
-    if (tiled or covers.len == 0) art.clear(self, single) else art.show(self, single, art.Key.release(covers.ids[0], .tile));
-    for (cell_keys, 0..) |key, index| {
-        const cell = part(mosaic, key) orelse continue;
-        if (tiled) art.show(self, cell, art.Key.release(covers.ids[index], .thumb)) else art.clear(self, cell);
+fn statLabel(box: *gtk.Box, text: [*:0]const u8) void {
+    if (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, box)) != null) {
+        const separator = gtk.gtk_label_new("·");
+        gtk.gtk_widget_add_css_class(separator, "artist-genre-separator");
+        gtk.gtk_box_append(box, separator);
     }
-    const page: [*:0]const u8 = if (tiled) "grid" else if (covers.len != 0) "single" else "blank";
-    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, mosaic), page);
+    const piece = gtk.gtk_label_new(text);
+    gtk.gtk_widget_add_css_class(piece, "numeric");
+    gtk.gtk_box_append(box, piece);
 }
 
-fn blank() *gtk.Widget {
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(box, "genre-tile-blank");
-    return box;
+fn countText(buffer: []u8, count: u32, one: []const u8, many: []const u8) [:0]const u8 {
+    return strings.format(buffer, "{d} {s}", .{ count, if (count == 1) one else many });
 }
 
-fn newMosaic(self: *App) *gtk.Widget {
-    const stack = gtk.gtk_stack_new();
-    const single = art.newFillingCover(self, blank());
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), single, "single");
-    gtk.g_object_set_data(stack, "orca-single", single);
-    const grid = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, grid), gtk.true_);
-    for (0..2) |row_index| {
-        const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-        gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, row), gtk.true_);
-        for (0..2) |column| {
-            const cell = art.newFillingCover(self, blank());
-            gtk.gtk_box_append(gtk.cast(gtk.Box, row), cell);
-            gtk.g_object_set_data(stack, cell_keys[row_index * 2 + column], cell);
-        }
-        gtk.gtk_box_append(gtk.cast(gtk.Box, grid), row);
-    }
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), grid, "grid");
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), blank(), "blank");
-    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, stack), "blank");
-    return stack;
+fn showStats(box: *gtk.Box, summary: Summary) void {
+    while (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, box))) |child| gtk.gtk_box_remove(box, child);
+    var buffer: [48]u8 = undefined;
+    statLabel(box, countText(&buffer, summary.track_count, "track", "tracks").ptr);
+    statLabel(box, countText(&buffer, summary.release_count, "album", "albums").ptr);
+    statLabel(box, countText(&buffer, summary.artist_count, "artist", "artists").ptr);
+    if (durationText(&buffer, summary.total_duration_ms)) |duration| statLabel(box, duration.ptr);
 }
 
-fn tileLabel(class: [*:0]const u8) *gtk.Widget {
-    const label = gtk.gtk_label_new(null);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 1);
-    gtk.gtk_widget_add_css_class(label, class);
-    return label;
-}
-
-fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const frame = gtk.gtk_overlay_new();
-    gtk.gtk_widget_add_css_class(frame, "genre-tile");
-    gtk.gtk_widget_set_overflow(frame, gtk.OVERFLOW_HIDDEN);
-    const sizer = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_size_request(sizer, tile_width, tile_height);
-    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), sizer);
-    const mosaic = newMosaic(self);
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), mosaic);
-    const shade = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(shade, "genre-tile-shade");
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), shade);
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(labels, "genre-tile-labels");
-    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_END);
-    const name = tileLabel("genre-tile-name");
-    const count = tileLabel("genre-tile-count");
-    gtk.gtk_widget_add_css_class(count, "numeric");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), name);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), count);
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), labels);
-    const ring = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(ring, "genre-tile-ring");
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), ring);
-    gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), frame);
-    gtk.g_object_set_data(frame, "orca-mosaic", mosaic);
-    gtk.g_object_set_data(frame, "orca-name", name);
-    gtk.g_object_set_data(frame, "orca-detail", count);
-}
-
-fn bindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const list_item = gtk.cast(gtk.ListItem, item);
-    const object = gtk.gtk_list_item_get_item(list_item) orelse return;
-    const genre: *BrowseObject = @ptrCast(@alignCast(object));
-    const frame = gtk.gtk_list_item_get_child(list_item) orelse return;
-    const name = part(frame, "orca-name") orelse return;
-    const count = part(frame, "orca-detail") orelse return;
-    const mosaic = part(frame, "orca-mosaic") orelse return;
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, name), genre.name().ptr);
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, count), genre.detail().ptr);
-    gtk.gtk_widget_set_tooltip_text(frame, genre.name().ptr);
-    const id = genre.id() orelse return paintMosaic(self, mosaic, .{});
-    paintMosaic(self, mosaic, coversFor(self, id));
-}
-
-fn unbindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const frame = gtk.gtk_list_item_get_child(gtk.cast(gtk.ListItem, item)) orelse return;
-    const mosaic = part(frame, "orca-mosaic") orelse return;
-    if (part(mosaic, "orca-single")) |single| art.forget(self, single);
-    for (cell_keys) |key| if (part(mosaic, key)) |cell| art.forget(self, cell);
-}
-
-fn selectionChanged(selection: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.genres.suppress) return;
-    const position = gtk.gtk_single_selection_get_selected(gtk.cast(gtk.SingleSelection, selection));
-    if (position == gtk.INVALID_LIST_POSITION) return;
-    showAt(self, position, true);
-}
-
-fn stripMoved(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.genres.exhausted) return;
-    const value = gtk.cast(gtk.Adjustment, adjustment);
-    const page = gtk.gtk_adjustment_get_page_size(value);
-    const remaining = gtk.gtk_adjustment_get_upper(value) - (gtk.gtk_adjustment_get_value(value) + page);
-    if (remaining < page) loadNext(self);
-}
-
-fn stripWheel(controller: ?*anyopaque, dx: f64, dy: f64, data: ?*anyopaque) callconv(.c) gtk.gboolean {
-    if (dy == 0 or dx != 0) return gtk.false_;
-    const adjustment = gtk.gtk_scrolled_window_get_hadjustment(gtk.cast(gtk.ScrolledWindow, data));
-    const step = if (gtk.gtk_event_controller_scroll_get_unit(gtk.cast(gtk.EventController, controller)) == gtk.SCROLL_UNIT_WHEEL)
-        dy * wheel_step
-    else
-        dy;
-    const limit = @max(gtk.gtk_adjustment_get_upper(adjustment) - gtk.gtk_adjustment_get_page_size(adjustment), 0);
-    gtk.gtk_adjustment_set_value(adjustment, std.math.clamp(gtk.gtk_adjustment_get_value(adjustment) + step, 0, limit));
-    return gtk.true_;
-}
-
-fn buildStrip(self: *App) *gtk.Widget {
-    const store = gtk.g_list_store_new(browse_model.getType()).?;
-    self.genres.store = store;
-    const selection = gtk.gtk_single_selection_new(gtk.cast(gtk.ListModel, store));
-    gtk.gtk_single_selection_set_autoselect(selection, gtk.false_);
-    gtk.gtk_single_selection_set_can_unselect(selection, gtk.true_);
-    self.genres.selection = selection;
-    _ = gtk.signalConnect(selection, "notify::selected", gtk.callback(selectionChanged), self);
-    const factory = gtk.gtk_signal_list_item_factory_new();
-    _ = gtk.signalConnect(factory, "setup", gtk.callback(setupTile), self);
-    _ = gtk.signalConnect(factory, "bind", gtk.callback(bindTile), self);
-    _ = gtk.signalConnect(factory, "unbind", gtk.callback(unbindTile), self);
-    const view = gtk.gtk_list_view_new(gtk.cast(gtk.SelectionModel, selection), factory);
-    gtk.gtk_orientable_set_orientation(gtk.cast(gtk.Orientable, view), gtk.ORIENTATION_HORIZONTAL);
-    gtk.gtk_list_view_set_tab_behavior(gtk.cast(gtk.ListView, view), gtk.LIST_TAB_ITEM);
-    gtk.gtk_widget_add_css_class(view, "genre-strip");
-    gtk.gtk_widget_set_tooltip_text(view, null);
-    self.genres.strip = view;
-
-    const scroller = gtk.gtk_scrolled_window_new();
-    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_AUTOMATIC, gtk.POLICY_NEVER);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), view);
-    gtk.gtk_widget_add_css_class(scroller, "genre-strip-scroller");
-    _ = gtk.signalConnect(
-        gtk.gtk_scrolled_window_get_hadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
-        "value-changed",
-        gtk.callback(stripMoved),
-        self,
-    );
-    const wheel = gtk.gtk_event_controller_scroll_new(gtk.EVENT_CONTROLLER_SCROLL_VERTICAL);
-    gtk.gtk_event_controller_set_propagation_phase(wheel, gtk.PHASE_CAPTURE);
-    _ = gtk.signalConnect(wheel, "scroll", gtk.callback(stripWheel), scroller);
-    gtk.gtk_widget_add_controller(scroller, wheel);
-    return scroller;
+fn label(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
+    const widget = gtk.gtk_label_new(text);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, widget), 0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, widget), gtk.ELLIPSIZE_END);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, widget), 1);
+    gtk.gtk_widget_add_css_class(widget, class);
+    return widget;
 }
 
 const IdList = struct {
@@ -569,30 +422,37 @@ fn smartPlaylistActivated(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
     playlists.open(self, id);
 }
 
-fn buildHero(self: *App) *gtk.Widget {
-    const hero = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(hero, "genre-hero");
-    const eyebrow = gtk.gtk_label_new("GENRE");
-    gtk.gtk_widget_add_css_class(eyebrow, "now-eyebrow");
+fn moreClicked(button: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    const widget = gtk.cast(gtk.Widget, button.?);
+    const model = gtk.g_menu_new();
+    defer gtk.g_object_unref(model);
+    gtk.g_menu_append(model, "Create Smart Playlist", "genre.smart-playlist");
+    const x: f64 = @floatFromInt(@divTrunc(gtk.gtk_widget_get_width(widget), 2));
+    const y: f64 = @floatFromInt(gtk.gtk_widget_get_height(widget));
+    menu.popupModel(widget, gtk.cast(gtk.GMenuModel, model), x, y);
+}
+
+fn buildHeader(self: *App) *gtk.Widget {
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(header, "genre-header");
+    const eyebrow = gtk.gtk_label_new("Genre");
+    gtk.gtk_widget_add_css_class(eyebrow, "artist-overline");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, eyebrow), 0);
     const name = gtk.gtk_label_new(null);
     gtk.gtk_widget_add_css_class(name, "genre-hero-name");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, name), 0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, name), gtk.ELLIPSIZE_END);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, name), gtk.true_);
     self.genres.hero_name = gtk.cast(gtk.Label, name);
-    const stats = gtk.gtk_label_new(null);
+    const stats = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_add_css_class(stats, "genre-hero-stats");
-    gtk.gtk_widget_add_css_class(stats, "numeric");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, stats), 0);
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, stats), gtk.true_);
-    self.genres.hero_stats = gtk.cast(gtk.Label, stats);
+    self.genres.hero_stats = gtk.cast(gtk.Box, stats);
 
-    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(actions, "album-actions");
-    gtk.gtk_widget_add_css_class(actions, "genre-actions");
-    const play = albums.pill("Play", "media-playback-start-symbolic", true);
+    gtk.gtk_widget_add_css_class(actions, "artist-actions");
+    const play = albums.pill("Play", "orca-play-symbolic", true);
     _ = gtk.signalConnect(play, "clicked", gtk.callback(playClicked), self);
-    const shuffle = albums.pill("Shuffle", "media-playlist-shuffle-symbolic", false);
+    const shuffle = albums.pill("Shuffle", "orca-shuffle-symbolic", false);
     _ = gtk.signalConnect(shuffle, "clicked", gtk.callback(shuffleClicked), self);
 
     const group = gtk.g_simple_action_group_new();
@@ -600,52 +460,38 @@ fn buildHero(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(action, "activate", gtk.callback(smartPlaylistActivated), self);
     gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, group), gtk.cast(gtk.GAction, action));
     gtk.g_object_unref(action);
-    gtk.gtk_widget_insert_action_group(hero, "genre", gtk.cast(gtk.GActionGroup, group));
+    gtk.gtk_widget_insert_action_group(header, "genre", gtk.cast(gtk.GActionGroup, group));
     gtk.g_object_unref(group);
-    const model = gtk.g_menu_new();
-    gtk.g_menu_append(model, "Create Smart Playlist", "genre.smart-playlist");
-    const more = gtk.gtk_menu_button_new();
-    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, more), "view-more-symbolic");
-    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, more), gtk.cast(gtk.GMenuModel, model));
-    gtk.g_object_unref(model);
-    gtk.gtk_widget_add_css_class(more, "circular");
+    const more = gtk.gtk_button_new_from_icon_name("orca-more-symbolic");
     gtk.gtk_widget_add_css_class(more, "album-more");
-    gtk.gtk_widget_set_valign(more, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(more, "More");
+    _ = gtk.signalConnect(more, "clicked", gtk.callback(moreClicked), self);
     for ([_]*gtk.Widget{ play, shuffle, more }) |button| gtk.gtk_box_append(gtk.cast(gtk.Box, actions), button);
 
-    for ([_]*gtk.Widget{ eyebrow, name, stats, actions }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, hero), piece);
-    return hero;
+    for ([_]*gtk.Widget{ eyebrow, name, stats, actions }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, header), piece);
+    return header;
 }
 
-const Card = struct {
-    widget: *gtk.Widget,
-    body: *gtk.Box,
-};
+fn sectionHeading(text: [*:0]const u8) *gtk.Widget {
+    const heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(heading, "artist-section-heading");
+    const title = gtk.gtk_label_new(text);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0);
+    gtk.gtk_widget_add_css_class(title, "artist-section-title");
+    gtk.gtk_widget_set_hexpand(title, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
+    return heading;
+}
 
-fn card(self: *App, title: [*:0]const u8, tooltip: [*:0]const u8, see_all: gtk.GCallback) Card {
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
-    gtk.gtk_widget_add_css_class(box, "genre-card");
-    gtk.gtk_widget_set_hexpand(box, gtk.true_);
-    gtk.gtk_widget_set_valign(box, gtk.ALIGN_START);
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    const label = gtk.gtk_label_new(title);
-    gtk.gtk_widget_add_css_class(label, "genre-card-title");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_hexpand(label, gtk.true_);
-    const button = gtk.gtk_button_new_with_label("See All \u{203a}");
-    gtk.gtk_widget_add_css_class(button, "flat");
-    gtk.gtk_widget_add_css_class(button, "genre-see-all");
-    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(button, tooltip);
-    _ = gtk.signalConnect(button, "clicked", see_all, self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), button);
-    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), heading);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), body);
-    return .{ .widget = box, .body = gtk.cast(gtk.Box, body) };
+fn section(text: [*:0]const u8, spacing: c_int) *gtk.Widget {
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, spacing);
+    gtk.gtk_widget_add_css_class(box, "genre-section");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), sectionHeading(text));
+    return box;
+}
+
+fn showSection(widget: ?*gtk.Widget, visible: bool) void {
+    gtk.gtk_widget_set_visible(widget orelse return, if (visible) gtk.true_ else gtk.false_);
 }
 
 fn albumsSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -654,79 +500,68 @@ fn albumsSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     albums.showGenre(self, genre.id);
 }
 
-fn artistsSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn albumPlayClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const genre = self.genres.current orelse return;
-    artists.showGenre(self, genre.id, self.genres.current_name.value);
+    const position = marked(button) orelse return;
+    if (position >= self.genres.release_count) return;
+    albums.playRelease(self, self.genres.release_ids[position]);
 }
 
-fn tracksSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const genre = self.genres.current orelse return;
-    track_filters.showGenre(self, genre.id);
-    browse.clearSearch(self);
-    browse.clearScope(self);
-    self.browse.sort = self.genres.track_sort;
-    self.browse.direction = .descending;
-    window.showSort(self);
-    self.reload();
-    window.showPage(self, .tracks);
-}
-
-fn cardLabel(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
-    const label = gtk.gtk_label_new(text);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 1);
-    gtk.gtk_widget_add_css_class(label, class);
-    return label;
-}
-
-fn albumTile(self: *App, release: liborca.ReleaseSummary) *gtk.Widget {
+fn albumTile(self: *App, release: liborca.ReleaseSummary, position: usize, size: art.Size) *gtk.Widget {
     const tile = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(tile, "genre-album");
+    gtk.gtk_widget_add_css_class(tile, "album-tile");
+    gtk.gtk_widget_add_css_class(tile, "artist-album-tile");
+    gtk.gtk_widget_add_css_class(tile, "genre-album-tile");
     gtk.gtk_widget_set_size_request(tile, album_pixels, -1);
     const cover = art.newCover(self, art.initialsPlaceholder(), album_pixels);
     gtk.gtk_widget_add_css_class(cover, "album-cover");
     art.setInitials(cover, release.title);
-    art.show(self, cover, art.Key.release(release.id, .tile));
-    const playing = albums.playingBadge();
+    art.show(self, cover, art.Key.release(release.id, size));
+    const play_button = gtk.gtk_button_new_from_icon_name("media-playback-start-symbolic");
+    for ([_][*:0]const u8{ "tile-play", "tile-action", "circular" }) |class| gtk.gtk_widget_add_css_class(play_button, class);
+    gtk.gtk_widget_set_halign(play_button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_valign(play_button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(play_button, "Play Album");
+    markPosition(play_button, position);
+    _ = gtk.signalConnect(play_button, "clicked", gtk.callback(albumPlayClicked), self);
     const frame = gtk.gtk_overlay_new();
+    gtk.gtk_widget_add_css_class(frame, "album-cover-frame");
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), cover);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), play_button);
+    const playing = albums.playingBadge();
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), playing);
     gtk.g_object_set_data(tile, "orca-playing", playing);
     albums.showPlaying(tile, self.playing().matches(.release, release.id));
     var buffer: [512]u8 = undefined;
-    const title = cardLabel(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr, "tile-title");
-    const artist = cardLabel(strings.terminated(&buffer, release.album_artist).ptr, "tile-artist");
-    const date = release.release_date orelse "";
-    const year = cardLabel(strings.terminated(&buffer, date[0..@min(date.len, 4)]).ptr, "tile-year");
-    gtk.gtk_widget_add_css_class(year, "numeric");
-    for ([_]*gtk.Widget{ frame, title, artist, year }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
+    const title = label(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr, "tile-title");
+    const artist = label(strings.terminated(&buffer, release.album_artist).ptr, "tile-artist");
+    for ([_]*gtk.Widget{ frame, title, artist }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
     return tile;
 }
 
-fn fillAlbums(self: *App, library: liborca.LibraryHandle, genre_id: i64) void {
+fn fillAlbums(self: *App, library: liborca.LibraryHandle, summary: Summary) void {
     const genres = &self.genres;
     const grid = genres.album_grid orelse return;
     gtk.gtk_flow_box_remove_all(grid);
     genres.release_count = 0;
     var page = self.runtime.libraryReleasePage(library, .{
-        .genre_id = genre_id,
+        .genre_id = summary.id,
         .sort = .most_played,
         .limit = album_limit,
-    }) catch return showCard(genres.album_card, false);
+    }) catch return showSection(genres.album_section, false);
     defer page.deinit();
+    const size = albums.coverArtSize(gtk.cast(gtk.Widget, grid), album_pixels);
     for (page.items[0..@min(page.items.len, album_limit)], 0..) |release, index| {
-        gtk.gtk_flow_box_append(grid, albumTile(self, release));
+        gtk.gtk_flow_box_append(grid, albumTile(self, release, index, size));
         genres.release_ids[index] = release.id;
         genres.release_count = index + 1;
     }
-    showCard(genres.album_card, genres.release_count != 0);
-}
-
-fn showCard(widget: ?*gtk.Widget, visible: bool) void {
-    gtk.gtk_widget_set_visible(widget orelse return, if (visible) gtk.true_ else gtk.false_);
+    if (genres.see_all) |see_all| {
+        var buffer: [48]u8 = undefined;
+        gtk.gtk_button_set_label(gtk.cast(gtk.Button, see_all), strings.format(&buffer, "See all {d}", .{summary.release_count}).ptr);
+        showSection(see_all, summary.release_count > genres.release_count);
+    }
+    showSection(genres.album_section, genres.release_count != 0);
 }
 
 fn albumActivated(_: ?*anyopaque, child: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -737,39 +572,23 @@ fn albumActivated(_: ?*anyopaque, child: ?*anyopaque, data: ?*anyopaque) callcon
     albums.openAlbum(self, navigation, self.genres.release_ids[@intCast(index)]);
 }
 
-fn rank(position: usize) *gtk.Widget {
-    var buffer: [8]u8 = undefined;
-    const label = gtk.gtk_label_new(strings.format(&buffer, "{d}", .{position + 1}).ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.5);
-    gtk.gtk_widget_set_size_request(label, 16, -1);
-    gtk.gtk_widget_add_css_class(label, "genre-rank");
-    gtk.gtk_widget_add_css_class(label, "numeric");
-    return label;
-}
-
-fn artistRow(self: *App, artist: liborca.ArtistSummary, position: usize) *gtk.Widget {
+fn artistRow(self: *App, artist: liborca.ArtistSummary) *gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(box, "genre-artist");
-    const thumb = art.newCover(self, art.initialsPlaceholder(), artist_pixels);
-    gtk.gtk_widget_add_css_class(thumb, "artist-thumb");
-    art.setInitials(thumb, artist.name);
-    art.showArtist(self, thumb, artist.id, if (artist.has_photo) .stored else .absent, artist.cover_release_id, .thumb);
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
+    const photo = art.newCover(self, art.initialsPlaceholder(), artist_pixels);
+    gtk.gtk_widget_add_css_class(photo, "artist-photo");
+    gtk.gtk_widget_add_css_class(photo, "genre-artist-photo");
+    gtk.gtk_widget_set_valign(photo, gtk.ALIGN_CENTER);
+    art.setInitials(photo, artist.name);
+    art.showArtist(self, photo, artist.id, if (artist.has_photo) .stored else .absent, null, art.Size.atLeast(artist_pixels));
     var buffer: [512]u8 = undefined;
-    const name = cardLabel(strings.terminated(&buffer, if (artist.name.len != 0) artist.name else "Unknown Artist").ptr, "genre-row-title");
-    const detail = cardLabel(strings.format(&buffer, "{d} {s}", .{
-        artist.track_count,
-        if (artist.track_count == 1) "track" else "tracks",
-    }).ptr, "genre-row-detail");
-    gtk.gtk_widget_add_css_class(detail, "numeric");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), name);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), detail);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), rank(position));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), thumb);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
+    const name = label(strings.terminated(&buffer, if (artist.name.len != 0) artist.name else "Unknown Artist").ptr, "genre-row-title");
+    gtk.gtk_widget_set_hexpand(name, gtk.true_);
+    const count = gtk.gtk_label_new(countText(&buffer, artist.track_count, "track", "tracks").ptr);
+    gtk.gtk_widget_add_css_class(count, "genre-row-detail");
+    gtk.gtk_widget_add_css_class(count, "numeric");
+    for ([_]*gtk.Widget{ photo, name, count }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
     albums.showPlaying(box, self.playing().matches(.artist, artist.id));
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     return row;
@@ -784,14 +603,14 @@ fn fillArtists(self: *App, library: liborca.LibraryHandle, genre_id: i64) void {
         .genre_id = genre_id,
         .sort = .track_count,
         .limit = artist_limit,
-    }) catch return showCard(genres.artist_card, false);
+    }) catch return showSection(genres.artist_section, false);
     defer page.deinit();
     for (page.items[0..@min(page.items.len, artist_limit)], 0..) |artist, index| {
-        gtk.gtk_list_box_append(list, artistRow(self, artist, index));
+        gtk.gtk_list_box_append(list, artistRow(self, artist));
         genres.artist_ids[index] = artist.id;
         genres.artist_count = index + 1;
     }
-    showCard(genres.artist_card, genres.artist_count != 0);
+    showSection(genres.artist_section, genres.artist_count != 0);
 }
 
 fn rowPosition(row: ?*anyopaque) ?usize {
@@ -805,64 +624,37 @@ fn artistActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv
     const position = rowPosition(row) orelse return;
     if (position >= self.genres.artist_count) return;
     const navigation = self.genres.navigation orelse return;
-    artists.openArtist(self, navigation, self.genres.artist_ids[position]);
-}
-
-fn marked(widget: ?*anyopaque) ?usize {
-    const position = @intFromPtr(gtk.g_object_get_data(widget.?, "orca-position"));
-    if (position == 0) return null;
-    return position - 1;
-}
-
-fn trackHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const position = marked(button) orelse return;
-    if (position >= self.genres.track_count) return;
-    feedback.toggle(self, self.genres.tracks[position].target);
+    artist_page.openArtist(self, navigation, self.genres.artist_ids[position]);
 }
 
 fn trackRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
-    gtk.gtk_widget_add_css_class(row, "album-track-row");
+    gtk.gtk_widget_add_css_class(row, "artist-track-row");
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(box, "genre-track");
-    const thumb = art.newCover(self, art.iconPlaceholder(track_cover_pixels), track_cover_pixels);
-    gtk.gtk_widget_add_css_class(thumb, "artist-track-cover");
-    art.show(self, thumb, if (summary.release_id) |release| art.Key.release(release, .thumb) else art.Key.track(summary.id, .thumb));
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
+    gtk.gtk_widget_add_css_class(box, "artist-track");
     var buffer: [512]u8 = undefined;
-    const title = cardLabel(strings.terminated(&buffer, if (summary.title.len != 0) summary.title else "Untitled").ptr, "genre-row-title");
-    gtk.gtk_widget_add_css_class(title, "album-track-title");
-    const artist = cardLabel(strings.terminated(&buffer, summary.artist).ptr, "genre-row-detail");
-    const heart = feedback.newRowButton(gtk.callback(trackHeartClicked), self);
-    feedback.showRowButton(heart, summary.feedback);
-    gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(position + 1));
-    gtk.gtk_widget_set_valign(heart, gtk.ALIGN_CENTER);
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, title), -1);
-    gtk.gtk_widget_set_hexpand(title, gtk.false_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), heart);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), heading);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), artist);
+    const title = label(strings.terminated(&buffer, if (summary.title.len != 0) summary.title else "Untitled").ptr, "artist-track-title");
+    const artist = label(strings.terminated(&buffer, summary.artist).ptr, "artist-track-album");
+    const titles = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 1);
+    gtk.gtk_widget_set_hexpand(titles, gtk.true_);
+    gtk.gtk_widget_set_valign(titles, gtk.ALIGN_CENTER);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, titles), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, titles), artist);
     const duration: [:0]const u8 = if (summary.duration_ms) |ms|
         (if (ms >= 0) strings.formatMs(&buffer, @intCast(ms)) else "")
     else
         "";
     const duration_label = gtk.gtk_label_new(duration.ptr);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, duration_label), 1.0);
-    gtk.gtk_widget_set_size_request(duration_label, 40, -1);
     gtk.gtk_widget_add_css_class(duration_label, "numeric");
-    gtk.gtk_widget_add_css_class(duration_label, "dim-label");
-    for ([_]*gtk.Widget{ rank(position), thumb, labels, duration_label }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
+    gtk.gtk_widget_add_css_class(duration_label, "artist-track-duration");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), titles);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), duration_label);
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
     self.genres.tracks[position] = .{
         .target = .{ .track_id = summary.id, .recording_id = summary.recording_id, .feedback = summary.feedback },
         .row = row,
-        .heart = heart,
     };
     self.genres.track_ids[position] = summary.id;
     return row;
@@ -884,7 +676,7 @@ fn fillTracks(self: *App, library: liborca.LibraryHandle, genre_id: i64) void {
     genres.track_count = 0;
     genres.track_ids = @splat(0);
     genres.track_sort = .play_count;
-    var page = topTracks(self, library, genre_id, .play_count) orelse return showCard(genres.track_card, false);
+    var page = topTracks(self, library, genre_id, .play_count) orelse return showSection(genres.track_section, false);
     const played = for (page.items) |item| {
         if (item.play_count != 0) break true;
     } else false;
@@ -901,7 +693,7 @@ fn fillTracks(self: *App, library: liborca.LibraryHandle, genre_id: i64) void {
         genres.track_count = position + 1;
     }
     markPlaying(self, self.shown_track_id);
-    showCard(genres.track_card, genres.track_count != 0);
+    showSection(genres.track_section, genres.track_count != 0);
 }
 
 fn trackSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -925,9 +717,7 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
     };
     for (self.genres.tracks[0..self.genres.track_count]) |*track| {
         const recording = track.target.recording_id orelse continue;
-        if (!changed.contains(recording)) continue;
-        track.target.feedback = value;
-        if (track.heart) |heart| feedback.showRowButton(heart, value);
+        if (changed.contains(recording)) track.target.feedback = value;
     }
 }
 
@@ -958,7 +748,7 @@ fn markChildren(container: *gtk.Widget, ids: []const i64, playing: app.Playing, 
 
 fn newList(class: [*:0]const u8) *gtk.Widget {
     const list = gtk.gtk_list_box_new();
-    gtk.gtk_widget_add_css_class(list, "album-tracks");
+    gtk.gtk_widget_add_css_class(list, "artist-tracks");
     gtk.gtk_widget_add_css_class(list, class);
     return list;
 }
@@ -979,53 +769,87 @@ fn stackBelow(bin: *gtk.Widget, condition: [*:0]const u8, outer: *gtk.Widget, in
     adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
 }
 
-fn buildCards(self: *App, bin: *gtk.Widget) *gtk.Widget {
-    const albums_card = card(self, "Albums", "Show this genre's albums in Albums", gtk.callback(albumsSeeAll));
-    self.genres.album_card = albums_card.widget;
+fn buildAlbums(self: *App) *gtk.Widget {
+    const box = section("Albums", 14);
+    self.genres.album_section = box;
+    const see_all = gtk.gtk_button_new_with_label("See all");
+    gtk.gtk_widget_add_css_class(see_all, "flat");
+    gtk.gtk_widget_add_css_class(see_all, "see-all");
+    gtk.gtk_widget_set_valign(see_all, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(see_all, "Show this genre\u{2019}s albums in Albums");
+    _ = gtk.signalConnect(see_all, "clicked", gtk.callback(albumsSeeAll), self);
+    self.genres.see_all = see_all;
+    if (gtk.gtk_widget_get_first_child(box)) |heading| gtk.gtk_box_append(gtk.cast(gtk.Box, heading), see_all);
     const grid = gtk.gtk_flow_box_new();
-    gtk.gtk_flow_box_set_selection_mode(gtk.cast(gtk.FlowBox, grid), gtk.SELECTION_NONE);
-    gtk.gtk_flow_box_set_homogeneous(gtk.cast(gtk.FlowBox, grid), gtk.true_);
-    gtk.gtk_flow_box_set_min_children_per_line(gtk.cast(gtk.FlowBox, grid), 2);
-    gtk.gtk_flow_box_set_max_children_per_line(gtk.cast(gtk.FlowBox, grid), album_limit);
-    gtk.gtk_flow_box_set_column_spacing(gtk.cast(gtk.FlowBox, grid), 16);
-    gtk.gtk_flow_box_set_row_spacing(gtk.cast(gtk.FlowBox, grid), 12);
-    gtk.gtk_flow_box_set_activate_on_single_click(gtk.cast(gtk.FlowBox, grid), gtk.true_);
-    gtk.gtk_widget_add_css_class(grid, "genre-albums");
+    const flow = gtk.cast(gtk.FlowBox, grid);
+    gtk.gtk_flow_box_set_selection_mode(flow, gtk.SELECTION_NONE);
+    gtk.gtk_flow_box_set_homogeneous(flow, gtk.true_);
+    gtk.gtk_flow_box_set_min_children_per_line(flow, 2);
+    gtk.gtk_flow_box_set_max_children_per_line(flow, album_limit);
+    gtk.gtk_flow_box_set_column_spacing(flow, 20);
+    gtk.gtk_flow_box_set_row_spacing(flow, 20);
+    gtk.gtk_flow_box_set_activate_on_single_click(flow, gtk.true_);
+    gtk.gtk_widget_set_halign(grid, gtk.ALIGN_START);
+    gtk.gtk_widget_add_css_class(grid, "artist-albums");
     _ = gtk.signalConnect(grid, "child-activated", gtk.callback(albumActivated), self);
-    self.genres.album_grid = gtk.cast(gtk.FlowBox, grid);
-    gtk.gtk_box_append(albums_card.body, grid);
+    self.genres.album_grid = flow;
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), grid);
+    return box;
+}
 
-    const artists_card = card(self, "Top Artists", "Show this genre's artists in Artists", gtk.callback(artistsSeeAll));
-    self.genres.artist_card = artists_card.widget;
+fn buildDetail(self: *App, bin: *gtk.Widget) *gtk.Widget {
+    const detail = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 32);
+    gtk.gtk_widget_add_css_class(detail, "genre-detail");
+    gtk.gtk_widget_set_hexpand(detail, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, detail), buildHeader(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, detail), buildAlbums(self));
+
+    const artist_section = section("Artists", 10);
+    gtk.gtk_widget_set_hexpand(artist_section, gtk.true_);
+    self.genres.artist_section = artist_section;
     const artist_list = newList("genre-artists");
     gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, artist_list), gtk.SELECTION_NONE);
     gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, artist_list), gtk.true_);
     _ = gtk.signalConnect(artist_list, "row-activated", gtk.callback(artistActivated), self);
     self.genres.artist_list = gtk.cast(gtk.ListBox, artist_list);
-    gtk.gtk_box_append(artists_card.body, artist_list);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, artist_section), artist_list);
 
-    const tracks_card = card(self, "Top Tracks", "Show this genre's tracks in Tracks", gtk.callback(tracksSeeAll));
-    self.genres.track_card = tracks_card.widget;
+    const track_section = section("Representative Tracks", 10);
+    gtk.gtk_widget_set_hexpand(track_section, gtk.true_);
+    self.genres.track_section = track_section;
     const track_list = newList("genre-tracks");
     gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, track_list), gtk.SELECTION_SINGLE);
     gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, track_list), gtk.false_);
     _ = gtk.signalConnect(track_list, "row-selected", gtk.callback(trackSelected), self);
     _ = gtk.signalConnect(track_list, "row-activated", gtk.callback(trackActivated), self);
     self.genres.track_list = gtk.cast(gtk.ListBox, track_list);
-    gtk.gtk_box_append(tracks_card.body, track_list);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, track_section), track_list);
 
-    const outer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 20);
-    gtk.gtk_widget_add_css_class(outer, "genre-cards");
-    const inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 20);
-    gtk.gtk_widget_set_hexpand(inner, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), artists_card.widget);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), tracks_card.widget);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, outer), albums_card.widget);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, outer), inner);
+    const pair = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 36);
+    gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, pair), gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, pair), artist_section);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, pair), track_section);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, detail), pair);
+    stackBelow(bin, "max-width: 950px", pair, null);
+    return detail;
+}
 
-    stackBelow(bin, "max-width: 1300px", outer, null);
-    stackBelow(bin, "max-width: 720px", outer, inner);
-    return outer;
+fn buildIndex(self: *App) *gtk.Widget {
+    const index = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 14);
+    gtk.gtk_widget_add_css_class(index, "genre-index");
+    gtk.gtk_widget_set_size_request(index, index_pixels, -1);
+    gtk.gtk_widget_set_valign(index, gtk.ALIGN_START);
+    const heading = gtk.gtk_label_new("Genres");
+    gtk.gtk_widget_add_css_class(heading, "display-page");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, heading), 0);
+    const list = gtk.gtk_list_box_new();
+    gtk.gtk_widget_add_css_class(list, "genre-index-list");
+    gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, list), gtk.SELECTION_SINGLE);
+    _ = gtk.signalConnect(list, "row-selected", gtk.callback(rowSelected), self);
+    self.genres.list = gtk.cast(gtk.ListBox, list);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, index), heading);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, index), list);
+    return index;
 }
 
 fn fillClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1038,13 +862,13 @@ fn buildEmpty(self: *App) *gtk.Widget {
     const empty = adw.adw_status_page_new();
     const page = gtk.cast(adw.StatusPage, empty);
     adw.adw_status_page_set_icon_name(page, "applications-multimedia-symbolic");
-    adw.adw_status_page_set_title(page, "No genres yet");
-    adw.adw_status_page_set_description(page, "Genres come from your files\u{2019} tags.");
+    self.genres.empty = page;
     const link = gtk.gtk_button_new_with_label("Fill missing genres from MusicBrainz");
     gtk.gtk_widget_add_css_class(link, "flat");
     gtk.gtk_widget_add_css_class(link, "genre-fill-link");
     gtk.gtk_widget_set_halign(link, gtk.ALIGN_CENTER);
     _ = gtk.signalConnect(link, "clicked", gtk.callback(fillClicked), self);
+    self.genres.fill_link = link;
     adw.adw_status_page_set_child(page, link);
     return empty;
 }
@@ -1052,14 +876,21 @@ fn buildEmpty(self: *App) *gtk.Widget {
 pub fn build(self: *App) *gtk.Widget {
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
-    const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(column, "genre-page");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buildStrip(self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buildHero(self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buildCards(self, bin));
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 36);
+    gtk.gtk_widget_add_css_class(row, "genre-page");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), buildIndex(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), buildDetail(self, bin));
+    stackBelow(bin, "max-width: 890px", row, null);
+
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), row);
+    _ = gtk.signalConnect(
+        gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
+        "value-changed",
+        gtk.callback(listMoved),
+        self,
+    );
     adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), scroller);
 
     const loading = adw.adw_spinner_new();
@@ -1074,16 +905,9 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.genres.body.?, buildEmpty(self), "empty");
     gtk.gtk_stack_set_visible_child_name(self.genres.body.?, "loading");
 
-    const title = page_ui.title("Genres");
-    gtk.gtk_label_set_text(title.meta, "Explore your music by genre. Curated from your library.");
-    gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, title.meta), "numeric");
-    gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, title.meta), "genres-tagline");
-
-    const view = page_ui.withTitle(title, body);
-
     const navigation = adw.adw_navigation_view_new();
     self.genres.navigation = gtk.cast(adw.NavigationView, navigation);
-    const root = adw.adw_navigation_page_new(view, "Genres");
+    const root = adw.adw_navigation_page_new(body, "Genres");
     adw.adw_navigation_page_set_tag(root, navigation_tag);
     adw.adw_navigation_view_add(self.genres.navigation.?, root);
     return navigation;

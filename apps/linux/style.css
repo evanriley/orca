@@ -4410,101 +4410,58 @@ window:not(.narrow) .page-title.tracks-title {
 
 /* Genres */
 
-.page-title .meta.genres-tagline {
-  font-size: 17px;
+.genre-page {
+  margin: 18px 32px 48px 32px;
+}
+
+.narrow .genre-page {
+  margin: 12px 16px 28px 16px;
+}
+
+list.genre-index-list {
+  background-color: transparent;
+}
+
+list.genre-index-list > row {
+  min-height: 0;
+  margin-bottom: 1px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  font-size: 13.5px;
   color: @orca_text_2;
 }
 
-.narrow .page-title .meta.genres-tagline {
-  font-size: 14px;
+list.genre-index-list > row:hover {
+  background-color: @orca_bg_hover;
 }
 
-.genre-strip {
-  background-color: transparent;
-  padding: 4px 24px 8px 24px;
-}
-
-.narrow .genre-strip {
-  padding: 2px 12px 6px 12px;
-}
-
-.genre-strip > row {
-  padding: 4px;
-  margin: 0;
-  border-radius: 12px;
-  background-color: transparent;
-}
-
-.genre-strip > row:hover,
-.genre-strip > row:selected {
-  background-color: transparent;
-}
-
-.genre-strip > row:focus-visible {
-  outline: none;
-}
-
-.genre-tile {
-  border-radius: 10px;
-  background-color: @orca_bg_raised_2;
-}
-
-.genre-tile .cover {
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.genre-tile-shade {
-  background-image: linear-gradient(to bottom, @orca_scrim, @orca_shadow);
-}
-
-.genre-tile-labels {
-  padding: 0 12px 10px 12px;
-}
-
-.genre-tile-name {
-  font-size: 16px;
-  font-weight: 600;
+list.genre-index-list > row:selected {
+  background-color: @orca_bg_selected;
   color: @orca_text;
-  text-shadow: 0 1px 2px @orca_shadow;
 }
 
-.genre-tile-count {
-  font-size: 12px;
+.genre-index-count {
+  font-size: 13.5px;
   color: @orca_text_2;
 }
 
-.genre-tile-ring {
-  border-radius: 10px;
+.genre-detail {
+  padding-top: 6px;
 }
 
-.genre-tile:hover .genre-tile-ring {
-  box-shadow: inset 0 0 0 1px @orca_border_strong;
-}
-
-.genre-strip > row:selected .genre-tile-ring {
-  box-shadow: inset 0 0 0 2px @orca_accent;
-}
-
-.genre-strip > row:focus-visible .genre-tile-ring {
-  box-shadow: inset 0 0 0 2px @orca_accent, inset 0 0 0 4px @orca_text;
-}
-
-.genre-hero {
-  padding: 18px 28px 22px 28px;
-}
-
-.narrow .genre-hero {
-  padding: 12px 16px 16px 16px;
+.genre-header {
+  padding-bottom: 26px;
+  border-bottom: 1px solid @orca_border;
 }
 
 .genre-hero-name {
+  margin-top: 16px;
   font-family: Newsreader, serif;
   font-size: 56px;
-  font-weight: 600;
-  line-height: 1.1;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1;
   color: @orca_text;
-  margin-top: 4px;
 }
 
 .narrow .genre-hero-name {
@@ -4512,86 +4469,56 @@ window:not(.narrow) .page-title.tracks-title {
 }
 
 .genre-hero-stats {
-  margin-top: 6px;
-  font-size: 15px;
+  margin-top: 2px;
+  font-size: 13.5px;
   color: @orca_text_2;
 }
 
-.genre-actions {
-  margin-top: 18px;
+.genre-header > .album-actions.artist-actions {
+  margin-top: 20px;
 }
 
-.genre-cards {
-  padding: 0 28px 28px 28px;
+.genre-section .artist-section-title {
+  font-size: 24px;
 }
 
-.narrow .genre-cards {
-  padding: 0 16px 20px 16px;
-}
-
-.genre-card {
-  padding: 16px 18px 14px 18px;
-  border-radius: 12px;
-  background-color: @orca_bg_raised;
-  box-shadow: inset 0 0 0 1px @orca_border;
-}
-
-.narrow .genre-card {
-  padding: 12px 12px 10px 12px;
-}
-
-.genre-card-title {
-  font-size: 17px;
-  font-weight: 600;
-  color: @orca_text;
-}
-
-button.genre-see-all {
-  min-height: 24px;
-  padding: 0 6px;
-  font-size: 13px;
+.genre-section button.see-all {
+  font-size: 12.5px;
   font-weight: 500;
   color: @orca_accent_text;
 }
 
-flowbox.genre-albums > flowboxchild {
-  padding: 0;
-  border-radius: var(--orca-radius-art);
-}
-
-list.genre-artists > row,
-list.genre-tracks > row {
-  box-shadow: none;
-}
-
-list.genre-artists > row:last-child,
-list.genre-tracks > row:last-child {
-  border-bottom: none;
-}
-
-.genre-rank {
+.genre-album-tile .tile-title {
   font-size: 13px;
+  font-weight: 500;
+}
+
+.genre-album-tile .tile-artist {
+  font-size: 12px;
   color: @orca_text_3;
 }
 
-.genre-artist {
-  min-height: 42px;
-  padding: 3px 6px;
+list.genre-artists > row {
+  padding: 6px 8px;
 }
 
-.genre-track {
-  min-height: 44px;
-  padding: 0 6px;
+.genre-artist-photo .cover-initials {
+  font-family: Newsreader, serif;
+  font-size: 14px;
 }
 
 .genre-row-title {
-  font-size: 14px;
+  font-size: 13.5px;
   color: @orca_text;
 }
 
 .genre-row-detail {
   font-size: 12px;
-  color: @orca_text_2;
+  color: @orca_text_3;
+}
+
+list.genre-tracks > row {
+  padding: 6px 8px;
 }
 
 button.genre-fill-link {

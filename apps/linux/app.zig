@@ -477,9 +477,6 @@ pub const App = struct {
     artist_list_loaded: u32 = 0,
     artist_list_exhausted: bool = false,
     artist_list_filter: OwnedText = .{},
-    artist_list_genre: ?i64 = null,
-    artist_list_genre_name: OwnedText = .{},
-    artist_genre_chip: ?*gtk.Widget = null,
     artist_list_meta: ?*gtk.Label = null,
     artists_navigation: ?*adw.NavigationView = null,
     artist_sort: liborca.ArtistSort = .name,
@@ -956,7 +953,6 @@ pub const App = struct {
         self.context.deinit(self.allocator);
         self.playlists.deinit(self.allocator);
         self.artist_list_filter.clear(self.allocator);
-        self.artist_list_genre_name.clear(self.allocator);
         self.album_search.clear(self.allocator);
         self.album_artist_name.clear(self.allocator);
         self.genres.deinit(self.allocator);

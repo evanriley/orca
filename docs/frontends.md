@@ -637,10 +637,7 @@ The window is an `AdwNavigationSplitView`:
   under them or appeared on, came latest first (`ArtistSort`, saved as
   `[view] artist_sort`); a Search
   artists field under the title filters by name through the query, and an
-  empty library or search shows a status page. Opened from a genre's Top
-  Artists, the page also shows a `Genre: Name` chip beside the search that
-  scopes the query to that genre (`ArtistQuery.genre_id`) until its × is
-  clicked. The grid keeps at least two
+  empty library or search shows a status page. The grid keeps at least two
   columns and shrinks its tiles to fit a 560 px window. An artist opens a
   page, `artist_page.zig`, laid over a blurred backdrop of the hero photo
   and clamped to 1060 px. The hero shows a round 232 px photo: the
@@ -775,32 +772,29 @@ The window is an `AdwNavigationSplitView`:
   influence Off hides it. `ORCA_GTK_DEBUG=art` prints each blur and reuse,
   and `ORCA_GTK_DEBUG=frames` each frame's paint time, on stderr; topics
   combine with commas.
-- **Genres** opens with a large Genres title and a tagline, then a strip of
-  165 by 128 px genre tiles, most tracks first, read from
-  `libraryGenrePage` 512 at a time as the strip scrolls. Each tile's
-  backdrop is a darkened two by two mosaic of covers from
-  `libraryGenreArtwork` (one cover when the genre has fewer than four), with
-  the name and track count at its bottom-left; the selected tile has an
-  accent outline. The strip scrolls sideways, also with a vertical wheel,
-  and is one Tab stop, Left and Right moving the selection. The selected
-  genre is saved as `[view] genre`; the genre with the most tracks is shown
-  when none is saved. Below it a GENRE overline, the genre's name and a line of
-  its track, album and artist counts and total time from `libraryGenre`,
+- **Genres** is one scrolling page in two columns. On the left, under a
+  large Genres title, a 230 px list of genres with their track counts, most
+  tracks first, read from `libraryGenrePage` 512 at a time as the page
+  scrolls; the selected genre is highlighted, and Up and Down move the
+  selection. The header search filters the list by name. The selected genre
+  is saved as `[view] genre`; the genre with the most tracks is shown when
+  none is saved. On the right, a GENRE overline, the genre's name, a line of
+  its track, album and artist counts and total time from `GenreSummary`,
   then Play, Shuffle and a more button whose Create Smart Playlist saves a
   smart playlist of the rule `genre is Name`. Play and Shuffle queue the
-  genre's playable tracks in Top Tracks order, at most
-  `max_playlist_entries`.
-  Three cards follow: Albums, the genre's four most played albums, each
-  opening its album page in place; Top Artists, the five of its artists with
-  the most tracks in the whole library; and Top Tracks, its five most played tracks, or by rating
-  while none has been played, each with a cover, a heart and duration, a
-  track playing the genre in that order from it. Each card's See All opens the matching
-  page scoped to the genre: Albums through its genre filter, Artists through
-  its genre chip, Tracks through its Genre filter in the card's sort. The
-  cards stack below 1300 px and the artist and track cards stack too below
-  720 px, so the page fits a 560 px window. A library with no genres shows a
-  status page whose Fill missing genres from MusicBrainz opens Settings ›
-  Library.
+  genre's playable tracks in Representative Tracks order, at most
+  `max_playlist_entries`. Albums follows: the genre's six most played albums
+  as tiles with a play button, each opening its album page in place, and See
+  all N, shown when the genre has more albums, opening Albums through its
+  genre filter. Below it, side by side, Artists, the five of its artists
+  with the most tracks in the whole library, each with a round photo or
+  initials and its track count, opening the artist's page; and
+  Representative Tracks, its five most played tracks, or by rating while
+  none has been played, a track playing the genre in that order from it. The
+  two columns stack below 890 px and Artists and Representative Tracks stack
+  below 950 px. A library with no genres shows a status page whose Fill
+  missing genres from MusicBrainz opens Settings › Library; a search that
+  matches none shows No matching genres.
 - **Folders** browses the library as it lies on disk. The header's
   breadcrumb reads `Folders › root › folder › …`, the root named by the last
   component of its path, and every segment but the last opens that level.
