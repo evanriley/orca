@@ -1705,16 +1705,23 @@ fn tileSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
-fn tileMoved(scale: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const value = gtk.gtk_range_get_value(gtk.cast(gtk.Range, scale));
+pub fn setAlbumTile(self: *App, value: f64) void {
     const range = app.album_tile_range;
     const pixels: c_int = @intFromFloat(std.math.clamp(@round(value), @as(f64, @floatFromInt(range[0])), @as(f64, @floatFromInt(range[1]))));
     if (pixels == self.appearance.album_grid_tile) return;
     self.appearance.album_grid_tile = pixels;
+    for ([_]?*gtk.Range{ self.album_cover_scale, self.settings_page.tile_scale }) |maybe_scale| {
+        const scale = maybe_scale orelse continue;
+        if (@round(gtk.gtk_range_get_value(scale)) != @as(f64, @floatFromInt(pixels)))
+            gtk.gtk_range_set_value(scale, @floatFromInt(pixels));
+    }
     albums.resizeGrid(self);
     cancelTileTimer(self);
     self.settings_page.tile_save_timer = gtk.g_timeout_add(tile_settle_ms, tileSettled, self);
+}
+
+fn tileMoved(scale: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    setAlbumTile(state(data), gtk.gtk_range_get_value(gtk.cast(gtk.Range, scale)));
 }
 
 fn choiceRow(title: [*:0]const u8, subtitle: [*:0]const u8, labels: []const ?[*:0]const u8, selected: c_uint, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
@@ -1746,7 +1753,7 @@ fn appearanceTab(self: *App) *gtk.Widget {
         gtk.callback(artworkChanged),
         self,
     ));
-    const grid = actionRow("Album grid size", "How large each cover is in the album grid");
+    const grid = actionRow("Album grid size", "Also adjustable from the Albums toolbar");
     const range = app.album_tile_range;
     const adjustment = gtk.gtk_adjustment_new(@floatFromInt(choices.album_grid_tile), @floatFromInt(range[0]), @floatFromInt(range[1]), 4, 16, 0);
     const scale = gtk.gtk_scale_new(gtk.ORIENTATION_HORIZONTAL, adjustment);
@@ -1756,6 +1763,7 @@ fn appearanceTab(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(scale, gtk.ALIGN_CENTER);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, scale), gtk.ACCESSIBLE_PROPERTY_LABEL, "Album grid size", @as(c_int, -1));
     _ = gtk.signalConnect(scale, "value-changed", gtk.callback(tileMoved), self);
+    self.settings_page.tile_scale = gtk.cast(gtk.Range, scale);
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, grid), scale);
     look.add(grid);
     look.add(choiceRow(

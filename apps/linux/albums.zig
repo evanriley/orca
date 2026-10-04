@@ -19,6 +19,7 @@ const ratings = @import("ratings.zig");
 const artists = @import("artists.zig");
 const album_filters = @import("album_filters.zig");
 const signal_path = @import("signal_path.zig");
+const preferences = @import("preferences.zig");
 const window = @import("window.zig");
 
 const App = app.App;
@@ -32,8 +33,8 @@ const duration_column_pixels: c_int = 44;
 const format_column_pixels: c_int = 96;
 const rate_column_pixels: c_int = 64;
 const stars_column_pixels: c_int = 96;
-const grid_padding_pixels = 36;
-const grid_cell_padding_pixels = 17;
+const grid_cell_padding_pixels = 22;
+const cover_size_pixels = 96;
 const grid_min_columns = 2;
 const min_tile_pixels = 72;
 const description_max_pixels = 520;
@@ -45,10 +46,12 @@ fn state(data: ?*anyopaque) *App {
 }
 
 const sorts = [_]struct { label: [*:0]const u8, sort: liborca.ReleaseSort }{
-    .{ .label = "Artist", .sort = .artist },
+    .{ .label = "Date Added", .sort = .recently_added },
     .{ .label = "Title", .sort = .title },
+    .{ .label = "Artist", .sort = .artist },
     .{ .label = "Year", .sort = .year },
-    .{ .label = "Recently Added", .sort = .recently_added },
+    .{ .label = "Loved", .sort = .loved },
+    .{ .label = "Most Played", .sort = .most_played },
 };
 
 pub const Chip = enum { all, recently_added, loved, high_resolution, needs_review };
@@ -159,7 +162,11 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
 
     const cover = art.newCover(self, art.initialsPlaceholder(), self.album_tile_pixels);
     gtk.gtk_widget_add_css_class(cover, "album-cover");
-    const play = gtk.gtk_button_new_from_icon_name("media-playback-start-symbolic");
+    const dim = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(dim, "tile-dim");
+    gtk.gtk_widget_add_css_class(dim, "tile-action");
+    gtk.gtk_widget_set_can_target(dim, gtk.false_);
+    const play = gtk.gtk_button_new_from_icon_name("orca-play-symbolic");
     gtk.gtk_widget_add_css_class(play, "tile-play");
     gtk.gtk_widget_add_css_class(play, "tile-action");
     gtk.gtk_widget_add_css_class(play, "circular");
@@ -170,16 +177,21 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     const frame = gtk.gtk_overlay_new();
     gtk.gtk_widget_add_css_class(frame, "album-cover-frame");
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), cover);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), dim);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), play);
     const badge = explicitBadge();
     gtk.gtk_widget_set_halign(badge, gtk.ALIGN_START);
     gtk.gtk_widget_set_valign(badge, gtk.ALIGN_END);
     gtk.gtk_widget_add_css_class(badge, "cover-badge");
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), badge);
-    const playing = playingBadge();
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), playing);
 
+    const playing = playingBars();
     const title = tileLabel(null, "tile-title");
+    gtk.gtk_widget_set_hexpand(title, gtk.true_);
+    const heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_widget_add_css_class(heading, "tile-heading");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), playing);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
     const artist = tileLabel(null, "tile-artist");
     gtk.gtk_widget_set_hexpand(artist, gtk.true_);
     const more = gtk.gtk_button_new_from_icon_name("view-more-symbolic");
@@ -195,7 +207,7 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     const year = tileLabel(null, "tile-year");
     gtk.gtk_widget_add_css_class(year, "numeric");
 
-    for ([_]*gtk.Widget{ frame, title, byline, year }) |part| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), part);
+    for ([_]*gtk.Widget{ frame, heading, byline, year }) |part| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), part);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), tile);
     for ([_]*gtk.Widget{ tile, play, more }) |widget| gtk.g_object_set_data(widget, "orca-list-item", item);
     gtk.g_object_set_data(tile, "orca-cover", cover);
@@ -215,6 +227,24 @@ pub fn playingBadge() *gtk.Widget {
     gtk.gtk_widget_set_tooltip_text(badge, "Playing");
     gtk.gtk_widget_set_visible(badge, gtk.false_);
     return badge;
+}
+
+fn playingBars() *gtk.Widget {
+    const bars = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 2);
+    gtk.gtk_widget_add_css_class(bars, "playing-bars");
+    gtk.gtk_widget_set_valign(bars, gtk.ALIGN_CENTER);
+    for ([_]c_int{ 10, 6, 8 }) |height| {
+        const bar = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+        gtk.gtk_widget_add_css_class(bar, "playing-bar");
+        gtk.gtk_widget_set_size_request(bar, 2, height);
+        gtk.gtk_widget_set_valign(bar, gtk.ALIGN_END);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, bars), bar);
+    }
+    gtk.gtk_widget_set_size_request(bars, -1, 10);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, bars), gtk.ACCESSIBLE_PROPERTY_LABEL, "Now playing", @as(c_int, -1));
+    gtk.gtk_widget_set_tooltip_text(bars, "Now playing");
+    gtk.gtk_widget_set_visible(bars, gtk.false_);
+    return bars;
 }
 
 pub fn showPlaying(widget: *gtk.Widget, playing: bool) void {
@@ -823,11 +853,13 @@ fn newChips(self: *App) *gtk.Widget {
     const row = adw.adw_wrap_box_new();
     adw.adw_wrap_box_set_child_spacing(gtk.cast(adw.WrapBox, row), 8);
     adw.adw_wrap_box_set_line_spacing(gtk.cast(adw.WrapBox, row), 8);
-    gtk.gtk_widget_add_css_class(row, "album-chips");
+    gtk.gtk_widget_set_hexpand(row, gtk.true_);
+    gtk.gtk_widget_set_valign(row, gtk.ALIGN_CENTER);
     var group: ?*gtk.ToggleButton = null;
     for (std.enums.values(Chip)) |chip| {
         const button = gtk.gtk_toggle_button_new();
         gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), chip_labels.get(chip));
+        gtk.gtk_widget_add_css_class(button, "chip");
         gtk.gtk_widget_add_css_class(button, "album-chip");
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
@@ -840,7 +872,35 @@ fn newChips(self: *App) *gtk.Widget {
     const keys = gtk.gtk_event_controller_key_new();
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(chipKeyPressed), self);
     gtk.gtk_widget_add_controller(row, keys);
-    return row;
+
+    const bar = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    gtk.gtk_widget_add_css_class(bar, "album-chips");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), row);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), newCoverSize(self));
+    return bar;
+}
+
+fn coverSizeMoved(scale: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    preferences.setAlbumTile(state(data), gtk.gtk_range_get_value(gtk.cast(gtk.Range, scale)));
+}
+
+fn newCoverSize(self: *App) *gtk.Widget {
+    const label = gtk.gtk_label_new("Cover size");
+    gtk.gtk_widget_add_css_class(label, "cover-size-label");
+    const range = app.album_tile_range;
+    const adjustment = gtk.gtk_adjustment_new(@floatFromInt(self.appearance.album_grid_tile), @floatFromInt(range[0]), @floatFromInt(range[1]), 4, 16, 0);
+    const scale = gtk.gtk_scale_new(gtk.ORIENTATION_HORIZONTAL, adjustment);
+    gtk.gtk_widget_add_css_class(scale, "cover-size");
+    gtk.gtk_scale_set_draw_value(gtk.cast(gtk.Scale, scale), gtk.false_);
+    gtk.gtk_widget_set_size_request(scale, cover_size_pixels, -1);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, scale), gtk.ACCESSIBLE_PROPERTY_LABEL, "Cover size", @as(c_int, -1));
+    _ = gtk.signalConnect(scale, "value-changed", gtk.callback(coverSizeMoved), self);
+    self.album_cover_scale = gtk.cast(gtk.Range, scale);
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_set_valign(box, gtk.ALIGN_CENTER);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), scale);
+    return box;
 }
 
 fn tileActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {
@@ -874,17 +934,17 @@ pub fn newSelection(store: *gtk.ListStore) *gtk.SelectionModel {
     return gtk.cast(gtk.SelectionModel, selection);
 }
 
-/// The column count whose covers come nearest `tile` once they grow or
-/// shrink to fill the row, never fewer than two.
+/// As many columns as fit covers of at least `tile`, which then grow to
+/// fill the row, never fewer than two.
 fn gridColumns(width: f64, tile: c_int) c_uint {
     const cell: f64 = @floatFromInt(tile + grid_cell_padding_pixels);
-    const fitting = @round((width - grid_padding_pixels) / cell);
+    const fitting = @floor(width / cell);
     if (!(fitting > grid_min_columns)) return grid_min_columns;
     return @intFromFloat(@min(fitting, 16));
 }
 
 fn gridTilePixels(width: f64, columns: c_uint) c_int {
-    const cell = @floor((width - grid_padding_pixels) / @as(f64, @floatFromInt(columns)));
+    const cell = @floor(width / @as(f64, @floatFromInt(columns)));
     return @intFromFloat(@max(cell - grid_cell_padding_pixels, min_tile_pixels));
 }
 
@@ -989,18 +1049,18 @@ fn layoutToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn newLayoutSwitch(self: *App) *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(box, "linked");
-    gtk.gtk_widget_add_css_class(box, "view-switch");
+    gtk.gtk_widget_add_css_class(box, "segmented");
     gtk.gtk_widget_set_valign(box, gtk.ALIGN_CENTER);
     const choices = [_]struct { layout: Layout, icon: [*:0]const u8, tooltip: [*:0]const u8 }{
-        .{ .layout = .grid, .icon = "view-grid-symbolic", .tooltip = "Grid" },
-        .{ .layout = .list, .icon = "view-list-symbolic", .tooltip = "List" },
+        .{ .layout = .grid, .icon = "orca-grid-symbolic", .tooltip = "Grid view" },
+        .{ .layout = .list, .icon = "orca-list-symbolic", .tooltip = "List view" },
     };
     var group: ?*gtk.ToggleButton = null;
     for (choices) |choice| {
         const button = gtk.gtk_toggle_button_new();
         gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, button), choice.icon);
         gtk.gtk_widget_set_tooltip_text(button, choice.tooltip);
+        gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, choice.tooltip, @as(c_int, -1));
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
@@ -1053,13 +1113,16 @@ pub fn build(self: *App) *gtk.Widget {
     for (sorts, 0..) |entry, index| labels[index] = entry.label;
     labels[sorts.len] = null;
     const sort_label = gtk.gtk_label_new("Sort by");
-    gtk.gtk_widget_add_css_class(sort_label, "meta");
+    gtk.gtk_widget_add_css_class(sort_label, "sort-label");
     gtk.gtk_widget_set_valign(sort_label, gtk.ALIGN_CENTER);
     const sort = gtk.gtk_drop_down_new_from_strings(&labels);
     gtk.gtk_widget_set_tooltip_text(sort, "Sort albums");
     gtk.gtk_widget_add_css_class(sort, "sort-dropdown");
+    gtk.gtk_widget_add_css_class(sort, "btn-dropdown");
+    gtk.gtk_widget_set_valign(sort, gtk.ALIGN_CENTER);
     self.album_sort_control = gtk.cast(gtk.DropDown, sort);
     _ = gtk.signalConnect(sort, "notify::selected", gtk.callback(sortChanged), self);
+    adw.adw_wrap_box_set_child_spacing(title.end, 10);
     title.add(sort_label);
     title.add(sort);
     title.add(album_filters.build(self));

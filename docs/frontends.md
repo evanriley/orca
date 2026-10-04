@@ -533,26 +533,31 @@ The window is an `AdwNavigationSplitView`:
   opens the job's progress and Stop in a popover.
 - **Albums** is a grid of covers with each album's title, artist and year,
   paged 512 Releases at a time. Its title row shows `N albums`, a Sort by
-  menu (artist, title, year or recently added, saved as `[view] album_sort`),
-  a Filters button and a Grid / List switch (saved as `[view] albums_layout`).
+  menu (Date Added, Title, Artist, Year, Loved or Most Played, saved as
+  `[view] album_sort`), a Filters button and a Grid / List switch (saved as
+  `[view] albums_layout`).
   A Search albums field under the title sets `ReleaseQuery.text`, so the
   search combines with the chip and the filters, and the count is
   `libraryReleaseCountMatching` of the whole query. Chips under it choose All Albums, Recently Added (the newest Releases
   first), Loved, High Resolution (above 48 kHz or 16 bits) or Needs Review
   (a pending match or correction); they are radio buttons and one Tab stop,
-  Left and Right moving between them. The Filters popover sets a genre (every
+  Left and Right moving between them. Beside them a Cover size slider sets
+  the smallest cover, 88 to 184 px (132 px by default), saved as
+  `[view] album_cover_size`; it and Settings › Appearance › Album grid size
+  are one value and move together. The Filters popover sets a genre (every
   genre, listed 512 at a time), a year range, Any or Lossless only, and
   whether the album has artwork, applied with Apply and reset with Clear;
   the button reads `Filters • N` while N are set. Every chip and filter is a
-  field of `ReleaseQuery`, so liborca filters and counts. The grid takes the
-  column count whose covers come nearest the chosen tile size (177 px by
-  default) and grows or shrinks the covers so the columns fill the row,
-  never fewer than two or more than sixteen. An
+  field of `ReleaseQuery`, so liborca filters and counts. The grid fits as
+  many columns as covers of the chosen size allow, 22 px apart, and grows
+  the covers so the columns fill the row, never fewer than two or more
+  than sixteen. An
   album without a cover shows its initials, and an explicit album an E
-  badge at the cover's bottom-left. Hovering or focusing a tile
-  shows a play button on the cover, which plays the album, and a more button
-  after the artist, which opens the album menu; the selected tile is
-  outlined. The list shows 44 px rows of a small cover, title, artist, year,
+  badge at the cover's bottom-left, and the playing track's album three
+  accent bars before its title, named Now playing for screen readers.
+  Hovering or focusing a tile dims the cover under a play button, which
+  plays the album, and shows a more button after the artist, which opens
+  the album menu; a hovered, focused or selected tile's cover is ringed. The list shows 44 px rows of a small cover, title, artist, year,
   track count, minutes, format (`FLAC 16/44.1`, or `Mixed`), a heart that
   loves the album and a more button.
   Activating an album opens its page: the cover beside an overline naming
@@ -1062,8 +1067,10 @@ narrower than 1260sp or the window narrower than 900sp:
   `[lyrics] fetch=true|false`.
 - Appearance: presentation only, saved in `[appearance]`. Artwork influence
   (`artwork=subtle|off`; off hides the cover tint behind album pages), Album
-  grid size (`album_tile`, 112 to 220 px, saved 400 ms after the slider
-  stops, on leaving Settings, or on quitting, whichever comes first), Density (`density=comfortable|compact`; compact shortens queue and
+  grid size (saved as `[view] album_cover_size` with the Albums page's Cover
+  size, 400 ms after either slider stops, on leaving Settings, or on
+  quitting, whichever comes first; the older `[appearance] album_tile` is read
+  when it is absent), Density (`density=comfortable|compact`; compact shortens queue and
   album list rows), Inspector open by default (`inspector_open`, opens the
   details panel at launch), Reduce animation (`reduce_animation`, which
   turns off `gtk-enable-animations`) and Show counts in sidebar
@@ -1346,6 +1353,15 @@ genres, loves, ratings and five playlists, two of them smart, through
 and stored with `sqlite3`, because no command stores a local image. Six
 fixture files carry an embedded cover, which wins over the generated one. The
 database is ignored by git.
+
+Settings start empty and are thrown away with the session. Set
+`ORCA_HEADLESS_CONFIG` to a directory to use it as `XDG_CONFIG_HOME`
+instead, so a setting changed in one run is read by the next:
+
+```sh
+ORCA_HEADLESS_CONFIG=/tmp/orca-config scripts/headless-gui.sh albums /tmp/a.png click:1395,165 wait:1000
+ORCA_HEADLESS_CONFIG=/tmp/orca-config scripts/headless-gui.sh albums /tmp/b.png
+```
 
 The session is confined to a private `XDG_RUNTIME_DIR`, created under
 `ORCA_HEADLESS_TMPDIR` (default `/tmp`); a path inside the user's runtime

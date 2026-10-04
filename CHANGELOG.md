@@ -455,6 +455,16 @@
   blurs and `ORCA_GTK_DEBUG=frames` frame times, and
   `scripts/headless-gui.sh` passes `ORCA_GTK_DEBUG` through and adds a
   `log:` step.
+- **The redesigned Albums page.** Its title row sorts by Date Added,
+  Title, Artist, Year, Loved or Most Played and carries Filters and a grid
+  and list switch with the design's stroke icons. A Cover size slider
+  beside the chips sets the smallest cover, 88 to 184 px, and moves with
+  Settings › Appearance › Album grid size; both are saved as `[view]
+  album_cover_size`, and the earlier `[appearance] album_tile` is no
+  longer read. Columns sit 22 px apart and grow to fill the row. The
+  playing album shows three accent bars before its title, and a hovered
+  cover dims under a 44 px play button. `scripts/headless-gui.sh` keeps
+  settings between runs in `ORCA_HEADLESS_CONFIG` when it is set.
 - **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
   panel is one window-wide sidebar, 420 px in every mode, on every page,
   so opening it, changing its mode or changing page never moves the

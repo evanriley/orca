@@ -36,6 +36,7 @@
 @define-color orca_frosted_ring alpha(@orca_text, 0.08);
 @define-color orca_scrim alpha(@orca_bg_window, 0.48);
 @define-color orca_art_overlay alpha(@orca_bg_window, 0.72);
+@define-color orca_art_dim alpha(@orca_bg_window, 0.35);
 
 :root {
   --orca-elevation: 0 0 0 1px @orca_border_popover, 0 24px 60px @orca_shadow;
@@ -1111,7 +1112,7 @@ button.queue-more:focus-visible {
 /* Albums */
 
 .album-chips {
-  padding: 0 28px 14px 28px;
+  padding: 0 32px 18px 32px;
 }
 
 .narrow .album-chips {
@@ -1119,13 +1120,14 @@ button.queue-more:focus-visible {
 }
 
 button.album-chip {
-  min-height: 34px;
-  padding: 0 18px;
-  border-radius: 10px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 9px;
   background-color: transparent;
-  box-shadow: inset 0 0 0 1px @orca_border;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
   color: @orca_text_2;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
 }
 
 button.album-chip:hover {
@@ -1137,6 +1139,106 @@ button.album-chip:checked {
   background-color: @orca_accent;
   box-shadow: none;
   color: @orca_on_accent;
+  font-weight: 500;
+}
+
+.cover-size-label,
+.sort-label {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.sort-label {
+  font-size: 12.5px;
+}
+
+scale.cover-size {
+  padding: 0;
+}
+
+scale.cover-size trough {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @orca_track;
+}
+
+scale.cover-size highlight {
+  border-radius: 2px;
+  background-color: @orca_text_2;
+}
+
+scale.cover-size slider {
+  min-width: 16px;
+  min-height: 16px;
+  margin: -6px;
+  border-radius: 9999px;
+  background-color: @orca_text_2;
+  box-shadow: none;
+}
+
+scale.cover-size slider:hover {
+  background-color: @orca_text;
+}
+
+dropdown.btn-dropdown > button,
+menubutton.btn-menu > button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--orca-radius-button);
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  color: @orca_text;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+dropdown.btn-dropdown > button:hover,
+menubutton.btn-menu > button:hover,
+menubutton.btn-menu > button:checked {
+  background-color: @orca_bg_hover;
+}
+
+dropdown.btn-dropdown > button > box {
+  border-spacing: 18px;
+}
+
+dropdown.btn-dropdown arrow {
+  -gtk-icon-source: -gtk-icontheme("orca-chevron-down-symbolic");
+  -gtk-icon-size: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  color: @orca_text_2;
+}
+
+menubutton.btn-menu image {
+  -gtk-icon-size: 16px;
+}
+
+.segmented {
+  padding: 2px;
+  border-radius: 9px;
+  background-color: @orca_bg_raised_2;
+}
+
+.segmented > button {
+  min-width: 32px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 7px;
+  background-color: transparent;
+  box-shadow: none;
+  color: @orca_text_2;
+  -gtk-icon-size: 16px;
+}
+
+.segmented > button:hover {
+  color: @orca_text;
+}
+
+.segmented > button:checked {
+  background-color: @orca_bg_selected;
+  color: @orca_text;
 }
 
 button.album-chip:checked:focus-visible,
@@ -1155,12 +1257,12 @@ dropdown.sort-dropdown > button:hover {
 }
 
 .album-grid {
-  padding: 4px 18px 18px 18px;
+  padding: 4px 21px 18px 21px;
   background-color: transparent;
 }
 
 .album-grid > child {
-  padding: 8px 8px 12px 8px;
+  padding: 0 11px 26px 11px;
   border-radius: 10px;
 }
 
@@ -1176,8 +1278,13 @@ dropdown.sort-dropdown > button:hover {
 .album-cover-frame {
   border-radius: var(--orca-radius-art);
   outline: 2px solid transparent;
-  outline-offset: 2px;
+  outline-offset: 0;
   transition: outline-color var(--orca-transition);
+}
+
+.tile-dim {
+  border-radius: var(--orca-radius-art);
+  background-color: @orca_art_dim;
 }
 
 .album-grid > child:hover .album-cover-frame,
@@ -1207,9 +1314,10 @@ dropdown.sort-dropdown > button:hover {
 }
 
 button.tile-play {
-  min-width: 48px;
-  min-height: 48px;
+  min-width: 44px;
+  min-height: 44px;
   padding: 0;
+  -gtk-icon-size: 16px;
   background-color: @orca_art_overlay;
   box-shadow: inset 0 0 0 1.5px @orca_text;
   color: @orca_text;
@@ -1241,6 +1349,27 @@ button.tile-more {
 .tile-artist {
   font-size: 12px;
   color: @orca_text_2;
+}
+
+.tile-heading {
+  margin-top: 10px;
+}
+
+.tile-heading > .tile-title {
+  margin-top: 0;
+}
+
+.album-tile .tile-artist {
+  font-size: 12.5px;
+}
+
+.playing-bar {
+  background-color: @orca_accent;
+}
+
+.album-grid .album-tile.now-playing .tile-title {
+  color: @orca_text;
+  font-weight: 500;
 }
 
 .tile-year {

@@ -293,6 +293,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.genres.selected = std.fmt.parseInt(i64, std.mem.span(value), 10) catch null;
     }
+    if (getString(keys, "view", "album_cover_size") orelse getString(keys, "appearance", "album_tile")) |value| {
+        defer gtk.g_free(value);
+        if (parseTile(std.mem.span(value))) |pixels| self.appearance.album_grid_tile = pixels;
+    }
     if (getString(keys, "view", "album_columns")) |value| {
         defer gtk.g_free(value);
         self.album_columns = albums.parseColumns(std.mem.span(value));
@@ -323,10 +327,6 @@ fn loadAppearance(self: *App, keys: *gtk.GKeyFile) void {
     if (getString(keys, "appearance", "artwork")) |value| {
         defer gtk.g_free(value);
         if (std.meta.stringToEnum(app.ArtworkInfluence, std.mem.span(value))) |artwork| appearance.artwork = artwork;
-    }
-    if (getString(keys, "appearance", "album_tile")) |value| {
-        defer gtk.g_free(value);
-        if (parseTile(std.mem.span(value))) |pixels| appearance.album_grid_tile = pixels;
     }
     if (getString(keys, "appearance", "density")) |value| {
         defer gtk.g_free(value);
@@ -407,14 +407,14 @@ pub fn save(self: *App) void {
     }
     const appearance = self.appearance;
     gtk.g_key_file_set_string(keys, "appearance", "artwork", @tagName(appearance.artwork));
-    var tile_buffer: [16]u8 = undefined;
-    gtk.g_key_file_set_string(keys, "appearance", "album_tile", strings.format(&tile_buffer, "{d}", .{appearance.album_grid_tile}).ptr);
     gtk.g_key_file_set_string(keys, "appearance", "density", @tagName(appearance.density));
     gtk.g_key_file_set_string(keys, "appearance", "inspector_open", if (appearance.inspector_open) "true" else "false");
     gtk.g_key_file_set_string(keys, "appearance", "reduce_animation", if (appearance.reduce_animation) "true" else "false");
     gtk.g_key_file_set_string(keys, "appearance", "sidebar_counts", if (appearance.sidebar_counts) "true" else "false");
     var album_columns_buffer: [64]u8 = undefined;
     gtk.g_key_file_set_string(keys, "view", "album_columns", albums.formatColumns(&album_columns_buffer, self.album_columns).ptr);
+    var tile_buffer: [16]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "view", "album_cover_size", strings.format(&tile_buffer, "{d}", .{appearance.album_grid_tile}).ptr);
     var columns_buffer: [256]u8 = undefined;
     gtk.g_key_file_set_string(keys, "view", "track_columns", track_table.formatColumns(&columns_buffer, self.track_columns.columns).ptr);
     var widths_buffer: [256]u8 = undefined;

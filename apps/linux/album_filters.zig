@@ -40,6 +40,7 @@ pub const Filters = struct {
 /// The popover's widgets and the genre ids behind its dropdown's entries.
 pub const Ui = struct {
     button: ?*gtk.Widget = null,
+    label: ?*gtk.Label = null,
     popover: ?*gtk.Widget = null,
     genre: ?*gtk.DropDown = null,
     genre_names: ?*gtk.StringList = null,
@@ -103,10 +104,11 @@ fn showFilters(self: *App) void {
 
 pub fn showActive(self: *App) void {
     const button = self.album_filters_ui.button orelse return;
+    const text = self.album_filters_ui.label orelse return;
     const active = self.album_filters.count();
     var buffer: [32]u8 = undefined;
     const label: [:0]const u8 = if (active == 0) "Filters" else strings.format(&buffer, "Filters • {d}", .{active});
-    gtk.gtk_menu_button_set_label(gtk.cast(gtk.MenuButton, button), label.ptr);
+    gtk.gtk_label_set_text(text, label.ptr);
     if (active != 0)
         gtk.gtk_widget_add_css_class(button, "filters-active")
     else
@@ -252,9 +254,16 @@ pub fn build(self: *App) *gtk.Widget {
 
     const button = gtk.gtk_menu_button_new();
     ui.button = button;
-    gtk.gtk_menu_button_set_label(gtk.cast(gtk.MenuButton, button), "Filters");
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), gtk.gtk_image_new_from_icon_name("orca-filter-symbolic"));
+    const label = gtk.gtk_label_new("Filters");
+    ui.label = gtk.cast(gtk.Label, label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), label);
+    gtk.gtk_menu_button_set_child(gtk.cast(gtk.MenuButton, button), content);
+    gtk.gtk_menu_button_set_always_show_arrow(gtk.cast(gtk.MenuButton, button), gtk.false_);
     gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, button), popover);
     gtk.gtk_widget_add_css_class(button, "filters-button");
+    gtk.gtk_widget_add_css_class(button, "btn-menu");
     gtk.gtk_widget_set_tooltip_text(button, "Filter albums");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
     showActive(self);

@@ -162,6 +162,7 @@ pub const SettingsPage = struct {
     sources: ?*gtk.Box = null,
     genre_source_row: ?*gtk.Widget = null,
     tile_save_timer: c_uint = 0,
+    tile_scale: ?*gtk.Range = null,
     audio_card: ?*gtk.Widget = null,
     audio_values: std.EnumArray(AudioFact, ?*gtk.Label) = .initFill(null),
     audio_idle: ?*gtk.Widget = null,
@@ -185,8 +186,8 @@ pub const Appearance = struct {
     sidebar_counts: bool = false,
 };
 
-pub const default_album_tile_pixels: c_int = 148;
-pub const album_tile_range = [2]c_int{ 112, 220 };
+pub const default_album_tile_pixels: c_int = 132;
+pub const album_tile_range = [2]c_int{ 88, 184 };
 
 pub const TransportSurface = enum { bar, now_playing };
 
@@ -362,6 +363,7 @@ pub const App = struct {
     album_grid_columns: c_uint = 0,
     album_grid_idle: c_uint = 0,
     album_tile_pixels: c_int = default_album_tile_pixels,
+    album_cover_scale: ?*gtk.Range = null,
     album_columns: albums.ColumnSet = .initEmpty(),
     album_info: albums.Info = .{},
     albums_empty: ?*adw.StatusPage = null,

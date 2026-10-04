@@ -19,7 +19,9 @@
 #                (art, frames) to add its debug reports
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
-# scripts/design-fixture.sh when missing; the app gets a copy. Output is
+# scripts/design-fixture.sh when missing; the app gets a copy. Settings
+# start empty and are discarded, unless ORCA_HEADLESS_CONFIG names a
+# directory to keep them in as XDG_CONFIG_HOME across runs. Output is
 # pinned to scripts/silent-sink.sh 1. Nothing reaches the user's desktop:
 # sway, D-Bus, the pointer and orca-gtk run with a private
 # XDG_RUNTIME_DIR, and on exit the script stops only the processes it
@@ -195,7 +197,7 @@ for variable in DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS 
     unset "$variable"
 done
 export XDG_RUNTIME_DIR=$runtime
-export HOME=$runtime/home XDG_CONFIG_HOME=$runtime/config XDG_DATA_HOME=$runtime/data XDG_CACHE_HOME=$runtime/cache
+export HOME=$runtime/home XDG_CONFIG_HOME=${ORCA_HEADLESS_CONFIG:-$runtime/config} XDG_DATA_HOME=$runtime/data XDG_CACHE_HOME=$runtime/cache
 export PATH="$tools/bin:$PATH"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$runtime/library" "$runtime/no-services"
 
