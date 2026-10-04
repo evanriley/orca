@@ -1062,46 +1062,66 @@ The window is an `AdwNavigationSplitView`:
   Open rows, how many files each has loaded and the scroll position are
   kept across reloads. The page reloads when matching, analysis or
   duplicate finding finishes.
-- **Matches** lists the tracks with MusicBrainz or AcoustID proposals
-  awaiting review (`libraryMatchReviewPage`), with their count in the
-  sidebar, as a card of flush rows under the page title. Each row shows
-  the track's own title, artist, album and length and its best proposal's
-  score; expanding it lists every proposal with its album and release date,
-  the looked-up release's when there is one, its
-  source (MusicBrainz, AcoustID or MusicBrainz + AcoustID) and AcoustID's
-  fingerprint score when there is one, Accept, Dismiss and a MusicBrainz
-  button that opens the recording's page in the browser. Accept toasts
-  "Match saved", or "Kept your values" when every value was locked or
-  already held. An accept can regroup albums, so the library pages reload
-  and album and artist pages go back to their lists, as after an edit. An AcoustID
-  proposal without a title reads Unknown title. A proposal more than 10 s
-  longer or shorter than the track shows its length in the warning colour.
-  Find Matches starts the matching job, which shows in Activity and,
-  unless Match by audio fingerprint is off in Settings, also asks
-  AcoustID by fingerprint with the application key the app sets at startup.
-  Accept Confident asks first, then accepts each track's best proposal at or
-  above the threshold set in Settings (90% by default,
-  `[matching] accept_confidence` in `settings.ini`). With nothing to review
-  the page offers Find Matches, or says every track has a recording ID.
+- **Matches**, "How your albums line up with MusicBrainz releases, and
+  why.", sorts Releases by their best MusicBrainz release candidate into
+  three tabs, Confident, Needs Review and Unmatched, each with its count
+  from `libraryReleaseMatchCounts`; Needs Review is shown first and its
+  count is the sidebar badge, with the album corrections added. A Release
+  is confident when its best candidate scores at or above the threshold set
+  in Settings (90% by default, `[matching] accept_confidence`). "Search
+  matches…" in the top bar, focused by Ctrl+F, filters the tabs, their
+  counts and the list by album title or artist; the badge stays unfiltered.
+  Counts and the tab's first 100 Releases (`libraryReleaseMatchPage`), with each one's
+  evidence and diff, are read on a loader thread. Each row shows the cover,
+  title and artist, "Best candidate" with the release's title and year, the
+  confidence over a bar, and Accept and Review; an Unmatched row has only
+  Search, which starts a re-identify Job for the album. Clicking a row
+  expands it to show the artist's local track count, the candidate's full
+  date and track count, and the evidence (`libraryReleaseMatchEvidence`):
+  AcoustID fingerprints `N of M tracks`, Track durations `within 1 s`,
+  Artist, Album title and Release date, each marked agrees or differs with
+  both values, beside a sentence that explains the confidence. Accept
+  applies the release ID and whichever of album, album artist and release
+  date differ (`libraryApplyMatchedRelease` with that `ReleaseFieldSet`).
+  Match Again starts the matching Job. Library Health's Unmatched releases
+  Review opens the Unmatched tab.
 
-  **Corrections**, a card above the tracks that is hidden when there are
-  none, lists the album groups a verification proposed
+  **Match Review**, opened by Review, compares one Release with its best
+  candidate (`libraryReleaseMatchDiff`). The top bar reads `Matches ›
+  ALBUM` and `Review i of N` with previous and next over the whole tab
+  under the current search, N from `libraryReleaseMatchCounts`, reading
+  `libraryReleaseMatchPage` 100 Releases at a time. Under the cover and title, "Local album vs MusicBrainz candidate
+  · N% confidence · Open release", the link opening the release on
+  musicbrainz.org. Choose what to adopt is a table of Use, Field, Local and
+  MusicBrainz for Album, Album artist, Release date, Release type, Release
+  ID, Genre, Artwork and Track titles; the differing album, album artist,
+  date and release ID start checked, and a checked row is tinted. Release
+  type, Genre and Artwork are compared but never applied, so their Use box
+  is insensitive. Artwork shows each side's source and size, "Local · 1200
+  × 1200" and "Cover Art Archive · 1200 × 1200", "—" when unmeasured.
+  Tracks · N of M aligned lists #, Local, Candidate, Δ time
+  (`0 s`, `+1 s`, `−1 s`) and Print (✓ when AcoustID heard the track), a
+  local title that differs in the diff colour. Apply N Fields to Orca
+  stores only the checked fields (`libraryApplyMatchedRelease` with a
+  `ReleaseFieldSet`), Not This Release dismisses the candidate
+  (`libraryDismissReleaseCandidate`), which moves the Release to Unmatched
+  when it had no other, and Search MusicBrainz… starts a re-identify Job
+  for the album. After Apply or Not This Release the page rereads the tab
+  and moves on to the next Release, or back to Matches when the tab is
+  empty. No media file is
+  written.
+
+  **Album corrections**, a section under the tabs that is hidden when
+  there are none, lists the album groups a verification proposed
   (`libraryCorrectionGroups`): each names the album and artist and,
   expanded, every track's current title
   and position beside the proposed ones. Accept All
   (`libraryAcceptCorrectionGroup`) and Dismiss All
-  (`libraryDismissCorrectionGroup`) take the whole group; the tracks in a
-  group are not listed among the tracks to review. A proposal that would
+  (`libraryDismissCorrectionGroup`) take the whole group. A proposal that would
   replace the recording ID in effect says "replaces" and the start of that
   ID beside its source. Accepting a correction, alone or with Accept All,
   opens the tag-write preview for the corrected tracks when the accept
   changed their values.
-
-  Submit to AcoustID (N) appears when an AcoustID key is saved and
-  `libraryAcoustIdSubmittableCount` is above zero. It asks first, then runs
-  `startAcoustIdSubmission` as a job shown in Activity, and the count is
-  read again when it finishes. A missing or refused key, or an unreachable
-  AcoustID, is reported in a toast; nothing is marked sent.
 
 Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
@@ -1192,8 +1212,7 @@ different recording, Could not confirm or Could not fingerprint, with
 identifiers reveals the recording, release, release-group, release-track and
 album-artist IDs that are known, each with its source as a tooltip. A track
 without a recording ID shows its top three proposals with Accept and
-Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page at
-that track; with no proposals it offers Find Match, which searches for that
+Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page; with no proposals it offers Find Match, which searches for that
 track alone. A track with a recording ID offers Verify while it is unverified
 or out of date. A change made in one place repaints the others, by recording and
 without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,

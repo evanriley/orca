@@ -4,14 +4,25 @@
 
 ### Added
 
-- **Release match filter, types and cover sizes.**
-  `libraryReleaseMatchPage` and `libraryReleaseMatchCounts` take a
-  `filter` that keeps Releases whose title or album artist has a word
-  starting with each of its words, and `orca-cli matches --releases`
-  takes `--filter=TEXT`. `libraryReleaseMatchDiff` gives the
+- **Matches and Match Review.** `orca-gtk`'s Matches page lists albums
+  by their best MusicBrainz release in Confident, Needs Review and
+  Unmatched tabs with their counts, each row with its candidate, confidence
+  and Accept and Review, expanding to the evidence (fingerprints,
+  durations, artist, title, date) and why it scored as it did. Match
+  Review sets the album's fields beside the release's, applies only the
+  checked ones, dismisses the release with Not This Release or searches
+  MusicBrainz again, and lists every track's local and candidate title,
+  duration difference and fingerprint. Library Health reads its Unmatched
+  count off the main thread, and its Review opens the Unmatched tab.
+  "Search matches…" filters the tabs by album title or artist, and Review
+  i of N pages through the whole tab. `libraryReleaseMatchPage` and
+  `libraryReleaseMatchCounts` take a `filter`, and `orca-cli matches
+  --releases` takes `--filter=TEXT`. `libraryReleaseMatchDiff` gives the
   candidate's release type from its release group ("Mixtape") and both
   covers' sizes (`ArtworkSize`), which `matches --release=ID --diff`
-  prints.
+  prints. The page replaces the per-track proposal list and its Accept Confident and
+  Submit to AcoustID buttons; Submit to AcoustID stays in the command
+  palette.
 - **Artwork Review.** `orca-gtk` has an Artwork Review page, opened by Fix
   on Library Health's Missing artwork row or the palette's Show Artwork
   Review: the albums with missing, undersized or conflicting artwork, each

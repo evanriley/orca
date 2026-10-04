@@ -30,6 +30,7 @@ pub const Bar = struct {
     entry: ?*gtk.Widget = null,
     editor_actions: ?*gtk.Widget = null,
     editor_save: ?*gtk.Widget = null,
+    end: ?*gtk.Stack = null,
 };
 
 fn state(data: ?*anyopaque) *App {
@@ -168,6 +169,10 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), buildTrail(self));
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildEditorActions(self));
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildSearch(self));
+    const end = gtk.gtk_stack_new();
+    gtk.gtk_widget_set_visible(end, gtk.false_);
+    self.top_bar.end = gtk.cast(gtk.Stack, end);
+    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), end);
     return bar;
 }
 
@@ -189,12 +194,32 @@ pub fn addTrail(self: *App, page: window.Page, crumbs: *gtk.Widget) void {
     _ = gtk.gtk_stack_add_named(trail, crumbs, page.name());
 }
 
+/// Shows `widget` at the end of the bar in place of the search while `page`
+/// is showing.
+pub fn addEnd(self: *App, page: window.Page, widget: *gtk.Widget) void {
+    const end = self.top_bar.end orelse return;
+    _ = gtk.gtk_stack_add_named(end, widget, page.name());
+}
+
+fn hasEnd(self: *App) bool {
+    const end = self.top_bar.end orelse return false;
+    return gtk.gtk_stack_get_child_by_name(end, self.current_page.name()) != null;
+}
+
+fn showEnd(self: *App) void {
+    const end = self.top_bar.end orelse return;
+    const shown = hasEnd(self);
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, end), @intFromBool(shown));
+    if (shown) gtk.gtk_stack_set_visible_child_name(end, self.current_page.name());
+}
+
 pub fn refresh(self: *App) void {
     const bar = &self.top_bar;
     if (bar.back) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoBack(self)));
     if (bar.forward) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoForward(self)));
     showTrail(self);
     showEditorActions(self);
+    showEnd(self);
     showPlaceholder(self);
     showWindowTitle(self);
     fitToPage(self);
@@ -271,7 +296,7 @@ fn showEditorActions(self: *App) void {
         gtk.gtk_button_set_label(gtk.cast(gtk.Button, save), if (metadata) "Apply to Orca" else "Save Smart Playlist");
     }
     if (self.top_bar.editor_actions) |actions| gtk.gtk_widget_set_visible(actions, @intFromBool(editing));
-    const searching = !editing and !write_tags.isShown(self) and self.current_page != .duplicates;
+    const searching = !editing and !write_tags.isShown(self) and self.current_page != .duplicates and !hasEnd(self);
     if (self.top_bar.search) |search| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, search), @intFromBool(searching));
 }
 

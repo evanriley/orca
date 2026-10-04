@@ -26,6 +26,7 @@ const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
 const audio_problems = @import("audio_problems.zig");
 const artwork_review = @import("artwork_review.zig");
+const match_review = @import("match_review.zig");
 const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
@@ -324,6 +325,7 @@ pub const Page = enum(c_uint) {
     duplicates,
     audio_problems,
     artwork_review,
+    match_review,
 
     pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -345,6 +347,7 @@ pub const Page = enum(c_uint) {
             .duplicates => "duplicates",
             .audio_problems => "audio-problems",
             .artwork_review => "artwork-review",
+            .match_review => "match-review",
         };
     }
 
@@ -368,6 +371,7 @@ pub const Page = enum(c_uint) {
             .duplicates => "Duplicates",
             .audio_problems => "Audio Problems",
             .artwork_review => "Artwork Review",
+            .match_review => "Match Review",
         };
     }
 
@@ -815,6 +819,7 @@ const nav_groups = [_]NavGroup{
 pub fn syncSidebarSelection(self: *App) void {
     const current: Page = switch (self.current_page) {
         .duplicates, .audio_problems, .artwork_review => .health,
+        .match_review => .matches,
         else => self.current_page,
     };
     for (std.enums.values(Page)) |page| {
@@ -870,6 +875,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .duplicates) duplicates.shown(self);
     if (page == .audio_problems) audio_problems.shown(self);
     if (page == .artwork_review) artwork_review.shown(self);
+    if (page == .match_review) match_review.shown(self);
     offline.showBanner(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
@@ -1035,6 +1041,7 @@ pub fn applyTracksForm(self: *App) void {
 }
 
 pub fn focusSearch(self: *App) void {
+    if (self.current_page == .matches and matches.focusSearch(self)) return;
     if (self.header_compact) return palette.summonSearch(self);
     const entry = self.top_bar.entry orelse return;
     _ = gtk.gtk_widget_grab_focus(entry);
@@ -1330,6 +1337,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, duplicates.build(self), Page.duplicates.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, audio_problems.build(self), Page.audio_problems.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artwork_review.build(self), Page.artwork_review.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, match_review.build(self), Page.match_review.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, first_run.buildScan(self), Page.scan.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());

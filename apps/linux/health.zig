@@ -585,7 +585,7 @@ fn openClipping(self: *App) void {
 }
 
 fn openUnmatched(self: *App) void {
-    window.goTo(self, .matches);
+    matches.showBucket(self, .unmatched);
 }
 
 fn openArtwork(self: *App) void {
@@ -916,7 +916,7 @@ pub fn reload(self: *App) void {
         for (info(row).kinds) |kind| counts.getPtr(row).* += by_kind.get(kind);
     }
     counts.getPtr(.loudness).* += unanalysed;
-    counts.set(.unmatched, if (self.runtime.libraryReleaseMatchCounts(library, 0.9, null)) |match_counts| match_counts.unmatched else |_| 0);
+    counts.set(.unmatched, matches.unmatchedCount(self) orelse 0);
     counts.set(.missing_files, self.runtime.libraryMissingFileCount(library) catch 0);
 
     showOverview(self, library, counts);

@@ -33,6 +33,8 @@ const activity = @import("activity.zig");
 const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
 const audio_problems = @import("audio_problems.zig");
+const matches = @import("matches.zig");
+const match_review = @import("match_review.zig");
 const artwork_review = @import("artwork_review.zig");
 const first_run = @import("first_run.zig");
 const jobs = @import("jobs.zig");
@@ -478,22 +480,10 @@ pub const App = struct {
     artwork_review: artwork_review.State = .{},
     first_run: first_run.State = .{},
 
-    matches_list: ?*gtk.ListBox = null,
-    matches_corrections: ?*gtk.ListBox = null,
-    matches_corrections_box: ?*gtk.Widget = null,
-    matches_group_count: u64 = 0,
-    matches_dirty: bool = false,
-    matches_note: ?*gtk.Label = null,
-    matches_body: ?*gtk.Stack = null,
-    matches_meta: ?*gtk.Label = null,
+    matches: matches.State = .{},
+    match_review: match_review.State = .{},
     matches_count: ?*gtk.Label = null,
-    matches_empty: ?*adw.StatusPage = null,
-    matches_empty_button: ?*gtk.Widget = null,
-    matches_accept_button: ?*gtk.Widget = null,
-    matches_submit_button: ?*gtk.Widget = null,
-    /// The Track whose row is open, kept open across reloads.
-    matches_open_track: ?i64 = null,
-    /// Accept Confident takes a track's best match at or above this.
+    /// An album is confident when its best release is at or above this.
     match_threshold_percent: u8 = default_match_threshold_percent,
     match_fingerprints: bool = true,
     acoustid_key_stored: bool = false,
@@ -1016,6 +1006,8 @@ pub const App = struct {
         self.activity.deinit(self.allocator);
         self.changes.deinit();
         self.duplicates.deinit();
+        self.matches.deinit();
+        self.match_review.deinit(self.allocator);
         self.artwork_review.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);

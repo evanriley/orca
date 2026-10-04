@@ -1,7 +1,7 @@
-//! The Matches page: the Tracks MusicBrainz or AcoustID proposed recordings
-//! for, each beside its best proposal, to accept or dismiss, and the
-//! submission of accepted matches to AcoustID. liborca finds, orders, records
-//! and submits the matches; this only words them.
+//! The Matches page: how each album lines up with its best MusicBrainz
+//! release, in tabs by confidence, with why, and the album corrections still
+//! to review. liborca weighs the candidates on a loader thread; this only
+//! words them.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -9,36 +9,154 @@ const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
+const art = @import("art.zig");
 const jobs = @import("jobs.zig");
 const details = @import("details.zig");
+const health = @import("health.zig");
 const window = @import("window.zig");
 const secret = @import("secret.zig");
 const tags = @import("tags.zig");
 const page_ui = @import("page.zig");
+const match_review = @import("match_review.zig");
 
 const App = app.App;
 
+pub const Bucket = liborca.ReleaseMatchBucket;
+const Field = liborca.ReleaseField;
+
 const separator = " · ";
-const length_tolerance_ms: u64 = 10_000;
 const recording_url = "https://musicbrainz.org/recording/";
+const list_limit: u32 = 100;
+const content_width: c_int = 1080;
+const cover_pixels: c_int = 48;
+
+pub const Detail = struct {
+    evidence: ?liborca.MatchEvidence = null,
+    diff: ?liborca.ReleaseMatchDiff = null,
+
+    fn deinit(self: *Detail) void {
+        if (self.diff) |*diff| diff.deinit();
+        self.* = .{};
+    }
+};
+
+const Loader = struct {
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    waker: liborca.HostWaker,
+    bucket: Bucket,
+    confident_at: f32,
+    filter: Filter,
+    with_page: bool,
+    thread: ?std.Thread = null,
+    finished: std.atomic.Value(bool) = .init(false),
+    counts: ?liborca.ReleaseMatchCounts = null,
+    filtered_counts: ?liborca.ReleaseMatchCounts = null,
+    groups: ?liborca.CorrectionGroupPage = null,
+    page: ?liborca.ReleaseMatchPage = null,
+    details: []Detail = &.{},
+
+    fn run(self: *Loader) void {
+        const filter = self.filter.text();
+        self.counts = self.runtime.libraryReleaseMatchCounts(self.library, self.confident_at, null) catch null;
+        if (filter != null) self.filtered_counts = self.runtime.libraryReleaseMatchCounts(self.library, self.confident_at, filter) catch null;
+        self.groups = self.runtime.libraryCorrectionGroups(self.library, std.heap.smp_allocator, app.page_size, 0) catch null;
+        if (self.with_page) {
+            self.page = self.runtime.libraryReleaseMatchPage(self.library, std.heap.smp_allocator, self.bucket, self.confident_at, filter, list_limit, 0) catch null;
+            if (self.page) |page| self.readDetails(page.items);
+        }
+        self.finished.store(true, .release);
+        self.waker.wake_fn(self.waker.context);
+    }
+
+    fn readDetails(self: *Loader, items: []const liborca.ReleaseMatchItem) void {
+        const read = std.heap.smp_allocator.alloc(Detail, items.len) catch return;
+        for (items, read) |item, *detail| {
+            detail.* = .{};
+            const best = item.best orelse continue;
+            detail.evidence = self.runtime.libraryReleaseMatchEvidence(self.library, item.release_id, best.release_mbid) catch null;
+            detail.diff = self.runtime.libraryReleaseMatchDiff(self.library, std.heap.smp_allocator, item.release_id, best.release_mbid) catch null;
+        }
+        self.details = read;
+    }
+
+    fn destroy(self: *Loader, allocator: std.mem.Allocator) void {
+        if (self.thread) |thread| thread.join();
+        if (self.groups) |*groups| groups.deinit();
+        if (self.page) |*page| page.deinit();
+        freeDetails(self.details);
+        allocator.destroy(self);
+    }
+};
+
+fn freeDetails(read: []Detail) void {
+    for (read) |*detail| detail.deinit();
+    if (read.len != 0) std.heap.smp_allocator.free(read);
+}
+
+const Want = enum { none, counts, page };
+
+pub const Filter = struct {
+    buffer: [liborca.max_search_text]u8 = undefined,
+    len: usize = 0,
+
+    pub fn text(self: *const Filter) ?[]const u8 {
+        return if (self.len == 0) null else self.buffer[0..self.len];
+    }
+
+    fn set(self: *Filter, value: []const u8) void {
+        self.len = @min(value.len, self.buffer.len);
+        @memcpy(self.buffer[0..self.len], value[0..self.len]);
+    }
+
+    fn eql(self: *const Filter, other: *const Filter) bool {
+        return std.mem.eql(u8, self.buffer[0..self.len], other.buffer[0..other.len]);
+    }
+};
+
+const Tab = struct {
+    button: ?*gtk.Widget = null,
+    count: ?*gtk.Label = null,
+};
+
+pub const State = struct {
+    built: bool = false,
+    stale: bool = true,
+    counts_stale: bool = true,
+    counts: ?liborca.ReleaseMatchCounts = null,
+    filter: Filter = .{},
+    filtered_counts: ?liborca.ReleaseMatchCounts = null,
+    group_count: u64 = 0,
+    bucket: Bucket = .needs_review,
+    page: ?liborca.ReleaseMatchPage = null,
+    details: []Detail = &.{},
+    expanded: ?i64 = null,
+    loader: ?*Loader = null,
+    wanted: Want = .none,
+    tabs: std.EnumArray(Bucket, Tab) = .initFill(.{}),
+    list: ?*gtk.Box = null,
+    empty: ?*gtk.Label = null,
+    note: ?*gtk.Label = null,
+    corrections: ?*gtk.ListBox = null,
+    corrections_box: ?*gtk.Widget = null,
+    scroller: ?*gtk.ScrolledWindow = null,
+    content: ?*gtk.Widget = null,
+    search: ?*gtk.Widget = null,
+
+    pub fn deinit(self: *State) void {
+        if (self.page) |*page| page.deinit();
+        self.page = null;
+        freeDetails(self.details);
+        self.details = &.{};
+    }
+};
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-const RowInfo = struct {
-    self: *App,
-    track_id: i64,
-    duration_ms: ?i64,
-    filled: bool = false,
-};
-
-fn rowInfo(data: ?*anyopaque) *RowInfo {
-    return @ptrCast(@alignCast(data.?));
-}
-
 /// Confidence as a whole percentage, rounded down so a match shown at P% is
-/// one Accept Confident at P% takes.
+/// one accepted at P%.
 pub fn percent(confidence: f32) u32 {
     return @intFromFloat(@floor(std.math.clamp(confidence, 0, 1) * 100));
 }
@@ -76,22 +194,6 @@ fn finish(buffer: []u8, writer: *const std.Io.Writer) [:0]const u8 {
     return buffer[0..writer.end :0];
 }
 
-fn lengthDiffers(track_ms: ?i64, proposal_ms: ?u64) bool {
-    const track = std.math.cast(u64, track_ms orelse return false) orelse return false;
-    const proposal = proposal_ms orelse return false;
-    const difference = if (track > proposal) track - proposal else proposal - track;
-    return difference > length_tolerance_ms;
-}
-
-pub fn updateCount(self: *App) void {
-    const library = self.library orelse return;
-    const total = (self.runtime.libraryMatchReviewCount(library) catch return) + self.matches_group_count;
-    const label = self.matches_count orelse return;
-    var buffer: [24]u8 = undefined;
-    const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&buffer, "{f}", .{strings.grouped(total)}) catch "";
-    gtk.gtk_label_set_text(label, text.ptr);
-}
-
 fn refused(self: *App, err: anyerror, fallback: [:0]const u8) void {
     if (err == error.StaleIdentificationProposal or err == error.UnknownIdentificationProposal) {
         self.toast("That match was already handled");
@@ -120,28 +222,64 @@ pub fn accepted(self: *App) void {
 }
 
 pub fn accept(self: *App, track_id: i64, proposal_id: i64) void {
-    _ = acceptProposal(self, track_id, proposal_id);
-}
-
-/// Whether accepting changed the library's values.
-fn acceptProposal(self: *App, track_id: i64, proposal_id: i64) bool {
-    const library = self.library orelse return false;
-    self.matches_open_track = track_id;
-    const acceptance = self.runtime.libraryAcceptMatch(library, proposal_id) catch |err| {
-        refused(self, err, "Could not save that match");
-        return false;
-    };
+    _ = track_id;
+    const library = self.library orelse return;
+    const acceptance = self.runtime.libraryAcceptMatch(library, proposal_id) catch |err|
+        return refused(self, err, "Could not save that match");
     self.toast(if (acceptance.values_written == 0) "Kept your values" else "Match saved");
     accepted(self);
-    return acceptance.values_written != 0;
 }
 
 pub fn dismiss(self: *App, track_id: i64, proposal_id: i64) void {
+    _ = track_id;
     const library = self.library orelse return;
-    self.matches_open_track = track_id;
     self.runtime.libraryDismissMatch(library, proposal_id) catch |err|
         return refused(self, err, "Could not dismiss that match");
     changed(self);
+}
+
+fn launched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
+    var err: ?*gtk.GError = null;
+    if (gtk.gtk_uri_launcher_launch_finish(gtk.cast(gtk.UriLauncher, source), result, &err) != 0) return;
+    gtk.g_clear_error(&err);
+    state(data).toast("Could not open MusicBrainz");
+}
+
+pub fn openUrl(self: *App, url: [:0]const u8) void {
+    const launcher = gtk.gtk_uri_launcher_new(url.ptr);
+    gtk.gtk_uri_launcher_launch(launcher, self.window, null, launched, self);
+    gtk.g_object_unref(launcher);
+}
+
+pub fn openRecording(self: *App, recording_mbid: []const u8) void {
+    var buffer: [128]u8 = undefined;
+    openUrl(self, strings.printZ(&buffer, recording_url ++ "{s}", .{recording_mbid}) catch return);
+}
+
+fn freeText(text: ?*anyopaque) callconv(.c) void {
+    gtk.g_free(text);
+}
+
+pub fn linkButton(recording_mbid: []const u8) *gtk.Widget {
+    const button = gtk.gtk_button_new_with_label("MusicBrainz");
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(button, "Open this recording on MusicBrainz");
+    setRecording(button, recording_mbid);
+    return button;
+}
+
+pub fn setRecording(button: *gtk.Widget, recording_mbid: []const u8) void {
+    gtk.g_object_set_data_full(button, "orca-recording", gtk.g_strndup(recording_mbid.ptr, recording_mbid.len), freeText);
+}
+
+pub fn recordingOf(button: ?*anyopaque) ?[]const u8 {
+    const text: [*:0]const u8 = @ptrCast(gtk.g_object_get_data(button.?, "orca-recording") orelse return null);
+    return std.mem.span(text);
+}
+
+pub fn showAcoustIdKey(self: *App, presence: secret.Presence) void {
+    self.acoustid_key_stored = presence == .stored;
 }
 
 fn groupOf(button: ?*anyopaque) ?i64 {
@@ -261,502 +399,679 @@ fn correctionGroupRow(self: *App, group: liborca.CorrectionGroup) *gtk.Widget {
     return row;
 }
 
-fn reloadCorrections(self: *App, library: liborca.LibraryHandle) void {
-    const list = self.matches_corrections orelse return;
+fn showCorrections(self: *App, groups: ?liborca.CorrectionGroupPage) void {
+    const matches = &self.matches;
+    const list = matches.corrections orelse return;
     gtk.gtk_list_box_remove_all(list);
-    self.matches_group_count = 0;
-    var page = self.runtime.libraryCorrectionGroups(library, self.allocator, app.page_size, 0) catch {
-        if (self.matches_corrections_box) |box| gtk.gtk_widget_set_visible(box, gtk.false_);
-        return;
-    };
-    defer page.deinit();
-    self.matches_group_count = page.items.len;
-    for (page.items) |group| gtk.gtk_list_box_append(list, correctionGroupRow(self, group));
-    if (self.matches_corrections_box) |box| gtk.gtk_widget_set_visible(box, if (page.items.len == 0) gtk.false_ else gtk.true_);
+    const listed = if (groups) |page| page.items else &.{};
+    for (listed) |group| gtk.gtk_list_box_append(list, correctionGroupRow(self, group));
+    if (matches.corrections_box) |box| gtk.gtk_widget_set_visible(box, @intFromBool(listed.len != 0));
 }
 
-fn launched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
-    var err: ?*gtk.GError = null;
-    if (gtk.gtk_uri_launcher_launch_finish(gtk.cast(gtk.UriLauncher, source), result, &err) != 0) return;
-    gtk.g_clear_error(&err);
-    state(data).toast("Could not open MusicBrainz");
+fn label(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
+    const widget = gtk.gtk_label_new(text);
+    gtk.gtk_widget_add_css_class(widget, class);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, widget), 0);
+    return widget;
 }
 
-/// Opens the recording's MusicBrainz page in the browser.
-pub fn openRecording(self: *App, recording_mbid: []const u8) void {
-    var buffer: [128]u8 = undefined;
-    const url = strings.printZ(&buffer, recording_url ++ "{s}", .{recording_mbid}) catch return;
-    const launcher = gtk.gtk_uri_launcher_new(url.ptr);
-    gtk.gtk_uri_launcher_launch(launcher, self.window, null, launched, self);
-    gtk.g_object_unref(launcher);
+fn cell(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
+    const widget = label(text, class);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, widget), gtk.ELLIPSIZE_END);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, widget), 1);
+    gtk.gtk_widget_set_hexpand(widget, gtk.true_);
+    return widget;
 }
 
-fn freeText(text: ?*anyopaque) callconv(.c) void {
-    gtk.g_free(text);
+fn append(box: *gtk.Widget, children: []const *gtk.Widget) void {
+    for (children) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, box), child);
 }
 
-/// A flat "MusicBrainz" button holding `recording_mbid`, for a "clicked"
-/// handler to pass to `openRecording`.
-pub fn linkButton(recording_mbid: []const u8) *gtk.Widget {
-    const button = gtk.gtk_button_new_with_label("MusicBrainz");
-    gtk.gtk_widget_add_css_class(button, "flat");
+pub fn iconLabelButton(icon: [*:0]const u8, text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
+    const image = gtk.gtk_image_new_from_icon_name(icon);
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_set_halign(content, gtk.ALIGN_CENTER);
+    append(content, &.{ image, gtk.gtk_label_new(text) });
+    const button = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
+    gtk.gtk_widget_add_css_class(button, class);
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(button, "Open this recording on MusicBrainz");
-    setRecording(button, recording_mbid);
     return button;
 }
 
-pub fn setRecording(button: *gtk.Widget, recording_mbid: []const u8) void {
-    gtk.g_object_set_data_full(button, "orca-recording", gtk.g_strndup(recording_mbid.ptr, recording_mbid.len), freeText);
+const Row = struct {
+    self: *App,
+    release_id: i64,
+    artist: ?*gtk.Label = null,
+    candidate: ?*gtk.Label = null,
+    evidence: ?*gtk.Revealer = null,
+};
+
+fn rowOf(data: ?*anyopaque) *Row {
+    return @ptrCast(@alignCast(data.?));
 }
 
-pub fn recordingOf(button: ?*anyopaque) ?[]const u8 {
-    const text: [*:0]const u8 = @ptrCast(gtk.g_object_get_data(button.?, "orca-recording") orelse return null);
-    return std.mem.span(text);
+fn freeRow(data: ?*anyopaque) callconv(.c) void {
+    const row = rowOf(data);
+    row.self.allocator.destroy(row);
 }
 
-fn proposalOf(button: ?*anyopaque) ?i64 {
-    const stored = gtk.g_object_get_data(button.?, "orca-proposal") orelse return null;
-    return @intCast(@intFromPtr(stored));
+const Shown = struct {
+    item: liborca.ReleaseMatchItem,
+    detail: ?*const Detail,
+};
+
+fn shownItem(self: *App, release_id: i64) ?Shown {
+    const page = self.matches.page orelse return null;
+    for (page.items, 0..) |item, index| {
+        if (item.release_id != release_id) continue;
+        return .{ .item = item, .detail = if (index < self.matches.details.len) &self.matches.details[index] else null };
+    }
+    return null;
 }
 
-fn acceptClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const info = rowInfo(data);
-    const self = info.self;
-    const track_id = info.track_id;
-    const correction = gtk.g_object_get_data(button.?, "orca-correction") != null;
-    const written = acceptProposal(self, track_id, proposalOf(button) orelse return);
-    if (written and correction) tags.confirmWrite(self, &.{track_id});
+fn fieldDiff(diff: liborca.ReleaseMatchDiff, field: Field) ?liborca.ReleaseFieldDiff {
+    for (diff.fields) |each| if (each.field == field) return each;
+    return null;
 }
 
-fn dismissClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const info = rowInfo(data);
-    dismiss(info.self, info.track_id, proposalOf(button) orelse return);
+fn year(date: []const u8) []const u8 {
+    return date[0..@min(date.len, 4)];
 }
 
-fn linkClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    openRecording(rowInfo(data).self, recordingOf(button) orelse return);
+fn artistText(buffer: []u8, item: liborca.ReleaseMatchItem, open: bool) [:0]const u8 {
+    const artist = if (item.artist.len != 0) item.artist else "Unknown artist";
+    if (!open) return strings.terminated(buffer, artist);
+    return strings.format(buffer, "{s}" ++ separator ++ "{d} local {s}", .{ artist, item.track_count, if (item.track_count == 1) "track" else "tracks" });
 }
 
-fn findClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    jobs.startMatching(state(data));
+fn candidateText(buffer: []u8, item: liborca.ReleaseMatchItem, open: bool) [:0]const u8 {
+    const best = item.best orelse return strings.terminated(buffer, "No candidate");
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    writer.writeAll(if (best.title.len != 0) best.title else "Untitled release") catch {};
+    if (best.date) |date| if (date.len != 0) writer.print(separator ++ "{s}", .{if (open) date else year(date)}) catch {};
+    if (open) if (best.track_count) |count| writer.print(separator ++ "{d} {s}", .{ count, if (count == 1) "track" else "tracks" }) catch {};
+    return finish(buffer, &writer);
 }
 
-fn noConfidentText(buffer: []u8, self: *const App) [:0]const u8 {
-    return strings.format(buffer, "No track has a clear best match scoring {d}% or more", .{self.match_threshold_percent});
+fn showOpen(row: *Row, open: bool) void {
+    const listed = shownItem(row.self, row.release_id) orelse return;
+    var buffer: [512]u8 = undefined;
+    if (row.artist) |artist| gtk.gtk_label_set_text(artist, artistText(&buffer, listed.item, open).ptr);
+    if (row.candidate) |candidate| gtk.gtk_label_set_text(candidate, candidateText(&buffer, listed.item, open).ptr);
+    if (row.evidence) |evidence| gtk.gtk_revealer_set_reveal_child(evidence, @intFromBool(open));
 }
 
-fn acceptConfidentClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
+fn toggleClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const row = rowOf(data);
+    const self = row.self;
+    const evidence = row.evidence orelse return;
+    const open = gtk.gtk_revealer_get_reveal_child(evidence) == 0;
+    if (open) collapseOthers(self, row.release_id);
+    self.matches.expanded = if (open) row.release_id else null;
+    showOpen(row, open);
+}
+
+fn collapseOthers(self: *App, release_id: i64) void {
+    const list = self.matches.list orelse return;
+    var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, list));
+    while (child) |widget| : (child = gtk.gtk_widget_get_next_sibling(widget)) {
+        const data = gtk.g_object_get_data(widget, "orca-match-row") orelse continue;
+        const row = rowOf(data);
+        if (row.release_id != release_id) showOpen(row, false);
+    }
+}
+
+fn acceptedFields(diff: ?liborca.ReleaseMatchDiff) liborca.ReleaseFieldSet {
+    var fields: liborca.ReleaseFieldSet = .initOne(.release_id);
+    const read = diff orelse return fields;
+    for ([_]Field{ .album, .album_artist, .release_date }) |field| {
+        const each = fieldDiff(read, field) orelse continue;
+        if (each.differs) fields.insert(field);
+    }
+    return fields;
+}
+
+fn acceptClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const row = rowOf(data);
+    const self = row.self;
     const library = self.library orelse return;
-    var buffer: [256]u8 = undefined;
-    const count = self.runtime.libraryConfidentMatchCount(library, thresholdFraction(self)) catch
-        return self.toast("Could not count the confident matches");
-    if (count == 0) return self.toast(noConfidentText(&buffer, self));
-    const heading = if (count == 1)
-        strings.format(&buffer, "Accept 1 match?", .{})
-    else
-        strings.format(&buffer, "Accept {f} matches?", .{strings.grouped(count)});
-    var body_buffer: [256]u8 = undefined;
-    const body = strings.format(
-        &body_buffer,
-        "Each track gets its best match scoring {d}% or more, preferring one its audio fingerprint confirms. This records MusicBrainz recording IDs in your library and never changes your files.",
-        .{self.match_threshold_percent},
-    );
-    const dialog = adw.adw_alert_dialog_new(heading.ptr, body.ptr);
-    const alert = gtk.cast(adw.AlertDialog, dialog);
-    adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
-    adw.adw_alert_dialog_add_response(alert, "accept", "Accept");
-    adw.adw_alert_dialog_set_response_appearance(alert, "accept", adw.RESPONSE_SUGGESTED);
-    adw.adw_alert_dialog_set_default_response(alert, "cancel");
-    adw.adw_alert_dialog_set_close_response(alert, "cancel");
-    _ = gtk.signalConnect(dialog, "response", gtk.callback(acceptConfidentResponse), self);
-    adw.adw_dialog_present(dialog, gtk.cast(gtk.Widget, button));
-}
-
-fn acceptConfidentResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (!std.mem.eql(u8, std.mem.span(response), "accept")) return;
-    const library = self.library orelse return;
-    const acceptance = self.runtime.libraryAcceptConfidentMatches(library, thresholdFraction(self)) catch
-        return self.toast("Could not accept the matches");
-    var buffer: [64]u8 = undefined;
-    self.toast(if (acceptance.accepted == 1)
-        "Accepted 1 match"
-    else
-        strings.format(&buffer, "Accepted {f} matches", .{strings.grouped(acceptance.accepted)}));
+    const listed = shownItem(self, row.release_id) orelse return;
+    const diff = if (listed.detail) |detail| detail.diff else null;
+    const written = self.runtime.libraryApplyMatchedRelease(library, row.release_id, acceptedFields(diff)) catch
+        return self.toast("Could not accept that release");
+    if (written == 0) return self.toast("Every track must be on the release first: review it to see which are not");
+    self.toast("Release accepted");
     accepted(self);
 }
 
-pub fn showAcoustIdKey(self: *App, presence: secret.Presence) void {
-    self.acoustid_key_stored = presence == .stored;
-    const library = self.library orelse return;
-    showSubmit(self, library);
-}
-
-fn acoustIdKeyChecked(presence: secret.Presence, data: ?*anyopaque) void {
-    showAcoustIdKey(state(data), presence);
-}
-
-pub fn checkAcoustIdKey(self: *App) void {
-    secret.check(liborca.acoustid_credential_service, liborca.acoustid_user_key_account, .report, acoustIdKeyChecked, self) catch {};
-}
-
-fn showSubmit(self: *App, library: liborca.LibraryHandle) void {
-    const submit = self.matches_submit_button orelse return;
-    const count = if (self.acoustid_key_stored) self.runtime.libraryAcoustIdSubmittableCount(library) catch 0 else 0;
-    gtk.gtk_widget_set_visible(submit, if (count == 0) gtk.false_ else gtk.true_);
-    if (count == 0) return;
-    var buffer: [64]u8 = undefined;
-    gtk.gtk_button_set_label(gtk.cast(gtk.Button, submit), strings.format(&buffer, "Submit to AcoustID ({f})", .{strings.grouped(count)}).ptr);
-}
-
-fn submitClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const library = self.library orelse return;
-    const count = self.runtime.libraryAcoustIdSubmittableCount(library) catch
-        return self.toast("Could not count the tracks to submit");
-    if (count == 0) {
-        showSubmit(self, library);
-        return self.toast("Nothing to submit");
+fn reviewClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const row = rowOf(data);
+    const self = row.self;
+    const page = self.matches.page orelse return;
+    var entries: std.ArrayList(match_review.Entry) = .empty;
+    defer entries.deinit(self.allocator);
+    var at: usize = 0;
+    for (page.items) |item| {
+        if (item.release_id == row.release_id) at = entries.items.len;
+        const confidence = if (item.best) |best| best.confidence else 0;
+        entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence }) catch return;
     }
-    var buffer: [160]u8 = undefined;
-    const heading = if (count == 1)
-        strings.format(&buffer, "Send audio fingerprints and recording IDs for 1 track to AcoustID?", .{})
-    else
-        strings.format(&buffer, "Send audio fingerprints and recording IDs for {f} tracks to AcoustID?", .{strings.grouped(count)});
-    const dialog = adw.adw_alert_dialog_new(
-        heading.ptr,
-        "This helps others identify the same recordings. Only matches you accepted or IDs you set are sent, never IDs already in your files' tags.",
-    );
-    const alert = gtk.cast(adw.AlertDialog, dialog);
-    adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
-    adw.adw_alert_dialog_add_response(alert, "send", "Send");
-    adw.adw_alert_dialog_set_response_appearance(alert, "send", adw.RESPONSE_SUGGESTED);
-    adw.adw_alert_dialog_set_default_response(alert, "cancel");
-    adw.adw_alert_dialog_set_close_response(alert, "cancel");
-    _ = gtk.signalConnect(dialog, "response", gtk.callback(submitResponse), self);
-    adw.adw_dialog_present(dialog, gtk.cast(gtk.Widget, button));
+    const bucket = self.matches.bucket;
+    const total: u64 = if (tabCounts(self)) |counts| switch (bucket) {
+        .confident => counts.confident,
+        .needs_review => counts.needs_review,
+        .unmatched => counts.unmatched,
+    } else entries.items.len;
+    match_review.open(self, .{ .bucket = bucket, .confident_at = thresholdFraction(self), .filter = self.matches.filter }, entries.items, total, at);
 }
 
-fn submitResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
-    if (!std.mem.eql(u8, std.mem.span(response), "send")) return;
-    jobs.startSubmission(state(data));
+fn searchClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const row = rowOf(data);
+    jobs.startAlbumReidentification(row.self, row.release_id);
 }
 
-fn newLabel(text: [:0]const u8, css_class: ?[*:0]const u8) *gtk.Widget {
-    const widget = gtk.gtk_label_new(text.ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, widget), 0.0);
-    if (css_class) |name| gtk.gtk_widget_add_css_class(widget, name);
-    return widget;
+fn actionButton(text: [*:0]const u8, tooltip: [*:0]const u8, handler: gtk.GCallback, row: *Row) *gtk.Widget {
+    const button = gtk.gtk_button_new_with_label(text);
+    gtk.gtk_widget_add_css_class(button, "match-button");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(button, tooltip);
+    _ = gtk.signalConnect(button, "clicked", handler, row);
+    return button;
 }
 
-fn proposalButton(text: [*:0]const u8, tooltip: [*:0]const u8, proposal_id: i64, handler: gtk.GCallback, info: *RowInfo) *gtk.Widget {
-    const widget = gtk.gtk_button_new_with_label(text);
-    gtk.gtk_widget_set_valign(widget, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(widget, tooltip);
-    gtk.g_object_set_data(widget, "orca-proposal", @ptrFromInt(@as(usize, @intCast(proposal_id))));
-    _ = gtk.signalConnect(widget, "clicked", handler, info);
-    return widget;
-}
-
-/// "Title — Artist credit · Album · #3 · 4:19 · 92% · AcoustID · fingerprint
-/// 98%" with Accept, Dismiss and a link to the recording. The length is flagged when it is far from the
-/// Track's.
-fn proposalRow(info: *RowInfo, proposal: liborca.MatchProposal) *gtk.Widget {
-    var buffer: [1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    writeHeading(&writer, proposal) catch {};
-    writeRelease(&writer, proposal) catch {};
-    if (proposal.track_number) |number| writer.print(separator ++ "#{d}", .{number}) catch {};
-    const text = finish(&buffer, &writer);
-    const heading = newLabel(text, null);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, heading), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_tooltip_text(heading, text.ptr);
-
+fn evidenceLine(agrees: bool, name: [*:0]const u8, value: [:0]const u8) *gtk.Widget {
+    const icon = gtk.gtk_image_new_from_icon_name(if (agrees) "orca-check-symbolic" else "orca-alert-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 15);
+    gtk.gtk_widget_add_css_class(icon, if (agrees) "match-agrees" else "match-differs");
     const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_set_hexpand(line, gtk.true_);
-    gtk.gtk_widget_set_valign(line, gtk.ALIGN_CENTER);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), heading);
-    if (proposal.duration_ms) |milliseconds| {
-        var length_buffer: [32]u8 = undefined;
-        gtk.gtk_box_append(gtk.cast(gtk.Box, line), newLabel(separator, null));
-        const length = newLabel(strings.formatMs(&length_buffer, milliseconds), "numeric");
-        if (lengthDiffers(info.duration_ms, milliseconds)) {
-            gtk.gtk_widget_add_css_class(length, "warning");
-            gtk.gtk_widget_set_tooltip_text(length, "Differs from your file by more than 10 seconds");
-        }
-        gtk.gtk_box_append(gtk.cast(gtk.Box, line), length);
-    }
-    var percent_buffer: [16]u8 = undefined;
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), newLabel(strings.format(&percent_buffer, separator ++ "{d}%", .{percent(proposal.confidence)}), "numeric"));
-    var source_buffer: [96]u8 = undefined;
-    var source_writer = std.Io.Writer.fixed(source_buffer[0 .. source_buffer.len - 1]);
-    source_writer.writeAll(separator) catch {};
-    writeSource(&source_writer, proposal) catch {};
-    if (proposal.corrects) |replaced| source_writer.print(separator ++ "replaces {s}", .{replaced[0..@min(replaced.len, 8)]}) catch {};
-    const source_text = finish(&source_buffer, &source_writer);
-    const source = newLabel(source_text, "dim-label");
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, source), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_tooltip_text(source, source_text[separator.len..].ptr);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), source);
-
-    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_widget_add_css_class(row, "match-proposal");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), line);
-    const accept_button = proposalButton("Accept", "Record this recording ID", proposal.id, gtk.callback(acceptClicked), info);
-    gtk.gtk_widget_add_css_class(accept_button, "suggested-action");
-    if (proposal.corrects != null) gtk.g_object_set_data(accept_button, "orca-correction", accept_button);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), accept_button);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), proposalButton("Dismiss", "Not this recording", proposal.id, gtk.callback(dismissClicked), info));
-    const link = linkButton(proposal.recording_mbid);
-    _ = gtk.signalConnect(link, "clicked", gtk.callback(linkClicked), info);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), link);
-    return row;
+    gtk.gtk_widget_add_css_class(line, "match-evidence-line");
+    const value_label = label(value.ptr, "match-evidence-value");
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, value_label), gtk.ELLIPSIZE_END);
+    append(line, &.{ icon, label(name, "match-evidence-name"), value_label });
+    return line;
 }
 
-fn fill(expander: *gtk.Widget, info: *RowInfo) void {
-    if (info.filled) return;
-    info.filled = true;
-    const self = info.self;
-    const library = self.library orelse return;
-    var proposals = self.runtime.libraryMatchProposals(library, info.track_id, app.page_size) catch
-        return self.toast("Could not read the matches");
-    defer proposals.deinit();
-    for (proposals.items) |proposal|
-        adw.adw_expander_row_add_row(gtk.cast(adw.ExpanderRow, expander), proposalRow(info, proposal));
-}
-
-fn expandedChanged(expander: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const row = gtk.cast(gtk.Widget, expander);
-    if (adw.adw_expander_row_get_expanded(gtk.cast(adw.ExpanderRow, row)) == 0) return;
-    fill(row, rowInfo(data));
-}
-
-fn rowDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const info = rowInfo(data);
-    info.self.allocator.destroy(info);
-}
-
-fn reviewRow(self: *App, item: liborca.MatchReviewItem) ?*gtk.Widget {
-    const info = self.allocator.create(RowInfo) catch return null;
-    info.* = .{ .self = self, .track_id = item.track_id, .duration_ms = item.duration_ms };
-    const row = adw.adw_expander_row_new();
-    _ = gtk.signalConnect(row, "destroy", gtk.callback(rowDestroyed), info);
-    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
-
-    var title_buffer: [512]u8 = undefined;
-    const title = strings.format(&title_buffer, "{s}{s}{s}", .{
-        if (item.title.len != 0) item.title else "Unknown title",
-        if (item.artist.len != 0) " — " else "",
-        item.artist,
+fn diffValues(buffer: []u8, diff: ?liborca.ReleaseMatchDiff, field: Field, fallback: []const u8) [:0]const u8 {
+    const read = diff orelse return strings.terminated(buffer, fallback);
+    const each = fieldDiff(read, field) orelse return strings.terminated(buffer, fallback);
+    if (!each.differs) return strings.terminated(buffer, if (each.local.len != 0) each.local else fallback);
+    return strings.format(buffer, "{s} vs {s}", .{
+        if (each.local.len != 0) each.local else "none",
+        each.candidate,
     });
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), title.ptr);
-
-    var subtitle_buffer: [512]u8 = undefined;
-    var writer = std.Io.Writer.fixed(subtitle_buffer[0 .. subtitle_buffer.len - 1]);
-    if (item.album.len != 0) writer.print("{s}" ++ separator, .{item.album}) catch {};
-    if (item.duration_ms) |milliseconds| if (std.math.cast(u64, milliseconds)) |length| {
-        var length_buffer: [32]u8 = undefined;
-        writer.print("{s}" ++ separator, .{strings.formatMs(&length_buffer, length)}) catch {};
-    };
-    writer.print("best {d}%", .{percent(item.best.confidence)}) catch {};
-    const subtitle = finish(&subtitle_buffer, &writer);
-    adw.adw_expander_row_set_subtitle(gtk.cast(adw.ExpanderRow, row), subtitle.ptr);
-    adw.adw_expander_row_set_title_lines(gtk.cast(adw.ExpanderRow, row), 1);
-    adw.adw_expander_row_set_subtitle_lines(gtk.cast(adw.ExpanderRow, row), 1);
-
-    var tooltip_buffer: [1024]u8 = undefined;
-    gtk.gtk_widget_set_tooltip_text(row, strings.format(&tooltip_buffer, "{s}\n{s}", .{ title, subtitle }).ptr);
-    _ = gtk.signalConnect(row, "notify::expanded", gtk.callback(expandedChanged), info);
-    return row;
 }
 
-pub fn build(self: *App) *gtk.Widget {
-    const list = gtk.gtk_list_box_new();
-    self.matches_list = gtk.cast(gtk.ListBox, list);
-    gtk.gtk_list_box_set_selection_mode(self.matches_list.?, gtk.SELECTION_NONE);
-    gtk.gtk_widget_add_css_class(list, "boxed-list");
-    gtk.gtk_widget_add_css_class(list, "match-list");
-    const note = gtk.gtk_label_new("");
-    self.matches_note = gtk.cast(gtk.Label, note);
-    gtk.gtk_widget_add_css_class(note, "dim-label");
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, note), gtk.true_);
-    const corrections = gtk.gtk_list_box_new();
-    self.matches_corrections = gtk.cast(gtk.ListBox, corrections);
-    gtk.gtk_list_box_set_selection_mode(self.matches_corrections.?, gtk.SELECTION_NONE);
-    gtk.gtk_widget_add_css_class(corrections, "boxed-list");
-    gtk.gtk_widget_add_css_class(corrections, "match-list");
-    const corrections_heading = newLabel("Corrections", "section-title");
-    const corrections_box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
-    self.matches_corrections_box = corrections_box;
-    gtk.gtk_box_append(gtk.cast(gtk.Box, corrections_box), corrections_heading);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, corrections_box), corrections);
-    gtk.gtk_widget_set_visible(corrections_box, gtk.false_);
-    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 12);
-    gtk.gtk_widget_add_css_class(content, "matches-body");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), corrections_box);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), list);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), note);
-    const scroller = gtk.gtk_scrolled_window_new();
-    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
-    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
+fn explanation(buffer: []u8, evidence: liborca.MatchEvidence, diff: ?liborca.ReleaseMatchDiff) [:0]const u8 {
+    const tracks_agree = evidence.tracks != 0 and evidence.fingerprints_matched == evidence.tracks and evidence.durations_within_1s;
+    if (tracks_agree and evidence.artist_agrees and evidence.title_agrees and !evidence.date_agrees) {
+        const dates = if (diff) |read| fieldDiff(read, .release_date) else null;
+        const later = if (dates) |each| std.mem.order(u8, each.candidate, each.local) == .gt else true;
+        return strings.format(
+            buffer,
+            "Tracks, durations and fingerprints agree, but the candidate is {s} edition with a different date. Review lets you take its IDs without its date.",
+            .{if (later) "a later" else "an earlier"},
+        );
+    }
+    return strings.terminated(buffer, evidence.note.slice());
+}
 
-    const empty = adw.adw_status_page_new();
-    self.matches_empty = gtk.cast(adw.StatusPage, empty);
-    const find_empty = gtk.gtk_button_new_with_label("Find Matches");
-    self.matches_empty_button = find_empty;
-    gtk.gtk_widget_set_halign(find_empty, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_add_css_class(find_empty, "pill");
-    gtk.gtk_widget_add_css_class(find_empty, "suggested-action");
-    gtk.gtk_widget_set_tooltip_text(find_empty, "About one track a second");
-    _ = gtk.signalConnect(find_empty, "clicked", gtk.callback(findClicked), self);
-    adw.adw_status_page_set_child(self.matches_empty.?, find_empty);
+fn evidenceView(item: liborca.ReleaseMatchItem, detail: ?*const Detail) ?*gtk.Widget {
+    const read = detail orelse return null;
+    const evidence = read.evidence orelse return null;
+    const lines = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(lines, "match-evidence-list");
+    var buffer: [512]u8 = undefined;
+    const fingerprints = evidence.tracks != 0 and evidence.fingerprints_matched == evidence.tracks;
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(fingerprints, "AcoustID fingerprints", strings.format(&buffer, "{d} of {d} tracks", .{ evidence.fingerprints_matched, evidence.tracks })));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.durations_within_1s, "Track durations", if (evidence.durations_within_1s) "within 1 s" else "not all within 1 s"));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.artist_agrees, if (evidence.artist_agrees) "Artist" else "Artist differs", diffValues(&buffer, read.diff, .album_artist, item.artist)));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.title_agrees, if (evidence.title_agrees) "Album title" else "Album title differs", diffValues(&buffer, read.diff, .album, item.title)));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.date_agrees, if (evidence.date_agrees) "Release date" else "Release date differs", diffValues(&buffer, read.diff, .release_date, "unknown")));
 
-    const body = gtk.gtk_stack_new();
-    self.matches_body = gtk.cast(gtk.Stack, body);
-    _ = gtk.gtk_stack_add_named(self.matches_body.?, scroller, "list");
-    _ = gtk.gtk_stack_add_named(self.matches_body.?, empty, "empty");
-
-    const title = page_ui.title("Matches");
-    self.matches_meta = title.meta;
-    const submit = gtk.gtk_button_new_with_label("Submit to AcoustID");
-    self.matches_submit_button = submit;
-    gtk.gtk_widget_set_tooltip_text(submit, "Send the matches you accepted to AcoustID");
-    gtk.gtk_widget_set_visible(submit, gtk.false_);
-    _ = gtk.signalConnect(submit, "clicked", gtk.callback(submitClicked), self);
-    title.add(submit);
-    const accept_confident = gtk.gtk_button_new_with_label("Accept Confident");
-    self.matches_accept_button = accept_confident;
-    _ = gtk.signalConnect(accept_confident, "clicked", gtk.callback(acceptConfidentClicked), self);
-    title.add(accept_confident);
-    const find = gtk.gtk_button_new_with_label("Find Matches");
-    gtk.gtk_widget_set_tooltip_text(find, "About one track a second");
-    _ = gtk.signalConnect(find, "clicked", gtk.callback(findClicked), self);
-    title.add(find);
-    checkAcoustIdKey(self);
-
-    const view = page_ui.withTitle(title, body);
+    const sentence = label(explanation(&buffer, evidence, read.diff).ptr, "match-explanation");
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, sentence), gtk.true_);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, sentence), 54);
+    gtk.gtk_widget_set_size_request(sentence, 360, -1);
+    gtk.gtk_widget_set_valign(sentence, gtk.ALIGN_START);
+    const view = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 40);
+    gtk.gtk_widget_add_css_class(view, "match-evidence");
+    append(view, &.{ lines, sentence });
     return view;
 }
 
-fn showEmpty(self: *App, unidentified: u64) void {
-    const page = self.matches_empty orelse return;
-    if (unidentified == 0) {
-        adw.adw_status_page_set_icon_name(page, "object-select-symbolic");
-        adw.adw_status_page_set_title(page, "Every track has a recording ID");
-        adw.adw_status_page_set_description(page, null);
-    } else {
-        adw.adw_status_page_set_icon_name(page, "system-search-symbolic");
-        adw.adw_status_page_set_title(page, "No matches to review");
-        adw.adw_status_page_set_description(page, if (self.match_fingerprints)
-            "Finding matches sends track titles, artists and album names to MusicBrainz, and a fingerprint of each track's audio to AcoustID. Nothing is sent until you start it."
-        else
-            "Finding matches sends track titles, artists and album names to MusicBrainz. Nothing is sent until you start it.");
+fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) ?*gtk.Widget {
+    const row = self.allocator.create(Row) catch return null;
+    row.* = .{ .self = self, .release_id = item.release_id };
+    const open = self.matches.expanded == item.release_id;
+    var buffer: [512]u8 = undefined;
+
+    const cover = art.newCover(self, art.initialsPlaceholder(), cover_pixels);
+    gtk.gtk_widget_add_css_class(cover, "match-cover");
+    art.setInitials(cover, item.title);
+    art.show(self, cover, art.Key.release(item.release_id, art.Size.atLeast(cover_pixels)));
+
+    const title = cell(strings.terminated(&buffer, if (item.title.len != 0) item.title else "Untitled album").ptr, "match-title");
+    const artist = cell(artistText(&buffer, item, open).ptr, "match-artist");
+    row.artist = gtk.cast(gtk.Label, artist);
+    const album = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 1);
+    gtk.gtk_widget_set_valign(album, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_hexpand(album, gtk.true_);
+    append(album, &.{ title, artist });
+
+    const candidate = cell(candidateText(&buffer, item, open).ptr, if (item.best == null) "match-candidate-none" else "match-candidate");
+    row.candidate = gtk.cast(gtk.Label, candidate);
+    const best = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_valign(best, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_hexpand(best, gtk.true_);
+    append(best, &.{ cell("Best candidate", "match-caption"), candidate });
+
+    const confidence = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 5);
+    gtk.gtk_widget_set_size_request(confidence, 150, -1);
+    gtk.gtk_widget_set_valign(confidence, gtk.ALIGN_CENTER);
+    if (item.best) |candidate_release| {
+        const value = label(strings.format(&buffer, "{d}% confidence", .{percent(candidate_release.confidence)}).ptr, "match-confidence");
+        gtk.gtk_widget_add_css_class(value, "numeric");
+        const bar = gtk.gtk_progress_bar_new();
+        gtk.gtk_widget_add_css_class(bar, "match-bar");
+        gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, bar), std.math.clamp(candidate_release.confidence, 0, 1));
+        append(confidence, &.{ value, bar });
     }
-    if (self.matches_empty_button) |find| gtk.gtk_widget_set_visible(find, if (unidentified == 0) gtk.false_ else gtk.true_);
+
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 18);
+    append(content, &.{ cover, album, best, confidence });
+    const toggle = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, toggle), content);
+    gtk.gtk_widget_add_css_class(toggle, "flat");
+    gtk.gtk_widget_add_css_class(toggle, "match-toggle");
+    gtk.gtk_widget_set_hexpand(toggle, gtk.true_);
+    gtk.gtk_widget_set_tooltip_text(toggle, "Show why");
+    _ = gtk.signalConnect(toggle, "clicked", gtk.callback(toggleClicked), row);
+
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
+    if (item.best != null) {
+        append(actions, &.{
+            actionButton("Accept", "Take this release's IDs, and its album, album artist and date where they differ", gtk.callback(acceptClicked), row),
+            actionButton("Review", "Choose what to take from this release", gtk.callback(reviewClicked), row),
+        });
+    } else {
+        gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton("Search", "Search MusicBrainz for this album again", gtk.callback(searchClicked), row));
+    }
+
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 18);
+    gtk.gtk_widget_add_css_class(header, "match-header");
+    append(header, &.{ toggle, actions });
+
+    const widget = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(widget, "match-row");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, widget), header);
+    if (evidenceView(item, detail)) |view| {
+        const revealer = gtk.gtk_revealer_new();
+        gtk.gtk_revealer_set_child(gtk.cast(gtk.Revealer, revealer), view);
+        gtk.gtk_revealer_set_reveal_child(gtk.cast(gtk.Revealer, revealer), @intFromBool(open));
+        row.evidence = gtk.cast(gtk.Revealer, revealer);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, widget), revealer);
+    } else {
+        gtk.gtk_widget_set_can_target(toggle, gtk.false_);
+        gtk.gtk_widget_set_focusable(toggle, gtk.false_);
+    }
+    gtk.g_object_set_data_full(widget, "orca-match-row", row, freeRow);
+    return widget;
 }
 
-fn showAcceptConfident(self: *App, library: liborca.LibraryHandle) void {
-    const accept_confident = self.matches_accept_button orelse return;
-    const count = self.runtime.libraryConfidentMatchCount(library, thresholdFraction(self)) catch 0;
-    var buffer: [128]u8 = undefined;
-    const tooltip = if (count == 0)
-        noConfidentText(&buffer, self)
-    else
-        strings.format(&buffer, "Accept each track's best match scoring {d}% or more", .{self.match_threshold_percent});
-    gtk.gtk_widget_set_tooltip_text(accept_confident, tooltip.ptr);
-    gtk.gtk_widget_set_sensitive(accept_confident, if (count == 0) gtk.false_ else gtk.true_);
-}
-
-fn focusOpenRow(data: ?*anyopaque) callconv(.c) gtk.gboolean {
-    const row = gtk.cast(gtk.Widget, data.?);
-    defer gtk.g_object_unref(row);
-    if (gtk.gtk_widget_get_root(row) != null) _ = gtk.gtk_widget_grab_focus(row);
-    return gtk.SOURCE_REMOVE;
-}
-
-/// Shows the page with `track_id`'s row open, when it is on the page.
-pub fn reveal(self: *App, track_id: i64) void {
-    self.matches_open_track = track_id;
-    window.showPage(self, .matches);
-    reload(self);
-}
-
-pub fn invalidate(self: *App) void {
-    if (self.current_page == .matches) {
-        reload(self);
+fn tabClicked(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const button: *gtk.Widget = @ptrCast(@alignCast(widget.?));
+    if (gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)) == 0) return;
+    for (std.enums.values(Bucket)) |bucket| {
+        const tab = self.matches.tabs.get(bucket).button orelse continue;
+        if (tab != button or bucket == self.matches.bucket) continue;
+        self.matches.bucket = bucket;
+        self.matches.expanded = null;
+        self.matches.stale = true;
+        request(self, .page);
         return;
     }
-    self.matches_dirty = true;
-    refreshBadge(self);
 }
 
-pub fn shown(self: *App) void {
-    if (self.matches_dirty) reload(self);
+fn bucketName(bucket: Bucket) [*:0]const u8 {
+    return switch (bucket) {
+        .confident => "Confident",
+        .needs_review => "Needs Review",
+        .unmatched => "Unmatched",
+    };
 }
 
-pub fn refreshBadge(self: *App) void {
-    const library = self.library orelse return;
-    var page = self.runtime.libraryCorrectionGroups(library, self.allocator, app.page_size, 0) catch return;
-    defer page.deinit();
-    self.matches_group_count = page.items.len;
+fn tabButton(self: *App, bucket: Bucket, group: ?*gtk.Widget) *gtk.Widget {
+    const count = label("", "match-tab-count");
+    gtk.gtk_widget_add_css_class(count, "numeric");
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    append(content, &.{ gtk.gtk_label_new(bucketName(bucket)), count });
+    const button = gtk.gtk_toggle_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
+    gtk.gtk_widget_add_css_class(button, "match-tab");
+    if (group) |first| gtk.gtk_toggle_button_set_group(gtk.cast(gtk.ToggleButton, button), gtk.cast(gtk.ToggleButton, first));
+    if (bucket == self.matches.bucket) gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
+    _ = gtk.signalConnect(button, "toggled", gtk.callback(tabClicked), self);
+    self.matches.tabs.set(bucket, .{ .button = button, .count = gtk.cast(gtk.Label, count) });
+    return button;
+}
+
+fn filterChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const text = std.mem.trim(u8, std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry))), " \t");
+    const matches = &self.matches;
+    if (std.mem.eql(u8, text, matches.filter.buffer[0..matches.filter.len])) return;
+    matches.filter.set(text);
+    matches.filtered_counts = null;
+    matches.expanded = null;
+    matches.stale = true;
+    request(self, .page);
+}
+
+fn buildSearch(self: *App) *gtk.Widget {
+    const entry = gtk.gtk_search_entry_new();
+    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), "Search matches…");
+    gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, entry), app.search_delay_ms);
+    if (gtk.gtk_widget_get_first_child(entry)) |icon| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, icon), "orca-search-symbolic");
+    if (gtk.gtk_widget_get_last_child(entry)) |icon| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, icon), "orca-close-symbolic");
+    _ = gtk.signalConnect(entry, "search-changed", gtk.callback(filterChanged), self);
+    self.matches.search = entry;
+    const hint = gtk.gtk_label_new("Ctrl F");
+    gtk.gtk_widget_add_css_class(hint, "keycap-hint");
+    gtk.gtk_widget_set_halign(hint, gtk.ALIGN_END);
+    gtk.gtk_widget_set_valign(hint, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_can_target(hint, gtk.false_);
+    const field = gtk.gtk_overlay_new();
+    gtk.gtk_widget_add_css_class(field, "library-search");
+    gtk.gtk_widget_set_valign(field, gtk.ALIGN_CENTER);
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, field), entry);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, field), hint);
+    return field;
+}
+
+pub fn focusSearch(self: *App) bool {
+    const entry = self.matches.search orelse return false;
+    return gtk.gtk_widget_grab_focus(entry) != 0;
+}
+
+fn matchAgainClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    jobs.startMatching(state(data));
+}
+
+fn scrollerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.matches.scroller = null;
+    self.matches.content = null;
+    self.matches.built = false;
+}
+
+fn fluidApplied(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const content = state(data).matches.content orelse return;
+    gtk.gtk_widget_set_size_request(content, -1, -1);
+    gtk.gtk_widget_set_hexpand(content, gtk.true_);
+}
+
+fn fluidUnapplied(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const content = state(data).matches.content orelse return;
+    gtk.gtk_widget_set_size_request(content, content_width, -1);
+    gtk.gtk_widget_set_hexpand(content, gtk.false_);
+}
+
+pub fn build(self: *App) *gtk.Widget {
+    const matches = &self.matches;
+    const title = page_ui.title("Matches");
+    gtk.gtk_widget_add_css_class(title.widget, "matches-title");
+    gtk.gtk_label_set_text(title.meta, "How your albums line up with MusicBrainz releases, and why.");
+    gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, title.meta), "numeric");
+    gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, title.meta), "matches-summary");
+    const again = iconLabelButton("orca-refresh-symbolic", "Match Again", "match-again");
+    gtk.gtk_widget_set_tooltip_text(again, "Search MusicBrainz again for every track without a recording ID");
+    _ = gtk.signalConnect(again, "clicked", gtk.callback(matchAgainClicked), self);
+    title.add(again);
+
+    const tabs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(tabs, "match-tabs");
+    var first: ?*gtk.Widget = null;
+    for (std.enums.values(Bucket)) |bucket| {
+        const button = tabButton(self, bucket, first);
+        if (first == null) first = button;
+        gtk.gtk_box_append(gtk.cast(gtk.Box, tabs), button);
+    }
+
+    const corrections = gtk.gtk_list_box_new();
+    matches.corrections = gtk.cast(gtk.ListBox, corrections);
+    gtk.gtk_list_box_set_selection_mode(matches.corrections.?, gtk.SELECTION_NONE);
+    gtk.gtk_widget_add_css_class(corrections, "boxed-list");
+    gtk.gtk_widget_add_css_class(corrections, "match-list");
+    const corrections_box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
+    gtk.gtk_widget_add_css_class(corrections_box, "match-corrections");
+    matches.corrections_box = corrections_box;
+    append(corrections_box, &.{ label("Album corrections", "match-section"), corrections });
+    gtk.gtk_widget_set_visible(corrections_box, gtk.false_);
+
+    const list = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(list, "match-rows");
+    matches.list = gtk.cast(gtk.Box, list);
+    const empty = label("", "match-empty");
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, empty), gtk.true_);
+    matches.empty = gtk.cast(gtk.Label, empty);
+    const note = label("", "match-note");
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, note), gtk.true_);
+    matches.note = gtk.cast(gtk.Label, note);
+
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(content, "matches-body");
+    gtk.gtk_widget_set_size_request(content, content_width, -1);
+    gtk.gtk_widget_set_hexpand(content, gtk.false_);
+    append(content, &.{ title.widget, tabs, corrections_box, list, empty, note });
+    matches.content = content;
+    const clamp = adw.adw_clamp_new();
+    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_width);
+    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, clamp), content_width);
+    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
+
+    const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
+    const column = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    append(column, &.{ clamp, spacer });
+
+    const scroller = gtk.gtk_scrolled_window_new();
+    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
+    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
+    gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
+    matches.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
+    _ = gtk.signalConnect(scroller, "destroy", gtk.callback(scrollerDestroyed), self);
+
+    const bin = adw.adw_breakpoint_bin_new();
+    gtk.gtk_widget_set_size_request(bin, 1, 1);
+    adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), scroller);
+    if (adw.adw_breakpoint_condition_parse("max-width: 1140px")) |condition| {
+        const breakpoint = adw.adw_breakpoint_new(condition);
+        _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(fluidApplied), self);
+        _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(fluidUnapplied), self);
+        adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
+    }
+
+    page_ui.addEnd(self, .matches, buildSearch(self));
+    matches.built = true;
+    return bin;
+}
+
+pub fn tabCounts(self: *App) ?liborca.ReleaseMatchCounts {
+    return if (self.matches.filter.len != 0) self.matches.filtered_counts else self.matches.counts;
+}
+
+fn showCounts(self: *App) void {
+    const matches = &self.matches;
+    const counts = tabCounts(self) orelse return;
+    var buffer: [32]u8 = undefined;
+    for (std.enums.values(Bucket)) |bucket| {
+        const count_label = matches.tabs.get(bucket).count orelse continue;
+        const count = switch (bucket) {
+            .confident => counts.confident,
+            .needs_review => counts.needs_review,
+            .unmatched => counts.unmatched,
+        };
+        gtk.gtk_label_set_text(count_label, strings.format(&buffer, "{f}", .{strings.grouped(count)}).ptr);
+    }
     updateCount(self);
 }
 
-pub fn reload(self: *App) void {
-    self.matches_dirty = false;
-    const list = self.matches_list orelse return;
-    gtk.gtk_list_box_remove_all(list);
-    const library = self.library orelse return;
-    reloadCorrections(self, library);
-    updateCount(self);
-    showAcceptConfident(self, library);
-    showSubmit(self, library);
-    const total = self.runtime.libraryMatchReviewCount(library) catch 0;
-    const unidentified = self.runtime.libraryUnidentifiedCount(library) catch 0;
-    var buffer: [256]u8 = undefined;
-    const groups = self.matches_group_count;
-    if (self.matches_meta) |meta| {
-        const text = if (groups == 0)
-            strings.format(&buffer, "{f} {s} to review" ++ separator ++ "{f} not identified", .{
-                strings.grouped(total),
-                if (total == 1) "track" else "tracks",
-                strings.grouped(unidentified),
-            })
-        else
-            strings.format(&buffer, "{f} {s}" ++ separator ++ "{f} {s} to review" ++ separator ++ "{f} not identified", .{
-                strings.grouped(groups),
-                if (groups == 1) "album correction" else "album corrections",
-                strings.grouped(total),
-                if (total == 1) "track" else "tracks",
-                strings.grouped(unidentified),
-            });
-        gtk.gtk_label_set_text(meta, text.ptr);
-    }
-    const nothing = total == 0 and groups == 0;
-    if (nothing) showEmpty(self, unidentified);
-    if (self.matches_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (nothing) "empty" else "list");
-    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, list), if (total == 0) gtk.false_ else gtk.true_);
+pub fn updateCount(self: *App) void {
+    const badge = self.matches_count orelse return;
+    const counts = self.matches.counts orelse {
+        request(self, .counts);
+        return;
+    };
+    const total = counts.needs_review + self.matches.group_count;
+    var buffer: [24]u8 = undefined;
+    const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&buffer, "{f}", .{strings.grouped(total)}) catch "";
+    gtk.gtk_label_set_text(badge, text.ptr);
+}
 
-    var page = self.runtime.libraryMatchReviewPage(library, app.page_size, 0) catch return;
-    defer page.deinit();
-    for (page.items) |item| {
-        const row = reviewRow(self, item) orelse continue;
-        gtk.gtk_list_box_append(list, row);
-        if (item.track_id != self.matches_open_track) continue;
-        adw.adw_expander_row_set_expanded(gtk.cast(adw.ExpanderRow, row), gtk.true_);
-        _ = gtk.g_idle_add(focusOpenRow, gtk.g_object_ref(row));
+pub fn unmatchedCount(self: *App) ?u64 {
+    if (self.matches.counts_stale) request(self, .counts);
+    const counts = self.matches.counts orelse return null;
+    return counts.unmatched;
+}
+
+fn emptyText(bucket: Bucket, filtered: bool) [*:0]const u8 {
+    if (filtered) return "No album here matches your search.";
+    return switch (bucket) {
+        .confident => "No album matches a MusicBrainz release with confidence yet.",
+        .needs_review => "No album needs review.",
+        .unmatched => "Every album has a MusicBrainz candidate.",
+    };
+}
+
+fn showList(self: *App) void {
+    const matches = &self.matches;
+    const list = matches.list orelse return;
+    while (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, list))) |child| gtk.gtk_box_remove(list, child);
+    const items = if (matches.page) |page| page.items else &.{};
+    for (items, 0..) |item, index| {
+        const detail: ?*const Detail = if (index < matches.details.len) &matches.details[index] else null;
+        const row = matchRow(self, item, detail) orelse continue;
+        gtk.gtk_box_append(list, row);
     }
-    if (self.matches_note) |note| {
-        const text: [:0]const u8 = if (total > page.items.len)
-            strings.format(&buffer, "Showing the first {f} of {f}. orca-cli matches lists them per track.", .{
-                strings.grouped(page.items.len),
+    if (matches.empty) |empty| {
+        gtk.gtk_label_set_text(empty, emptyText(matches.bucket, matches.filter.len != 0));
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, empty), @intFromBool(items.len == 0));
+    }
+    const total: u64 = if (tabCounts(self)) |counts| switch (matches.bucket) {
+        .confident => counts.confident,
+        .needs_review => counts.needs_review,
+        .unmatched => counts.unmatched,
+    } else items.len;
+    if (matches.note) |note| {
+        var buffer: [160]u8 = undefined;
+        const text: [:0]const u8 = if (total > items.len)
+            strings.format(&buffer, "Showing the first {f} of {f}. orca-cli matches --releases lists them all.", .{
+                strings.grouped(items.len),
                 strings.grouped(total),
             })
         else
             "";
         gtk.gtk_label_set_text(note, text.ptr);
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, note), @intFromBool(text.len != 0));
     }
+}
+
+fn request(self: *App, want: Want) void {
+    const matches = &self.matches;
+    const library = self.library orelse return;
+    if (matches.loader != null) {
+        if (@intFromEnum(want) > @intFromEnum(matches.wanted)) matches.wanted = want;
+        return;
+    }
+    matches.wanted = .none;
+    const loader = self.allocator.create(Loader) catch return;
+    loader.* = .{
+        .runtime = self.runtime,
+        .library = library,
+        .waker = self.waker(),
+        .bucket = matches.bucket,
+        .confident_at = thresholdFraction(self),
+        .filter = matches.filter,
+        .with_page = want == .page,
+    };
+    matches.counts_stale = false;
+    if (want == .page) matches.stale = false;
+    loader.thread = std.Thread.spawn(.{}, Loader.run, .{loader}) catch {
+        self.allocator.destroy(loader);
+        matches.counts_stale = true;
+        if (want == .page) matches.stale = true;
+        return;
+    };
+    matches.loader = loader;
+}
+
+pub fn tick(self: *App) void {
+    const matches = &self.matches;
+    const loader = matches.loader orelse return;
+    if (!loader.finished.load(.acquire)) return;
+    matches.loader = null;
+    defer loader.destroy(self.allocator);
+
+    const unmatched_before = if (matches.counts) |counts| counts.unmatched else null;
+    if (loader.counts) |counts| matches.counts = counts;
+    const current_filter = loader.filter.eql(&matches.filter);
+    if (current_filter) matches.filtered_counts = loader.filtered_counts;
+    matches.group_count = if (loader.groups) |groups| groups.items.len else 0;
+    showCounts(self);
+    if (matches.built) showCorrections(self, loader.groups);
+    if (loader.with_page and loader.bucket == matches.bucket and current_filter) {
+        matches.deinit();
+        matches.page = loader.page;
+        matches.details = loader.details;
+        loader.page = null;
+        loader.details = &.{};
+        showList(self);
+    }
+    const unmatched_after = if (matches.counts) |counts| counts.unmatched else null;
+    if (unmatched_before != unmatched_after) health.reload(self);
+
+    const wanted = matches.wanted;
+    matches.wanted = .none;
+    if (wanted == .page or (matches.stale and self.current_page == .matches)) {
+        request(self, .page);
+    } else if (wanted == .counts or matches.counts_stale) {
+        request(self, .counts);
+    }
+}
+
+pub fn shutdown(self: *App) void {
+    if (self.matches.loader) |loader| loader.destroy(self.allocator);
+    self.matches.loader = null;
+}
+
+pub fn reveal(self: *App, track_id: i64) void {
+    _ = track_id;
+    window.goTo(self, .matches);
+}
+
+pub fn showBucket(self: *App, bucket: Bucket) void {
+    const matches = &self.matches;
+    if (bucket != matches.bucket) {
+        matches.bucket = bucket;
+        matches.expanded = null;
+        matches.stale = true;
+        if (matches.tabs.get(bucket).button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
+    }
+    window.goTo(self, .matches);
+    shown(self);
+}
+
+pub fn invalidate(self: *App) void {
+    self.matches.stale = true;
+    self.matches.counts_stale = true;
+    match_review.invalidate(self);
+    request(self, if (self.current_page == .matches) .page else .counts);
+}
+
+pub fn shown(self: *App) void {
+    if (self.matches.stale) request(self, .page);
 }
