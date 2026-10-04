@@ -18,6 +18,7 @@ pub const ListenInput = struct {
     album: []const u8 = "",
     recording_mbid: ?[]const u8 = null,
     player_client: []const u8 = "",
+    syncable: bool = true,
 };
 
 pub const PlayStats = struct {
@@ -97,8 +98,8 @@ pub const ListenRepository = struct {
         var statement = try self.db.prepare(
             \\INSERT INTO listens(
             \\    file_id, recording_id, started_at, listened_ms, duration_ms,
-            \\    title, artist, album, recording_mbid, player_client)
-            \\VALUES (?1, (SELECT recording_id FROM files WHERE id = ?1), ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            \\    title, artist, album, recording_mbid, player_client, syncable)
+            \\VALUES (?1, (SELECT recording_id FROM files WHERE id = ?1), ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             \\ON CONFLICT(file_id, started_at) DO NOTHING
             \\RETURNING id, recording_id;
         );
@@ -112,6 +113,7 @@ pub const ListenRepository = struct {
         try statement.bindText(7, input.album);
         try statement.bindOptionalText(8, input.recording_mbid);
         try statement.bindText(9, input.player_client);
+        try statement.bindInt64(10, @intFromBool(input.syncable));
         if (try statement.step() != .row) return null;
         const id = statement.columnInt64(0);
         const recording_id = optionalInt64(statement, 1);
@@ -150,6 +152,81 @@ pub const ListenRepository = struct {
         try statement.bindInt64(2, started_at);
         try statement.bindInt64(3, value);
         if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// `updateListened` for a listen that now meets ListenBrainz's rule:
+    /// marks it syncable and, when `payload` is given and it was not syncable
+    /// before, queues it for `service` in the same transaction. Returns
+    /// whether it queued.
+    pub fn finishSyncable(
+        self: *ListenRepository,
+        file_id: i64,
+        started_at: i64,
+        listened_ms: u64,
+        service: []const u8,
+        payload: ?[]const u8,
+    ) !bool {
+        const value = std.math.cast(i64, listened_ms) orelse return error.InvalidListen;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var statement = try self.db.prepare(
+            \\UPDATE listens SET listened_ms = max(listened_ms, ?3), syncable = 1
+            \\WHERE file_id = ?1 AND started_at = ?2 AND syncable = 0
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, started_at);
+        try statement.bindInt64(3, value);
+        var queued = false;
+        if (try statement.step() == .row) {
+            const listen_id = statement.columnInt64(0);
+            if (try statement.step() != .done) return error.SqlFailed;
+            if (payload) |bytes| {
+                var key_buffer: [32]u8 = undefined;
+                const event_key = std.fmt.bufPrint(&key_buffer, "listen:{d}", .{listen_id}) catch unreachable;
+                try enqueueScrobbleLocked(self.db, service, event_key, bytes);
+                queued = true;
+            }
+        } else {
+            var update = try self.db.prepare(
+                "UPDATE listens SET listened_ms = max(listened_ms, ?3) WHERE file_id = ?1 AND started_at = ?2;",
+            );
+            defer update.deinit();
+            try update.bindInt64(1, file_id);
+            try update.bindInt64(2, started_at);
+            try update.bindInt64(3, value);
+            if (try update.step() != .done) return error.SqlFailed;
+        }
+        try self.db.exec("COMMIT;");
+        return queued;
+    }
+
+    /// Deletes every listen, every delivery of one, sent or not, and the
+    /// play counts drawn from them, in one transaction. Ratings, loves and
+    /// feedback stay. Returns how many listens went.
+    pub fn clear(self: *ListenRepository) !u64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        // Listen ids restart at 1 once the table is empty, and a delivery
+        // left keyed `listen:<id>` would silently swallow the new listen's.
+        try self.db.exec("DELETE FROM scrobble_queue WHERE event_key LIKE 'listen:%';");
+        try self.db.exec("DELETE FROM listens;");
+        const removed = self.db.changes();
+        try self.db.exec("DELETE FROM recording_play_stats;");
+        try self.db.exec("COMMIT;");
+        return removed;
+    }
+
+    pub fn count(self: *const ListenRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM listens;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     /// Plays of the Track's recording, from every file of it. Keyed on the

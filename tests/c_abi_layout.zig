@@ -68,6 +68,8 @@ const struct_pairs = .{
     .{ c_api.HealthKindSummaryView, c.orca_health_kind_summary_view },
     .{ c_api.HealthKindSummaryViewV2, c.orca_health_kind_summary_view_v2 },
     .{ c_api.LibraryStatsView, c.orca_library_stats_view },
+    .{ c_api.LibraryStatsViewV2, c.orca_library_stats_view_v2 },
+    .{ c_api.CacheSizeView, c.orca_cache_size },
     .{ c_api.ProviderSourceView, c.orca_provider_source_view },
     .{ c_api.HealthFileView, c.orca_health_file_view },
     .{ c_api.RootView, c.orca_root_view },
@@ -278,6 +280,13 @@ const export_mappings = .{
         pub const Tag = database.FolderEntryKind;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportFolderEntryKind(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_LISTEN_POLICY_";
+        pub const Tag = core.runtime.ListenPolicy;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportListenPolicy(tag);
         }
     },
     struct {

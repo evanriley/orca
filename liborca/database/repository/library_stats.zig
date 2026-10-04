@@ -22,6 +22,11 @@ pub const LibraryStats = struct {
     /// When the latest analysis measurement was stored, in Unix seconds; null
     /// before any analysis.
     last_analysis_at: ?i64,
+    /// When the latest duplicate scan a host started succeeded, in Unix
+    /// seconds, as the Job history records it; null when it records none.
+    last_duplicate_scan_at: ?i64,
+    /// Every listen kept in the local play history.
+    listens: u64,
 };
 
 pub const library_stats_sql =
@@ -31,7 +36,9 @@ pub const library_stats_sql =
     \\       present.files, present.bytes,
     \\       (SELECT COALESCE(sum(max(duration_ms, 0)), 0) FROM tracks),
     \\       (SELECT max(finished_at) FROM scan_runs WHERE state = 'completed'),
-    \\       (SELECT max(created_at) FROM analysis_results)
+    \\       (SELECT max(created_at) FROM analysis_results),
+    \\       (SELECT max(finished_at) FROM job_history WHERE kind = 'duplicate_scan' AND state = 'succeeded'),
+    \\       (SELECT count(*) FROM listens)
     \\FROM (SELECT count(*) AS files, COALESCE(sum(max(files.size_bytes, 0)), 0) AS bytes
     \\      FROM (SELECT DISTINCT file_id FROM locations NOT INDEXED
     \\            WHERE state <> 'missing' ORDER BY file_id) AS located
@@ -54,6 +61,8 @@ pub const LibraryStatsRepository = struct {
             .total_duration_ms = @intCast(statement.columnInt64(5)),
             .last_scan_finished_at = optionalInt64(statement, 6),
             .last_analysis_at = optionalInt64(statement, 7),
+            .last_duplicate_scan_at = optionalInt64(statement, 8),
+            .listens = @intCast(statement.columnInt64(9)),
         };
     }
 };
@@ -123,6 +132,8 @@ test "an empty library has zero counts and no scan or analysis time" {
         .total_duration_ms = 0,
         .last_scan_finished_at = null,
         .last_analysis_at = null,
+        .last_duplicate_scan_at = null,
+        .listens = 0,
     }, try library.stats.stats());
 }
 
@@ -153,4 +164,27 @@ test "the last scan time is when the latest completed scan run finished" {
         \\    ({d}, 3, 1700000200, 'completed'), ({d}, 4, NULL, 'running');
     , .{ root, root, root, root }, 0));
     try std.testing.expectEqual(@as(?i64, 1_700_000_200), (try library.stats.stats()).last_scan_finished_at);
+}
+
+test "the last duplicate scan time is when the latest succeeded duplicate scan in the Job history finished" {
+    var library = try openStatsLibrary("duplicates");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO job_history(kind, started_at, finished_at, state, completed_units) VALUES
+        \\    ('duplicate_scan', 1700000000, 1700000100, 'succeeded', 1),
+        \\    ('duplicate_scan', 1700000200, 1700000900, 'cancelled', 0),
+        \\    ('analysis', 1700000300, 1700000800, 'succeeded', 1),
+        \\    ('duplicate_scan', 1700000300, 1700000400, 'succeeded', 1);
+    );
+    try std.testing.expectEqual(@as(?i64, 1_700_000_400), (try library.stats.stats()).last_duplicate_scan_at);
+}
+
+test "library stats count every listen in the local play history" {
+    var library = try openStatsLibrary("listens");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO listens(file_id, started_at, listened_ms, title, artist, syncable) VALUES
+        \\    (NULL, 1700000000, 31000, 'One', 'Artist', 0), (NULL, 1700000500, 200000, 'Two', 'Artist', 1);
+    );
+    try std.testing.expectEqual(@as(u64, 2), (try library.stats.stats()).listens);
 }

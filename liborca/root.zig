@@ -210,6 +210,8 @@ pub const FeedbackChange = runtime.FeedbackChange;
 pub const ClientIdentity = runtime.ClientIdentity;
 pub const CredentialStore = runtime.CredentialStore;
 pub const ScrobblerStatus = runtime.ScrobblerStatus;
+pub const ListenPolicy = runtime.ListenPolicy;
+pub const CacheSize = runtime.CacheSize;
 pub const ScrobblerState = runtime.ScrobblerState;
 pub const BoundedText = runtime.BoundedText;
 

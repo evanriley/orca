@@ -203,6 +203,8 @@ const commands = [_]Command{
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND] [OFFSET]", .min_arguments = 1, .max_arguments = 3, .run = listHealthIssues },
     .{ .name = "stats", .usage = "stats DATABASE", .min_arguments = 1, .max_arguments = 1, .run = printLibraryStats },
+    .{ .name = "listens", .usage = "listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]", .min_arguments = 1, .max_arguments = 4, .run = listenSettings },
+    .{ .name = "cache", .usage = "cache DATABASE [--clear]", .min_arguments = 1, .max_arguments = 2, .run = providerCache },
     .{ .name = "sources", .usage = "sources", .min_arguments = 0, .max_arguments = 0, .run = listProviderSources, .shares_usage_line = true },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
     .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
@@ -560,8 +562,8 @@ const help_details =
     \\output device itself runs at as device_format=S16LE|S24LE|S24_32LE|S32LE|F32LE
     \\device_bits= device_rate=, or device_format=- when it is unknown (the device
     \\is suspended, virtual or not yet reported, or the backend is not PipeWire).
-    \\It records listens in the Library's play history and never sends them
-    \\anywhere.
+    \\It records listens in the Library's play history under the policy and
+    \\recording setting `listens` keeps, and never sends them anywhere.
     \\
     \\play-folder plays every Track below PATH (relative to root ROOT_ID; ""
     \\is the root itself), recursively in path order, at most 10000. It
@@ -759,8 +761,22 @@ const help_details =
     \\
     \\stats prints key=value lines: artists, releases, tracks, files (those
     \\with a location that is not missing), bytes, duration_ms,
-    \\last_scan_finished_at and last_analysis_at, in Unix seconds, or - when
-    \\no scan has completed or nothing is analysed.
+    \\last_scan_finished_at, last_analysis_at and last_duplicate_scan_at, in
+    \\Unix seconds, or - when no scan has completed, nothing is analysed or no
+    \\duplicate scan has succeeded, then listens, the local play history.
+    \\
+    \\listens prints policy=, record= and listens=. --policy=half keeps a play
+    \\heard for half the track or four minutes, ListenBrainz's rule; 30s keeps
+    \\one heard for 30 seconds and full one heard to the end. A listen kept
+    \\under 30s that falls short of ListenBrainz's rule stays local and is
+    \\never sent. --record=off keeps no listens at all. --clear deletes every
+    \\listen, every listen waiting to be sent and every play count, prints
+    \\cleared=N and keeps ratings and loves.
+    \\
+    \\cache prints the bytes of fetched provider data: artwork_bytes (Cover
+    \\Art Archive covers), photo_bytes (artist photos), lyrics_bytes (LRCLIB)
+    \\and info_bytes (artist and release info). --clear deletes them and
+    \\prints what they held; embedded and folder artwork and local lyrics stay.
     \\
     \\backfill re-reads the headers of files whose declared audio properties
     \\are missing and reprojects the Tracks derived from them, without walking
@@ -1521,6 +1537,67 @@ fn printLibraryStats(context: Context) !void {
     );
     try printOptionalStat(context.stdout, "last_scan_finished_at", stats.last_scan_finished_at);
     try printOptionalStat(context.stdout, "last_analysis_at", stats.last_analysis_at);
+    try printOptionalStat(context.stdout, "last_duplicate_scan_at", stats.last_duplicate_scan_at);
+    try context.stdout.print("listens={d}\n", .{stats.listens});
+}
+
+fn listenSettings(context: Context) !void {
+    var policy: ?liborca.ListenPolicy = null;
+    var record: ?bool = null;
+    var clear = false;
+    for (context.arguments[1..]) |argument| {
+        if (std.mem.startsWith(u8, argument, "--policy=")) {
+            const value = argument["--policy=".len..];
+            policy = if (std.mem.eql(u8, value, "half"))
+                .half_or_four_minutes
+            else if (std.mem.eql(u8, value, "30s"))
+                .thirty_seconds
+            else if (std.mem.eql(u8, value, "full"))
+                .full_track
+            else
+                return error.UnknownOption;
+        } else if (std.mem.startsWith(u8, argument, "--record=")) {
+            const value = argument["--record=".len..];
+            record = if (std.mem.eql(u8, value, "on")) true else if (std.mem.eql(u8, value, "off")) false else return error.UnknownOption;
+        } else if (std.mem.eql(u8, argument, "--clear")) {
+            clear = true;
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    if (policy) |value| try runtime.librarySetListenPolicy(library, value);
+    if (record) |value| try runtime.librarySetListenRecording(library, value);
+    if (clear) try context.stdout.print("cleared={d}\n", .{try runtime.libraryClearListens(library)});
+    const current = try runtime.libraryListenPolicy(library);
+    const recording = try runtime.libraryListenRecording(library);
+    const stats = try runtime.libraryStats(library);
+    try context.stdout.print("policy={s}\nrecord={s}\nlistens={d}\n", .{
+        switch (current) {
+            .half_or_four_minutes => "half",
+            .thirty_seconds => "30s",
+            .full_track => "full",
+        },
+        if (recording) "on" else "off",
+        stats.listens,
+    });
+}
+
+fn providerCache(context: Context) !void {
+    const clear = if (context.arguments.len == 2)
+        (if (std.mem.eql(u8, context.arguments[1], "--clear")) true else return error.UnknownOption)
+    else
+        false;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const size = if (clear) try runtime.libraryClearCache(library) else try runtime.libraryCacheSize(library);
+    try context.stdout.print("artwork_bytes={d}\nphoto_bytes={d}\nlyrics_bytes={d}\ninfo_bytes={d}\n", .{
+        size.artwork_bytes,
+        size.photo_bytes,
+        size.lyrics_bytes,
+        size.info_bytes,
+    });
 }
 
 fn listProviderSources(context: Context) !void {

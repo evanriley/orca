@@ -4,6 +4,24 @@
 
 ### Added
 
+- **Listen policy, history clearing and cache size.** A Library keeps a
+  `ListenPolicy` (`half_or_four_minutes`, ListenBrainz's rule and the
+  default, `thirty_seconds` or `full_track`) and a recording switch,
+  through `librarySetListenPolicy` and `librarySetListenRecording`. Schema
+  version 48 adds `listens.syncable`: a listen kept under a policy that falls
+  short of ListenBrainz's rule is stored with 0 and never sent.
+  `libraryClearListens` deletes the history, the listens waiting to be sent
+  and the play counts, and keeps ratings and loves. `LibraryStats` gains
+  `last_duplicate_scan_at` and `listens`. `libraryCacheSize` and
+  `libraryClearCache` measure and delete fetched covers, photos, LRCLIB
+  lyrics and artist and release info, never embedded or folder artwork or
+  local lyrics. `orca-cli listens` and `orca-cli cache` reach them, and
+  `orca-cli stats` prints the new fields. The C ABI adds
+  `orca_listen_policy`, `orca_library_set_listen_policy`,
+  `orca_library_listen_policy`, `orca_library_set_listen_recording`,
+  `orca_library_listen_recording`, `orca_library_clear_listens`,
+  `orca_cache_size`, `orca_library_cache_size`, `orca_library_clear_cache`
+  and `orca_library_stats_v2`.
 - **First-run folder estimate and scan progress.** `estimateAudioFiles`
   counts the audio files under a folder not yet added, by each file's first
   bytes, up to a limit (100000 by default) past which `FolderEstimate`

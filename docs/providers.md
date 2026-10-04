@@ -106,6 +106,24 @@ every 100 ms by `processNextCommand`, and a listen is recorded when:
 - the track is at least 30 s long, and
 - it has been audible for `min(half its length, 4 min)`.
 
+That is ListenBrainz's rule, and the default listen policy. A Library may keep
+another (`librarySetListenPolicy`, `orca-cli listens --policy=`):
+
+| Policy | A listen is recorded once heard for |
+| --- | --- |
+| `half_or_four_minutes` | ListenBrainz's rule, above |
+| `thirty_seconds` | 30 s, whatever the track's length |
+| `full_track` | the whole track, less one second |
+
+The policy decides only what the local history keeps. A listen is sent only
+when it also meets ListenBrainz's rule: one that does not is stored with
+`listens.syncable = 0` and never queued, and becomes syncable, and is queued
+if sending is on, when its finished time meets the rule. Under `full_track`,
+a play that meets ListenBrainz's rule but stops before the end is neither kept
+nor sent. `librarySetListenRecording(library, false)` (`--record=off`) keeps
+no listens at all, and so sends none; now-playing announcements still go out
+while sending is on. Both settings are stored in the Library.
+
 Audible time counts only frames played at their natural rate. Paused time and
 positions skipped by a seek do not count. `started_at` is when the entry's
 first frame would have played, in Unix seconds: the moment playback started,
@@ -131,7 +149,13 @@ play count and last play of a Track's file; `orca-cli track` prints them and
 `orca-gtk` shows them in the details panel. The schema is described in
 [database.md](database.md).
 
-`orca-cli play-tracks` records listens and never sends them.
+`orca-cli play-tracks` records listens under the Library's policy and never
+sends them.
+
+`libraryClearListens` (`orca-cli listens --clear`) deletes every listen, every
+delivery of one, sent or still waiting, and with them every play count, in one
+transaction, so `delivered` in the scrobbler status restarts from 0. Ratings, loves and feedback, and any feedback waiting to be sent,
+stay.
 
 ## Delivery
 

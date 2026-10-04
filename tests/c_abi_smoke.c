@@ -2266,6 +2266,51 @@ static int library_stats_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+static int listen_settings_smoke(orca_runtime *runtime, orca_handle library) {
+    uint8_t policy = 9;
+    SMOKE_CHECK(orca_library_listen_policy(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_listen_policy(runtime, library, &policy) == ORCA_STATUS_OK);
+    SMOKE_CHECK(policy == ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES);
+    SMOKE_CHECK(orca_library_set_listen_policy(runtime, library, 3) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_listen_policy(runtime, library, ORCA_LISTEN_POLICY_FULL_TRACK) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_listen_policy(runtime, library, &policy) == ORCA_STATUS_OK);
+    SMOKE_CHECK(policy == ORCA_LISTEN_POLICY_FULL_TRACK);
+    SMOKE_CHECK(orca_library_set_listen_policy(runtime, library, ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES) ==
+                ORCA_STATUS_OK);
+
+    uint8_t recording = 9;
+    SMOKE_CHECK(orca_library_listen_recording(runtime, library, &recording) == ORCA_STATUS_OK && recording == 1);
+    SMOKE_CHECK(orca_library_set_listen_recording(runtime, library, 2) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_listen_recording(runtime, library, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_listen_recording(runtime, library, &recording) == ORCA_STATUS_OK && recording == 0);
+    SMOKE_CHECK(orca_library_set_listen_recording(runtime, library, 1) == ORCA_STATUS_OK);
+
+    orca_library_stats_view stats;
+    orca_library_stats_view_v2 extended;
+    SMOKE_CHECK(orca_library_stats_v2(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_stats(runtime, library, &stats) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_stats_v2(runtime, library, &extended) == ORCA_STATUS_OK);
+    SMOKE_CHECK(extended.base.tracks == stats.tracks && extended.base.total_bytes == stats.total_bytes);
+    SMOKE_CHECK(extended.has_last_duplicate_scan_at ? extended.last_duplicate_scan_at > 0
+                                                    : extended.last_duplicate_scan_at == 0);
+
+    uint64_t removed = 99;
+    SMOKE_CHECK(orca_library_clear_listens(runtime, library, &removed) == ORCA_STATUS_OK);
+    SMOKE_CHECK(removed == extended.listens);
+    SMOKE_CHECK(orca_library_stats_v2(runtime, library, &extended) == ORCA_STATUS_OK && extended.listens == 0);
+
+    orca_cache_size size;
+    SMOKE_CHECK(orca_library_cache_size(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_cache_size(runtime, library, &size) == ORCA_STATUS_OK);
+    orca_cache_size cleared;
+    SMOKE_CHECK(orca_library_clear_cache(runtime, library, &cleared) == ORCA_STATUS_OK);
+    SMOKE_CHECK(cleared.artwork_bytes == size.artwork_bytes && cleared.photo_bytes == size.photo_bytes &&
+                cleared.lyrics_bytes == size.lyrics_bytes && cleared.info_bytes == size.info_bytes);
+    SMOKE_CHECK(orca_library_cache_size(runtime, library, &size) == ORCA_STATUS_OK);
+    SMOKE_CHECK(size.artwork_bytes == 0 && size.photo_bytes == 0 && size.lyrics_bytes == 0 && size.info_bytes == 0);
+    return 0;
+}
+
 struct provider_source_capture {
     size_t count;
     int first_is_musicbrainz;
@@ -4170,6 +4215,7 @@ int main(int argc, char **argv) {
     if (orca_library_release_count(runtime, library, &release_count) != ORCA_STATUS_OK) return 102;
     if (release_count == 0) return 103;
     if (library_stats_smoke(runtime, library) != 0) return 1;
+    if (listen_settings_smoke(runtime, library) != 0) return 1;
     if (provider_sources_smoke(runtime) != 0) return 1;
 
     /* Bounds are part of the contract here too. */

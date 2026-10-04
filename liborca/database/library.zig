@@ -79,6 +79,7 @@ pub const LibraryDatabase = struct {
     settings: repository.LibrarySettingsRepository,
     job_history: repository.JobHistoryRepository,
     stats: repository.LibraryStatsRepository,
+    fetched_cache: repository.FetchedCacheRepository,
     genres: repository.GenreRepository,
     search: repository.SearchRepository,
     track_lyrics: repository.TrackLyricsRepository,
@@ -178,6 +179,7 @@ pub const LibraryDatabase = struct {
             .settings = .{ .db = database, .write_lane = write_lane },
             .job_history = .{ .db = database, .write_lane = write_lane },
             .stats = .{ .db = database },
+            .fetched_cache = .{ .db = database, .write_lane = write_lane },
             .genres = .{ .db = database, .write_lane = write_lane },
             .search = .{ .db = database },
             .track_lyrics = .{ .db = database, .write_lane = write_lane },
@@ -2500,6 +2502,74 @@ test "updating a listen's time heard only ever raises it" {
     try std.testing.expectEqual(@as(i64, 230_000), try testScalar(library.database, "SELECT listened_ms FROM listens;"));
     try library.listens.updateListened(file_id, 1_700_000_001, 300_000);
     try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM listens;"));
+}
+
+test "a local-only listen finished past ListenBrainz's rule becomes syncable and is queued once" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-syncable?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    var input = testListen(file_id, 1_700_000_000);
+    input.listened_ms = 31_000;
+    input.syncable = false;
+    _ = try library.listens.record(input);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT syncable FROM listens;"));
+
+    try std.testing.expect(try library.listens.finishSyncable(file_id, 1_700_000_000, 130_000, "listenbrainz", "{}"));
+    try std.testing.expect(!try library.listens.finishSyncable(file_id, 1_700_000_000, 140_000, "listenbrainz", "{}"));
+
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT syncable FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 140_000), try testScalar(library.database, "SELECT listened_ms FROM listens;"));
+    try std.testing.expectEqual(@as(u64, 1), try library.scrobbles.pendingCount());
+}
+
+test "clearing listens removes them, their pending deliveries and play counts, and keeps ratings and loves" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-clear?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    try library.database.exec(
+        \\INSERT INTO recordings(id, title) VALUES (7, 'Northern Sky');
+        \\UPDATE files SET recording_id = 7;
+        \\INSERT INTO ratings(recording_id, rating, updated_at) VALUES (7, 80, 1);
+    );
+    _ = try library.listens.recordAndQueue(testListen(file_id, 1_700_000_000), "listenbrainz", "{}");
+    _ = try library.listens.record(testListen(file_id, 1_700_000_500));
+    try library.database.exec(
+        "INSERT INTO scrobble_queue(service, event_key, payload, state, created_at) VALUES ('listenbrainz', 'feedback:7', '{}', 0, 1);",
+    );
+    try std.testing.expectEqual(@as(u64, 2), try library.listens.count());
+
+    try std.testing.expectEqual(@as(u64, 2), try library.listens.clear());
+
+    try std.testing.expectEqual(@as(u64, 0), try library.listens.count());
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM recording_play_stats;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM scrobble_queue WHERE event_key LIKE 'listen:%';"));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM scrobble_queue;"));
+    try std.testing.expectEqual(@as(i64, 80), try testScalar(library.database, "SELECT rating FROM ratings WHERE recording_id = 7;"));
+}
+
+test "a listen recorded after the history was cleared is queued although its id was used before" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-clear-reuse?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    const first = (try library.listens.recordAndQueue(testListen(file_id, 1_700_000_000), "listenbrainz", "{}")).?;
+    try library.database.exec("UPDATE scrobble_queue SET state = 2;");
+    _ = try library.listens.clear();
+
+    const second = (try library.listens.recordAndQueue(testListen(file_id, 1_700_000_900), "listenbrainz", "{}")).?;
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM scrobble_queue WHERE state = 0;"));
 }
 
 test "a listen subject carries the Track's metadata and the file's MusicBrainz ids" {

@@ -74,6 +74,8 @@ pub const PlaylistPathStyle = runtime_playlists.PlaylistPathStyle;
 pub const ClientIdentity = network.client.Identity;
 pub const CredentialStore = providers.credentials.Store;
 pub const ScrobblerStatus = listen_worker.Status;
+pub const ListenPolicy = providers.listens.ListenPolicy;
+pub const CacheSize = database.CacheSize;
 pub const ScrobblerState = providers.listenbrainz.State;
 pub const BoundedText = providers.listenbrainz.BoundedText;
 pub const HostWaker = control.HostWaker;
@@ -95,6 +97,10 @@ pub const LibraryObject = struct {
     /// drain.
     listens: ?*listen_worker.Listens = null,
     stored_counts: ?runtime_listens.StoredCounts = null,
+    /// The stored listen settings, read when the Library opens so the
+    /// control lane can apply them without SQLite.
+    listen_policy: ListenPolicy = .half_or_four_minutes,
+    record_listens: bool = true,
     /// Null while the Library is not watched, and between a drain and the
     /// re-arm that follows it.
     watch: ?*runtime_watch.LibraryWatch = null,
@@ -617,7 +623,15 @@ pub const OrcaRuntime = struct {
         errdefer self.allocator.destroy(library_database);
         library_database.* = try database.LibraryDatabase.open(self.allocator, io, path);
         errdefer library_database.close();
-        return self.libraries.insert(.{ .database = library_database });
+        return self.libraries.insert(.{
+            .database = library_database,
+            .listen_policy = try library_database.settings.enumValue(
+                ListenPolicy,
+                database.setting_listen_policy,
+                .half_or_four_minutes,
+            ),
+            .record_listens = try library_database.settings.flag(database.setting_listen_recording, true),
+        });
     }
 
     pub fn destroyLibrary(self: *OrcaRuntime, library: LibraryHandle) !void {
@@ -1188,6 +1202,46 @@ pub const OrcaRuntime = struct {
     /// host may poll it every tick to learn when to reread its history.
     pub fn libraryListensRecorded(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return runtime_listens.libraryListensRecorded(self, library);
+    }
+
+    /// How long a play must be heard to count as a listen in the local
+    /// history. Only a listen that also meets ListenBrainz's rule (half the
+    /// track or four minutes, of a track of at least 30 seconds) is sent.
+    pub fn librarySetListenPolicy(self: *OrcaRuntime, library: LibraryHandle, policy: ListenPolicy) !void {
+        return runtime_listens.librarySetListenPolicy(self, library, policy);
+    }
+
+    pub fn libraryListenPolicy(self: *OrcaRuntime, library: LibraryHandle) !ListenPolicy {
+        return runtime_listens.libraryListenPolicy(self, library);
+    }
+
+    /// Whether plays are kept as listens. Off, nothing is recorded, so
+    /// nothing is sent either.
+    pub fn librarySetListenRecording(self: *OrcaRuntime, library: LibraryHandle, enabled: bool) !void {
+        return runtime_listens.librarySetListenRecording(self, library, enabled);
+    }
+
+    pub fn libraryListenRecording(self: *OrcaRuntime, library: LibraryHandle) !bool {
+        return runtime_listens.libraryListenRecording(self, library);
+    }
+
+    /// Deletes every local listen and the listens waiting to be sent, and
+    /// with them every play count. Ratings, loves and feedback stay. Returns
+    /// how many listens went.
+    pub fn libraryClearListens(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return runtime_listens.libraryClearListens(self, library);
+    }
+
+    /// The bytes of provider data the Library keeps.
+    pub fn libraryCacheSize(self: *OrcaRuntime, library: LibraryHandle) !CacheSize {
+        return (try libraryDatabase(self, library)).fetched_cache.size();
+    }
+
+    /// Deletes fetched covers, artist and related artist photos, LRCLIB
+    /// lyrics and artist and release info, and returns what they held.
+    /// Embedded and folder artwork and local lyrics stay.
+    pub fn libraryClearCache(self: *OrcaRuntime, library: LibraryHandle) !CacheSize {
+        return (try libraryDatabase(self, library)).fetched_cache.clear();
     }
 
     pub fn librarySetFeedback(

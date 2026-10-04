@@ -304,9 +304,17 @@ defer page.deinit();
 - `libraryStats(library)` returns `LibraryStats`: the Artist, Release and
   Track counts the unfiltered listings show, the files with a location that
   is not missing and their bytes, the Tracks' summed `total_duration_ms`,
-  and `last_scan_finished_at` and `last_analysis_at` in Unix seconds, null
-  before the first completed scan or measurement. See
-  [database.md](database.md#library-stats).
+  `last_scan_finished_at` and `last_analysis_at` in Unix seconds, null
+  before the first completed scan or measurement, `last_duplicate_scan_at`,
+  null until a host's duplicate scan succeeds, and `listens`, the local play
+  history's count. See [database.md](database.md#library-stats).
+- `libraryCacheSize(library)` returns a `CacheSize`: the bytes of fetched
+  Cover Art Archive covers (`artwork_bytes`), artist and related artist
+  photos (`photo_bytes`), LRCLIB lyrics (`lyrics_bytes`) and artist and
+  release info (`info_bytes`). `libraryClearCache(library)` deletes all of
+  it, which is fetched again when next wanted, and returns what it held.
+  Embedded and folder artwork and local lyrics are never touched. See
+  [database.md](database.md#fetched-cache).
 - `providerSources()` returns the `ProviderSource`s Orca takes data from, one
   per `ProviderSourceId` in its order: each one's `name`, `url`, what it
   `supplies`, its `licence`, and a `licence_url`, null when the licence has
@@ -495,6 +503,16 @@ defer page.deinit();
   serial names. `libraryTrackPlayStats` and `TrackDetails` report the play
   count and last play of the Track's recording, through any of its files; a
   file that moves to another recording takes its plays along.
+- `librarySetListenPolicy(library, ListenPolicy)` chooses how long a play
+  must be heard to be kept: `half_or_four_minutes` (the default and
+  ListenBrainz's rule), `thirty_seconds` or `full_track`;
+  `libraryListenPolicy` reads it. A listen kept under another policy that
+  falls short of ListenBrainz's rule is never sent.
+  `librarySetListenRecording(library, false)` keeps no listens;
+  `libraryListenRecording` reads it. `libraryClearListens(library)` deletes
+  the history, the listens waiting to be sent and the play counts, returns
+  how many listens went, and keeps ratings and loves. See
+  [providers.md](providers.md#listens).
 - `librarySetScrobbling` also sends a Library's listens to ListenBrainz, for
   at most one Library per runtime. The token comes from the `CredentialStore`
   given to `setCredentialStore`; `libraryScrobblerCredentialsChanged` has it

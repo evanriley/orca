@@ -10,6 +10,29 @@ const position_slack_ms: u64 = 500;
 
 pub const now_playing_after_ms: u64 = 10_000;
 
+/// How long a play must be heard before Orca keeps it as a listen. Only
+/// `half_or_four_minutes` is ListenBrainz's own rule; a listen kept under
+/// another policy that falls short of that rule stays local.
+pub const ListenPolicy = enum {
+    half_or_four_minutes,
+    thirty_seconds,
+    full_track,
+};
+
+pub const thirty_seconds_ms: u64 = 30_000;
+
+/// Audio the sampler can miss at each end of a play, so a track played from
+/// start to end still counts as heard in full.
+pub const full_track_tolerance_ms: u64 = 1_000;
+
+pub fn counts(policy: ListenPolicy, duration_ms: u64, listened_ms: u64) bool {
+    return switch (policy) {
+        .half_or_four_minutes => scrobble.listenedEnough(duration_ms, listened_ms),
+        .thirty_seconds => listened_ms >= thirty_seconds_ms,
+        .full_track => duration_ms != 0 and listened_ms + full_track_tolerance_ms >= duration_ms,
+    };
+}
+
 pub const Sample = struct {
     /// The audible entry's serial; zero when nothing is loaded.
     entry_serial: u32,
@@ -23,6 +46,7 @@ pub const Sample = struct {
     mono_ms: i64,
     /// Wall clock, in Unix seconds.
     wall_s: i64,
+    policy: ListenPolicy = .half_or_four_minutes,
 };
 
 pub const Listen = struct {
@@ -31,6 +55,9 @@ pub const Listen = struct {
     started_at: i64,
     listened_ms: u64,
     duration_ms: u64,
+    /// Whether the time heard meets ListenBrainz's rule, so the listen may
+    /// be sent.
+    syncable: bool = true,
 };
 
 pub const Emission = union(enum) {
@@ -67,10 +94,10 @@ pub const ListenTracker = struct {
         const open = if (self.open) |*value| value else return emission;
         if (sample.duration_ms != 0) open.listen.duration_ms = sample.duration_ms;
         open.listen.listened_ms += audibleMs(previous, sample);
-        if (!open.emitted and scrobble.listenedEnough(open.listen.duration_ms, open.listen.listened_ms)) {
+        if (!open.emitted and counts(sample.policy, open.listen.duration_ms, open.listen.listened_ms)) {
             open.emitted = true;
             open.started = true;
-            return .{ .eligible = open.listen };
+            return .{ .eligible = withSyncable(open.listen) };
         }
         if (sample.drained) return self.endPlayedOut();
         if (!open.started and open.listen.listened_ms >= now_playing_after_ms and
@@ -87,7 +114,7 @@ pub const ListenTracker = struct {
     pub fn end(self: *ListenTracker) Emission {
         const open = self.open orelse return .none;
         self.open = null;
-        return if (open.emitted) .{ .finished = open.listen } else .none;
+        return if (open.emitted) .{ .finished = withSyncable(open.listen) } else .none;
     }
 
     fn endPlayedOut(self: *ListenTracker) Emission {
@@ -116,6 +143,12 @@ pub const ListenTracker = struct {
         self.last_opened_serial = sample.entry_serial;
     }
 };
+
+fn withSyncable(listen: Listen) Listen {
+    var result = listen;
+    result.syncable = scrobble.listenedEnough(listen.duration_ms, listen.listened_ms);
+    return result;
+}
 
 fn sameEntry(entry_serial: u32, track_id: i64, sample: Sample) bool {
     const sampled = sample.track_id orelse return false;
@@ -147,6 +180,7 @@ const Transport = struct {
     duration_ms: u64 = 180_000,
     mono_ms: i64 = 0,
     wall_s: i64 = 1_700_000_000,
+    policy: ListenPolicy = .half_or_four_minutes,
     started: std.ArrayList(Listen) = .empty,
     eligible: std.ArrayList(Listen) = .empty,
     finished: std.ArrayList(Listen) = .empty,
@@ -168,6 +202,7 @@ const Transport = struct {
             .duration_ms = self.duration_ms,
             .mono_ms = self.mono_ms,
             .wall_s = self.wall_s,
+            .policy = self.policy,
         };
     }
 
@@ -500,4 +535,64 @@ test "a listen that counts on the sample that would announce it is not announced
     try testing.expectEqual(@as(usize, 1), transport.eligible.items.len);
     try transport.run(60_000);
     try testing.expectEqual(@as(usize, 0), transport.started.items.len);
+}
+
+test "each listen policy counts a play at its own threshold" {
+    try testing.expect(!counts(.half_or_four_minutes, 180_000, 89_999));
+    try testing.expect(counts(.half_or_four_minutes, 180_000, 90_000));
+    try testing.expect(counts(.half_or_four_minutes, 600_000, 240_000));
+    try testing.expect(!counts(.half_or_four_minutes, 25_000, 25_000));
+    try testing.expect(!counts(.thirty_seconds, 600_000, 29_999));
+    try testing.expect(counts(.thirty_seconds, 600_000, 30_000));
+    try testing.expect(!counts(.full_track, 180_000, 178_999));
+    try testing.expect(counts(.full_track, 180_000, 179_000));
+    try testing.expect(counts(.full_track, 25_000, 25_000));
+    try testing.expect(!counts(.full_track, 0, 60_000));
+}
+
+test "under the 30-second policy a play heard 35 seconds of three minutes counts but stays local" {
+    var transport: Transport = .{ .policy = .thirty_seconds };
+    defer transport.deinit();
+    try transport.run(35_000);
+    try testing.expectEqual(@as(usize, 1), transport.eligible.items.len);
+    try testing.expectEqual(@as(u64, 30_000), transport.eligible.items[0].listened_ms);
+    try testing.expect(!transport.eligible.items[0].syncable);
+    transport.advanceEntry(11);
+    try transport.run(200);
+    try testing.expectEqual(@as(usize, 1), transport.finished.items.len);
+    try testing.expect(!transport.finished.items[0].syncable);
+}
+
+test "a listen kept early under the 30-second policy finishes syncable once heard for half its length" {
+    var transport: Transport = .{ .policy = .thirty_seconds };
+    defer transport.deinit();
+    try transport.run(100_000);
+    try testing.expect(!transport.eligible.items[0].syncable);
+    transport.advanceEntry(11);
+    try transport.run(200);
+    try testing.expectEqual(@as(usize, 1), transport.finished.items.len);
+    try testing.expect(transport.finished.items[0].syncable);
+}
+
+test "under the full-track policy only a play heard to the end counts, and it is syncable" {
+    var skipped: Transport = .{ .policy = .full_track };
+    defer skipped.deinit();
+    try skipped.run(150_000);
+    skipped.advanceEntry(11);
+    try skipped.run(200);
+    try testing.expectEqual(@as(usize, 0), skipped.eligible.items.len);
+
+    var whole: Transport = .{ .policy = .full_track, .duration_ms = 60_000 };
+    defer whole.deinit();
+    try whole.run(60_000);
+    try testing.expectEqual(@as(usize, 1), whole.eligible.items.len);
+    try testing.expect(whole.eligible.items[0].syncable);
+}
+
+test "under the default policy every counted listen is syncable" {
+    var transport: Transport = .{};
+    defer transport.deinit();
+    try transport.run(90_100);
+    try testing.expectEqual(@as(usize, 1), transport.eligible.items.len);
+    try testing.expect(transport.eligible.items[0].syncable);
 }

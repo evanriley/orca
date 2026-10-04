@@ -207,6 +207,37 @@ pub fn libraryListensRecorded(self: *OrcaRuntime, library: LibraryHandle) !u64 {
     return listens.recorded.load(.monotonic);
 }
 
+pub fn librarySetListenPolicy(self: *OrcaRuntime, library: LibraryHandle, policy: runtime.ListenPolicy) !void {
+    const library_database = try runtime.libraryDatabase(self, library);
+    try library_database.settings.setEnum(database.setting_listen_policy, policy);
+    (try self.libraries.get(library)).listen_policy = policy;
+}
+
+pub fn libraryListenPolicy(self: *OrcaRuntime, library: LibraryHandle) !runtime.ListenPolicy {
+    _ = try runtime.libraryDatabase(self, library);
+    return (try self.libraries.get(library)).listen_policy;
+}
+
+pub fn librarySetListenRecording(self: *OrcaRuntime, library: LibraryHandle, enabled: bool) !void {
+    const library_database = try runtime.libraryDatabase(self, library);
+    try library_database.settings.setFlag(database.setting_listen_recording, enabled);
+    (try self.libraries.get(library)).record_listens = enabled;
+}
+
+pub fn libraryListenRecording(self: *OrcaRuntime, library: LibraryHandle) !bool {
+    _ = try runtime.libraryDatabase(self, library);
+    return (try self.libraries.get(library)).record_listens;
+}
+
+pub fn libraryClearListens(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const removed = try library_database.listens.clear();
+    const object_value = try self.libraries.get(library);
+    object_value.stored_counts = null;
+    if (object_value.listens) |listens| listens.historyChanged(self.control_threaded.io());
+    return removed;
+}
+
 pub fn librarySetFeedback(
     self: *OrcaRuntime,
     library: LibraryHandle,
@@ -476,6 +507,7 @@ pub fn sampleListens(self: *OrcaRuntime) void {
             (if (ref.library.eql(opener.library)) ref.track_id else null)
         else
             null;
+        const library_object = self.libraries.get(opener.library) catch continue;
         const emission = object_value.listens.observe(.{
             .entry_serial = read.status.entry_serial,
             .track_id = track_id,
@@ -486,6 +518,7 @@ pub fn sampleListens(self: *OrcaRuntime) void {
             .duration_ms = read.status.duration_ms,
             .mono_ms = now.mono_ms,
             .wall_s = now.wall_s,
+            .policy = library_object.listen_policy,
         });
         queueListen(self, opener.library, emission, now.mono_ms);
     }
@@ -551,6 +584,7 @@ fn queueListen(self: *OrcaRuntime, library: LibraryHandle, emission: providers.l
         .finished => |listen| .{ .kind = .finished, .listen = listen },
     };
     if (entry.kind == .now_playing and !announcesNowPlaying(self, library)) return;
+    if (entry.kind != .now_playing and !(self.libraries.get(library) catch return).record_listens) return;
     _ = startListenWorker(self, library) catch {};
     const object_value = self.libraries.get(library) catch return;
     const listens = object_value.listens orelse return;

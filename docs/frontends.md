@@ -68,7 +68,12 @@ The boundary covers the whole engine, not a fragment of it:
 - **Library stats.** `orca_library_stats` fills an
   `orca_library_stats_view`: the Artist, Release, Track and present-file
   counts, total bytes and duration, and the last completed scan and
-  analysis times, each with a `has_*` flag.
+  analysis times, each with a `has_*` flag. `orca_library_stats_v2` fills an
+  `orca_library_stats_view_v2`, which adds the last successful duplicate scan
+  and the listen count.
+- **Fetched cache.** `orca_library_cache_size` fills an `orca_cache_size` of
+  fetched artwork, photo, lyrics and info bytes; `orca_library_clear_cache`
+  deletes them and reports what they held.
 - **Provider sources.** `orca_provider_sources` calls back once per
   provider, in `orca_provider_source_id` order, with an
   `orca_provider_source_view`: its id, name, URL, what it supplies, its
@@ -127,6 +132,12 @@ The boundary covers the whole engine, not a fragment of it:
   counted, the advisory, and the dates the file was added and modified. `orca_library_track_play_stats`,
   `orca_library_listens_recorded` and `orca_library_unanalyzed_count` are
   plain reads.
+- **Listen settings.** `orca_library_set_listen_policy` and
+  `orca_library_listen_policy` keep an `orca_listen_policy`;
+  `orca_library_set_listen_recording` and `orca_library_listen_recording`
+  turn the play history on and off; `orca_library_clear_listens` deletes it,
+  the listens waiting to be sent and the play counts, and keeps ratings and
+  loves.
 - **Love and ratings.** `orca_library_set_feedback` loves, hates or clears
   feedback on Tracks' recordings, kept locally and queued for ListenBrainz;
   `orca_library_track_feedback` reads it. `orca_library_set_rating` stores a

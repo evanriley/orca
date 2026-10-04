@@ -170,6 +170,16 @@ typedef enum orca_feedback {
     ORCA_FEEDBACK_HATED = 2,
 } orca_feedback;
 
+/* How long a play must be heard before it is kept as a listen. Only
+ * ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES is ListenBrainz's rule: half the
+ * track or four minutes, of a track of at least 30 seconds. A listen kept
+ * under another policy that falls short of that rule is never sent. */
+typedef enum orca_listen_policy {
+    ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES = 0,
+    ORCA_LISTEN_POLICY_THIRTY_SECONDS = 1,
+    ORCA_LISTEN_POLICY_FULL_TRACK = 2,
+} orca_listen_policy;
+
 /* The `has_*` flags distinguish "zero" from "the library does not know". */
 typedef struct orca_track_view {
     int64_t id;
@@ -952,6 +962,30 @@ typedef struct orca_library_stats_view {
     uint8_t has_last_analysis_at;
     uint8_t reserved[6];
 } orca_library_stats_view;
+
+/* orca_library_stats_view with the last duplicate scan and the listen count.
+ * `last_duplicate_scan_at` is when the latest duplicate scan a host started
+ * succeeded, in Unix seconds, as the Job history records it; 0 when
+ * `has_last_duplicate_scan_at` is 0. `listens` counts the local play history. */
+typedef struct orca_library_stats_view_v2 {
+    orca_library_stats_view base;
+    int64_t last_duplicate_scan_at;
+    uint64_t listens;
+    uint8_t has_last_duplicate_scan_at;
+    uint8_t reserved[7];
+} orca_library_stats_view_v2;
+
+/* The bytes of provider data a Library keeps. `artwork_bytes`: Cover Art
+ * Archive covers of Releases and release groups. `photo_bytes`: Wikimedia
+ * Commons photos of Artists and related artists. `lyrics_bytes`: LRCLIB
+ * lyrics. `info_bytes`: artist and release descriptions, links, related
+ * artists and release groups. */
+typedef struct orca_cache_size {
+    uint64_t artwork_bytes;
+    uint64_t photo_bytes;
+    uint64_t lyrics_bytes;
+    uint64_t info_bytes;
+} orca_cache_size;
 
 /* A service Orca takes data from, so every host credits the same sources. */
 typedef enum orca_provider_source_id {
@@ -1846,6 +1880,28 @@ orca_status orca_library_stats(
     orca_handle library,
     orca_library_stats_view *output
 );
+/* orca_library_stats with the last duplicate scan and the listen count. */
+orca_status orca_library_stats_v2(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_library_stats_view_v2 *output
+);
+/* Fills `output` with the bytes of fetched provider data the Library keeps.
+ * A null `output` is ORCA_STATUS_INVALID_ARGUMENT. */
+orca_status orca_library_cache_size(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_cache_size *output
+);
+/* Deletes fetched covers, artist and related artist photos, LRCLIB lyrics and
+ * artist and release info, all fetched again when next wanted. Embedded and
+ * folder artwork and local lyrics stay. `cleared`, which may be null,
+ * receives what they held. */
+orca_status orca_library_clear_cache(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_cache_size *cleared
+);
 /* Calls `callback` once per provider Orca takes data from, in
  * orca_provider_source_id order. The list is fixed and needs no Library. A
  * null `callback` is ORCA_STATUS_INVALID_ARGUMENT. */
@@ -2211,6 +2267,40 @@ orca_status orca_library_listens_recorded(
     orca_runtime *runtime,
     orca_handle library,
     uint64_t *output
+);
+/* Keeps the Library's orca_listen_policy. INVALID_ARGUMENT for a value that
+ * is not one. */
+orca_status orca_library_set_listen_policy(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t policy
+);
+/* The Library's orca_listen_policy; ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES
+ * unless set. */
+orca_status orca_library_listen_policy(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t *output
+);
+/* `enabled` 0 keeps no listens, so none is sent either; 1, the default, keeps
+ * them. INVALID_ARGUMENT for any other value. */
+orca_status orca_library_set_listen_recording(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t enabled
+);
+orca_status orca_library_listen_recording(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t *output
+);
+/* Deletes every local listen and every listen waiting to be sent, and with
+ * them every play count. Ratings, loves and feedback stay. `removed`, which
+ * may be null, receives how many listens went. */
+orca_status orca_library_clear_listens(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *removed
 );
 /* Sets, or with ORCA_FEEDBACK_NONE clears, the feedback on the recordings of
  * `track_ids`: at most 512 ids; INVALID_ARGUMENT for more, for a null `ids`

@@ -161,6 +161,7 @@ pub const Listens = struct {
     signal: std.atomic.Value(u32) = .init(0),
     credentials_generation: std.atomic.Value(u32) = .init(0),
     feedback_generation: std.atomic.Value(u32) = .init(0),
+    history_generation: std.atomic.Value(u32) = .init(0),
     /// The generation whose token has been validated, written by the worker.
     credentials_validated: std.atomic.Value(u32) = .init(0),
     recorded: std.atomic.Value(u64) = .init(0),
@@ -194,6 +195,12 @@ pub const Listens = struct {
     /// Control lane.
     pub fn feedbackChanged(self: *Listens, io: std.Io) void {
         _ = self.feedback_generation.fetchAdd(1, .release);
+        self.wake(io);
+    }
+
+    /// Control lane: the listens or their queue changed outside the worker.
+    pub fn historyChanged(self: *Listens, io: std.Io) void {
+        _ = self.history_generation.fetchAdd(1, .release);
         self.wake(io);
     }
 
@@ -282,6 +289,7 @@ pub const Worker = struct {
         config.enabled = false;
         var seen_generation = self.listens.credentials_generation.load(.acquire);
         var seen_feedback = self.listens.feedback_generation.load(.acquire);
+        var seen_history = self.listens.history_generation.load(.acquire);
         var wake_at_ms: ?i64 = null;
         var pending = self.pendingCount(0);
         var feedback_pending = self.feedbackPendingCount(0);
@@ -322,7 +330,11 @@ pub const Worker = struct {
 
             const announcing = config.enabled and config.now_playing;
             const drained = self.drainRing(config);
-            if (drained.recorded) pending = self.pendingCount(pending);
+            const history_generation = self.listens.history_generation.load(.acquire);
+            if (drained.recorded or drained.queued or history_generation != seen_history) {
+                seen_history = history_generation;
+                pending = self.pendingCount(pending);
+            }
             if (!announcing) now_playing = null;
             if (drained.now_playing) |entry| {
                 if (announcing) {
@@ -492,7 +504,9 @@ pub const Worker = struct {
                     drained.queued = drained.queued or outcome == .queued;
                 },
             },
-            .finished => self.finish(entry.listen),
+            .finished => if (self.finish(entry.listen, config)) {
+                drained.queued = true;
+            },
             .now_playing => {
                 drained.now_playing = entry;
             },
@@ -517,8 +531,9 @@ pub const Worker = struct {
             .album = subject.album,
             .recording_mbid = subject.recording_mbid,
             .player_client = if (config.identity) |*owned| owned.view().name else "",
+            .syncable = listen.syncable,
         };
-        if (config.enabled) {
+        if (config.enabled and listen.syncable) {
             var event = providers.scrobble.Event.fromSubject(&subject, listen.started_at, listen.listened_ms);
             if (event.duration_ms == 0) event.duration_ms = listen.duration_ms;
             if (event.eligible()) {
@@ -533,14 +548,33 @@ pub const Worker = struct {
         return if (id == null) .duplicate else .recorded;
     }
 
-    /// Raises the recorded listen to the time finally heard. The listen
-    /// already stands as recorded, so a failure here loses only the extra.
-    fn finish(self: *Worker, listen: Listen) void {
+    /// Raises the recorded listen to the time finally heard, and queues a
+    /// listen kept as local only once that time meets ListenBrainz's rule.
+    /// The listen already stands as recorded, so a failure here loses only
+    /// the extra. Returns whether it queued.
+    fn finish(self: *Worker, listen: Listen, config: Config) bool {
         const subject = (self.database.listens.listenSubject(self.allocator, listen.track_id) catch
-            return) orelse return;
+            return false) orelse return false;
         defer subject.deinit();
-        const file_id = subject.file_id orelse return;
-        self.database.listens.updateListened(file_id, listen.started_at, listen.listened_ms) catch {};
+        const file_id = subject.file_id orelse return false;
+        if (!listen.syncable) {
+            self.database.listens.updateListened(file_id, listen.started_at, listen.listened_ms) catch {};
+            return false;
+        }
+        var payload: ?[]u8 = null;
+        defer if (payload) |bytes| self.allocator.free(bytes);
+        if (config.enabled) {
+            var event = providers.scrobble.Event.fromSubject(&subject, listen.started_at, listen.listened_ms);
+            if (event.duration_ms == 0) event.duration_ms = listen.duration_ms;
+            if (event.eligible()) payload = event.encode(self.allocator) catch null;
+        }
+        return self.database.listens.finishSyncable(
+            file_id,
+            listen.started_at,
+            listen.listened_ms,
+            listenbrainz.service,
+            payload,
+        ) catch false;
     }
 
     fn pendingCount(self: *Worker, previous: u64) u64 {

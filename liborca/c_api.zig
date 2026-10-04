@@ -814,6 +814,21 @@ pub const LibraryStatsView = extern struct {
     _reserved: [6]u8 = @splat(0),
 };
 
+pub const LibraryStatsViewV2 = extern struct {
+    base: LibraryStatsView,
+    last_duplicate_scan_at: i64,
+    listens: u64,
+    has_last_duplicate_scan_at: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const CacheSizeView = extern struct {
+    artwork_bytes: u64,
+    photo_bytes: u64,
+    lyrics_bytes: u64,
+    info_bytes: u64,
+};
+
 pub const ProviderSourceView = extern struct {
     id: u8,
     _reserved: [7]u8 = @splat(0),
@@ -1814,7 +1829,12 @@ pub export fn orca_library_stats(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const stats = box.runtime.libraryStats(importLibrary(library)) catch |err|
         return box.fail(@src(), err);
-    destination.* = .{
+    destination.* = exportLibraryStats(stats);
+    return .ok;
+}
+
+fn exportLibraryStats(stats: database.LibraryStats) LibraryStatsView {
+    return .{
         .artists = stats.artists,
         .releases = stats.releases,
         .tracks = stats.tracks,
@@ -1826,6 +1846,57 @@ pub export fn orca_library_stats(
         .has_last_scan_finished_at = @intFromBool(stats.last_scan_finished_at != null),
         .has_last_analysis_at = @intFromBool(stats.last_analysis_at != null),
     };
+}
+
+pub export fn orca_library_stats_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*LibraryStatsViewV2,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.libraryStats(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .base = exportLibraryStats(stats),
+        .last_duplicate_scan_at = stats.last_duplicate_scan_at orelse 0,
+        .listens = stats.listens,
+        .has_last_duplicate_scan_at = @intFromBool(stats.last_duplicate_scan_at != null),
+    };
+    return .ok;
+}
+
+fn exportCacheSize(size: core.runtime.CacheSize) CacheSizeView {
+    return .{
+        .artwork_bytes = size.artwork_bytes,
+        .photo_bytes = size.photo_bytes,
+        .lyrics_bytes = size.lyrics_bytes,
+        .info_bytes = size.info_bytes,
+    };
+}
+
+pub export fn orca_library_cache_size(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*CacheSizeView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const size = box.runtime.libraryCacheSize(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportCacheSize(size);
+    return .ok;
+}
+
+pub export fn orca_library_clear_cache(
+    runtime: ?*Runtime,
+    library: Handle,
+    cleared: ?*CacheSizeView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const size = box.runtime.libraryClearCache(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    if (cleared) |destination| destination.* = exportCacheSize(size);
     return .ok;
 }
 
@@ -2576,6 +2647,47 @@ pub export fn orca_library_listens_recorded(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryListensRecorded(importLibrary(library)) catch |err|
         return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_set_listen_policy(runtime: ?*Runtime, library: Handle, policy: u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const value = importListenPolicy(policy) orelse
+        return box.reject(@src(), .invalid_argument, "policy is not an orca_listen_policy");
+    box.runtime.librarySetListenPolicy(importLibrary(library), value) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_listen_policy(runtime: ?*Runtime, library: Handle, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const policy = box.runtime.libraryListenPolicy(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    destination.* = exportListenPolicy(policy);
+    return .ok;
+}
+
+pub export fn orca_library_set_listen_recording(runtime: ?*Runtime, library: Handle, enabled: u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    if (enabled > 1) return box.reject(@src(), .invalid_argument, "enabled must be 0 or 1");
+    box.runtime.librarySetListenRecording(importLibrary(library), enabled == 1) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_listen_recording(runtime: ?*Runtime, library: Handle, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const enabled = box.runtime.libraryListenRecording(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = @intFromBool(enabled);
+    return .ok;
+}
+
+pub export fn orca_library_clear_listens(runtime: ?*Runtime, library: Handle, removed: ?*u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const count = box.runtime.libraryClearListens(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    if (removed) |destination| destination.* = count;
     return .ok;
 }
 
@@ -6791,6 +6903,23 @@ pub fn exportHealthAction(action: database.HealthAction) u8 {
     };
 }
 
+pub fn exportListenPolicy(policy: core.runtime.ListenPolicy) u8 {
+    return switch (policy) {
+        .half_or_four_minutes => 0,
+        .thirty_seconds => 1,
+        .full_track => 2,
+    };
+}
+
+fn importListenPolicy(value: u8) ?core.runtime.ListenPolicy {
+    return switch (value) {
+        0 => .half_or_four_minutes,
+        1 => .thirty_seconds,
+        2 => .full_track,
+        else => null,
+    };
+}
+
 fn importFeedback(value: u8) ?database.Feedback {
     return switch (value) {
         0 => .none,
@@ -7766,6 +7895,68 @@ test "library stats and the sized health summary reach the C ABI, and a null out
     try std.testing.expectEqual(@as(u64, 2), summary.base.count);
     try std.testing.expectEqual(@as(u64, 2), summary.files);
     try std.testing.expectEqual(@as(u64, 3_000), summary.bytes);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "listen settings, history clearing, the cache and the second library stats reach the C ABI" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-listen-settings?mode=memory&cache=shared",
+        &library,
+    ));
+
+    var policy: u8 = 9;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_listen_policy(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_listen_policy(runtime, library, &policy));
+    try std.testing.expectEqual(@as(u8, 0), policy);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_listen_policy(runtime, library, 3));
+    try std.testing.expectEqual(Status.ok, orca_library_set_listen_policy(runtime, library, 1));
+    try std.testing.expectEqual(Status.ok, orca_library_listen_policy(runtime, library, &policy));
+    try std.testing.expectEqual(@as(u8, 1), policy);
+
+    var recording: u8 = 9;
+    try std.testing.expectEqual(Status.ok, orca_library_listen_recording(runtime, library, &recording));
+    try std.testing.expectEqual(@as(u8, 1), recording);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_listen_recording(runtime, library, 2));
+    try std.testing.expectEqual(Status.ok, orca_library_set_listen_recording(runtime, library, 0));
+    try std.testing.expectEqual(Status.ok, orca_library_listen_recording(runtime, library, &recording));
+    try std.testing.expectEqual(@as(u8, 0), recording);
+
+    const box = runtimeBox(runtime).?;
+    const library_database = try core.runtime.databaseOf(&box.runtime, importLibrary(library));
+    try library_database.database.exec(
+        \\INSERT INTO listens(file_id, started_at, listened_ms, title, artist) VALUES (NULL, 1, 1, 'a', 'b'), (NULL, 2, 1, 'a', 'b');
+        \\INSERT INTO job_history(kind, started_at, finished_at, state, completed_units) VALUES ('duplicate_scan', 5, 7, 'succeeded', 1);
+        \\INSERT INTO releases(id, title) VALUES (1, 'Covered');
+        \\INSERT INTO release_artwork(release_id, musicbrainz_release_id, image, mime, fetched_at) VALUES (1, 'r', x'010203', 'image/jpeg', 1);
+    );
+
+    var stats: LibraryStatsViewV2 = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_stats_v2(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_stats_v2(runtime, library, &stats));
+    try std.testing.expectEqual(@as(u64, 2), stats.listens);
+    try std.testing.expectEqual(@as(u8, 1), stats.has_last_duplicate_scan_at);
+    try std.testing.expectEqual(@as(i64, 7), stats.last_duplicate_scan_at);
+    try std.testing.expectEqual(@as(u64, 1), stats.base.releases);
+
+    var removed: u64 = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_clear_listens(runtime, library, &removed));
+    try std.testing.expectEqual(@as(u64, 2), removed);
+    try std.testing.expectEqual(Status.ok, orca_library_clear_listens(runtime, library, null));
+
+    var size: CacheSizeView = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_cache_size(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_cache_size(runtime, library, &size));
+    try std.testing.expectEqual(@as(u64, 3), size.artwork_bytes);
+    var cleared: CacheSizeView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_clear_cache(runtime, library, &cleared));
+    try std.testing.expectEqual(@as(u64, 3), cleared.artwork_bytes);
+    try std.testing.expectEqual(Status.ok, orca_library_clear_cache(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_cache_size(runtime, library, &size));
+    try std.testing.expectEqual(@as(u64, 0), size.artwork_bytes);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 

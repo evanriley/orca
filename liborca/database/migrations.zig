@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 47;
+pub const current_version = 48;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1444,6 +1444,11 @@ const migration_47 =
     \\
 ;
 
+const migration_48 =
+    \\ALTER TABLE listens ADD COLUMN syncable INTEGER NOT NULL DEFAULT 1;
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -1975,6 +1980,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 45 and target_version >= 45) try db.exec(migration_45);
     if (version < 46 and target_version >= 46) try db.exec(migration_46);
     if (version < 47 and target_version >= 47) try db.exec(migration_47);
+    if (version < 48 and target_version >= 48) try db.exec(migration_48);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -3790,4 +3796,30 @@ test "a version-45 library records which Releases have a front image in the fold
     try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM releases WHERE has_folder_cover = 1;"));
+}
+
+test "a version-47 library keeps its listens, each marked syncable, and a new listen may be stored as local only" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v47-listens.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 47);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One');
+        \\INSERT INTO files(id, audio_format, size_bytes, recording_id) VALUES (1, 1, 10, 1);
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist)
+        \\VALUES (1, 1, 1700000000, 90000, 'One', 'Artist');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT syncable FROM listens;"));
+    try db.exec(
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist, syncable)
+        \\VALUES (1, 1, 1700000100, 31000, 'One', 'Artist', 0);
+    );
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM listens WHERE syncable = 0;"));
 }

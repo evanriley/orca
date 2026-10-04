@@ -546,6 +546,20 @@ Recording.
 row in one transaction with `event_key = "listen:<listens.id>"`, so a listen is
 never stored without its delivery or queued twice.
 
+Version 48 adds `listens.syncable`, 1 for every existing row. A listen kept
+under a local listen policy that falls short of ListenBrainz's rule is
+stored with 0 and never queued. `ListenRepository.finishSyncable` raises a
+listen's heard time when its entry ends and, if that now meets the rule,
+sets `syncable = 1` and queues it in the same transaction, at most once: the
+`UPDATE ... WHERE syncable = 0 RETURNING id` matches only the first time.
+`ListenRepository.clear` deletes, in one transaction, every `listen:` row of
+`scrobble_queue`, delivered ones included, every listen and every
+`recording_play_stats` row; feedback rows, ratings and loves stay. Listen ids
+restart at 1 once the table is empty, so a delivered row left behind would
+share its key with a new listen and the new one would never be queued. The listen policy and the recording switch are
+`library_settings` keys `listens.policy` (an enum tag name) and
+`listens.record` (`0` or `1`).
+
 `scrobble_queue.state` is 0 pending, 1 leased, 2 delivered, 3 rejected.
 `ScrobbleQueueRepository.lease` claims rows in one `UPDATE ... RETURNING`:
 pending rows whose `next_attempt_at` has come, and leased rows whose
@@ -1283,6 +1297,11 @@ reads one row:
   A cancelled or failed run does not count.
 - `last_analysis_at`: `max(analysis_results.created_at)`, which the analysis
   cache sets on every insert and update.
+- `last_duplicate_scan_at`: the latest `job_history.finished_at` of a
+  `duplicate_scan` that `succeeded`. The history records host Jobs only and
+  keeps the newest 1,000 rows, so a scan run by itself, or pruned away, does
+  not count.
+- `listens`: `count(*)` of `listens`.
 
 The present files come from one scan of `locations` (`NOT INDEXED`) into an
 ordered `DISTINCT`, joined to `files` by primary key in id order. Letting
@@ -1307,6 +1326,27 @@ serves `JobHistoryRepository.page`, newest first; its filters are `scans`
 (scan, reconcile, projection, property backfill), `analysis` (analysis,
 duplicate scan), `file_changes` (tag writes) and `problems` (failed or
 cancelled).
+
+## Fetched cache
+
+`FetchedCacheRepository` (`Runtime.libraryCacheSize`,
+`Runtime.libraryClearCache`, `orca-cli cache`) measures and deletes the
+provider data a Library keeps, all of which can be fetched again:
+
+| `CacheSize` field | Tables |
+| --- | --- |
+| `artwork_bytes` | `release_artwork.image` (Cover Art Archive covers of Releases), `release_group_covers.image` |
+| `photo_bytes` | `artist_info.photo` unless it came from the Artist's folder (`photo_source = 0`), `related_artist_photos.photo` |
+| `lyrics_bytes` | `track_lyrics.synced` and `plain` (LRCLIB) |
+| `info_bytes` | the text of `artist_info`, `release_info`, `artist_links`, `artist_related` and `artist_release_groups` |
+
+Clearing deletes those rows in one transaction under the write lane. An
+`artist_info` row whose photo came from the Artist's folder keeps the photo,
+with every fetched field nulled and `fetched_at = 0`, so the next look fetches
+again. Embedded and folder covers are read from the files and
+`releases.has_folder_cover`, and local lyrics from the files, so neither is
+touched. `provider_cache`, the HTTP response cache, is not counted or
+cleared.
 
 ## Concurrency
 

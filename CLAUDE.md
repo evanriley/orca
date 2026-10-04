@@ -138,7 +138,8 @@ zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, p
 zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
 zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file
 zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
-zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at= (- when none)
+zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=
+zig build run -- cache DATABASE [--clear]   # artwork_bytes= photo_bytes= lyrics_bytes= info_bytes= of fetched provider data; --clear deletes it and prints what it held; embedded and folder art and local lyrics stay
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
 zig build run -- health-restore DATABASE FILE_ID KIND
 zig build run -- analyze DATABASE AUDIO
@@ -202,6 +203,7 @@ zig build run -- peq-response FILE [--rate=HZ]   # HZ<TAB>DB at 32 log-spaced fr
 
 # listening history and ListenBrainz -- token from ORCA_LISTENBRAINZ_TOKEN,
 # server from ORCA_LISTENBRAINZ_URL (https, or http to localhost)
+zig build run -- listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]   # policy= record= listens=; a listen short of ListenBrainz's rule stays local; --clear prints cleared=N, deletes listens, queued listens and play counts, keeps ratings and loves
 zig build run -- scrobble DATABASE [--status] [--timeout=MS]   # send queued listens and feedback (nothing queued: no request); --status sends nothing
 zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept locally; scrobble syncs it to ListenBrainz
 zig build run -- love-release DATABASE IDS [--clear]   # album love; kept in the library, never sent
