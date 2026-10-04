@@ -394,6 +394,14 @@
   service Orca takes data from, what it supplies and its licence, with links
   to the licence and the site; the MusicBrainz genres row shows only while
   genre fill is on. An About card shows the version and the audio backend.
+- **Headless screenshots of orca-gtk.** `scripts/headless-gui.sh PAGE
+  OUT.png [STEP...]` opens a page of `orca-gtk` in a private headless sway
+  session at 1440×900, drives it with keys, text and a virtual pointer, and
+  saves a screenshot. Nothing reaches the desktop, output is pinned to the
+  silent test sink, and only the processes it started are stopped.
+  `scripts/design-fixture.sh` builds the library it opens,
+  `fixtures/library/design.db`: 26 albums by eight artists with covers,
+  three artist photos, genres and five playlists, two of them smart.
 
 ### Changed
 

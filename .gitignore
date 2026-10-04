@@ -3,6 +3,7 @@ zig-out/
 zig-pkg/
 .direnv/
 result*
+/fixtures/library/design.db*
 
 # Local editor and OS state
 .DS_Store
