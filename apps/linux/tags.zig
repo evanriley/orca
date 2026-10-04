@@ -247,7 +247,7 @@ pub fn edit(self: *App, ids: []const i64) void {
     const dialog = adw.adw_dialog_new();
     editor.dialog = dialog;
     var heading_buffer: [48]u8 = undefined;
-    const heading: [:0]const u8 = if (ids.len == 1) "Edit Tags" else strings.printZ(&heading_buffer, "Edit {d} Songs", .{ids.len}) catch "Edit Tags";
+    const heading: [:0]const u8 = if (ids.len == 1) "Edit Tags" else strings.printZ(&heading_buffer, "Edit {d} Tracks", .{ids.len}) catch "Edit Tags";
     adw.adw_dialog_set_title(dialog, heading.ptr);
     adw.adw_dialog_set_content_width(dialog, 480);
     adw.adw_dialog_set_child(dialog, view);

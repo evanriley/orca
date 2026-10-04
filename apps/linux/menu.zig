@@ -34,7 +34,7 @@ const FeedbackCounts = struct {
 pub const Context = struct {
     kind: Kind = .tracks,
     tracks: std.ArrayList(i64) = .empty,
-    songs: std.ArrayList(feedback.Target) = .empty,
+    targets: std.ArrayList(feedback.Target) = .empty,
     release_id: ?i64 = null,
     release_loved: bool = false,
     artist_id: ?i64 = null,
@@ -46,7 +46,7 @@ pub const Context = struct {
     pub fn reset(self: *Context, kind: Kind) void {
         self.kind = kind;
         self.tracks.clearRetainingCapacity();
-        self.songs.clearRetainingCapacity();
+        self.targets.clearRetainingCapacity();
         self.release_id = null;
         self.release_loved = false;
         self.artist_id = null;
@@ -64,12 +64,12 @@ pub const Context = struct {
         current: liborca.Feedback,
     ) !void {
         try self.tracks.ensureUnusedCapacity(allocator, 1);
-        try self.songs.append(allocator, .{ .track_id = track_id, .recording_id = recording_id, .feedback = current });
+        try self.targets.append(allocator, .{ .track_id = track_id, .recording_id = recording_id, .feedback = current });
         self.tracks.appendAssumeCapacity(track_id);
     }
 
     pub fn deinit(self: *Context, allocator: std.mem.Allocator) void {
-        self.songs.deinit(allocator);
+        self.targets.deinit(allocator);
         self.tracks.deinit(allocator);
     }
 };
@@ -111,7 +111,7 @@ fn playlistMenu(self: *App) *gtk.GMenu {
 }
 
 fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
-    const songs = context.tracks.items.len != 0;
+    const tracks = context.tracks.items.len != 0;
     const playback = gtk.g_menu_new();
     switch (context.kind) {
         .tracks, .album, .artist => {
@@ -125,7 +125,7 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
             gtk.g_menu_append(playback, "Play Later", "queue.play-later");
             gtk.g_menu_append(playback, "Remove from Queue", "app.ctx-remove");
         },
-        .playlist => if (songs) {
+        .playlist => if (tracks) {
             gtk.g_menu_append(playback, "Play", "app.ctx-play");
             gtk.g_menu_append(playback, "Play Next", "app.ctx-play-next");
             gtk.g_menu_append(playback, "Add to Queue", "app.ctx-enqueue");
@@ -167,25 +167,25 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
             gtk.g_menu_append(opinion, "Love Album", "app.ctx-love-album");
     }
     if (counts.none != 0) {
-        gtk.g_menu_append(opinion, if (whole_album) "Love All Songs" else "Love", "app.ctx-love");
-        gtk.g_menu_append(opinion, if (whole_album) "Dislike All Songs" else "Dislike", "app.ctx-dislike");
+        gtk.g_menu_append(opinion, if (whole_album) "Love All Tracks" else "Love", "app.ctx-love");
+        gtk.g_menu_append(opinion, if (whole_album) "Dislike All Tracks" else "Dislike", "app.ctx-dislike");
     }
     if (counts.loved != 0)
-        gtk.g_menu_append(opinion, if (whole_album) "Remove Love from All Songs" else "Remove Love", "app.ctx-remove-love");
+        gtk.g_menu_append(opinion, if (whole_album) "Remove Love from All Tracks" else "Remove Love", "app.ctx-remove-love");
     if (counts.hated != 0)
-        gtk.g_menu_append(opinion, if (whole_album) "Remove Dislike from All Songs" else "Remove Dislike", "app.ctx-remove-dislike");
-    const rates_songs = switch (context.kind) {
+        gtk.g_menu_append(opinion, if (whole_album) "Remove Dislike from All Tracks" else "Remove Dislike", "app.ctx-remove-dislike");
+    const rates_tracks = switch (context.kind) {
         .tracks, .queue, .playlist => true,
         .album, .artist => false,
     };
-    if (songs and rates_songs) {
+    if (tracks and rates_tracks) {
         const rating = ratingMenu();
         gtk.g_menu_append_submenu(opinion, "Rating", gtk.cast(gtk.GMenuModel, rating));
         gtk.g_object_unref(rating);
     }
     if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, opinion)) != 0)
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, opinion));
-    if (songs and context.kind != .artist) {
+    if (tracks and context.kind != .artist) {
         const collecting = gtk.g_menu_new();
         const choices = playlistMenu(self);
         gtk.g_menu_append_submenu(collecting, "Add to Playlist", gtk.cast(gtk.GMenuModel, choices));
@@ -193,7 +193,7 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
         gtk.g_object_unref(choices);
         gtk.g_object_unref(collecting);
     }
-    if (context.kind != .artist and (songs or context.kind != .playlist)) {
+    if (context.kind != .artist and (tracks or context.kind != .playlist)) {
         const editing = gtk.g_menu_new();
         gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
         if (context.kind == .tracks or context.kind == .album or context.kind == .playlist)
@@ -201,7 +201,7 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
         gtk.g_object_unref(editing);
     }
-    if (context.tracks.items.len == 1 and rates_songs) {
+    if (context.tracks.items.len == 1 and rates_tracks) {
         const identification = gtk.g_menu_new();
         gtk.g_menu_append(identification, "Verify", "app.ctx-verify");
         gtk.g_menu_append(identification, "Re-identify", "app.ctx-reidentify");
@@ -308,7 +308,7 @@ pub fn gestureWidget(gesture: ?*anyopaque) *gtk.Widget {
 
 fn countFeedback(context: *const Context) FeedbackCounts {
     var counts: FeedbackCounts = .{};
-    for (context.songs.items) |song| switch (song.feedback) {
+    for (context.targets.items) |track| switch (track.feedback) {
         .none => counts.none += 1,
         .loved => counts.loved += 1,
         .hated => counts.hated += 1,
@@ -317,19 +317,19 @@ fn countFeedback(context: *const Context) FeedbackCounts {
 }
 
 pub fn love(self: *App) void {
-    feedback.change(self, self.context.songs.items, null, .loved);
+    feedback.change(self, self.context.targets.items, null, .loved);
 }
 
 pub fn dislike(self: *App) void {
-    feedback.change(self, self.context.songs.items, null, .hated);
+    feedback.change(self, self.context.targets.items, null, .hated);
 }
 
 pub fn removeLove(self: *App) void {
-    feedback.change(self, self.context.songs.items, .loved, .none);
+    feedback.change(self, self.context.targets.items, .loved, .none);
 }
 
 pub fn removeDislike(self: *App) void {
-    feedback.change(self, self.context.songs.items, .hated, .none);
+    feedback.change(self, self.context.targets.items, .hated, .none);
 }
 
 pub fn loveAlbum(self: *App) void {
@@ -341,7 +341,7 @@ pub fn removeAlbumLove(self: *App) void {
 }
 
 pub fn rate(self: *App, stars: i64) void {
-    ratings.change(self, self.context.songs.items, ratings.menuRating(stars));
+    ratings.change(self, self.context.targets.items, ratings.menuRating(stars));
 }
 
 pub fn addToPlaylist(self: *App, playlist_id: i64) void {
@@ -432,7 +432,7 @@ pub fn enqueue(self: *App) void {
 pub fn remove(self: *App) void {
     const position = self.context.queue_position orelse return;
     self.runtime.playerQueueRemove(self.player, position) catch |err| switch (err) {
-        error.QueueEntryInUse => self.toast("That song is already playing or up next"),
+        error.QueueEntryInUse => self.toast("That track is already playing or up next"),
         else => self.toast("Could not remove that entry"),
     };
     self.requestTick();

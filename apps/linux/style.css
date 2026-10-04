@@ -784,8 +784,8 @@ scale.volume slider {
   min-height: 20px;
 }
 
-.track-list .song-number,
-.track-list .song-duration {
+.track-list .track-number,
+.track-list .track-duration {
   color: @orca_text_3;
 }
 
@@ -807,7 +807,7 @@ scale.volume slider {
   background-color: color-mix(in srgb, @orca_accent 14%, @orca_bg_selected);
 }
 
-.track-list row.playing .song-title {
+.track-list row.playing .track-title {
   color: @orca_accent_text;
   font-weight: 600;
 }
@@ -1762,7 +1762,7 @@ button.artist-photo-credit {
   color: @orca_text_3;
 }
 
-.artist-song-number {
+.artist-track-number {
   color: @orca_text_3;
 }
 
@@ -1793,12 +1793,12 @@ button.see-all {
   color: @orca_text_2;
 }
 
-.artist-song {
+.artist-track {
   min-height: 52px;
   padding: 0 8px;
 }
 
-.artist-song-cover {
+.artist-track-cover {
   border-radius: 4px;
 }
 
@@ -2479,7 +2479,7 @@ button.playlist-show-all {
   margin: 0 20px;
 }
 
-.songs-tracks {
+.tracks-page {
   margin: 0 16px;
 }
 
@@ -2488,7 +2488,7 @@ button.playlist-show-all {
   margin: 0 16px;
 }
 
-.narrow .songs-tracks {
+.narrow .tracks-page {
   margin: 0 8px;
 }
 
@@ -3359,7 +3359,7 @@ button.peq-add {
   min-height: 36px;
 }
 
-/* Songs page */
+/* Tracks page */
 
 button.filters-button,
 .filters-button > button {
@@ -3371,15 +3371,15 @@ button.filters-button,
   box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 50%, transparent);
 }
 
-.song-filters {
+.track-filters {
   padding: 14px 16px;
 }
 
-.song-filters .filters-label {
+.track-filters .filters-label {
   color: @orca_text_2;
 }
 
-.songs-title dropdown {
+.tracks-title dropdown {
   min-width: 170px;
 }
 
@@ -3395,7 +3395,7 @@ button.filters-button,
   margin-left: 0;
 }
 
-.track-list .song-format {
+.track-list .track-format {
   color: @orca_text_3;
 }
 
@@ -3411,7 +3411,7 @@ button.filters-button,
 }
 
 .track-list row.playing button.row-more,
-.track-list.loved-songs button.row-more {
+.track-list.loved-tracks button.row-more {
   opacity: 1;
 }
 
@@ -3578,12 +3578,12 @@ flowbox.genre-albums > flowboxchild {
 }
 
 list.genre-artists > row,
-list.genre-songs > row {
+list.genre-tracks > row {
   box-shadow: none;
 }
 
 list.genre-artists > row:last-child,
-list.genre-songs > row:last-child {
+list.genre-tracks > row:last-child {
   border-bottom: none;
 }
 
@@ -3597,7 +3597,7 @@ list.genre-songs > row:last-child {
   padding: 3px 6px;
 }
 
-.genre-song {
+.genre-track {
   min-height: 44px;
   padding: 0 6px;
 }

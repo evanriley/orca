@@ -154,7 +154,7 @@ fn kindDetail(kind: ?Kind) [*:0]const u8 {
         .missing_analysis => "Plays without volume levelling",
         .clipping => "Peak at or above 0 dBFS; not necessarily audible",
         .excessive_silence => "Often a hidden track or a long rip",
-        .technical_anomaly => "Two songs claim one position",
+        .technical_anomaly => "Two tracks claim one position",
         .corrupt_audio => "Playback may stop or skip",
         .exact_duplicate, .likely_duplicate => "",
         .unreadable_file => "Moved, unreadable or damaged",
@@ -164,7 +164,7 @@ fn kindDetail(kind: ?Kind) [*:0]const u8 {
 
 fn kindAbout(kind: ?Kind) [*:0]const u8 {
     return switch (kind orelse return "Orca has not measured these files yet, so they play without ReplayGain and are not checked for clipping, silence, damage or duplicates.") {
-        .missing_metadata => "Songs without a title, artist or album are hard to find and sort, and fall into Unknown groups.",
+        .missing_metadata => "Tracks without a title, artist or album are hard to find and sort, and fall into Unknown groups.",
         .missing_track_number => "Without a track number Orca orders the album by file name, which may not be the order it was released in.",
         .album_artist_anomaly => "Without an album artist, an album with guest artists can split into several albums.",
         .artwork_problem => "These albums have no embedded cover and none was fetched, so they show a placeholder.",
@@ -174,7 +174,7 @@ fn kindAbout(kind: ?Kind) [*:0]const u8 {
         .technical_anomaly => "Two recordings on one album claim the same track number, which can be a duplicate or a tagging slip.",
         .corrupt_audio => "The file opened, but part of its audio would not decode. Playback may stop or skip there.",
         .exact_duplicate => "The same audio is in the library more than once. Removing the extra copies would free the space shown.",
-        .likely_duplicate => "The audio closely resembles another file's: often the same song in another format or from another release.",
+        .likely_duplicate => "The audio closely resembles another file's: often the same track in another format or from another release.",
         .unreadable_file => "Orca could not open the file or read its header. It may have moved, lost its permissions or be damaged.",
         .recording_mismatch => "AcoustID recognises the audio as a different recording from the one the library names.",
     };
@@ -204,7 +204,7 @@ fn actionLabel(action: CardAction) [*:0]const u8 {
 fn actionAbout(kind: ?Kind) [*:0]const u8 {
     return switch (cardAction(kind)) {
         .analyze => "Analyze measures loudness for ReplayGain and checks for clipping, silence and damage. It takes hours on a large library, and stopping it keeps what is done.",
-        .fix_in_matches => "Fix opens Matches, which searches MusicBrainz for these songs and lets you accept what it finds. Each file also offers Edit Tags. Both change the library, not the files.",
+        .fix_in_matches => "Fix opens Matches, which searches MusicBrainz for these tracks and lets you accept what it finds. Each file also offers Edit Tags. Both change the library, not the files.",
         .review_in_matches => "Review opens Matches, where each correction can be accepted or dismissed. Accepting changes the library, not the files.",
         .fix => "Fix lists the albums' files. An album with a MusicBrainz ID fetches its cover from the Cover Art Archive; the others need a match first. Covers are kept in the library, never written to files.",
         .review => if (kind == .exact_duplicate or kind == .likely_duplicate)
@@ -484,7 +484,7 @@ fn fixMenu(row: *gtk.Widget, issue: *Issue) void {
     gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, model));
     gtk.g_object_unref(model);
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(button, "Find this song on MusicBrainz, or edit its tags");
+    gtk.gtk_widget_set_tooltip_text(button, "Find this track on MusicBrainz, or edit its tags");
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), button);
 }
 
@@ -647,7 +647,7 @@ fn cardActionClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn actionTooltip(kind: ?Kind) [*:0]const u8 {
     return switch (cardAction(kind)) {
         .analyze => "Measure loudness for ReplayGain across the library",
-        .fix_in_matches => "Search MusicBrainz for these songs in Matches",
+        .fix_in_matches => "Search MusicBrainz for these tracks in Matches",
         .review_in_matches => "Review the proposed corrections in Matches",
         .fix => "Show the files, with Fetch Cover on each",
         .review => "Show the files",

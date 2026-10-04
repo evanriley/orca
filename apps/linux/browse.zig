@@ -136,7 +136,7 @@ pub fn loadNextArtistPage(self: *App) void {
             artist.release_count,
             if (artist.release_count == 1) "album" else "albums",
             artist.track_count,
-            if (artist.track_count == 1) "song" else "songs",
+            if (artist.track_count == 1) "track" else "tracks",
         }) catch "";
         append(store, artist.id, artist.name, detail);
     }
@@ -183,7 +183,7 @@ pub fn loadNextReleasePage(self: *App) void {
     for (page.items) |release| {
         const discs = release.disc_count orelse 1;
         const detail = if (discs > 1)
-            strings.printZ(&buffer, "{s} · {d} songs · {d} discs", .{
+            strings.printZ(&buffer, "{s} · {d} tracks · {d} discs", .{
                 release.album_artist,
                 release.track_count,
                 discs,
@@ -192,7 +192,7 @@ pub fn loadNextReleasePage(self: *App) void {
             strings.printZ(&buffer, "{s} · {d} {s}", .{
                 release.album_artist,
                 release.track_count,
-                if (release.track_count == 1) "song" else "songs",
+                if (release.track_count == 1) "track" else "tracks",
             }) catch "";
         append(store, release.id, release.title, detail);
     }

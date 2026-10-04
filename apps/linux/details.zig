@@ -16,7 +16,7 @@ const strings = @import("strings.zig");
 const app = @import("app.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
-const song_table = @import("song_table.zig");
+const track_table = @import("track_table.zig");
 const matches = @import("matches.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
@@ -465,7 +465,7 @@ fn choicePage(panel: *const Panel) ?ChoicePage {
         .artist => |artist| .{ .artist = artist.artist_id },
         .ids => |ids| {
             const genres = &panel.self.genres;
-            if (ids.ptr != genres.song_ids[0..].ptr) return null;
+            if (ids.ptr != genres.track_ids[0..].ptr) return null;
             return .{ .genre = (genres.current orelse return null).id };
         },
         .selection, .playlist, .playing => null,
@@ -514,8 +514,8 @@ fn recalledChoice(panel: *const Panel) ?i64 {
 fn wantedTrack(panel: *Panel) ?i64 {
     const self = panel.self;
     switch (panel.source) {
-        .selection => |selection| return song_table.firstSelected(selection) orelse self.shown_track_id,
-        .playlist => |playlist| return song_table.firstSelected(playlist.selection),
+        .selection => |selection| return track_table.firstSelected(selection) orelse self.shown_track_id,
+        .playlist => |playlist| return track_table.firstSelected(playlist.selection),
         .ids, .album, .artist => {
             if (panel.chosen) |chosen| return chosen;
             if (panel.artist_pinned) return null;
@@ -1957,7 +1957,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, file_section }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
 
-    const placeholder = gtk.gtk_label_new("Select a song to see its details.");
+    const placeholder = gtk.gtk_label_new("Select a track to see its details.");
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, placeholder), gtk.true_);
     gtk.gtk_widget_add_css_class(placeholder, "dim-label");
     gtk.gtk_widget_set_margin_top(placeholder, 24);

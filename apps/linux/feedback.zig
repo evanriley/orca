@@ -1,5 +1,5 @@
 //! Love and dislike: the heart in the player bar, the heart button on every
-//! song row, and the one place a change is applied and shown.
+//! track row, and the one place a change is applied and shown.
 //!
 //! The choice belongs to liborca and is kept per recording; this only asks for
 //! it and repaints what displays it.
@@ -9,7 +9,7 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const app = @import("app.zig");
 const track_model = @import("track_model.zig");
-const song_table = @import("song_table.zig");
+const track_table = @import("track_table.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const queue = @import("queue.zig");
@@ -184,7 +184,7 @@ fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void
     repaintLists(self, changed, .{ .feedback = value });
 }
 
-/// Shows `change` on every listed song whose recording is in `changed`.
+/// Shows `change` on every listed track whose recording is in `changed`.
 pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
     repaintRows(self, changed, change_value);
     albums.repaint(self, changed, change_value);
@@ -223,5 +223,5 @@ pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, change_val
 }
 
 fn repaintRows(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
-    song_table.repaint(&self.songs, changed, change_value);
+    track_table.repaint(&self.tracks, changed, change_value);
 }

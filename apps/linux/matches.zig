@@ -179,9 +179,9 @@ fn acceptGroupClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void 
         return groupRefused(self, err, "Could not save the correction");
     var buffer: [64]u8 = undefined;
     self.toast(if (acceptance.accepted == 1)
-        "Corrected 1 song"
+        "Corrected 1 track"
     else
-        strings.format(&buffer, "Corrected {f} songs", .{strings.grouped(acceptance.accepted)}));
+        strings.format(&buffer, "Corrected {f} tracks", .{strings.grouped(acceptance.accepted)}));
     accepted(self);
     if (acceptance.values_written != 0 and tracks.items.len != 0) tags.confirmWrite(self, tracks.items);
 }
@@ -246,12 +246,12 @@ fn correctionGroupRow(self: *App, group: liborca.CorrectionGroup) *gtk.Widget {
     var subtitle_buffer: [128]u8 = undefined;
     const count = group.proposals.len;
     adw.adw_expander_row_set_subtitle(gtk.cast(adw.ExpanderRow, row), if (count == 1)
-        "1 song is identified as another track of this album"
+        "1 track is identified as another track of this album"
     else
-        strings.format(&subtitle_buffer, "{d} songs are identified as other tracks of this album", .{count}).ptr);
+        strings.format(&subtitle_buffer, "{d} tracks are identified as other tracks of this album", .{count}).ptr);
     adw.adw_expander_row_set_title_lines(gtk.cast(adw.ExpanderRow, row), 1);
     const accept_button = groupButton("Accept All", group.group_id, gtk.callback(acceptGroupClicked), self);
-    gtk.gtk_widget_set_tooltip_text(accept_button, "Record every song's corrected recording, title and position");
+    gtk.gtk_widget_set_tooltip_text(accept_button, "Record every track's corrected recording, title and position");
     gtk.gtk_widget_add_css_class(accept_button, "suggested-action");
     const dismiss_button = groupButton("Dismiss All", group.group_id, gtk.callback(dismissGroupClicked), self);
     adw.adw_expander_row_add_suffix(gtk.cast(adw.ExpanderRow, row), accept_button);
@@ -343,7 +343,7 @@ fn findClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn noConfidentText(buffer: []u8, self: *const App) [:0]const u8 {
-    return strings.format(buffer, "No song has a clear best match scoring {d}% or more", .{self.match_threshold_percent});
+    return strings.format(buffer, "No track has a clear best match scoring {d}% or more", .{self.match_threshold_percent});
 }
 
 fn acceptConfidentClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -360,7 +360,7 @@ fn acceptConfidentClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     var body_buffer: [256]u8 = undefined;
     const body = strings.format(
         &body_buffer,
-        "Each song gets its best match scoring {d}% or more, preferring one its audio fingerprint confirms. This records MusicBrainz recording IDs in your library and never changes your files.",
+        "Each track gets its best match scoring {d}% or more, preferring one its audio fingerprint confirms. This records MusicBrainz recording IDs in your library and never changes your files.",
         .{self.match_threshold_percent},
     );
     const dialog = adw.adw_alert_dialog_new(heading.ptr, body.ptr);
@@ -415,16 +415,16 @@ fn submitClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const library = self.library orelse return;
     const count = self.runtime.libraryAcoustIdSubmittableCount(library) catch
-        return self.toast("Could not count the songs to submit");
+        return self.toast("Could not count the tracks to submit");
     if (count == 0) {
         showSubmit(self, library);
         return self.toast("Nothing to submit");
     }
     var buffer: [160]u8 = undefined;
     const heading = if (count == 1)
-        strings.format(&buffer, "Send audio fingerprints and recording IDs for 1 song to AcoustID?", .{})
+        strings.format(&buffer, "Send audio fingerprints and recording IDs for 1 track to AcoustID?", .{})
     else
-        strings.format(&buffer, "Send audio fingerprints and recording IDs for {f} songs to AcoustID?", .{strings.grouped(count)});
+        strings.format(&buffer, "Send audio fingerprints and recording IDs for {f} tracks to AcoustID?", .{strings.grouped(count)});
     const dialog = adw.adw_alert_dialog_new(
         heading.ptr,
         "This helps others identify the same recordings. Only matches you accepted or IDs you set are sent, never IDs already in your files' tags.",
@@ -610,7 +610,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_halign(find_empty, gtk.ALIGN_CENTER);
     gtk.gtk_widget_add_css_class(find_empty, "pill");
     gtk.gtk_widget_add_css_class(find_empty, "suggested-action");
-    gtk.gtk_widget_set_tooltip_text(find_empty, "About one song a second");
+    gtk.gtk_widget_set_tooltip_text(find_empty, "About one track a second");
     _ = gtk.signalConnect(find_empty, "clicked", gtk.callback(findClicked), self);
     adw.adw_status_page_set_child(self.matches_empty.?, find_empty);
 
@@ -632,7 +632,7 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(accept_confident, "clicked", gtk.callback(acceptConfidentClicked), self);
     title.add(accept_confident);
     const find = gtk.gtk_button_new_with_label("Find Matches");
-    gtk.gtk_widget_set_tooltip_text(find, "About one song a second");
+    gtk.gtk_widget_set_tooltip_text(find, "About one track a second");
     _ = gtk.signalConnect(find, "clicked", gtk.callback(findClicked), self);
     title.add(find);
     checkAcoustIdKey(self);
@@ -645,15 +645,15 @@ fn showEmpty(self: *App, unidentified: u64) void {
     const page = self.matches_empty orelse return;
     if (unidentified == 0) {
         adw.adw_status_page_set_icon_name(page, "object-select-symbolic");
-        adw.adw_status_page_set_title(page, "Every song has a recording ID");
+        adw.adw_status_page_set_title(page, "Every track has a recording ID");
         adw.adw_status_page_set_description(page, null);
     } else {
         adw.adw_status_page_set_icon_name(page, "system-search-symbolic");
         adw.adw_status_page_set_title(page, "No matches to review");
         adw.adw_status_page_set_description(page, if (self.match_fingerprints)
-            "Finding matches sends song titles, artists and album names to MusicBrainz, and a fingerprint of each song's audio to AcoustID. Nothing is sent until you start it."
+            "Finding matches sends track titles, artists and album names to MusicBrainz, and a fingerprint of each track's audio to AcoustID. Nothing is sent until you start it."
         else
-            "Finding matches sends song titles, artists and album names to MusicBrainz. Nothing is sent until you start it.");
+            "Finding matches sends track titles, artists and album names to MusicBrainz. Nothing is sent until you start it.");
     }
     if (self.matches_empty_button) |find| gtk.gtk_widget_set_visible(find, if (unidentified == 0) gtk.false_ else gtk.true_);
 }
@@ -665,7 +665,7 @@ fn showAcceptConfident(self: *App, library: liborca.LibraryHandle) void {
     const tooltip = if (count == 0)
         noConfidentText(&buffer, self)
     else
-        strings.format(&buffer, "Accept each song's best match scoring {d}% or more", .{self.match_threshold_percent});
+        strings.format(&buffer, "Accept each track's best match scoring {d}% or more", .{self.match_threshold_percent});
     gtk.gtk_widget_set_tooltip_text(accept_confident, tooltip.ptr);
     gtk.gtk_widget_set_sensitive(accept_confident, if (count == 0) gtk.false_ else gtk.true_);
 }
@@ -700,7 +700,7 @@ pub fn reload(self: *App) void {
         const text = if (groups == 0)
             strings.format(&buffer, "{f} {s} to review" ++ separator ++ "{f} not identified", .{
                 strings.grouped(total),
-                if (total == 1) "song" else "songs",
+                if (total == 1) "track" else "tracks",
                 strings.grouped(unidentified),
             })
         else
@@ -708,7 +708,7 @@ pub fn reload(self: *App) void {
                 strings.grouped(groups),
                 if (groups == 1) "album correction" else "album corrections",
                 strings.grouped(total),
-                if (total == 1) "song" else "songs",
+                if (total == 1) "track" else "tracks",
                 strings.grouped(unidentified),
             });
         gtk.gtk_label_set_text(meta, text.ptr);
@@ -729,7 +729,7 @@ pub fn reload(self: *App) void {
     }
     if (self.matches_note) |note| {
         const text: [:0]const u8 = if (total > page.items.len)
-            strings.format(&buffer, "Showing the first {f} of {f}. orca-cli matches lists them per song.", .{
+            strings.format(&buffer, "Showing the first {f} of {f}. orca-cli matches lists them per track.", .{
                 strings.grouped(page.items.len),
                 strings.grouped(total),
             })

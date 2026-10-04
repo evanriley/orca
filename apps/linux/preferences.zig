@@ -150,7 +150,7 @@ pub fn confirmRemoveFolder(self: *App, root_id: i64) void {
     const folder = if (slash) |index| trimmed[index + 1 ..] else trimmed;
     var buffer: [1024]u8 = undefined;
     const heading = strings.printZ(&buffer, "Remove “{s}”?", .{if (folder.len == 0) path else folder}) catch "Remove this folder?";
-    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its songs leave the library. The files on disk are not touched.");
+    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its tracks leave the library. The files on disk are not touched.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
     adw.adw_alert_dialog_add_response(alert, "remove", "Remove");
@@ -176,7 +176,7 @@ fn removeRootResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque
     var buffer: [64]u8 = undefined;
     self.toast(strings.format(&buffer, "Removed {d} {s}", .{
         removed.tracks_removed,
-        if (removed.tracks_removed == 1) "song" else "songs",
+        if (removed.tracks_removed == 1) "track" else "tracks",
     }));
     jobs.reloadLibraryViews(self);
     self.requestTick();
@@ -325,11 +325,11 @@ fn acoustIdCard(self: *App) *gtk.Widget {
     const acoustid = card(
         "auth-fingerprint-symbolic",
         "AcoustID",
-        "AcoustID identifies songs by their sound. With your key, matches you accept can be sent back from the Matches page.",
+        "AcoustID identifies tracks by their sound. With your key, matches you accept can be sent back from the Matches page.",
     );
     const fingerprints = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fingerprints), "Match by audio fingerprint");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fingerprints), "Find Matches also sends a fingerprint of each song's audio to AcoustID");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fingerprints), "Find Matches also sends a fingerprint of each track's audio to AcoustID");
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fingerprints), if (self.match_fingerprints) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(fingerprints, "notify::active", gtk.callback(fingerprintsSwitched), self);
     acoustid.add(fingerprints);
@@ -501,7 +501,7 @@ fn maintenanceCard(self: *App) *gtk.Widget {
     const range = settings.threshold_range;
     const threshold = adw.adw_spin_row_new_with_range(@floatFromInt(range[0]), @floatFromInt(range[1]), 1);
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threshold), "Accept confident matches at");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threshold), "Percent. Accept Confident on the Matches page takes a song's best match scoring this or more.");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threshold), "Percent. Accept Confident on the Matches page takes a track's best match scoring this or more.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, threshold), 3);
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threshold), 0);
     adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threshold), @floatFromInt(self.match_threshold_percent));
@@ -511,7 +511,7 @@ fn maintenanceCard(self: *App) *gtk.Widget {
         const fill = self.runtime.libraryGenreFill(library) catch liborca.GenreFill{};
         const genres = adw.adw_switch_row_new();
         adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, genres), "Fill missing genres from MusicBrainz");
-        adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, genres), "When artist or album info is fetched, songs with no genre from a file or an edit take MusicBrainz's");
+        adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, genres), "When artist or album info is fetched, tracks with no genre from a file or an edit take MusicBrainz's");
         adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, genres), 3);
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, genres), @intFromBool(fill.musicbrainz));
         _ = gtk.signalConnect(genres, "notify::active", gtk.callback(genreFillSwitched), self);
@@ -682,11 +682,11 @@ fn deviceNames(self: *App) *gtk.StringList {
 }
 
 fn playbackTab(self: *App) *gtk.Widget {
-    const volume = card("multimedia-volume-control-symbolic", "Volume", "ReplayGain plays each song, or each album, at the loudness Measure Loudness found for it.");
+    const volume = card("multimedia-volume-control-symbolic", "Volume", "ReplayGain plays each track, or each album, at the loudness Measure Loudness found for it.");
     const modes = [_]?[*:0]const u8{ "Off", "Track", "Album", null };
     const replay = adw.adw_combo_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, replay), "ReplayGain");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, replay), "Track evens out every song; Album keeps the levels within an album");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, replay), "Track evens out every track; Album keeps the levels within an album");
     const mode_list = gtk.gtk_string_list_new(&modes);
     adw.adw_combo_row_set_model(gtk.cast(adw.ComboRow, replay), gtk.cast(gtk.ListModel, mode_list));
     gtk.g_object_unref(mode_list);
@@ -698,7 +698,7 @@ fn playbackTab(self: *App) *gtk.Widget {
     });
     _ = gtk.signalConnect(replay, "notify::selected", gtk.callback(replayGainChanged), self);
     volume.add(replay);
-    const gapless = actionRow("Gapless playback", "Always on. Songs that share a sample rate and channel count play back to back with no gap.");
+    const gapless = actionRow("Gapless playback", "Always on. Tracks that share a sample rate and channel count play back to back with no gap.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, gapless), 3);
     volume.add(gapless);
 
@@ -1611,7 +1611,7 @@ fn listeningTab(self: *App) *gtk.Widget {
 
     const now_playing = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, now_playing), "Show what I'm playing now");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, now_playing), "Sends the current song to ListenBrainz once it has played for 10 seconds");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, now_playing), "Sends the current track to ListenBrainz once it has played for 10 seconds");
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, now_playing), if (self.announce_now_playing) gtk.true_ else gtk.false_);
     gtk.gtk_widget_set_sensitive(now_playing, if (self.library != null and self.scrobbling) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(now_playing, "notify::active", gtk.callback(nowPlayingSwitched), self);
@@ -1636,7 +1636,7 @@ fn listeningTab(self: *App) *gtk.Widget {
     const lyrics_card = card(
         "media-view-subtitles-symbolic",
         "Lyrics",
-        "Lyrics come from .lrc files beside your songs and from their tags. Orca never writes lyrics to a file.",
+        "Lyrics come from .lrc files beside your tracks and from their tags. Orca never writes lyrics to a file.",
     );
     const fetch = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fetch), "Fetch lyrics from LRCLIB");
@@ -1752,7 +1752,7 @@ fn appearanceTab(self: *App) *gtk.Widget {
     look.add(grid);
     look.add(choiceRow(
         "Density",
-        "Compact fits more songs, albums and queue entries on screen",
+        "Compact fits more tracks, albums and queue entries on screen",
         &.{ "Comfortable", "Compact", null },
         @intFromEnum(choices.density),
         gtk.callback(densityChanged),

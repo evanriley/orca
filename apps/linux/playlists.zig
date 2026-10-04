@@ -1,5 +1,5 @@
 //! Playlists: the overview of every playlist, the page that lists one
-//! playlist's songs, and the dialogs that create, rename, describe, delete,
+//! playlist's tracks, and the dialogs that create, rename, describe, delete,
 //! import and export them.
 //!
 //! liborca keeps the playlists, filters, sorts and counts them, resolves their
@@ -22,7 +22,7 @@ const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const details = @import("details.zig");
 const page_ui = @import("page.zig");
-const song_table = @import("song_table.zig");
+const track_table = @import("track_table.zig");
 const smart_playlist_editor = @import("smart_playlist_editor.zig");
 
 const App = app.App;
@@ -134,7 +134,7 @@ pub const State = struct {
     open_pinned: bool = false,
     open_loved: bool = false,
     open_name: ?[:0]u8 = null,
-    songs: song_table.Table = .{},
+    tracks: track_table.Table = .{},
     hero: ?*gtk.Widget = null,
     hero_art: ?*gtk.Stack = null,
     mosaic: ?*gtk.Widget = null,
@@ -707,18 +707,18 @@ fn setupCardSized(self: *App, item: ?*anyopaque, width: c_int, art_height: c_int
     gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
     gtk.gtk_box_insert_child_after(gtk.cast(gtk.Box, heading), spacer, pin);
     const kind = label("playlist-card-kind");
-    const songs = label("playlist-card-meta");
-    gtk.gtk_widget_add_css_class(songs, "numeric");
+    const tracks = label("playlist-card-meta");
+    gtk.gtk_widget_add_css_class(tracks, "numeric");
     const updated = label("playlist-card-meta");
 
-    for ([_]*gtk.Widget{ layers, heading, kind, songs, updated }) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), child);
+    for ([_]*gtk.Widget{ layers, heading, kind, tracks, updated }) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), child);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), tile);
     for ([_]*gtk.Widget{ tile, play_button, more }) |widget| gtk.g_object_set_data(widget, "orca-list-item", item);
     gtk.g_object_set_data(tile, "orca-art", frame);
     gtk.g_object_set_data(tile, "orca-title", title);
     gtk.g_object_set_data(tile, "orca-pin", pin);
     gtk.g_object_set_data(tile, "orca-kind", kind);
-    gtk.g_object_set_data(tile, "orca-songs", songs);
+    gtk.g_object_set_data(tile, "orca-tracks", tracks);
     gtk.g_object_set_data(tile, "orca-updated", updated);
     menu.onSecondaryClick(tile, cardMenu, self);
 }
@@ -749,7 +749,7 @@ fn bindCard(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     setLabel(tile, "orca-title", card.name.ptr);
     if (part(tile, "orca-pin")) |pin| gtk.gtk_widget_set_visible(pin, @intFromBool(card.pinned));
     showKind(tile, card);
-    setLabel(tile, "orca-songs", summaryText(&buffer, card).ptr);
+    setLabel(tile, "orca-tracks", summaryText(&buffer, card).ptr);
     setLabel(tile, "orca-updated", updatedText(&buffer, card.updated_at).ptr);
     loadCovers(self, card);
     loadLook(self, card);
@@ -786,21 +786,21 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.gtk_widget_set_valign(names, gtk.ALIGN_CENTER);
     gtk.gtk_box_append(gtk.cast(gtk.Box, names), heading);
     gtk.gtk_box_append(gtk.cast(gtk.Box, names), kind);
-    const songs = fixedLabel("album-list-detail", 72, 1);
+    const tracks = fixedLabel("album-list-detail", 72, 1);
     const duration = fixedLabel("album-list-detail", 80, 1);
-    for ([_]*gtk.Widget{ songs, duration }) |widget| gtk.gtk_widget_add_css_class(widget, "numeric");
+    for ([_]*gtk.Widget{ tracks, duration }) |widget| gtk.gtk_widget_add_css_class(widget, "numeric");
     const updated = fixedLabel("album-list-detail", 120, 0);
     gtk.gtk_widget_add_css_class(updated, "playlist-list-updated");
     const more = moreButton(self);
     gtk.gtk_widget_add_css_class(more, "row-more");
-    for ([_]*gtk.Widget{ frame, names, songs, duration, updated, more }) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, row), child);
+    for ([_]*gtk.Widget{ frame, names, tracks, duration, updated, more }) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, row), child);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
     for ([_]*gtk.Widget{ row, more }) |widget| gtk.g_object_set_data(widget, "orca-list-item", item);
     gtk.g_object_set_data(row, "orca-art", frame);
     gtk.g_object_set_data(row, "orca-title", title);
     gtk.g_object_set_data(row, "orca-pin", pin);
     gtk.g_object_set_data(row, "orca-kind", kind);
-    gtk.g_object_set_data(row, "orca-songs", songs);
+    gtk.g_object_set_data(row, "orca-tracks", tracks);
     gtk.g_object_set_data(row, "orca-duration", duration);
     gtk.g_object_set_data(row, "orca-updated", updated);
     menu.onSecondaryClick(row, cardMenu, self);
@@ -814,7 +814,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     setLabel(row, "orca-title", card.name.ptr);
     if (part(row, "orca-pin")) |pin| gtk.gtk_widget_set_visible(pin, @intFromBool(card.pinned));
     showKind(row, card);
-    setLabel(row, "orca-songs", strings.printZ(&buffer, "{d} {s}", .{ card.entries, plural(card.entries, "track", "tracks") }) catch "");
+    setLabel(row, "orca-tracks", strings.printZ(&buffer, "{d} {s}", .{ card.entries, plural(card.entries, "track", "tracks") }) catch "");
     var duration_buffer: [32]u8 = undefined;
     setLabel(row, "orca-duration", strings.terminated(&buffer, strings.totalDuration(&duration_buffer, card.duration_ms)).ptr);
     setLabel(row, "orca-updated", updatedText(&buffer, card.updated_at).ptr);
@@ -997,7 +997,7 @@ fn showLove(heart: *gtk.Widget, loved: bool) void {
 /// Rereads the open playlist. `keep_scroll` holds the list where it was, for
 /// an edit to the rows the user is looking at.
 pub fn reloadPage(self: *App, keep_scroll: bool) void {
-    const store = self.playlists.songs.store orelse return;
+    const store = self.playlists.tracks.store orelse return;
     const adjustment = if (self.playlists.scroller) |scroller|
         gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller))
     else
@@ -1056,11 +1056,11 @@ pub fn reloadPage(self: *App, keep_scroll: bool) void {
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
-    song_table.repaint(&self.playlists.songs, changed, change);
+    track_table.repaint(&self.playlists.tracks, changed, change);
 }
 
 fn rowAt(self: *App, position: u32) ?*TrackObject {
-    const store = self.playlists.songs.store orelse return null;
+    const store = self.playlists.tracks.store orelse return null;
     const item = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), position) orelse return null;
     gtk.g_object_unref(item);
     return @ptrCast(@alignCast(item));
@@ -1072,7 +1072,7 @@ pub fn playFrom(self: *App, position: u32) void {
     const playlist_id = self.playlists.open_id orelse return;
     const library = self.library orelse return;
     const row = rowAt(self, position) orelse return;
-    if (!row.inLibrary()) return self.toast("That song is not in your library");
+    if (!row.inLibrary()) return self.toast("That track is not in your library");
     var start: u32 = 0;
     var index: u32 = 0;
     while (index < position) : (index += 1) {
@@ -1481,7 +1481,7 @@ fn buildListed(self: *App) *gtk.Widget {
     adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, heading), controls);
     gtk.gtk_widget_set_hexpand(words, gtk.true_);
 
-    const empty = statusPage("media-playlist-consecutive-symbolic", "No playlists yet", "Make one, let rules choose its songs, or import an M3U file.");
+    const empty = statusPage("media-playlist-consecutive-symbolic", "No playlists yet", "Make one, let rules choose its tracks, or import an M3U file.");
     adw.adw_status_page_set_child(gtk.cast(adw.StatusPage, empty), creationButtons(self));
     const no_results = statusPage("edit-find-symbolic", "No playlists found", "Try a different search, tab or type.");
     const body = gtk.gtk_stack_new();
@@ -1535,11 +1535,11 @@ fn buildOverview(self: *App) *gtk.Widget {
 }
 
 fn buildPlaylistPage(self: *App) *adw.NavigationPage {
-    const list = song_table.build(&self.playlists.songs, self, .{ .multiple = false, .sortable = false, .playlist = true });
+    const list = track_table.build(&self.playlists.tracks, self, .{ .multiple = false, .sortable = false, .playlist = true });
     const scroller = gtk.gtk_scrolled_window_new();
     self.playlists.scroller = scroller;
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), list);
-    const empty = statusPage("media-playlist-consecutive-symbolic", "No songs yet", "Right-click a song or an album and choose Add to Playlist.");
+    const empty = statusPage("media-playlist-consecutive-symbolic", "No tracks yet", "Right-click a track or an album and choose Add to Playlist.");
     const body = gtk.gtk_stack_new();
     self.playlists.body = gtk.cast(gtk.Stack, body);
     gtk.gtk_widget_set_vexpand(body, gtk.true_);
@@ -1659,7 +1659,7 @@ pub fn addTracks(self: *App, playlist_id: i64, track_ids: []const i64) void {
         const insertion = self.runtime.libraryPlaylistInsert(library, playlist_id, track_ids[start..end], null) catch |err| {
             self.toast(switch (err) {
                 error.PlaylistFull => "That playlist is full",
-                error.PlaylistIsSmart => "A smart playlist's rules choose its songs",
+                error.PlaylistIsSmart => "A smart playlist's rules choose its tracks",
                 else => "Could not add to that playlist",
             });
             break;
@@ -1672,13 +1672,13 @@ pub fn addTracks(self: *App, playlist_id: i64, track_ids: []const i64) void {
     var buffer: [640]u8 = undefined;
     var name_buffer: [512]u8 = undefined;
     const name = nameOf(self, playlist_id, &name_buffer);
-    self.toast(strings.printZ(&buffer, "Added {d} {s} to “{s}”", .{ added, plural(added, "song", "songs"), name }) catch "Added to the playlist");
+    self.toast(strings.printZ(&buffer, "Added {d} {s} to “{s}”", .{ added, plural(added, "track", "tracks"), name }) catch "Added to the playlist");
 }
 
 pub fn removeAt(self: *App, playlist_id: i64, position: u32) void {
     const library = self.library orelse return;
     _ = self.runtime.libraryPlaylistRemove(library, playlist_id, &.{position}) catch
-        return self.toast("Could not remove that song");
+        return self.toast("Could not remove that track");
     refresh(self);
     if (self.playlists.open_id == playlist_id) reloadPage(self, true);
 }
@@ -1686,7 +1686,7 @@ pub fn removeAt(self: *App, playlist_id: i64, position: u32) void {
 pub fn move(self: *App, playlist_id: i64, from: u32, to: u32) void {
     const library = self.library orelse return;
     self.runtime.libraryPlaylistMove(library, playlist_id, from, to) catch
-        return self.toast("Could not move that song");
+        return self.toast("Could not move that track");
     refresh(self);
     if (self.playlists.open_id == playlist_id) reloadPage(self, true);
 }
@@ -1857,7 +1857,7 @@ pub fn confirmDelete(self: *App, playlist_id: i64) void {
     const heading = strings.printZ(&buffer, "Delete “{s}”?", .{nameOf(self, playlist_id, &name_buffer)}) catch "Delete this playlist?";
     const request = self.allocator.create(PlaylistRequest) catch return self.toast("Out of memory");
     request.* = .{ .self = self, .playlist_id = playlist_id };
-    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its songs stay in your library.");
+    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its tracks stay in your library.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
     adw.adw_alert_dialog_add_response(alert, "delete", "Delete");
@@ -1915,9 +1915,9 @@ fn exportChosen(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopa
     }) catch return self.toast("Could not export that playlist");
     var buffer: [128]u8 = undefined;
     self.toast(if (exported.skipped != 0)
-        strings.printZ(&buffer, "Exported {d} {s}, {d} not in your library", .{ exported.written, plural(exported.written, "song", "songs"), exported.skipped }) catch "Exported"
+        strings.printZ(&buffer, "Exported {d} {s}, {d} not in your library", .{ exported.written, plural(exported.written, "track", "tracks"), exported.skipped }) catch "Exported"
     else
-        strings.printZ(&buffer, "Exported {d} {s}", .{ exported.written, plural(exported.written, "song", "songs") }) catch "Exported");
+        strings.printZ(&buffer, "Exported {d} {s}", .{ exported.written, plural(exported.written, "track", "tracks") }) catch "Exported");
 }
 
 pub fn chooseImport(self: *App) void {
@@ -1976,9 +1976,9 @@ fn importFile(self: *App, path: []const u8) void {
     const matched = imported.matched_by_path + imported.matched_by_info;
     var buffer: [128]u8 = undefined;
     const text = if (imported.unmatched != 0)
-        strings.printZ(&buffer, "Imported {d} {s}, {d} not found", .{ matched, plural(matched, "song", "songs"), imported.unmatched }) catch "Imported"
+        strings.printZ(&buffer, "Imported {d} {s}, {d} not found", .{ matched, plural(matched, "track", "tracks"), imported.unmatched }) catch "Imported"
     else
-        strings.printZ(&buffer, "Imported {d} {s}", .{ matched, plural(matched, "song", "songs") }) catch "Imported";
+        strings.printZ(&buffer, "Imported {d} {s}", .{ matched, plural(matched, "track", "tracks") }) catch "Imported";
     const overlay = self.toasts orelse return;
     const toast = adw.adw_toast_new(text.ptr);
     if (imported.unmatched != 0) {
@@ -2016,7 +2016,7 @@ fn showUnmatched(self: *App) void {
     gtk.gtk_scrolled_window_set_max_content_height(gtk.cast(gtk.ScrolledWindow, scroller), 320);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), text_label);
 
-    const dialog = adw.adw_alert_dialog_new("Not Found", "No song in your library matches these entries.");
+    const dialog = adw.adw_alert_dialog_new("Not Found", "No track in your library matches these entries.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_set_extra_child(alert, scroller);
     adw.adw_alert_dialog_add_response(alert, "close", "Close");

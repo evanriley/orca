@@ -44,11 +44,11 @@ const App = app.App;
 
 fn failureText(failure: liborca.Failure) [:0]const u8 {
     return switch (failure) {
-        .track_has_no_file => "That song has no file",
-        .track_file_missing => "That song's file is missing",
+        .track_has_no_file => "That track has no file",
+        .track_file_missing => "That track's file is missing",
         .codec_unavailable => "No codec can read that file",
         .player_not_bound => "No library is open",
-        .not_playable => "That song is not playable",
+        .not_playable => "That track is not playable",
         else => "Playback failed",
     };
 }
@@ -394,8 +394,8 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
     const sections = [_]struct { title: [*:0]const u8, items: []const [2][*:0]const u8 }{
         .{ .title = "Playback", .items = &.{
             .{ "Play / Pause", "space" },
-            .{ "Next Song", "<Control>Right" },
-            .{ "Previous Song", "<Control>Left" },
+            .{ "Next Track", "<Control>Right" },
+            .{ "Previous Track", "<Control>Left" },
         } },
         .{ .title = "Library", .items = &.{
             .{ "Search and Commands", "<Control>k" },

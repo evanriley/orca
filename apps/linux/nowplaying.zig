@@ -257,7 +257,7 @@ fn buildPanel(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(list, "now-up-next-list");
     _ = gtk.signalConnect(list, "row-activated", gtk.callback(upNextActivated), self);
     append(panel, list);
-    const nothing = label("Nothing queued after this song", "now-up-next-empty");
+    const nothing = label("Nothing queued after this track", "now-up-next-empty");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, nothing), 0.0);
     page.up_next_empty = nothing;
     append(panel, nothing);

@@ -523,7 +523,7 @@ fn playFolder(self: *App, shuffle: bool) void {
     const library = self.library orelse return;
     if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
     self.runtime.playerPlayFolder(self.player, library, self.io, root_id, folders.path.value, shuffle) catch |err| switch (err) {
-        error.FolderEmpty => return self.toast("No songs in this folder"),
+        error.FolderEmpty => return self.toast("No tracks in this folder"),
         else => return self.toast("Could not start playback"),
     };
     self.requestTick();
@@ -856,7 +856,7 @@ fn releaseHeader(self: *App, summary: liborca.TrackSummary) *gtk.Widget {
     gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_hexpand(labels, gtk.true_);
     var buffer: [512]u8 = undefined;
-    const album: []const u8 = if (summary.release_id == null) "Other Songs" else if (summary.album.len != 0) summary.album else "Untitled";
+    const album: []const u8 = if (summary.release_id == null) "Other Tracks" else if (summary.album.len != 0) summary.album else "Untitled";
     const title = gtk.gtk_label_new(strings.terminated(&buffer, album).ptr);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);

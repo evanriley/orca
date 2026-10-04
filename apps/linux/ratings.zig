@@ -1,4 +1,4 @@
-//! Star ratings: five stars on every song row, and the
+//! Star ratings: five stars on every track row, and the
 //! one place a rating change is applied and shown.
 //!
 //! The rating belongs to liborca and is kept per recording; this only asks for
@@ -52,7 +52,7 @@ pub fn newStars(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
     return box;
 }
 
-/// Stars on a song row: faint until the row is hovered or the song is rated.
+/// Stars on a track row: faint until the row is hovered or the track is rated.
 pub fn newRowStars(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
     const box = newStars(handler, data);
     gtk.gtk_widget_add_css_class(box, "row-stars");

@@ -36,11 +36,11 @@ const biography_max_pixels = 480;
 const biography_lines = 4;
 const album_pixels: c_int = 128;
 const release_row_limit = 8;
-const song_cover_pixels: c_int = 44;
+const track_cover_pixels: c_int = 44;
 const related_pixels: c_int = 80;
 const related_limit = 6;
 const related_tile_pixels: c_int = 96;
-const top_song_limit = 5;
+const top_track_limit = 5;
 const queue_limit = 10_000;
 const pending_info_limit = 8;
 const musicbrainz_artist_url = "https://musicbrainz.org/artist/";
@@ -598,7 +598,7 @@ pub fn build(self: *App) *gtk.Widget {
     return navigation;
 }
 
-const Song = struct {
+const Track = struct {
     target: feedback.Target,
     release_id: ?i64,
     artist_id: ?i64,
@@ -619,9 +619,9 @@ pub const ArtistPage = struct {
     name: [:0]u8,
     tracks: []i64,
     releases: []i64,
-    songs: [top_song_limit]Song = undefined,
-    song_ids: [top_song_limit]i64 = undefined,
-    song_count: usize = 0,
+    top_tracks: [top_track_limit]Track = undefined,
+    track_ids: [top_track_limit]i64 = undefined,
+    track_count: usize = 0,
     related: [related_limit]Related = undefined,
     related_count: usize = 0,
     loved: bool = false,
@@ -651,7 +651,7 @@ fn pageDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const allocator = page.self.allocator;
     unregisterPage(page);
-    details.forgetIds(page.self, page.song_ids[0..]);
+    details.forgetIds(page.self, page.track_ids[0..]);
     allocator.free(page.name);
     allocator.free(page.tracks);
     allocator.free(page.releases);
@@ -663,7 +663,7 @@ pub fn inspectorSource(self: *App, pushed: *adw.NavigationPage) ?details.Source 
     const child = adw.adw_navigation_page_get_child(pushed) orelse return null;
     for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
         if (page.scroller != child) continue;
-        return .{ .artist = .{ .ids = page.song_ids[0..], .artist_id = page.artist_id } };
+        return .{ .artist = .{ .ids = page.track_ids[0..], .artist_id = page.artist_id } };
     }
     return null;
 }
@@ -717,11 +717,11 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
         .rating => return,
     };
     for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
-        for (page.songs[0..page.song_count]) |*song| {
-            const recording = song.target.recording_id orelse continue;
+        for (page.top_tracks[0..page.track_count]) |*track| {
+            const recording = track.target.recording_id orelse continue;
             if (!changed.contains(recording)) continue;
-            song.target.feedback = value;
-            if (song.heart) |heart| feedback.showRowButton(heart, value);
+            track.target.feedback = value;
+            if (track.heart) |heart| feedback.showRowButton(heart, value);
         }
     }
 }
@@ -729,9 +729,9 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
 pub fn markPlaying(self: *App, track_id: ?i64) void {
     const playing = self.playing();
     for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
-        for (page.songs[0..page.song_count]) |song| {
-            const row = song.row orelse continue;
-            if (track_id == song.target.track_id)
+        for (page.top_tracks[0..page.track_count]) |track| {
+            const row = track.row orelse continue;
+            if (track_id == track.target.track_id)
                 gtk.gtk_widget_add_css_class(row, "now-playing")
             else
                 gtk.gtk_widget_remove_css_class(row, "now-playing");
@@ -749,7 +749,7 @@ pub fn markPlaying(self: *App, track_id: ?i64) void {
 }
 
 fn play(page: *ArtistPage, shuffle: bool) void {
-    if (page.tracks.len == 0) return page.self.toast("No song of theirs has a playable file");
+    if (page.tracks.len == 0) return page.self.toast("No track of theirs has a playable file");
     page.self.runtime.playerSetShuffle(page.self.player, shuffle) catch {};
     transport.playIds(page.self, page.tracks, 0);
 }
@@ -919,50 +919,50 @@ fn rowPosition(row: *gtk.Widget) ?usize {
     return @intCast(index);
 }
 
-fn setSongContext(page: *ArtistPage, position: usize) bool {
-    if (position >= page.song_count) return false;
+fn setTrackContext(page: *ArtistPage, position: usize) bool {
+    if (position >= page.track_count) return false;
     const self = page.self;
-    const song = page.songs[position];
+    const track = page.top_tracks[position];
     self.context.reset(.tracks);
-    self.context.addTrack(self.allocator, song.target.track_id, song.target.recording_id, song.target.feedback) catch return false;
-    self.context.release_id = song.release_id;
-    self.context.artist_id = song.artist_id orelse page.artist_id;
+    self.context.addTrack(self.allocator, track.target.track_id, track.target.recording_id, track.target.feedback) catch return false;
+    self.context.release_id = track.release_id;
+    self.context.artist_id = track.artist_id orelse page.artist_id;
     return true;
 }
 
-fn songMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+fn trackMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const row = menu.gestureWidget(gesture);
     const position = rowPosition(row) orelse return;
-    if (setSongContext(page, position)) menu.popup(page.self, row, x, y);
+    if (setTrackContext(page, position)) menu.popup(page.self, row, x, y);
 }
 
-fn songMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const position = marked(button) orelse return;
-    if (setSongContext(page, position)) albums.popupBelow(page.self, gtk.cast(gtk.Widget, button.?));
+    if (setTrackContext(page, position)) albums.popupBelow(page.self, gtk.cast(gtk.Widget, button.?));
 }
 
-fn songHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const position = marked(button) orelse return;
-    if (position >= page.song_count) return;
-    feedback.toggle(page.self, page.songs[position].target);
+    if (position >= page.track_count) return;
+    feedback.toggle(page.self, page.top_tracks[position].target);
 }
 
-fn songSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const selected = row orelse return;
     const page = pageData(data);
     const position = rowPosition(gtk.cast(gtk.Widget, selected)) orelse return;
-    if (position >= page.song_count) return;
-    details.choose(page.self, page.song_ids[0..], page.song_ids[position]);
+    if (position >= page.track_count) return;
+    details.choose(page.self, page.track_ids[0..], page.track_ids[position]);
 }
 
-fn songActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const position = rowPosition(gtk.cast(gtk.Widget, row)) orelse return;
-    if (position >= page.song_count) return;
-    const id = page.song_ids[position];
+    if (position >= page.track_count) return;
+    const id = page.track_ids[position];
     page.self.runtime.playerSetShuffle(page.self.player, false) catch {};
     const start = std.mem.indexOfScalar(i64, page.tracks, id) orelse return transport.playIds(page.self, &.{id}, 0);
     transport.playIds(page.self, page.tracks, @intCast(start));
@@ -976,22 +976,22 @@ fn explicitBadge() *gtk.Widget {
     return badge;
 }
 
-fn songRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize) *gtk.Widget {
+fn trackRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize) *gtk.Widget {
     const self = page.self;
     const row = gtk.gtk_list_box_row_new();
     gtk.gtk_widget_add_css_class(row, "album-track-row");
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(box, "artist-song");
+    gtk.gtk_widget_add_css_class(box, "artist-track");
 
     var buffer: [512]u8 = undefined;
     const number = gtk.gtk_label_new(strings.format(&buffer, "{d}", .{position + 1}).ptr);
     gtk.gtk_widget_set_size_request(number, 16, -1);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, number), 0.5);
-    gtk.gtk_widget_add_css_class(number, "artist-song-number");
+    gtk.gtk_widget_add_css_class(number, "artist-track-number");
     gtk.gtk_widget_add_css_class(number, "numeric");
 
-    const thumb = art.newCover(self, art.iconPlaceholder(song_cover_pixels), song_cover_pixels);
-    gtk.gtk_widget_add_css_class(thumb, "artist-song-cover");
+    const thumb = art.newCover(self, art.iconPlaceholder(track_cover_pixels), track_cover_pixels);
+    gtk.gtk_widget_add_css_class(thumb, "artist-track-cover");
     art.show(self, thumb, if (summary.release_id) |release| art.Key.release(release, .thumb) else art.Key.track(summary.id, .thumb));
 
     const title = gtk.gtk_label_new(strings.terminated(&buffer, if (summary.title.len != 0) summary.title else "Untitled").ptr);
@@ -1003,7 +1003,7 @@ fn songRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize) *g
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_box), title);
     if (summary.explicit == .explicit) gtk.gtk_box_append(gtk.cast(gtk.Box, title_box), explicitBadge());
 
-    const heart = feedback.newRowButton(gtk.callback(songHeartClicked), page);
+    const heart = feedback.newRowButton(gtk.callback(trackHeartClicked), page);
     feedback.showRowButton(heart, summary.feedback);
     markPosition(heart, position);
 
@@ -1023,20 +1023,20 @@ fn songRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize) *g
     gtk.gtk_widget_set_valign(more, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(more, "More");
     markPosition(more, position);
-    _ = gtk.signalConnect(more, "clicked", gtk.callback(songMoreClicked), page);
+    _ = gtk.signalConnect(more, "clicked", gtk.callback(trackMoreClicked), page);
 
     for ([_]*gtk.Widget{ number, thumb, title_box, heart, duration_label, more }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
-    menu.onSecondaryClick(row, songMenu, page);
-    page.songs[position] = .{
+    menu.onSecondaryClick(row, trackMenu, page);
+    page.top_tracks[position] = .{
         .target = .{ .track_id = summary.id, .recording_id = summary.recording_id, .feedback = summary.feedback },
         .release_id = summary.release_id,
         .artist_id = summary.artist_id,
         .row = row,
         .heart = heart,
     };
-    page.song_ids[position] = summary.id;
+    page.track_ids[position] = summary.id;
     return row;
 }
 
@@ -1065,7 +1065,7 @@ fn section() *gtk.Widget {
     return box;
 }
 
-fn songsSection(page: *ArtistPage, top: []const liborca.TrackSummary, by_rating: bool) *gtk.Widget {
+fn tracksSection(page: *ArtistPage, top: []const liborca.TrackSummary, by_rating: bool) *gtk.Widget {
     const box = section();
     const heading = sectionHeading("Top Tracks", if (by_rating) "By rating" else "Most played in your library");
     const see_all = gtk.gtk_button_new_with_label("See All");
@@ -1081,11 +1081,11 @@ fn songsSection(page: *ArtistPage, top: []const liborca.TrackSummary, by_rating:
     gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, list), gtk.SELECTION_SINGLE);
     gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, list), gtk.false_);
     gtk.gtk_widget_add_css_class(list, "album-tracks");
-    gtk.gtk_widget_add_css_class(list, "artist-songs");
-    _ = gtk.signalConnect(list, "row-selected", gtk.callback(songSelected), page);
-    _ = gtk.signalConnect(list, "row-activated", gtk.callback(songActivated), page);
-    for (top, 0..) |summary, position| gtk.gtk_list_box_append(gtk.cast(gtk.ListBox, list), songRow(page, summary, position));
-    page.song_count = top.len;
+    gtk.gtk_widget_add_css_class(list, "artist-tracks");
+    _ = gtk.signalConnect(list, "row-selected", gtk.callback(trackSelected), page);
+    _ = gtk.signalConnect(list, "row-activated", gtk.callback(trackActivated), page);
+    for (top, 0..) |summary, position| gtk.gtk_list_box_append(gtk.cast(gtk.ListBox, list), trackRow(page, summary, position));
+    page.track_count = top.len;
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), list);
     return box;
 }
@@ -1508,7 +1508,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
         .artist_id = artist_id,
         .sort = .play_count,
         .direction = .descending,
-        .limit = top_song_limit,
+        .limit = top_track_limit,
     }) catch return;
     defer top.deinit();
     const by_rating = for (top.items) |item| {
@@ -1519,7 +1519,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
             .artist_id = artist_id,
             .sort = .rating,
             .direction = .descending,
-            .limit = top_song_limit,
+            .limit = top_track_limit,
         }) catch return;
         top.deinit();
         top = rated;
@@ -1625,7 +1625,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     const sections = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 40);
     gtk.gtk_widget_add_css_class(sections, "artist-sections");
     page.sections = sections;
-    if (top.items.len != 0) gtk.gtk_box_append(gtk.cast(gtk.Box, sections), songsSection(page, top.items, by_rating));
+    if (top.items.len != 0) gtk.gtk_box_append(gtk.cast(gtk.Box, sections), tracksSection(page, top.items, by_rating));
     const side = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 28);
     for (rows) |*row| gtk.gtk_box_append(gtk.cast(gtk.Box, side), albumsSection(page, row));
     gtk.gtk_box_append(gtk.cast(gtk.Box, side), relatedSection(page));

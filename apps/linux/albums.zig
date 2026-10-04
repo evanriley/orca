@@ -383,10 +383,10 @@ fn setupListRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.
     gtk.gtk_box_append(gtk.cast(gtk.Box, names), title_box);
     gtk.gtk_box_append(gtk.cast(gtk.Box, names), artist);
     const year = listLabel("album-list-detail", 40, 0);
-    const songs = listLabel("album-list-detail", 64, 1);
+    const tracks = listLabel("album-list-detail", 64, 1);
     const minutes = listLabel("album-list-detail", 56, 1);
     const format = listLabel("album-list-format", format_column_pixels, 0);
-    for ([_]*gtk.Widget{ year, songs, minutes }) |label| gtk.gtk_widget_add_css_class(label, "numeric");
+    for ([_]*gtk.Widget{ year, tracks, minutes }) |label| gtk.gtk_widget_add_css_class(label, "numeric");
     const heart = feedback.newRowButton(gtk.callback(listHeartClicked), self);
     const more = gtk.gtk_button_new_from_icon_name("view-more-symbolic");
     gtk.gtk_widget_add_css_class(more, "flat");
@@ -394,7 +394,7 @@ fn setupListRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.
     gtk.gtk_widget_set_valign(more, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(more, "More");
     _ = gtk.signalConnect(more, "clicked", gtk.callback(tileMoreClicked), self);
-    for ([_]*gtk.Widget{ cover, names, year, songs, minutes, format, heart, more }) |part|
+    for ([_]*gtk.Widget{ cover, names, year, tracks, minutes, format, heart, more }) |part|
         gtk.gtk_box_append(gtk.cast(gtk.Box, row), part);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
     for ([_]*gtk.Widget{ row, heart, more }) |widget| gtk.g_object_set_data(widget, "orca-list-item", item);
@@ -403,7 +403,7 @@ fn setupListRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.
     gtk.g_object_set_data(row, "orca-explicit", badge);
     gtk.g_object_set_data(row, "orca-artist", artist);
     gtk.g_object_set_data(row, "orca-year", year);
-    gtk.g_object_set_data(row, "orca-songs", songs);
+    gtk.g_object_set_data(row, "orca-tracks", tracks);
     gtk.g_object_set_data(row, "orca-minutes", minutes);
     gtk.g_object_set_data(row, "orca-format", format);
     gtk.g_object_set_data(row, "orca-heart", heart);
@@ -427,8 +427,8 @@ fn bindListRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c
     if (tilePart(widget, "orca-explicit")) |badge| gtk.gtk_widget_set_visible(badge, @intFromBool(release.explicit));
     if (tilePart(widget, "orca-artist")) |artist| gtk.gtk_label_set_text(gtk.cast(gtk.Label, artist), row.detail().ptr);
     if (tilePart(widget, "orca-year")) |year| gtk.gtk_label_set_text(gtk.cast(gtk.Label, year), row.caption().ptr);
-    if (tilePart(widget, "orca-songs")) |songs|
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, songs), strings.format(&buffer, "{d} {s}", .{ release.track_count, if (release.track_count == 1) "song" else "songs" }).ptr);
+    if (tilePart(widget, "orca-tracks")) |tracks|
+        gtk.gtk_label_set_text(gtk.cast(gtk.Label, tracks), strings.format(&buffer, "{d} {s}", .{ release.track_count, if (release.track_count == 1) "track" else "tracks" }).ptr);
     if (tilePart(widget, "orca-minutes")) |minutes|
         gtk.gtk_label_set_text(gtk.cast(gtk.Label, minutes), strings.format(&buffer, "{d} min", .{minutesOf(release.duration_ms)}).ptr);
     if (tilePart(widget, "orca-format")) |format| gtk.gtk_label_set_text(gtk.cast(gtk.Label, format), release.format.ptr);
@@ -1083,7 +1083,7 @@ pub const AlbumPage = struct {
     self: *App,
     navigation: *adw.NavigationView,
     ids: []i64,
-    songs: []feedback.Target,
+    tracks: []feedback.Target,
     artists: []?i64,
     rows: []?*gtk.Widget,
     disc_lists: std.ArrayList(*gtk.Widget) = .empty,
@@ -1116,7 +1116,7 @@ fn pageDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     details.forgetIds(page.self, page.ids);
     page.disc_lists.deinit(allocator);
     allocator.free(page.ids);
-    allocator.free(page.songs);
+    allocator.free(page.tracks);
     allocator.free(page.artists);
     allocator.free(page.rows);
     allocator.destroy(page);
@@ -1176,12 +1176,12 @@ pub fn setNarrow(self: *App) void {
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
     for (self.open_album_pages[0..self.open_album_page_count]) |page| {
-        for (page.songs, page.rows) |*song, maybe_row| {
-            const recording = song.recording_id orelse continue;
+        for (page.tracks, page.rows) |*track, maybe_row| {
+            const recording = track.recording_id orelse continue;
             if (!changed.contains(recording)) continue;
             switch (change) {
                 .feedback => |value| {
-                    song.feedback = value;
+                    track.feedback = value;
                     const row = maybe_row orelse continue;
                     const heart = gtk.g_object_get_data(row, "orca-heart") orelse continue;
                     feedback.showRowButton(gtk.cast(gtk.Widget, heart), value);
@@ -1238,7 +1238,7 @@ fn setTrackContext(page: *AlbumPage, position: usize) bool {
     if (position >= page.ids.len) return false;
     const self = page.self;
     self.context.reset(.tracks);
-    self.context.addTrack(self.allocator, page.ids[position], page.songs[position].recording_id, page.songs[position].feedback) catch return false;
+    self.context.addTrack(self.allocator, page.ids[position], page.tracks[position].recording_id, page.tracks[position].feedback) catch return false;
     self.context.release_id = page.release_id;
     self.context.artist_id = page.artists[position] orelse page.album_artist_id;
     return true;
@@ -1297,16 +1297,16 @@ fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(
 fn heartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const marked = @intFromPtr(gtk.g_object_get_data(button.?, "orca-position"));
-    if (marked == 0 or marked > page.songs.len) return;
-    feedback.toggle(page.self, page.songs[marked - 1]);
+    if (marked == 0 or marked > page.tracks.len) return;
+    feedback.toggle(page.self, page.tracks[marked - 1]);
 }
 
 fn starClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const stars = ratings.starsOf(button) orelse return;
     const marked = @intFromPtr(gtk.g_object_get_data(stars, "orca-position"));
-    if (marked == 0 or marked > page.songs.len) return;
-    ratings.change(page.self, &.{page.songs[marked - 1]}, ratings.chosen(button));
+    if (marked == 0 or marked > page.tracks.len) return;
+    ratings.change(page.self, &.{page.tracks[marked - 1]}, ratings.chosen(button));
 }
 
 fn trackRow(page: *AlbumPage, summary: liborca.TrackSummary, album_artist: []const u8, position: usize) ?*gtk.Widget {
@@ -1539,8 +1539,8 @@ fn showMeta(page: *AlbumPage) void {
         parts += 1;
     };
     if (parts != 0) writer.writeAll(" • ") catch {};
-    var songs: [32]u8 = undefined;
-    writer.print("{s} • {d} min", .{ plural(&songs, page.ids.len, "song", "songs"), minutesOf(release.total_duration_ms) }) catch {};
+    var tracks: [32]u8 = undefined;
+    writer.print("{s} • {d} min", .{ plural(&tracks, page.ids.len, "track", "tracks"), minutesOf(release.total_duration_ms) }) catch {};
     buffer[writer.end] = 0;
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), buffer[0..writer.end :0].ptr);
 }
@@ -1779,7 +1779,7 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
         .self = self,
         .navigation = navigation,
         .ids = &.{},
-        .songs = &.{},
+        .tracks = &.{},
         .artists = &.{},
         .rows = &.{},
         .release_id = release_id,
@@ -1790,27 +1790,27 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
         self.allocator.destroy(page);
         return false;
     };
-    page.songs = self.allocator.alloc(feedback.Target, tracks.items.len) catch {
+    page.tracks = self.allocator.alloc(feedback.Target, tracks.items.len) catch {
         self.allocator.free(page.ids);
         self.allocator.destroy(page);
         return false;
     };
     page.artists = self.allocator.alloc(?i64, tracks.items.len) catch {
         self.allocator.free(page.ids);
-        self.allocator.free(page.songs);
+        self.allocator.free(page.tracks);
         self.allocator.destroy(page);
         return false;
     };
     page.rows = self.allocator.alloc(?*gtk.Widget, tracks.items.len) catch {
         self.allocator.free(page.ids);
-        self.allocator.free(page.songs);
+        self.allocator.free(page.tracks);
         self.allocator.free(page.artists);
         self.allocator.destroy(page);
         return false;
     };
-    for (page.ids, page.songs, page.artists, page.rows, tracks.items) |*id, *song, *artist_id, *row, item| {
+    for (page.ids, page.tracks, page.artists, page.rows, tracks.items) |*id, *track, *artist_id, *row, item| {
         id.* = item.id;
-        song.* = .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback };
+        track.* = .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback };
         artist_id.* = item.artist_id;
         row.* = null;
     }

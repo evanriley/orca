@@ -409,6 +409,11 @@
   smart playlist tiles and equaliser filters drop their own colours, and
   keyboard focus shows a 2 px accent ring. New type, control, spacing and
   radius classes match the design's scale.
+- **orca-gtk says Tracks, not Songs.** Every label, count, tooltip, menu
+  item and toast names a track, as liborca does. A settings file written
+  before this release keeps its column choice: `[view] song_columns` and
+  `song_column_widths` are still read when the `track_` keys are absent,
+  and saving writes the `track_` keys.
 - **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
   panel is one window-wide sidebar, 420 px in every mode, on every page,
   so opening it, changing its mode or changing page never moves the

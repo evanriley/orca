@@ -13,7 +13,7 @@ const feedback = @import("feedback.zig");
 const page_ui = @import("page.zig");
 const playlists = @import("playlists.zig");
 const settings = @import("settings.zig");
-const song_filters = @import("song_filters.zig");
+const track_filters = @import("track_filters.zig");
 const strings = @import("strings.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
@@ -28,10 +28,10 @@ const tile_width: c_int = 165;
 const tile_height: c_int = 128;
 const album_pixels: c_int = 128;
 const artist_pixels: c_int = 36;
-const song_cover_pixels: c_int = 32;
+const track_cover_pixels: c_int = 32;
 const album_limit = 4;
 const artist_limit = 5;
-const song_limit = 5;
+const track_limit = 5;
 const mosaic_cells = 4;
 const wheel_step: f64 = 120;
 const cell_keys = [mosaic_cells][*:0]const u8{ "orca-cell-0", "orca-cell-1", "orca-cell-2", "orca-cell-3" };
@@ -59,7 +59,7 @@ const Covers = struct {
     len: u8 = 0,
 };
 
-const Song = struct {
+const Track = struct {
     target: feedback.Target,
     row: ?*gtk.Widget = null,
     heart: ?*gtk.Widget = null,
@@ -85,18 +85,18 @@ pub const State = struct {
     hero_stats: ?*gtk.Label = null,
     album_card: ?*gtk.Widget = null,
     artist_card: ?*gtk.Widget = null,
-    song_card: ?*gtk.Widget = null,
+    track_card: ?*gtk.Widget = null,
     album_grid: ?*gtk.FlowBox = null,
     artist_list: ?*gtk.ListBox = null,
-    song_list: ?*gtk.ListBox = null,
+    track_list: ?*gtk.ListBox = null,
     release_ids: [album_limit]i64 = @splat(0),
     release_count: usize = 0,
     artist_ids: [artist_limit]i64 = @splat(0),
     artist_count: usize = 0,
-    songs: [song_limit]Song = undefined,
-    song_ids: [song_limit]i64 = @splat(0),
-    song_count: usize = 0,
-    song_sort: liborca.TrackSort = .play_count,
+    tracks: [track_limit]Track = undefined,
+    track_ids: [track_limit]i64 = @splat(0),
+    track_count: usize = 0,
+    track_sort: liborca.TrackSort = .play_count,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.idle != 0) _ = gtk.g_source_remove(self.idle);
@@ -286,7 +286,7 @@ fn showGenre(self: *App, summary: Summary, name: []const u8, persist: bool) void
     const library = self.library orelse return;
     fillAlbums(self, library, summary.id);
     fillArtists(self, library, summary.id);
-    fillSongs(self, library, summary.id);
+    fillTracks(self, library, summary.id);
 }
 
 fn statsText(buffer: []u8, summary: Summary) [:0]const u8 {
@@ -531,8 +531,8 @@ fn playGenre(self: *App, shuffle: bool, start_id: ?i64) void {
 fn playById(self: *App, genre_id: i64, shuffle: bool, start_id: ?i64) void {
     var list: IdList = .{ .app = self };
     defer list.ids.deinit(self.allocator);
-    collectPlayable(self, genre_id, self.genres.song_sort, &list);
-    if (list.ids.items.len == 0) return self.toast("No song in this genre has a playable file");
+    collectPlayable(self, genre_id, self.genres.track_sort, &list);
+    if (list.ids.items.len == 0) return self.toast("No track in this genre has a playable file");
     self.runtime.playerSetShuffle(self.player, shuffle) catch {};
     const wanted = start_id orelse return transport.playIds(self, list.ids.items, 0);
     const start = std.mem.indexOfScalar(i64, list.ids.items, wanted) orelse return transport.playIds(self, &.{wanted}, 0);
@@ -660,13 +660,13 @@ fn artistsSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artists.showGenre(self, genre.id, self.genres.current_name.value);
 }
 
-fn songsSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn tracksSeeAll(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const genre = self.genres.current orelse return;
-    song_filters.showGenre(self, genre.id);
+    track_filters.showGenre(self, genre.id);
     browse.clearSearch(self);
     browse.clearScope(self);
-    self.browse.sort = self.genres.song_sort;
+    self.browse.sort = self.genres.track_sort;
     self.browse.direction = .descending;
     window.showSort(self);
     self.reload();
@@ -814,20 +814,20 @@ fn marked(widget: ?*anyopaque) ?usize {
     return position - 1;
 }
 
-fn songHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const position = marked(button) orelse return;
-    if (position >= self.genres.song_count) return;
-    feedback.toggle(self, self.genres.songs[position].target);
+    if (position >= self.genres.track_count) return;
+    feedback.toggle(self, self.genres.tracks[position].target);
 }
 
-fn songRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Widget {
+fn trackRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
     gtk.gtk_widget_add_css_class(row, "album-track-row");
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(box, "genre-song");
-    const thumb = art.newCover(self, art.iconPlaceholder(song_cover_pixels), song_cover_pixels);
-    gtk.gtk_widget_add_css_class(thumb, "artist-song-cover");
+    gtk.gtk_widget_add_css_class(box, "genre-track");
+    const thumb = art.newCover(self, art.iconPlaceholder(track_cover_pixels), track_cover_pixels);
+    gtk.gtk_widget_add_css_class(thumb, "artist-track-cover");
     art.show(self, thumb, if (summary.release_id) |release| art.Key.release(release, .thumb) else art.Key.track(summary.id, .thumb));
     const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
@@ -836,7 +836,7 @@ fn songRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Widg
     const title = cardLabel(strings.terminated(&buffer, if (summary.title.len != 0) summary.title else "Untitled").ptr, "genre-row-title");
     gtk.gtk_widget_add_css_class(title, "album-track-title");
     const artist = cardLabel(strings.terminated(&buffer, summary.artist).ptr, "genre-row-detail");
-    const heart = feedback.newRowButton(gtk.callback(songHeartClicked), self);
+    const heart = feedback.newRowButton(gtk.callback(trackHeartClicked), self);
     feedback.showRowButton(heart, summary.feedback);
     gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(position + 1));
     gtk.gtk_widget_set_valign(heart, gtk.ALIGN_CENTER);
@@ -859,63 +859,63 @@ fn songRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Widg
     for ([_]*gtk.Widget{ rank(position), thumb, labels, duration_label }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
-    self.genres.songs[position] = .{
+    self.genres.tracks[position] = .{
         .target = .{ .track_id = summary.id, .recording_id = summary.recording_id, .feedback = summary.feedback },
         .row = row,
         .heart = heart,
     };
-    self.genres.song_ids[position] = summary.id;
+    self.genres.track_ids[position] = summary.id;
     return row;
 }
 
-fn topSongs(self: *App, library: liborca.LibraryHandle, genre_id: i64, sort: liborca.TrackSort) ?liborca.TrackPage {
+fn topTracks(self: *App, library: liborca.LibraryHandle, genre_id: i64, sort: liborca.TrackSort) ?liborca.TrackPage {
     return self.runtime.libraryTrackQuery(library, "", .{
         .genre_id = genre_id,
         .sort = sort,
         .direction = .descending,
-        .limit = song_limit,
+        .limit = track_limit,
     }) catch null;
 }
 
-fn fillSongs(self: *App, library: liborca.LibraryHandle, genre_id: i64) void {
+fn fillTracks(self: *App, library: liborca.LibraryHandle, genre_id: i64) void {
     const genres = &self.genres;
-    const list = genres.song_list orelse return;
+    const list = genres.track_list orelse return;
     gtk.gtk_list_box_remove_all(list);
-    genres.song_count = 0;
-    genres.song_ids = @splat(0);
-    genres.song_sort = .play_count;
-    var page = topSongs(self, library, genre_id, .play_count) orelse return showCard(genres.song_card, false);
+    genres.track_count = 0;
+    genres.track_ids = @splat(0);
+    genres.track_sort = .play_count;
+    var page = topTracks(self, library, genre_id, .play_count) orelse return showCard(genres.track_card, false);
     const played = for (page.items) |item| {
         if (item.play_count != 0) break true;
     } else false;
     if (!played) {
-        if (topSongs(self, library, genre_id, .rating)) |rated| {
+        if (topTracks(self, library, genre_id, .rating)) |rated| {
             page.deinit();
             page = rated;
-            genres.song_sort = .rating;
+            genres.track_sort = .rating;
         }
     }
     defer page.deinit();
-    for (page.items[0..@min(page.items.len, song_limit)], 0..) |summary, position| {
-        gtk.gtk_list_box_append(list, songRow(self, summary, position));
-        genres.song_count = position + 1;
+    for (page.items[0..@min(page.items.len, track_limit)], 0..) |summary, position| {
+        gtk.gtk_list_box_append(list, trackRow(self, summary, position));
+        genres.track_count = position + 1;
     }
     markPlaying(self, self.shown_track_id);
-    showCard(genres.song_card, genres.song_count != 0);
+    showCard(genres.track_card, genres.track_count != 0);
 }
 
-fn songSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const position = rowPosition(row orelse return) orelse return;
-    if (position >= self.genres.song_count) return;
-    details.choose(self, self.genres.song_ids[0..], self.genres.song_ids[position]);
+    if (position >= self.genres.track_count) return;
+    details.choose(self, self.genres.track_ids[0..], self.genres.track_ids[position]);
 }
 
-fn songActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const position = rowPosition(row) orelse return;
-    if (position >= self.genres.song_count) return;
-    playGenre(self, false, self.genres.song_ids[position]);
+    if (position >= self.genres.track_count) return;
+    playGenre(self, false, self.genres.track_ids[position]);
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
@@ -923,18 +923,18 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
         .feedback => |value| value,
         .rating => return,
     };
-    for (self.genres.songs[0..self.genres.song_count]) |*song| {
-        const recording = song.target.recording_id orelse continue;
+    for (self.genres.tracks[0..self.genres.track_count]) |*track| {
+        const recording = track.target.recording_id orelse continue;
         if (!changed.contains(recording)) continue;
-        song.target.feedback = value;
-        if (song.heart) |heart| feedback.showRowButton(heart, value);
+        track.target.feedback = value;
+        if (track.heart) |heart| feedback.showRowButton(heart, value);
     }
 }
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
-    for (self.genres.songs[0..self.genres.song_count]) |song| {
-        const row = song.row orelse continue;
-        if (track_id == song.target.track_id)
+    for (self.genres.tracks[0..self.genres.track_count]) |track| {
+        const row = track.row orelse continue;
+        if (track_id == track.target.track_id)
             gtk.gtk_widget_add_css_class(row, "now-playing")
         else
             gtk.gtk_widget_remove_css_class(row, "now-playing");
@@ -1004,22 +1004,22 @@ fn buildCards(self: *App, bin: *gtk.Widget) *gtk.Widget {
     self.genres.artist_list = gtk.cast(gtk.ListBox, artist_list);
     gtk.gtk_box_append(artists_card.body, artist_list);
 
-    const songs_card = card(self, "Top Tracks", "Show this genre's songs in Songs", gtk.callback(songsSeeAll));
-    self.genres.song_card = songs_card.widget;
-    const song_list = newList("genre-songs");
-    gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, song_list), gtk.SELECTION_SINGLE);
-    gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, song_list), gtk.false_);
-    _ = gtk.signalConnect(song_list, "row-selected", gtk.callback(songSelected), self);
-    _ = gtk.signalConnect(song_list, "row-activated", gtk.callback(songActivated), self);
-    self.genres.song_list = gtk.cast(gtk.ListBox, song_list);
-    gtk.gtk_box_append(songs_card.body, song_list);
+    const tracks_card = card(self, "Top Tracks", "Show this genre's tracks in Tracks", gtk.callback(tracksSeeAll));
+    self.genres.track_card = tracks_card.widget;
+    const track_list = newList("genre-tracks");
+    gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, track_list), gtk.SELECTION_SINGLE);
+    gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, track_list), gtk.false_);
+    _ = gtk.signalConnect(track_list, "row-selected", gtk.callback(trackSelected), self);
+    _ = gtk.signalConnect(track_list, "row-activated", gtk.callback(trackActivated), self);
+    self.genres.track_list = gtk.cast(gtk.ListBox, track_list);
+    gtk.gtk_box_append(tracks_card.body, track_list);
 
     const outer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 20);
     gtk.gtk_widget_add_css_class(outer, "genre-cards");
     const inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 20);
     gtk.gtk_widget_set_hexpand(inner, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, inner), artists_card.widget);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), songs_card.widget);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), tracks_card.widget);
     gtk.gtk_box_append(gtk.cast(gtk.Box, outer), albums_card.widget);
     gtk.gtk_box_append(gtk.cast(gtk.Box, outer), inner);
 

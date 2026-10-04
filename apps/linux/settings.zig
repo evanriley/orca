@@ -19,7 +19,7 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
-const song_table = @import("song_table.zig");
+const track_table = @import("track_table.zig");
 const albums = @import("albums.zig");
 const playlists = @import("playlists.zig");
 const parametric = @import("parametric.zig");
@@ -297,13 +297,13 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.album_columns = albums.parseColumns(std.mem.span(value));
     }
-    if (getString(keys, "view", "song_columns")) |value| {
+    if (getString(keys, "view", "track_columns") orelse getString(keys, "view", "song_columns")) |value| {
         defer gtk.g_free(value);
-        self.song_columns.columns = song_table.parseColumns(std.mem.span(value));
+        self.track_columns.columns = track_table.parseColumns(std.mem.span(value));
     }
-    if (getString(keys, "view", "song_column_widths")) |value| {
+    if (getString(keys, "view", "track_column_widths") orelse getString(keys, "view", "song_column_widths")) |value| {
         defer gtk.g_free(value);
-        song_table.parseWidths(std.mem.span(value), &self.song_columns.widths);
+        track_table.parseWidths(std.mem.span(value), &self.track_columns.widths);
     }
     if (getString(keys, "playback", "volume")) |value| {
         defer gtk.g_free(value);
@@ -411,9 +411,9 @@ pub fn save(self: *App) void {
     var album_columns_buffer: [64]u8 = undefined;
     gtk.g_key_file_set_string(keys, "view", "album_columns", albums.formatColumns(&album_columns_buffer, self.album_columns).ptr);
     var columns_buffer: [256]u8 = undefined;
-    gtk.g_key_file_set_string(keys, "view", "song_columns", song_table.formatColumns(&columns_buffer, self.song_columns.columns).ptr);
+    gtk.g_key_file_set_string(keys, "view", "track_columns", track_table.formatColumns(&columns_buffer, self.track_columns.columns).ptr);
     var widths_buffer: [256]u8 = undefined;
-    gtk.g_key_file_set_string(keys, "view", "song_column_widths", song_table.formatWidths(&widths_buffer, &self.song_columns.widths).ptr);
+    gtk.g_key_file_set_string(keys, "view", "track_column_widths", track_table.formatWidths(&widths_buffer, &self.track_columns.widths).ptr);
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);

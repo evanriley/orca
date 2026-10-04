@@ -401,8 +401,8 @@ fn dropped(target: ?*anyopaque, value: *const gtk.GValue, _: f64, _: f64, data: 
 
 fn move(self: *App, from: u32, to: u32) void {
     self.runtime.playerQueueMove(self.player, from, to) catch |err| self.toast(switch (err) {
-        error.QueueEntryInUse => "Can't move a song that's already lined up",
-        else => "Could not move that song",
+        error.QueueEntryInUse => "Can't move a track that's already lined up",
+        else => "Could not move that track",
     });
     invalidate(self);
     self.mpris.notify();
@@ -445,7 +445,7 @@ pub fn askSaveName(self: *App) void {
     gtk.gtk_entry_set_placeholder_text(gtk.cast(gtk.Entry, entry), "Name");
     gtk.gtk_entry_set_activates_default(gtk.cast(gtk.Entry, entry), gtk.true_);
     request.* = .{ .self = self, .entry = entry };
-    const dialog = adw.adw_alert_dialog_new("Save Queue as Playlist", "The playing song and everything up next.");
+    const dialog = adw.adw_alert_dialog_new("Save Queue as Playlist", "The playing track and everything up next.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_set_extra_child(alert, entry);
     adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
@@ -634,7 +634,7 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, empty), "Nothing queued");
     adw.adw_status_page_set_description(
         gtk.cast(adw.StatusPage, empty),
-        "Play a song, or select several and press Enter.",
+        "Play a track, or select several and press Enter.",
     );
 
     const body = gtk.gtk_stack_new();
@@ -689,8 +689,8 @@ fn visible(widget: ?*gtk.Widget, shown: bool) void {
 
 fn durationText(buffer: []u8, count: usize, total_ms: i64) [:0]const u8 {
     var duration_buffer: [32]u8 = undefined;
-    const songs: []const u8 = if (count == 1) "song" else "songs";
-    return strings.format(buffer, "{d} {s} • {s}", .{ count, songs, strings.totalDuration(&duration_buffer, total_ms) });
+    const tracks: []const u8 = if (count == 1) "track" else "tracks";
+    return strings.format(buffer, "{d} {s} • {s}", .{ count, tracks, strings.totalDuration(&duration_buffer, total_ms) });
 }
 
 /// Rebuilds the page from the engine. Bounded by one page of the queue, which
@@ -765,11 +765,11 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
         var total_ms = next_ms;
         if (now.len != 0) total_ms += now[0].duration_ms orelse 0;
         const upcoming = status.queue_length -| status.queue_index;
-        const songs: []const u8 = if (status.queue_length == 1) "song" else "songs";
+        const noun: []const u8 = if (status.queue_length == 1) "track" else "tracks";
         const subtitle = if (status.queue_length == 0)
             ""
         else if (status.queue_index != 0 or upcoming > ref_count)
-            strings.format(&buffer, "{d} {s}", .{ status.queue_length, songs })
+            strings.format(&buffer, "{d} {s}", .{ status.queue_length, noun })
         else
             durationText(&buffer, status.queue_length, total_ms);
         gtk.gtk_label_set_text(meta, subtitle.ptr);

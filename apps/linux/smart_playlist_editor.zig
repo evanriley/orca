@@ -226,7 +226,7 @@ fn showCount(editor: *Editor) void {
     const matched = self.runtime.librarySmartPlaylistCount(library, json) catch |err| return showError(editor, rulesError(err));
     gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, editor.count), "error");
     var buffer: [64]u8 = undefined;
-    gtk.gtk_label_set_text(editor.count, strings.printZ(&buffer, "{d} {s} match", .{ matched, if (matched == 1) "song" else "songs" }) catch "");
+    gtk.gtk_label_set_text(editor.count, strings.printZ(&buffer, "{d} {s} match", .{ matched, if (matched == 1) "track" else "tracks" }) catch "");
 }
 
 fn writeNumber(writer: *std.Io.Writer, typed: []const u8, scale: i64) !void {
@@ -517,7 +517,7 @@ fn newGroup(editor: *Editor, depth: usize) *gtk.Widget {
     gtk.gtk_widget_set_tooltip_text(match, "Whether every rule must match, or any one");
     _ = gtk.signalConnect(match, "notify::selected", gtk.callback(selectionChanged), editor);
     gtk.g_object_set_data(group, "orca-match", match);
-    const lead = caption(if (depth == 1) "Match" else "Songs that match");
+    const lead = caption(if (depth == 1) "Match" else "Tracks that match");
     const tail = caption(if (depth == 1) "of the following rules" else "of these rules");
     gtk.gtk_widget_set_hexpand(tail, gtk.true_);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, tail), 0);

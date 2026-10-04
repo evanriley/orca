@@ -522,7 +522,7 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library
 The window is an `AdwNavigationSplitView`:
 
 - The sidebar (`AdwSidebar`) opens with the Orca wordmark and the main menu,
-  then lists the pages in sections: Library (Albums, Artists, Songs, Genres, Folders, Loved),
+  then lists the pages in sections: Library (Albums, Artists, Tracks, Genres, Folders, Loved),
   Collection (Playlists), Playback
   (Now Playing, and Queue with its length) and Library Tools (Health and
   Matches, each with its count). Settings is pinned at its foot, above the
@@ -549,12 +549,12 @@ The window is an `AdwNavigationSplitView`:
   shows a play button on the cover, which plays the album, and a more button
   after the artist, which opens the album menu; the selected tile is
   outlined. The list shows 44 px rows of a small cover, title, artist, year,
-  song count, minutes, format (`FLAC 16/44.1`, or `Mixed`), a heart that
+  track count, minutes, format (`FLAC 16/44.1`, or `Mixed`), a heart that
   loves the album and a more button.
   Activating an album opens its page: the cover beside an overline naming
   the release type, else COMPILATION for a compilation and ALBUM otherwise,
   the title, the artist as a link and a line of year, its top one or two genres joined by ` / `,
-  song count and minutes, then the album's description from
+  track count and minutes, then the album's description from
   `Runtime.libraryReleaseInfo`, at most 520 px wide and three lines, with a
   More link, shown when the text wraps past three lines at the width it is
   given, that shows the rest, and under it its source and licence. With no
@@ -596,7 +596,7 @@ The window is an `AdwNavigationSplitView`:
   library, all from `libraryArtistTotals`. A `Photo: credit • licence` line under the hero links to the
   photo's page. Below sit Top Tracks, their five most played tracks, or by
   rating while none has been played, each with its cover, an E badge when
-  explicit, a heart, duration and more button, with See All opening Songs
+  explicit, a heart, duration and more button, with See All opening Tracks
   scoped to the artist sorted by plays; Albums, EPs & Singles and
   Appearances, each a wrapping grid of up to eight releases, newest first,
   under a heading with its count, whose release opens its page in place.
@@ -620,12 +620,12 @@ The window is an `AdwNavigationSplitView`:
   Preferences' Fetch artist info switch, saved as
   `[library] fetch_artist_info`, is on; when it finishes the photo,
   biography, listeners, credit and related artists refresh in place.
-  Activating a song plays the artist's tracks in album order from it, and
-  the inspector shows the selected song, otherwise the Artist. A window too
+  Activating a track plays the artist's tracks in album order from it, and
+  the inspector shows the selected track, otherwise the Artist. A window too
   narrow for the full header stacks the hero and the two sections and lays
   the stats out in a row; a narrow window hides the stats.
-- **Songs** is the song list. Its header carries its own search,
-  `Search songs, artists, albums…` with a Ctrl F hint, in place of the
+- **Tracks** is the track list. Its header carries its own search,
+  `Search tracks, artists, albums…` with a Ctrl F hint, in place of the
   library search, and a Filters menu: Genre, a Year range, Format (Any,
   Lossless, Lossy), a minimum sample rate, Loved only and Explicit only,
   with Clear Filters. Every filter is part of the liborca query, with or
@@ -640,25 +640,25 @@ The window is an `AdwNavigationSplitView`:
   showing the Artist and Album panes. The list pages 512 rows at a time from
   liborca as it scrolls, and a header click re-queries in the engine's order
   rather than sorting loaded rows; the sorted column's title is
-  highlighted. Under an uppercase header each song is one thin-ruled row:
-  the playing song shows a play mark in place of its number and an accent
-  title, an explicit song shows an E badge after its title, its heart sits
+  highlighted. Under an uppercase header each track is one thin-ruled row:
+  the playing track shows a play mark in place of its number and an accent
+  title, an explicit track shows an E badge after its title, its heart sits
   in its own column, its rating stars show on hover and once rated, and
   hovering a row shows a ••• button with the track menu. The ••• at the
   header's end, and every column title's menu, choose the columns: Artist,
   Album, Loved, Rating, Date Added, Year, Last Played, Plays, Duration,
   Format, Codec, Bit Depth and Sample Rate; # and Title always show. The
   default is Artist, Album, Loved, Date Added, Duration and Format. The
-  choice is saved as `[view] song_columns` (a comma list of those names in
-  snake case) and dragged widths as `[view] song_column_widths`
-  (`name:pixels` pairs); column order is not saved. A narrow window drops
+  choice is saved as `[view] track_columns` (a comma list of those names in
+  snake case) and dragged widths as `[view] track_column_widths`
+  (`name:pixels` pairs); the older `song_columns` and `song_column_widths` keys are read when these are absent; column order is not saved. A narrow window drops
   every chosen column except Artist, Loved and Duration without forgetting
   the choice and narrows Title and Artist, which ellipsize, so that Title,
   Artist, the heart and Duration fit a 560 px window without saving those
   widths; the table scrolls sideways inside its own area when the rest does
-  not fit. Below the 900sp breakpoint the Songs, Loved and playlist tables
+  not fit. Below the 900sp breakpoint the Tracks, Loved and playlist tables
   narrow this way and the search shrinks. The tables sit inside the page's
-  side margins. The Songs,
+  side margins. The Tracks,
   Artists and Albums searches query 200 ms after the last keystroke. A
   library with no tracks shows a welcome page with Add Music Folder; a scan
   in progress shows there too.
@@ -681,9 +681,9 @@ The window is an `AdwNavigationSplitView`:
   opening its album page in place; Top Artists, the five of its artists with
   the most tracks in the whole library; and Top Tracks, its five most played tracks, or by rating
   while none has been played, each with a cover, a heart and duration, a
-  song playing the genre in that order from it. Each card's See All opens the matching
+  track playing the genre in that order from it. Each card's See All opens the matching
   page scoped to the genre: Albums through its genre filter, Artists through
-  its genre chip, Songs through its Genre filter in the card's sort. The
+  its genre chip, Tracks through its Genre filter in the card's sort. The
   cards stack below 1300 px and the artist and track cards stack too below
   720 px, so the page fits a 560 px window. A library with no genres shows a
   status page whose Fill missing genres from MusicBrainz opens Settings ›
@@ -699,13 +699,13 @@ The window is an `AdwNavigationSplitView`:
   (`playerPlayFolder`), and a count such as `12 folders • 148 files`, the
   files counting those in subfolders. Files lists 36 px rows, 512 at a time
   as it scrolls: folders first with their file count and total duration,
-  activated to open them, then files with the file name, the song's title
+  activated to open them, then files with the file name, the track's title
   beside it when it differs, the format and the duration; below 700 px of
   content width the format (and a folder's file count) is hidden and the
   name takes the row's width before the title beside it. Activating a file
-  plays this folder's songs, without subfolders, in file order from it. A
+  plays this folder's tracks, without subfolders, in file order from it. A
   file's more button, or a right click, offers Show in Files, Play, Add to
-  Queue and Edit Metadata…. Library shows the songs of files directly in
+  Queue and Edit Metadata…. Library shows the tracks of files directly in
   this folder, not in its subfolders, grouped by album under a 48 px cover,
   album title and artist and year, in disc and track order, as the album
   page lists them. A folder without audio shows `No audio files here.`, and
@@ -714,24 +714,24 @@ The window is an `AdwNavigationSplitView`:
 - **Loved** opens with a large Loved title, a tagline and a short
   description, Play, Shuffle and a more button, then a mosaic of up to four
   loved album covers (taken from loved albums first, then from the albums of
-  loved songs; one cover when there are fewer than four) and the counts of
-  loved songs, albums and artists. The mosaic goes first as the page narrows,
-  then the counts. Play queues every playable loved song, most recently loved
+  loved tracks; one cover when there are fewer than four) and the counts of
+  loved tracks, albums and artists. The mosaic goes first as the page narrows,
+  then the counts. Play queues every playable loved track, most recently loved
   first, Shuffle does the same with shuffle on, and the more button opens the
-  track menu for those songs. Three underlined tabs follow: Loved Songs, the
-  Songs list's table of loved songs, most recently loved first and paged 512
-  at a time, with the inspector for the selected song. Its columns are the
+  track menu for those tracks. Three underlined tabs follow: Loved Tracks, the
+  Tracks list's table of loved tracks, most recently loved first and paged 512
+  at a time, with the inspector for the selected track. Its columns are the
   row's position (#), a small cover, Title, Artist, Album, Duration under a
   clock, the heart, Rating, Last Played and a ••• button with the track menu
   on every row; the covers go when the table is narrow, and Album, Rating and
-  Last Played as on Songs. Last Played reads Today, Yesterday or
+  Last Played as on Tracks. Last Played reads Today, Yesterday or
   `3 days ago` up to six days, then the date, with the full date and
   time in its tooltip; Loved Albums, the Albums grid of loved albums; and Loved
   Artists, a grid of round artist tiles, most recently loved first, each with
-  the Artist's stored photo or its initials, its name and its album and song
+  the Artist's stored photo or its initials, its name and its album and track
   counts. The page never fetches a photo; `orca-cli artist-info --fetch`
   stores one. An album or Artist opens its page in place, a right click on an
-  Artist opens the artist menu, and a song plays on activation. The page is
+  Artist opens the artist menu, and a track plays on activation. The page is
   read again each time it is shown, so a heart cleared on it leaves its row
   in place until then.
 - **Playlists** opens with its title block, New Smart Playlist and
@@ -746,7 +746,7 @@ The window is an `AdwNavigationSplitView`:
   filters, sorts and counts every section (`libraryPlaylistPage`,
   `libraryPlaylistCount`); the search matches names case-insensitively.
   A card shows a mosaic of the first four distinct album covers among the
-  playlist's songs, or for a smart playlist a tile whose icon follows the
+  playlist's tracks, or for a smart playlist a tile whose icon follows the
   field its first rule tests (loved, dates, rating, play count), then the
   name with a pin when pinned, Smart Playlist, By You or Imported, the
   track count and length with how many tracks are unavailable, and when it
@@ -763,13 +763,13 @@ The window is an `AdwNavigationSplitView`:
   track count, length and how many tracks are unavailable, and the
   description, then Play, Shuffle, a heart for playlist love, Edit Rules
   for a smart playlist and the playlist menu. Below 900sp the heading
-  stacks the art above the name. The songs follow in the Songs list's
+  stacks the art above the name. The tracks follow in the Tracks list's
   table, numbered by their position in the playlist; below 900sp it drops
-  its album and the other columns a narrow window drops on Songs. Activating a song plays the
+  its album and the other columns a narrow window drops on Tracks. Activating a track plays the
   playlist from it; its menu adds Remove from Playlist, Move Up and Move
   Down on a manual playlist. An
-  entry whose recording has no song left reads Not in your library, is
-  dimmed and does not play. While no song is selected the inspector shows
+  entry whose recording has no track left reads Not in your library, is
+  dimmed and does not play. While no track is selected the inspector shows
   the playlist: its name, Created by, Details (tracks, unavailable,
   duration, mixed artists, top genres, created, last updated), the
   description and the tags.
@@ -781,12 +781,12 @@ The window is an `AdwNavigationSplitView`:
   comparison fitting the field's type and a value: text, a number, a
   `YYYY-MM-DD` date, or Yes or No. The editor writes version 1 rules JSON
   (`docs/playlists.md`) and, a quarter of a second after the last change,
-  asks `librarySmartPlaylistCount` how many songs match; when liborca rejects
+  asks `librarySmartPlaylistCount` how many tracks match; when liborca rejects
   the rules, the line shows its reason instead. Create saves with
   `libraryCreateSmartPlaylist` and opens the new playlist; Save on an
   existing one uses `librarySetSmartPlaylistRules`. Opening it on a smart
   playlist reads `librarySmartPlaylistRules` back into the groups.
-- **Now Playing** is the audible song's cover, large, over a blurred and
+- **Now Playing** is the audible track's cover, large, over a blurred and
   darkened copy of it, with a Now Playing overline, the title in serif, the
   artist and the album with its year as links, a heart, a more button with
   the track menu, a seek bar and the transport. Clicking the title opens its
@@ -795,7 +795,7 @@ The window is an `AdwNavigationSplitView`:
   drive playback. Under the transport sit three centred lyric lines: the
   previous line dimmed, the line being heard, and the next. Plain lyrics
   show their first three lines, the page looks lyrics up itself when the
-  song changes, the space collapses when the song has none, and clicking
+  track changes, the space collapses when the track has none, and clicking
   the lines opens the Lyrics inspector. A 340 px column at the end holds
   Up Next, five queue entries from the audible one with Clear and View Full
   Queue, and Track Info (title, artist, album, date, genre, track number as
@@ -806,7 +806,7 @@ The window is an `AdwNavigationSplitView`:
   glyph, Nothing playing and Pick an album or press Play. Clicking the
   cover in the player bar opens it.
 - **Queue** is the Player's queue as the engine resolves it, under the page
-  title, the song count (and length when the whole queue is shown) and Save
+  title, the track count (and length when the whole queue is shown) and Save
   as Playlist… and Clear buttons, in three sections. Now Playing is the
   audible entry on an accent tint: cover, title in the accent colour, artist
   and album, heart and duration. Up Next lists the entries after it with
@@ -827,7 +827,7 @@ The window is an `AdwNavigationSplitView`:
 - **Health** lists what liborca found wrong with the library, with a count in
   the sidebar. The page, titled Library Health, opens with the issue count,
   the same `libraryHealthIssueCount` as the sidebar badge,
-  a Find Duplicates button and the library's album, song and artist counts
+  a Find Duplicates button and the library's album, track and artist counts
   (`libraryReleaseCount`, `libraryTrackCount`, `libraryArtistCount`), then a
   card per kind of issue in `libraryHealthSummary`'s order: a symbolic icon
   tinted by the kind's highest severity, the kind's name and a one-line
@@ -848,10 +848,10 @@ The window is an `AdwNavigationSplitView`:
   (`libraryRestoreHealthIssue`). A card above the kinds offers Analyse while
   `libraryUnanalyzedCount` is above zero and no analysis runs. The page
   reloads when matching, analysis or duplicate finding finishes.
-- **Matches** lists the songs with MusicBrainz or AcoustID proposals
+- **Matches** lists the tracks with MusicBrainz or AcoustID proposals
   awaiting review (`libraryMatchReviewPage`), with their count in the
   sidebar, as a card of flush rows under the page title. Each row shows
-  the song's own title, artist, album and length and its best proposal's
+  the track's own title, artist, album and length and its best proposal's
   score; expanding it lists every proposal with its album and release date,
   the looked-up release's when there is one, its
   source (MusicBrainz, AcoustID or MusicBrainz + AcoustID) and AcoustID's
@@ -861,26 +861,26 @@ The window is an `AdwNavigationSplitView`:
   already held. An accept can regroup albums, so the library pages reload
   and album and artist pages go back to their lists, as after an edit. An AcoustID
   proposal without a title reads Unknown title. A proposal more than 10 s
-  longer or shorter than the song shows its length in the warning colour.
+  longer or shorter than the track shows its length in the warning colour.
   Find Matches starts the matching job, which shares the status card and,
   unless Match by audio fingerprint is off in Settings, also asks
   AcoustID by fingerprint with the application key the app sets at startup.
-  Accept Confident asks first, then accepts each song's best proposal at or
+  Accept Confident asks first, then accepts each track's best proposal at or
   above the threshold set in Settings (90% by default,
   `[matching] accept_confidence` in `settings.ini`). With nothing to review
-  the page offers Find Matches, or says every song has a recording ID.
+  the page offers Find Matches, or says every track has a recording ID.
 
-  **Corrections**, a card above the songs that is hidden when there are
+  **Corrections**, a card above the tracks that is hidden when there are
   none, lists the album groups a verification proposed
   (`libraryCorrectionGroups`): each names the album and artist and,
-  expanded, every song's current title
+  expanded, every track's current title
   and position beside the proposed ones. Accept All
   (`libraryAcceptCorrectionGroup`) and Dismiss All
-  (`libraryDismissCorrectionGroup`) take the whole group; the songs in a
-  group are not listed among the songs to review. A proposal that would
+  (`libraryDismissCorrectionGroup`) take the whole group; the tracks in a
+  group are not listed among the tracks to review. A proposal that would
   replace the recording ID in effect says "replaces" and the start of that
   ID beside its source. Accepting a correction, alone or with Accept All,
-  opens the tag-write preview for the corrected songs when the accept
+  opens the tag-write preview for the corrected tracks when the accept
   changed their values.
 
   Submit to AcoustID (N) appears when an AcoustID key is saved and
@@ -894,16 +894,16 @@ avatar), a queue entry, or the playing track's cover in Now Playing and the
 player bar opens a menu: Play, Play Next, Add to Queue, Love, Dislike, Edit
 Tags…, Show Album and Show Artist, as far as they apply; queue entries offer
 Play Now, Play Next, Play Later, Remove from Queue and Save Queue as
-Playlist…. A single song in the track list, an album page, the queue or
+Playlist…. A single track in the track list, an album page, the queue or
 a playlist also offers Verify and Re-identify, and an album Match Album,
 Verify Album, Re-identify Album and Fetch Cover Art. Verify needs Match by
 audio fingerprint on in Settings. Re-identify Album accepts nothing and
-fetches no cover; its proposals wait in Matches. A song with no feedback offers Love and Dislike; a loved one
+fetches no cover; its proposals wait in Matches. A track with no feedback offers Love and Dislike; a loved one
 offers Remove Love, a disliked one Remove Dislike. On a selection the entries
-apply to every selected song. An album's menu offers Love Album or Remove
-Album Love, and names its song entries Love All Songs, Dislike All Songs,
-Remove Love from All Songs and Remove Dislike from All Songs; album love and
-song love are independent of each other.
+apply to every selected track. An album's menu offers Love Album or Remove
+Album Love, and names its track entries Love All Tracks, Dislike All Tracks,
+Remove Love from All Tracks and Remove Dislike from All Tracks; album love and
+track love are independent of each other.
 The playing track is marked across its whole row in the track list, on album
 pages and in the queue.
 
@@ -928,22 +928,22 @@ pulled out from under the output.
   hidden as the state changes, and the three groups fill the bar's height,
   so Tab visits the left group, then the centre, then the right, whether or
   not anything plays. A heart beside the title loves the audible
-  song and, pressed again, removes the love; it is read when the audible song
+  track and, pressed again, removes the love; it is read when the audible track
   changes and after any change. Below the 900sp breakpoint the format line
   and what changes the samples are hidden, the device name becomes an icon
   that opens the same device list,
   and the volume slider moves into a popover behind the speaker button.
 
 **Love and dislike** are kept by liborca per recording (`librarySetFeedback`);
-album love is kept per Release (`librarySetReleaseLove`) and changes no song.
-Every song row has a heart button, in its own column in the Songs and
-Loved lists and after the title on album pages, the queue and the Now Playing page for the audible song and the songs
-up next. A loved song shows a filled heart in the accent colour; any other song shows an outline
+album love is kept per Release (`librarySetReleaseLove`) and changes no track.
+Every track row has a heart button, in its own column in the Tracks and
+Loved lists and after the title on album pages, the queue and the Now Playing page for the audible track and the tracks
+up next. A loved track shows a filled heart in the accent colour; any other track shows an outline
 heart, dimmed until the row is hovered or selected. Pressing the button loves
-the song, or removes the love, and a disliked song becomes loved. The button
-does not play the song or change the selection. The player bar's heart does the
-same for the audible song. Disliked songs have no marker on their row. The
-love or dislike of a song without a MusicBrainz recording ID is saved on this
+the track, or removes the love, and a disliked track becomes loved. The button
+does not play the track or change the selection. The player bar's heart does the
+same for the audible track. Disliked tracks have no marker on their row. The
+love or dislike of a track without a MusicBrainz recording ID is saved on this
 computer only.
 
 The inspector's **Identity** section has two rows. MusicBrainz shows where
@@ -953,15 +953,15 @@ the verification (`libraryTrackVerification`): Not checked, Matched, Hears a
 different recording, Could not confirm or Could not fingerprint, with
 "out of date" and "suggestion dismissed" appended when they apply. Show
 identifiers reveals the recording, release, release-group, release-track and
-album-artist IDs that are known, each with its source as a tooltip. A song
+album-artist IDs that are known, each with its source as a tooltip. A track
 without a recording ID shows its top three proposals with Accept and
 Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page at
-that song; with no proposals it offers Find Match, which searches for that
-song alone. A song with a recording ID offers Verify while it is unverified
+that track; with no proposals it offers Find Match, which searches for that
+track alone. A track with a recording ID offers Verify while it is unverified
 or out of date. A change made in one place repaints the others, by recording and
 without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
 and only those whose recording changed are replaced. The list factories connect
-each button once, in setup, and read the row's song when the button is pressed.
+each button once, in setup, and read the row's track when the button is pressed.
 
 Each page's header bar is flat and carries no title. A page pushed onto
 another, such as an album or artist page, shows a breadcrumb at its start
@@ -972,11 +972,11 @@ header sits the library search, `Search your library…` with a Ctrl K hint,
 followed by the page's inspector toggles. Below the 900sp breakpoint the
 entry becomes a search button that does the same as Ctrl+K. Ctrl+F focuses
 the current page's own search (Albums, Artists, Playlists), and on any other
-page opens Songs and focuses its search.
+page opens Tracks and focuses its search.
 
 **Command palette.** Focusing the library search, or Ctrl+K, opens a
 popover up to 640 × 480 px under it, kept inside the window. Where the header
-shows a search button, or on Songs and the Playlists overview, the popover
+shows a search button, or on Tracks and the Playlists overview, the popover
 carries its own entry. Typed
 text goes to `Runtime.librarySearch` (`orca-cli search`) 120 ms after the last
 keystroke, and the hits are shown in groups, Tracks, Albums, Artists,
@@ -1206,9 +1206,9 @@ ReplayGain, the equalizer, crossfeed, the volume (once the slider settles) or
 the output device change, and when the popover or the Signal Path mode opens;
 never on the tick.
 
-The **inspector** sits at the end of the Songs list, the Loved page, each
+The **inspector** sits at the end of the Tracks list, the Loved page, each
 album page and playlist, and Now Playing, where it takes the place of the
-Up Next column and shows the playing song.
+Up Next column and shows the playing track.
 Three linked toggles at the end of the header show it in one of three modes,
 or hide it: the track inspector (`Ctrl+I`), lyrics (`Ctrl+Shift+L`) and the
 signal path (`Ctrl+Shift+S`). The mode is shared by every page and saved as `[view] details`,
@@ -1216,20 +1216,20 @@ signal path (`Ctrl+Shift+S`). The mode is shared by every page and saved as `[vi
 inspector is laid over the page instead of beside it and starts closed; a
 mode opens it, and clicking beside it or Escape closes it without changing
 the saved mode. Below 760sp the toggles also become one Panels menu with the
-same three modes. The inspector's scrolling area is not a Tab stop. The Songs inspector shows the first selected track, otherwise
-the playing one, and the Loved inspector the selected loved song, otherwise
+same three modes. The inspector's scrolling area is not a Tab stop. The Tracks inspector shows the first selected track, otherwise
+the playing one, and the Loved inspector the selected loved track, otherwise
 the playing one; an album page's inspector shows its selected track, otherwise
 the playing track when it belongs to the album, otherwise the album: its
 title, an Album subtitle, an Overview (artist, date, genres, tracks, duration
 and format), Identity (whether a MusicBrainz release is matched, once release
 info is stored) and its Description. An artist page's inspector shows the
-Artist until a song is selected or the biography is clicked: their name, an
+Artist until a track is selected or the biography is clicked: their name, an
 Artist subtitle, an Overview (genres one per line, years active, total
 albums and tracks, and how many tracks are in the library), the full Biography with its
 licence and a Read more link, Links from `libraryArtistLinks`, each opening
 in the browser, and a button that fetches the info again. On an album page a click or
 the arrow keys select a row, one per page, and double-click or Enter plays
-from it. The Songs table and the Albums, Artists, Playlists and Queue lists
+from it. The Tracks table and the Albums, Artists, Playlists and Queue lists
 each take one Tab stop: Tab visits the focused row's buttons and then leaves
 the list, and the arrow keys move between rows. The track inspector is filled from `Runtime.libraryTrackDetails` when
 the shown track changes and when the library changes. It opens with the

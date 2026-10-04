@@ -15,8 +15,8 @@ const mpris = @import("mpris.zig");
 const art = @import("art.zig");
 const menu = @import("menu.zig");
 const track_model = @import("track_model.zig");
-const song_table = @import("song_table.zig");
-const song_filters = @import("song_filters.zig");
+const track_table = @import("track_table.zig");
+const track_filters = @import("track_filters.zig");
 const album_filters = @import("album_filters.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
@@ -264,10 +264,10 @@ pub const App = struct {
     /// a refused play reports why instead of silently doing nothing.
     pending_play_request: u64 = 0,
 
-    songs: song_table.Table = .{},
-    song_columns: song_table.Config = .{},
-    song_filters: song_filters.Filters = .{},
-    song_filters_ui: song_filters.Ui = .{},
+    tracks: track_table.Table = .{},
+    track_columns: track_table.Config = .{},
+    track_filters: track_filters.Filters = .{},
+    track_filters_ui: track_filters.Ui = .{},
     scroller: ?*gtk.Widget = null,
     query: OwnedText = .{},
     loaded_rows: u32 = 0,
@@ -394,7 +394,7 @@ pub const App = struct {
     matches_submit_button: ?*gtk.Widget = null,
     /// The Track whose row is open, kept open across reloads.
     matches_open_track: ?i64 = null,
-    /// Accept Confident takes a song's best match at or above this.
+    /// Accept Confident takes a track's best match at or above this.
     match_threshold_percent: u8 = default_match_threshold_percent,
     match_fingerprints: bool = true,
     acoustid_key_stored: bool = false,
@@ -569,17 +569,17 @@ pub const App = struct {
         return .{
             .artist_id = if (searching) null else self.browse.artist_id,
             .release_id = if (searching) null else self.browse.release_id,
-            .genre_id = self.song_filters.genre_id,
-            .loved_only = self.song_filters.loved_only,
-            .year_min = self.song_filters.year_from,
-            .year_max = self.song_filters.year_to,
-            .lossless = switch (self.song_filters.format) {
+            .genre_id = self.track_filters.genre_id,
+            .loved_only = self.track_filters.loved_only,
+            .year_min = self.track_filters.year_from,
+            .year_max = self.track_filters.year_to,
+            .lossless = switch (self.track_filters.format) {
                 .any => null,
                 .lossless => true,
                 .lossy => false,
             },
-            .min_sample_rate = self.song_filters.min_sample_rate,
-            .explicit_only = self.song_filters.explicit_only,
+            .min_sample_rate = self.track_filters.min_sample_rate,
+            .explicit_only = self.track_filters.explicit_only,
             .sort = self.browse.sort,
             .direction = self.browse.direction,
             .limit = page_size,
@@ -634,9 +634,9 @@ pub const App = struct {
                 if (self.page_exhausted) "" else "+",
             }) catch ""
         else if (self.track_total == 1)
-            "1 song"
+            "1 track"
         else
-            strings.printZ(&buffer, "{d} songs", .{self.track_total}) catch "";
+            strings.printZ(&buffer, "{d} tracks", .{self.track_total}) catch "";
         gtk.gtk_label_set_text(meta, text.ptr);
     }
 
@@ -648,7 +648,7 @@ pub const App = struct {
         const scoped = self.browse.artist_id != null or self.browse.release_id != null;
         if (self.loaded_rows != 0 or scoped) {
             gtk.gtk_stack_set_visible_child_name(body, "list");
-        } else if (searching or self.song_filters.active()) {
+        } else if (searching or self.track_filters.active()) {
             gtk.gtk_stack_set_visible_child_name(body, "no-results");
         } else {
             self.updateWelcome();
@@ -681,7 +681,7 @@ pub const App = struct {
     pub fn loadNextPage(self: *App) void {
         const library = self.library orelse return;
         if (self.page_exhausted) return;
-        const store = self.songs.store orelse return;
+        const store = self.tracks.store orelse return;
         var page = self.runtime.libraryTrackQuery(
             library,
             self.query.value,
@@ -701,7 +701,7 @@ pub const App = struct {
             self.allocator,
             page.items.len,
         ) catch {
-            self.toast("Out of memory building the song list");
+            self.toast("Out of memory building the track list");
             return;
         };
         defer additions.deinit(self.allocator);
@@ -724,7 +724,7 @@ pub const App = struct {
     }
 
     pub fn reload(self: *App) void {
-        const store = self.songs.store orelse return;
+        const store = self.tracks.store orelse return;
         gtk.g_list_store_remove_all(store);
         self.loaded_rows = 0;
         self.page_exhausted = false;
@@ -757,8 +757,8 @@ pub const App = struct {
         parametric.deinit(self);
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
         if (self.volume_settle_timer != 0) _ = gtk.g_source_remove(self.volume_settle_timer);
-        self.songs.deinit();
-        self.song_filters_ui.deinit(self.allocator);
+        self.tracks.deinit();
+        self.track_filters_ui.deinit(self.allocator);
         self.album_filters_ui.deinit(self.allocator);
         self.album_info.deinit(self.allocator);
         self.artist_info.deinit(self.allocator);

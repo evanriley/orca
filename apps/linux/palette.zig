@@ -130,7 +130,7 @@ fn openSettings(comptime tab: app.SettingsTab) *const fn (*App) void {
 const commands = [_]Command{
     .{ .name = "Go to Albums", .run = goTo(.albums) },
     .{ .name = "Go to Artists", .run = goTo(.artists) },
-    .{ .name = "Go to Songs", .run = goTo(.tracks) },
+    .{ .name = "Go to Tracks", .run = goTo(.tracks) },
     .{ .name = "Go to Genres", .run = goTo(.genres) },
     .{ .name = "Go to Folders", .run = goTo(.folders) },
     .{ .name = "Go to Loved", .run = goTo(.loved) },

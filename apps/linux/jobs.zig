@@ -25,7 +25,7 @@ const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const art = @import("art.zig");
 const preferences = @import("preferences.zig");
-const song_table = @import("song_table.zig");
+const track_table = @import("track_table.zig");
 const window = @import("window.zig");
 
 const App = app.App;
@@ -365,7 +365,7 @@ fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.Ma
     if (self.match_task_release != null and snapshot.completed_units == (snapshot.total_units orelse 0))
         return gtk.gtk_label_set_text(label, "Cover Art Archive");
     var buffer: [160]u8 = undefined;
-    const text = strings.printZ(&buffer, "{f} of {f} songs · {f} {s}", .{
+    const text = strings.printZ(&buffer, "{f} of {f} tracks · {f} {s}", .{
         strings.grouped(snapshot.completed_units),
         strings.grouped(snapshot.total_units orelse snapshot.completed_units),
         strings.grouped(if (self.match_task_mode == .verify) stats.verified else stats.matched),
@@ -377,7 +377,7 @@ fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.Ma
 fn writeSubmissionDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.SubmissionStats) void {
     const label = self.scan_detail orelse return;
     var buffer: [160]u8 = undefined;
-    const text = strings.printZ(&buffer, "{f} of {f} songs", .{
+    const text = strings.printZ(&buffer, "{f} of {f} tracks", .{
         strings.grouped(stats.files_examined),
         strings.grouped(snapshot.total_units orelse stats.files_examined),
     }) catch return;
@@ -394,8 +394,8 @@ fn albumAccepted(self: *App, release_id: i64) void {
     albums.releaseChanged(self, release_id);
     artists.reloadKeepingScroll(self);
     loved.releaseChanged(self, release_id);
-    song_table.refreshRelease(&self.songs, release_id);
-    song_table.refreshRelease(&self.playlists.songs, release_id);
+    track_table.refreshRelease(&self.tracks, release_id);
+    track_table.refreshRelease(&self.playlists.tracks, release_id);
     self.genres.stale = true;
     self.folders.stale = true;
 }
@@ -413,8 +413,8 @@ fn albumMoved(self: *App, old_id: i64, new_id: i64) void {
     artists.reloadKeepingScroll(self);
     loved.releaseMoved(self, old_id, new_id);
     for ([_]i64{ old_id, new_id }) |release_id| {
-        song_table.refreshRelease(&self.songs, release_id);
-        song_table.refreshRelease(&self.playlists.songs, release_id);
+        track_table.refreshRelease(&self.tracks, release_id);
+        track_table.refreshRelease(&self.playlists.tracks, release_id);
     }
     albums.markPlaying(self, self.shown_track_id);
     artists.markPlaying(self, self.shown_track_id);
@@ -481,17 +481,17 @@ fn verificationFinished(self: *App, track_id: ?i64, state_value: liborca.JobStat
     if (track_id != null) return self.toast(if (result.disagreed != 0)
         "AcoustID hears a different recording — review it in Matches"
     else if (result.agreed != 0)
-        "AcoustID agrees with this song's recording"
+        "AcoustID agrees with this track's recording"
     else if (result.unconfirmed != 0)
-        "AcoustID could not confirm this song"
+        "AcoustID could not confirm this track"
     else if (result.verified == 0)
-        "Nothing to verify: the song has no recording ID, or its verification is current"
+        "Nothing to verify: the track has no recording ID, or its verification is current"
     else
-        "Could not fingerprint this song");
+        "Could not fingerprint this track");
     var buffer: [96]u8 = undefined;
     self.toast(strings.printZ(&buffer, "Verified {f} {s} · {f} disagree", .{
         strings.grouped(result.verified),
-        if (result.verified == 1) "song" else "songs",
+        if (result.verified == 1) "track" else "tracks",
         strings.grouped(result.disagreed),
     }) catch "Verified");
 }
@@ -544,7 +544,7 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
     self.toast(if (matched == 0)
         "No new matches found"
     else
-        strings.printZ(&buffer, "Found matches for {f} {s}", .{ strings.grouped(matched), if (matched == 1) "song" else "songs" }) catch "Found matches");
+        strings.printZ(&buffer, "Found matches for {f} {s}", .{ strings.grouped(matched), if (matched == 1) "track" else "tracks" }) catch "Found matches");
 }
 
 fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.SubmissionStats) void {
@@ -561,7 +561,7 @@ fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca
     var buffer: [64]u8 = undefined;
     self.toast(strings.printZ(&buffer, "Submitted {f} {s} to AcoustID", .{
         strings.grouped(result.submitted),
-        if (result.submitted == 1) "song" else "songs",
+        if (result.submitted == 1) "track" else "tracks",
     }) catch "Submitted to AcoustID");
 }
 

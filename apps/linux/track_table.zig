@@ -23,7 +23,7 @@ const duration_title = "Duration";
 const chooser_title = "Columns";
 
 const fixed_columns = ColumnSet.initMany(&.{ .number, .title, .artist, .album, .loved, .rating, .duration, .more });
-const default_song_columns = ColumnSet.initMany(&.{ .number, .title, .artist, .album, .loved, .date_added, .duration, .format, .more });
+const default_track_columns = ColumnSet.initMany(&.{ .number, .title, .artist, .album, .loved, .date_added, .duration, .format, .more });
 const always_shown = ColumnSet.initMany(&.{ .number, .title, .more });
 const dropped_when_narrow = ColumnSet.initMany(&.{ .album, .rating, .date_added, .year, .last_played, .plays, .format, .codec, .bit_depth, .sample_rate });
 
@@ -31,9 +31,9 @@ const dropped_when_narrow = ColumnSet.initMany(&.{ .album, .rating, .date_added,
 const optional_columns = [_]Column{ .artist, .album, .loved, .rating, .date_added, .year, .last_played, .plays, .duration, .format, .codec, .bit_depth, .sample_rate };
 
 /// The columns a configurable table shows and the widths they were dragged
-/// to; `[view] song_columns` and `song_column_widths` keep them.
+/// to; `[view] track_columns` and `track_column_widths` keep them.
 pub const Config = struct {
-    columns: ColumnSet = default_song_columns,
+    columns: ColumnSet = default_track_columns,
     widths: [Column.all.len]c_int = @splat(0),
 };
 
@@ -243,7 +243,7 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
         if (ids.items.len != 0)
             transport.playIds(self, ids.items, 0)
         else
-            self.toast("None of the selected songs has a playable file");
+            self.toast("None of the selected tracks has a playable file");
         return;
     }
     gtk.gtk_bitset_unref(chosen);
@@ -252,7 +252,7 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     defer gtk.g_object_unref(item);
     const row: *TrackObject = @ptrCast(@alignCast(item));
     if (!row.hasFile()) {
-        self.toast("That song has no playable file");
+        self.toast("That track has no playable file");
         return;
     }
     const id = row.id();
@@ -344,7 +344,7 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
         .number => number: {
             const stack = gtk.gtk_stack_new();
             const label = textLabel(true);
-            gtk.gtk_widget_add_css_class(label, "song-number");
+            gtk.gtk_widget_add_css_class(label, "track-number");
             const glyph = gtk.gtk_image_new_from_icon_name("media-playback-start-symbolic");
             gtk.gtk_widget_set_halign(glyph, gtk.ALIGN_END);
             gtk.gtk_widget_add_css_class(glyph, "album-track-playing");
@@ -355,7 +355,7 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
         .title => title: {
             const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
             const label = textLabel(false);
-            gtk.gtk_widget_add_css_class(label, "song-title");
+            gtk.gtk_widget_add_css_class(label, "track-title");
             const badge = gtk.gtk_label_new("E");
             gtk.gtk_widget_add_css_class(badge, "explicit-badge");
             gtk.gtk_widget_set_valign(badge, gtk.ALIGN_CENTER);
@@ -366,12 +366,12 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
         },
         .duration => duration: {
             const label = textLabel(true);
-            gtk.gtk_widget_add_css_class(label, "song-duration");
+            gtk.gtk_widget_add_css_class(label, "track-duration");
             break :duration label;
         },
         .format => format: {
             const label = textLabel(false);
-            gtk.gtk_widget_add_css_class(label, "song-format");
+            gtk.gtk_widget_add_css_class(label, "track-format");
             break :format label;
         },
         .artist, .album, .date_added, .year, .last_played, .plays, .codec, .bit_depth, .sample_rate => textLabel(isNumeric(cell.column)),

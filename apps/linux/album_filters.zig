@@ -211,7 +211,7 @@ fn choices(labels: []const [*:0]const u8, toggles: []?*gtk.ToggleButton) *gtk.Wi
 pub fn build(self: *App) *gtk.Widget {
     const ui = &self.album_filters_ui;
     const list = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
-    gtk.gtk_widget_add_css_class(list, "song-filters");
+    gtk.gtk_widget_add_css_class(list, "track-filters");
 
     const names = gtk.gtk_string_list_new(null);
     gtk.gtk_string_list_append(names, "Any genre");

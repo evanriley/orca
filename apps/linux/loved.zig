@@ -1,4 +1,4 @@
-//! The Loved page: the loved songs, albums and artists, most recently loved
+//! The Loved page: the loved tracks, albums and artists, most recently loved
 //! first.
 //!
 //! liborca keeps every kind of love and orders it; this asks for a page at a
@@ -21,7 +21,7 @@ const menu = @import("menu.zig");
 const page_ui = @import("page.zig");
 const strings = @import("strings.zig");
 const browse_model = @import("browse_model.zig");
-const song_table = @import("song_table.zig");
+const track_table = @import("track_table.zig");
 
 const App = app.App;
 const BrowseObject = browse_model.BrowseObject;
@@ -31,7 +31,7 @@ const mosaic_pixels: c_int = 200;
 const artist_pixels: c_int = 148;
 const cover_pixels: c_int = 24;
 const cover_column_width: c_int = 40;
-const song_columns = song_table.ColumnSet.initMany(&.{ .number, .title, .artist, .album, .duration, .loved, .rating, .last_played, .more });
+const track_columns = track_table.ColumnSet.initMany(&.{ .number, .title, .artist, .album, .duration, .loved, .rating, .last_played, .more });
 const mosaic_keys = [_][*:0]const u8{ "orca-cover-0", "orca-cover-1", "orca-cover-2", "orca-cover-3" };
 
 pub const navigation_tag = "loved";
@@ -42,17 +42,17 @@ pub const State = struct {
     albums_loaded: u32 = 0,
     albums_exhausted: bool = false,
     albums_body: ?*gtk.Stack = null,
-    songs: song_table.Table = .{},
-    songs_loaded: u32 = 0,
-    songs_exhausted: bool = false,
-    songs_body: ?*gtk.Stack = null,
+    tracks: track_table.Table = .{},
+    tracks_loaded: u32 = 0,
+    tracks_exhausted: bool = false,
+    tracks_body: ?*gtk.Stack = null,
     artist_store: ?*gtk.ListStore = null,
     artists_loaded: u32 = 0,
     artists_exhausted: bool = false,
     artists_body: ?*gtk.Stack = null,
     stats: ?*gtk.Widget = null,
     mosaic: ?*gtk.Widget = null,
-    song_count: ?*gtk.Label = null,
+    track_count: ?*gtk.Label = null,
     album_count: ?*gtk.Label = null,
     artist_count: ?*gtk.Label = null,
     actions: ?*gtk.Widget = null,
@@ -64,7 +64,7 @@ fn state(data: ?*anyopaque) *App {
 
 pub fn reload(self: *App) void {
     reloadAlbums(self);
-    reloadSongs(self);
+    reloadTracks(self);
     reloadArtists(self);
     showMosaic(self);
 }
@@ -88,8 +88,8 @@ pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
         },
         .not_listed, .replaced => {},
     };
-    song_table.refreshRelease(&self.loved.songs, old_id);
-    if (new_id != old_id) song_table.refreshRelease(&self.loved.songs, new_id);
+    track_table.refreshRelease(&self.loved.tracks, old_id);
+    if (new_id != old_id) track_table.refreshRelease(&self.loved.tracks, new_id);
     showMosaic(self);
 }
 
@@ -127,34 +127,34 @@ fn showCount(label: ?*gtk.Label, count: u64) void {
     gtk.gtk_label_set_text(label orelse return, text.ptr);
 }
 
-fn reloadSongs(self: *App) void {
-    const store = self.loved.songs.store orelse return;
+fn reloadTracks(self: *App) void {
+    const store = self.loved.tracks.store orelse return;
     gtk.g_list_store_remove_all(store);
-    self.loved.songs_loaded = 0;
-    self.loved.songs_exhausted = false;
+    self.loved.tracks_loaded = 0;
+    self.loved.tracks_exhausted = false;
     const library = self.library orelse return;
     const total = self.runtime.libraryTrackMatchCount(library, .{ .loved_only = true }) catch 0;
-    showCount(self.loved.song_count, total);
+    showCount(self.loved.track_count, total);
     if (self.loved.actions) |actions| gtk.gtk_widget_set_sensitive(actions, if (total == 0) gtk.false_ else gtk.true_);
-    if (self.loved.songs_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
-    loadNextSongs(self);
+    if (self.loved.tracks_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
+    loadNextTracks(self);
 }
 
-fn loadNextSongs(self: *App) void {
-    const store = self.loved.songs.store orelse return;
-    if (self.loved.songs_exhausted) return;
+fn loadNextTracks(self: *App) void {
+    const store = self.loved.tracks.store orelse return;
+    if (self.loved.tracks_exhausted) return;
     const library = self.library orelse return;
     var page = self.runtime.libraryTrackQuery(library, "", .{
         .loved_only = true,
         .sort = .loved,
         .limit = app.page_size,
-        .offset = self.loved.songs_loaded,
+        .offset = self.loved.tracks_loaded,
     }) catch {
-        self.loved.songs_exhausted = true;
+        self.loved.tracks_exhausted = true;
         return;
     };
     defer page.deinit();
-    if (page.items.len < app.page_size) self.loved.songs_exhausted = true;
+    if (page.items.len < app.page_size) self.loved.tracks_exhausted = true;
     var additions: std.ArrayList(?*anyopaque) = .empty;
     defer {
         for (additions.items) |row| gtk.g_object_unref(row);
@@ -168,7 +168,7 @@ fn loadNextSongs(self: *App) void {
         };
     }
     appendRows(store, additions.items);
-    self.loved.songs_loaded += @intCast(page.items.len);
+    self.loved.tracks_loaded += @intCast(page.items.len);
 }
 
 fn appendRows(store: *gtk.ListStore, rows: []?*anyopaque) void {
@@ -220,7 +220,7 @@ fn loadNextArtists(self: *App) void {
             artist.release_count,
             if (artist.release_count == 1) "album" else "albums",
             artist.track_count,
-            if (artist.track_count == 1) "song" else "songs",
+            if (artist.track_count == 1) "track" else "tracks",
         }) catch "";
         const row = browse_model.newArtist(artist.id, artist.name, detail, .{ .has_photo = artist.has_photo }) orelse continue;
         additions.append(self.allocator, row) catch {
@@ -273,7 +273,7 @@ fn showMosaic(self: *App) void {
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
-    song_table.repaint(&self.loved.songs, changed, change);
+    track_table.repaint(&self.loved.tracks, changed, change);
 }
 
 fn eachPlayable(self: *App, context: anytype, comptime visit: fn (@TypeOf(context), liborca.TrackSummary) bool) void {
@@ -318,7 +318,7 @@ fn playLoved(self: *App, shuffle: bool) void {
     var list: IdList = .{ .app = self };
     defer list.ids.deinit(self.allocator);
     eachPlayable(self, &list, IdList.add);
-    if (list.ids.items.len == 0) return self.toast("No loved song has a playable file");
+    if (list.ids.items.len == 0) return self.toast("No loved track has a playable file");
     self.runtime.playerSetShuffle(self.player, shuffle) catch {};
     transport.playIds(self, list.ids.items, 0);
 }
@@ -335,7 +335,7 @@ fn moreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.context.reset(.tracks);
     eachPlayable(self, self, addToContext);
-    if (self.context.tracks.items.len == 0) return self.toast("No loved song has a playable file");
+    if (self.context.tracks.items.len == 0) return self.toast("No loved track has a playable file");
     albums.popupBelow(self, gtk.cast(gtk.Widget, button.?));
 }
 
@@ -351,9 +351,9 @@ fn albumsScrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void 
     if (!self.loved.albums_exhausted and nearEnd(adjustment)) loadNextAlbums(self);
 }
 
-fn songsScrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn tracksScrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    if (!self.loved.songs_exhausted and nearEnd(adjustment)) loadNextSongs(self);
+    if (!self.loved.tracks_exhausted and nearEnd(adjustment)) loadNextTracks(self);
 }
 
 fn artistsScrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -524,7 +524,7 @@ fn unbindCover(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c
 }
 
 fn arrangeColumns(self: *App) ?*gtk.ColumnViewColumn {
-    const view = self.loved.songs.view orelse return null;
+    const view = self.loved.tracks.view orelse return null;
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupCover), self);
     _ = gtk.signalConnect(factory, "bind", gtk.callback(bindCover), self);
@@ -534,8 +534,8 @@ fn arrangeColumns(self: *App) ?*gtk.ColumnViewColumn {
     gtk.gtk_column_view_column_set_fixed_width(cover, cover_column_width);
     gtk.gtk_column_view_insert_column(view, 1, cover);
     gtk.g_object_unref(cover);
-    const duration = self.loved.songs.header(.duration) orelse return cover;
-    const loved = self.loved.songs.header(.loved) orelse return cover;
+    const duration = self.loved.tracks.header(.duration) orelse return cover;
+    const loved = self.loved.tracks.header(.loved) orelse return cover;
     const columns = gtk.gtk_column_view_get_columns(view);
     var index: c_uint = 0;
     while (gtk.g_list_model_get_item(columns, index)) |column| : (index += 1) {
@@ -546,28 +546,28 @@ fn arrangeColumns(self: *App) ?*gtk.ColumnViewColumn {
     return cover;
 }
 
-fn buildSongs(self: *App) *gtk.Widget {
-    const view = song_table.build(&self.loved.songs, self, .{
+fn buildTracks(self: *App) *gtk.Widget {
+    const view = track_table.build(&self.loved.tracks, self, .{
         .multiple = false,
         .sortable = false,
-        .columns = song_columns,
+        .columns = track_columns,
         .duration_icon = true,
         .relative_dates = true,
     });
-    self.loved.songs.positions = true;
-    gtk.gtk_widget_add_css_class(view, "loved-songs");
+    self.loved.tracks.positions = true;
+    gtk.gtk_widget_add_css_class(view, "loved-tracks");
     const cover = arrangeColumns(self);
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
-    const scroller = scrollerFor(view, gtk.callback(songsScrolled), self);
+    const scroller = scrollerFor(view, gtk.callback(tracksScrolled), self);
     gtk.gtk_widget_add_css_class(scroller, "loved-tracks");
     adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), scroller);
     if (cover) |column| hideBelow(bin, "max-width: 620px", &.{column});
     return bodyFor(
-        &self.loved.songs_body,
+        &self.loved.tracks_body,
         bin,
         "list",
-        emptyPage("No Loved Songs", "Love a song with the heart in its row."),
+        emptyPage("No Loved Tracks", "Love a track with the heart in its row."),
     );
 }
 
@@ -670,13 +670,13 @@ fn buildHero(self: *App) *gtk.Widget {
     const stats = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 18);
     gtk.gtk_widget_add_css_class(stats, "loved-stats");
     gtk.gtk_widget_set_valign(stats, gtk.ALIGN_CENTER);
-    const songs = stat("LOVED SONGS");
-    self.loved.song_count = songs.number;
+    const tracks = stat("LOVED TRACKS");
+    self.loved.track_count = tracks.number;
     const loved_albums = stat("LOVED ALBUMS");
     self.loved.album_count = loved_albums.number;
     const loved_artists = stat("LOVED ARTISTS");
     self.loved.artist_count = loved_artists.number;
-    for ([_]*gtk.Widget{ songs.widget, loved_albums.widget, loved_artists.widget }) |widget| {
+    for ([_]*gtk.Widget{ tracks.widget, loved_albums.widget, loved_artists.widget }) |widget| {
         var child = gtk.gtk_widget_get_first_child(widget);
         while (child) |label| : (child = gtk.gtk_widget_get_next_sibling(label)) gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0);
         gtk.gtk_box_append(gtk.cast(gtk.Box, stats), widget);
@@ -715,7 +715,7 @@ fn hideBelow(bin: *gtk.Widget, condition: [*:0]const u8, objects: []const *anyop
 pub fn build(self: *App) *gtk.Widget {
     const views = adw.adw_view_stack_new();
     const stack = gtk.cast(adw.ViewStack, views);
-    _ = adw.adw_view_stack_add_titled_with_icon(stack, buildSongs(self), "songs", "Loved Songs", "audio-x-generic-symbolic");
+    _ = adw.adw_view_stack_add_titled_with_icon(stack, buildTracks(self), "tracks", "Loved Tracks", "audio-x-generic-symbolic");
     _ = adw.adw_view_stack_add_titled_with_icon(stack, buildAlbums(self), "albums", "Loved Albums", "media-optical-symbolic");
     _ = adw.adw_view_stack_add_titled_with_icon(stack, buildArtists(self), "artists", "Loved Artists", "avatar-default-symbolic");
     gtk.gtk_widget_set_vexpand(views, gtk.true_);

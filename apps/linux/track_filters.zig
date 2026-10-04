@@ -1,4 +1,4 @@
-//! The Songs page's Filters popover. Every filter is a field of the engine's
+//! The Tracks page's Filters popover. Every filter is a field of the engine's
 //! `TrackQuery`, with or without search text.
 
 const std = @import("std");
@@ -59,7 +59,7 @@ fn parseYear(editable: ?*gtk.Editable) ?i32 {
 }
 
 fn changed(self: *App) void {
-    const ui = &self.song_filters_ui;
+    const ui = &self.track_filters_ui;
     if (ui.suppress) return;
     var filters: Filters = .{};
     if (ui.genre) |genre| {
@@ -79,15 +79,15 @@ fn changed(self: *App) void {
     }
     if (ui.loved) |check| filters.loved_only = gtk.gtk_check_button_get_active(check) != 0;
     if (ui.explicit) |check| filters.explicit_only = gtk.gtk_check_button_get_active(check) != 0;
-    if (std.meta.eql(filters, self.song_filters)) return;
-    self.song_filters = filters;
+    if (std.meta.eql(filters, self.track_filters)) return;
+    self.track_filters = filters;
     showActive(self);
     self.reload();
 }
 
 fn showActive(self: *App) void {
-    const button = self.song_filters_ui.button orelse return;
-    if (self.song_filters.active())
+    const button = self.track_filters_ui.button orelse return;
+    if (self.track_filters.active())
         gtk.gtk_widget_add_css_class(button, "filters-active")
     else
         gtk.gtk_widget_remove_css_class(button, "filters-active");
@@ -113,7 +113,7 @@ fn resetControls(ui: *Ui) void {
 
 fn clearClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const ui = &self.song_filters_ui;
+    const ui = &self.track_filters_ui;
     ui.suppress = true;
     resetControls(ui);
     ui.suppress = false;
@@ -121,11 +121,11 @@ fn clearClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn showGenre(self: *App, genre_id: i64) void {
-    const ui = &self.song_filters_ui;
+    const ui = &self.track_filters_ui;
     ui.suppress = true;
     resetControls(ui);
     ui.suppress = false;
-    self.song_filters = .{ .genre_id = genre_id };
+    self.track_filters = .{ .genre_id = genre_id };
     showActive(self);
 }
 
@@ -133,7 +133,7 @@ pub fn showGenre(self: *App, genre_id: i64) void {
 /// keeping the chosen genre selected.
 fn popoverShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const ui = &self.song_filters_ui;
+    const ui = &self.track_filters_ui;
     const names = ui.genre_names orelse return;
     const genre = ui.genre orelse return;
     const library = self.library orelse return;
@@ -160,7 +160,7 @@ fn popoverShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
             if (name.len == 0) continue;
             ui.genre_ids.append(self.allocator, item.id) catch break;
             gtk.gtk_string_list_append(names, name.ptr);
-            if (self.song_filters.genre_id == item.id) selected = @intCast(ui.genre_ids.items.len);
+            if (self.track_filters.genre_id == item.id) selected = @intCast(ui.genre_ids.items.len);
         }
         if (page.items.len < app.page_size) break;
         offset += @intCast(page.items.len);
@@ -193,11 +193,11 @@ fn yearEntry(self: *App, placeholder: [*:0]const u8) *gtk.Widget {
     return entry;
 }
 
-/// The Filters button for the Songs page header.
+/// The Filters button for the Tracks page header.
 pub fn build(self: *App) *gtk.Widget {
-    const ui = &self.song_filters_ui;
+    const ui = &self.track_filters_ui;
     const list = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
-    gtk.gtk_widget_add_css_class(list, "song-filters");
+    gtk.gtk_widget_add_css_class(list, "track-filters");
 
     const names = gtk.gtk_string_list_new(null);
     gtk.gtk_string_list_append(names, "Any genre");
@@ -261,7 +261,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_menu_button_set_label(gtk.cast(gtk.MenuButton, button), "Filters");
     gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, button), popover);
     gtk.gtk_widget_add_css_class(button, "filters-button");
-    gtk.gtk_widget_set_tooltip_text(button, "Filter songs");
+    gtk.gtk_widget_set_tooltip_text(button, "Filter tracks");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
     return button;
 }

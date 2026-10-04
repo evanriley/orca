@@ -25,8 +25,8 @@ const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const page_ui = @import("page.zig");
-const song_table = @import("song_table.zig");
-const song_filters = @import("song_filters.zig");
+const track_table = @import("track_table.zig");
+const track_filters = @import("track_filters.zig");
 const preferences = @import("preferences.zig");
 const palette = @import("palette.zig");
 const lyrics = @import("lyrics.zig");
@@ -49,7 +49,7 @@ fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
-    song_table.markPlaying(&.{ &self.songs, &self.loved.songs, &self.playlists.songs }, track_id);
+    track_table.markPlaying(&.{ &self.tracks, &self.loved.tracks, &self.playlists.tracks }, track_id);
 }
 
 const SortChoice = struct {
@@ -83,8 +83,8 @@ fn sortChoiceIndex(sort: liborca.TrackSort) c_uint {
 /// Numbers the rows by disc and track only where the order is the album's,
 /// and highlights the sorted column's title.
 fn showSortedColumn(self: *App) void {
-    self.songs.positions = self.browse.sort != .track_number and self.browse.sort != .album;
-    song_table.markSorted(&self.songs, if (self.browse.sort == .id) null else self.browse.sort);
+    self.tracks.positions = self.browse.sort != .track_number and self.browse.sort != .album;
+    track_table.markSorted(&self.tracks, if (self.browse.sort == .id) null else self.browse.sort);
 }
 
 pub fn showSort(self: *App) void {
@@ -95,11 +95,11 @@ pub fn showSort(self: *App) void {
     defer self.suppress_browse_signals = previous;
     if (self.sort_dropdown) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, sortChoiceIndex(self.browse.sort));
     showSortedColumn(self);
-    const view = self.songs.view orelse return;
+    const view = self.tracks.view orelse return;
     var chosen: ?*gtk.ColumnViewColumn = null;
     for (Column.all) |column| {
         if (column.sortKey()) |key| {
-            if (key == self.browse.sort) chosen = self.songs.header(column);
+            if (key == self.browse.sort) chosen = self.tracks.header(column);
         }
     }
     gtk.gtk_column_view_sort_by_column(
@@ -127,7 +127,7 @@ fn sortChosen(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
 fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_browse_signals) return;
-    const view = gtk.cast(gtk.Widget, self.songs.view orelse return);
+    const view = gtk.cast(gtk.Widget, self.tracks.view orelse return);
     if (gtk.gtk_widget_get_root(view) == null) return;
     const column_sorter = gtk.cast(gtk.ColumnViewSorter, sorter);
     const primary = gtk.gtk_column_view_sorter_get_primary_sort_column(column_sorter);
@@ -135,7 +135,7 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
     self.browse.direction = .ascending;
     if (primary) |chosen| {
         for (Column.all) |column| {
-            if (self.songs.header(column) == chosen) {
+            if (self.tracks.header(column) == chosen) {
                 if (column.sortKey()) |key| self.browse.sort = key;
             }
         }
@@ -152,7 +152,7 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
     self.reload();
 }
 
-fn filterSongs(self: *App, text: []const u8) void {
+fn filterTracks(self: *App, text: []const u8) void {
     if (std.mem.eql(u8, text, self.query.value)) return;
     self.query.set(self.allocator, text);
     // A text match and a browse scope are alternatives to liborca, so a search
@@ -174,7 +174,7 @@ fn applyFilter(self: *App, page: Page, text: []const u8) void {
     switch (page) {
         .albums => albums.setFilter(self, text),
         .artists => artists.setFilter(self, text),
-        .tracks => filterSongs(self, text),
+        .tracks => filterTracks(self, text),
         .playlists => playlists.setFilter(self, text),
         else => {},
     }
@@ -207,7 +207,7 @@ pub fn clearSearch(self: *App) void {
 pub fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (filterTarget(self) != .tracks or self.palette.popover != null) return;
-    var ids = song_table.playableIds(&self.songs, self.allocator);
+    var ids = track_table.playableIds(&self.tracks, self.allocator);
     defer ids.deinit(self.allocator);
     if (ids.items.len != 0) transport.playIds(self, ids.items, 0);
 }
@@ -319,7 +319,7 @@ pub const Page = enum(c_uint) {
         return switch (self) {
             .albums => "Albums",
             .artists => "Artists",
-            .tracks => "Songs",
+            .tracks => "Tracks",
             .genres => "Genres",
             .folders => "Folders",
             .loved => "Loved",
@@ -459,9 +459,9 @@ pub fn visibleContent(self: *App) ?*gtk.Widget {
 
 fn sectionSource(self: *App, page: Page) details.Source {
     return switch (page) {
-        .tracks => .{ .selection = self.songs.selection orelse return .playing },
-        .loved => .{ .selection = self.loved.songs.selection orelse return .playing },
-        .genres => .{ .ids = self.genres.song_ids[0..] },
+        .tracks => .{ .selection = self.tracks.selection orelse return .playing },
+        .loved => .{ .selection = self.loved.tracks.selection orelse return .playing },
+        .genres => .{ .ids = self.genres.track_ids[0..] },
         else => .playing,
     };
 }
@@ -471,7 +471,7 @@ fn pushedSource(self: *App, page: *adw.NavigationPage) ?details.Source {
         .album => albums.inspectorSource(self, page),
         .artist => artists.inspectorSource(self, page),
         .playlist => |id| .{ .playlist = .{
-            .selection = self.playlists.songs.selection orelse return null,
+            .selection = self.playlists.tracks.selection orelse return null,
             .playlist_id = id,
         } },
     };
@@ -867,7 +867,7 @@ fn buildSidebar(self: *App) *gtk.Widget {
     const library = titledSection("Library");
     _ = sidebarItem(library, "Albums", "media-optical-symbolic");
     _ = sidebarItem(library, "Artists", "avatar-default-symbolic");
-    _ = sidebarItem(library, "Songs", "audio-x-generic-symbolic");
+    _ = sidebarItem(library, "Tracks", "audio-x-generic-symbolic");
     _ = sidebarItem(library, "Genres", "applications-multimedia-symbolic");
     _ = sidebarItem(library, "Folders", "folder-symbolic");
     _ = sidebarItem(library, "Loved", feedback.filled_icon);
@@ -918,9 +918,9 @@ pub fn focusSearch(self: *App) void {
 }
 
 fn buildTrackList(self: *App) *gtk.Widget {
-    const view = song_table.build(&self.songs, self, .{ .multiple = true, .sortable = true, .config = &self.song_columns });
+    const view = track_table.build(&self.tracks, self, .{ .multiple = true, .sortable = true, .config = &self.track_columns });
     _ = gtk.signalConnect(
-        gtk.gtk_column_view_get_sorter(self.songs.view.?),
+        gtk.gtk_column_view_get_sorter(self.tracks.view.?),
         "changed",
         gtk.callback(sortChanged),
         self,
@@ -928,7 +928,7 @@ fn buildTrackList(self: *App) *gtk.Widget {
 
     const scroller = gtk.gtk_scrolled_window_new();
     self.scroller = scroller;
-    gtk.gtk_widget_add_css_class(scroller, "songs-tracks");
+    gtk.gtk_widget_add_css_class(scroller, "tracks-page");
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), view);
@@ -947,7 +947,7 @@ fn buildSortDropdown(self: *App) *gtk.Widget {
     const dropdown = gtk.gtk_drop_down_new_from_strings(&labels);
     self.sort_dropdown = gtk.cast(gtk.DropDown, dropdown);
     gtk.gtk_widget_add_css_class(dropdown, "sort-dropdown");
-    gtk.gtk_widget_set_tooltip_text(dropdown, "Sort songs");
+    gtk.gtk_widget_set_tooltip_text(dropdown, "Sort tracks");
     gtk.gtk_widget_set_valign(dropdown, gtk.ALIGN_CENTER);
     gtk.gtk_drop_down_set_selected(self.sort_dropdown.?, sortChoiceIndex(self.browse.sort));
     _ = gtk.signalConnect(dropdown, "notify::selected", gtk.callback(sortChosen), self);
@@ -998,14 +998,14 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, buildWelcome(self), "welcome");
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, no_results, "no-results");
 
-    const title = page_ui.title("Songs");
-    gtk.gtk_widget_add_css_class(title.widget, "songs-title");
+    const title = page_ui.title("Tracks");
+    gtk.gtk_widget_add_css_class(title.widget, "tracks-title");
     self.tracks_meta = title.meta;
 
     const list_toggle = gtk.gtk_toggle_button_new();
     self.list_toggle = list_toggle;
     gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, list_toggle), "view-list-symbolic");
-    gtk.gtk_widget_set_tooltip_text(list_toggle, "Songs only");
+    gtk.gtk_widget_set_tooltip_text(list_toggle, "Tracks only");
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, list_toggle), gtk.true_);
     const browse_toggle = gtk.gtk_toggle_button_new();
     self.browse_toggle = browse_toggle;
@@ -1025,7 +1025,7 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(sort_label, gtk.ALIGN_CENTER);
     title.add(sort_label);
     title.add(buildSortDropdown(self));
-    title.add(song_filters.build(self));
+    title.add(track_filters.build(self));
     title.add(view_switch);
 
     return page_ui.withTitle(title, body);
@@ -1135,7 +1135,7 @@ fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
 /// Done here rather than with breakpoint setters, which would put back the
 /// columns as they were when the window narrowed and undo a choice made since.
 fn narrowTables(self: *App, narrow: bool) void {
-    for ([_]*song_table.Table{ &self.songs, &self.loved.songs, &self.playlists.songs }) |table| song_table.setNarrow(table, narrow);
+    for ([_]*track_table.Table{ &self.tracks, &self.loved.tracks, &self.playlists.tracks }) |table| track_table.setNarrow(table, narrow);
 }
 
 fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

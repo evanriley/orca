@@ -394,7 +394,7 @@ fn render(view: *View) void {
     const state = &self.lyrics;
     view.generation = state.generation;
     switch (state.resolution) {
-        .nothing_playing => showStatus(view, "audio-x-generic-symbolic", "Nothing Playing", "Lyrics follow the song that is playing."),
+        .nothing_playing => showStatus(view, "audio-x-generic-symbolic", "Nothing Playing", "Lyrics follow the track that is playing."),
         .resolving => showStatus(view, null, "Looking for Lyrics…", null),
         .failed => showStatus(view, "dialog-warning-symbolic", "Lyrics Could Not Be Read", null),
         .found => |found| if (found.lyrics) |lyrics| switch (lyrics.kind) {

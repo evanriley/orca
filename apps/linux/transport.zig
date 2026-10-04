@@ -216,7 +216,7 @@ pub fn toggle(self: *App) void {
     else
         self.runtime.playPlayer(self.player);
     result catch |err| {
-        if (isNotReady(err)) self.toast("Nothing to play yet — double-click a song");
+        if (isNotReady(err)) self.toast("Nothing to play yet — double-click a track");
     };
     self.mpris.notify();
     self.requestTick();
