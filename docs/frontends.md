@@ -1174,8 +1174,11 @@ The window is an `AdwNavigationSplitView`:
 
 Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
-player bar opens a menu: Play, Play Next, Add to Queue, Love, Dislike, Edit
-Tags…, Show Album and Show Artist, as far as they apply; queue entries offer
+player bar opens a menu: Play, Play Next, Add to Queue, Love, Dislike, a
+Rating submenu (1 to 5 Stars, Clear Rating) for tracks, an Add to Playlist
+submenu (New Playlist… and each manual playlist), Edit Tags…, Write Tags to
+Files… on tracks, albums and playlists, Show Album and Show Artist, as far
+as they apply; queue entries offer
 Play Now, Play Next, Play Later, Remove from Queue and Save Queue as
 Playlist…. A single track in the track list, an album page, the queue or
 a playlist also offers Verify and Re-identify, and an album Match Album,
@@ -1273,18 +1276,20 @@ only; the inspector beside it runs the full height of the window. A page pushed 
 another, such as an album or artist page, shows a breadcrumb at its start
 whose first part returns to the page it was opened from (Albums › ABBA),
 dimmed, and whose last part is the page in the normal text colour; a
-playlist's reads Playlists › its name. The breadcrumb is the only back
-control; Alt+← and the mouse back button also return. The header has no
+playlist's reads Playlists › its name. Back and Forward buttons before the
+trail step through the window's history, up to 32 visits; Alt+←, Alt+→
+and the mouse back and forward buttons do the same. The header has no
 window controls: Ctrl+Q quits and the compositor closes the window. At its
 end sits only the library search, a 300 px field with a magnifier and a
 Ctrl K hint. Its placeholder names what the page's own search covers
 (`Search albums, artists or genres…`, `Search artists…`,
-`Search tracks, artists, albums…`, `Search genres…`, `Search playlists…`,
-`Search settings…`) and reads `Search your library…` everywhere else.
-Below the 900sp breakpoint the
+`Search tracks, artists, albums…`, `Search genres…`, `Search this folder…`,
+`Search playlists…`, `Search loved…`, `Search settings…`) and reads
+`Search your library…` everywhere else. Below the 900sp breakpoint the
 entry becomes a search button that does the same as Ctrl+K. Ctrl+F focuses
 the field, or opens Search where the header shows a search button. On Albums,
-Artists, Tracks, Genres and Playlists its text filters that page; elsewhere
+Artists, Tracks, Genres, Folders, Playlists, Loved and Settings its text
+filters that page; elsewhere
 typing opens Search with the text. On every page, text starting with `›`, or
 `>` as a typed alias, opens the command palette with the rest. Either way the
 field is cleared and the page stays unfiltered.
@@ -1331,12 +1336,8 @@ Below 900sp the album, artist and playlist headings and the Settings columns
 stack vertically, the player bar tightens, and a header's actions wrap onto a
 second line when they do not fit. Below 760sp the sidebar collapses behind a
 back button, the browse panes hide, page titles shrink, and the player bar
-stays tightened. Every page fits a 560 px window. Messages are toasts. Shortcuts are listed in the
-shortcuts dialog (Ctrl+?). Space, Ctrl+←/→, L (love the playing track) and
-1 to 5 (rate it) are handled by window key controllers rather than
-application accelerators, and the plain keys do nothing while a dialog is
-open or a text field or popover has focus, so a focused search box keeps
-them. Ctrl+Shift+R scans the library. The window title names the page:
+stays tightened. Every page fits a 560 px window. Messages are toasts.
+[Keyboard](#keyboard) lists the shortcuts. The window title names the page:
 `Orca — Albums`, a pushed page's own title, or `Orca — Settings · Advanced`.
 
 **Edit Metadata** (Edit Tags… in menus) is a page pushed over the current
@@ -1390,7 +1391,7 @@ Identify (optional) and Listen.
    `estimateAudioFiles`, which reads no tags and adds nothing, and reads
    `About 2,800 audio files found`, `More than 100,000 audio files found`,
    `No audio files found yet` or `Orca cannot read this folder`. Watch for
-   changes sets `[library] watch_folders` as the Settings switch does. Scan My
+   changes sets `[library] watch` as the Settings switch does. Scan My
    Music adds each folder with `libraryAddRoot`, starts a scan and opens the
    Scan page.
 2. **Scan** is the Scan page below.
@@ -1496,8 +1497,9 @@ selection made while one runs is loaded after it. Undo This Change… asks for c
 `exportTagWriteHistory`, replacing a file the dialog has confirmed. The page
 reloads after every library job.
 
-**Duplicates** is a page, opened by Compare on a Library Health duplicate
-row or the command palette's Show Duplicates, under the trail Library
+**Duplicates** is a page, opened by Review on Library Health's Duplicates
+row, Compare on one of its files, or the command palette's Show Duplicates,
+under the trail Library
 Health › Duplicates. Under its title, `N recordings appear more than once ·
 potentially SIZE. Orca never deletes on its own.` sums
 `libraryDuplicateGroupTotals`, and `Group N of M` with previous and next
@@ -2031,6 +2033,65 @@ installed with their licences to `share/orca/fonts`, and registered with Pango f
 `<exe dir>/../share/orca/fonts` before the window is built; if they are
 missing, `orca-gtk` logs a warning and uses system fonts.
 
+### Keyboard
+
+The shortcuts dialog (Ctrl+?) lists the window's shortcuts:
+
+| Keys | Action |
+| --- | --- |
+| Space | Play or pause |
+| Ctrl+→, Ctrl+← | Next track, previous track |
+| L | Love the playing track, or remove its love |
+| 1 to 5 | Rate the playing track |
+| Ctrl+K | Search and commands |
+| Ctrl+F | Search this page |
+| Ctrl+L | Show the queue |
+| Ctrl+Shift+L | Lyrics in the inspector |
+| Ctrl+I | The inspector |
+| Ctrl+Shift+S | Signal path in the inspector |
+| Alt+←, Alt+→ | Back, forward |
+| Ctrl+O | Add a music folder |
+| Ctrl+Shift+R | Scan the library |
+| Ctrl+, | Settings |
+| Ctrl+? | Keyboard shortcuts |
+| Ctrl+Q | Quit |
+
+Space, Ctrl+←/→, L, 1 to 5 and Alt+←/→ are handled by window key
+controllers rather than application accelerators. The plain keys do nothing
+while a dialog is open or a text field or popover has focus, so a focused
+search box keeps them. Keys that belong to one page, such as Shift+Enter
+and Delete in the queue, are described with that page. The shortcuts
+cannot be rebound.
+
+### Settings file
+
+`$XDG_CONFIG_HOME/orca/settings.ini` holds only the frontend's own choices;
+nothing inside a library is kept there, and secrets live in the Secret
+Service. Its groups and keys, each described with the page or tab that sets
+it:
+
+- `[general]`: `launch_at_login`, `start_page`, `notify_tracks`, `notify_tasks`,
+  `artist_name_order`.
+- `[library]`: `watch`, `analysis_threads`, `fetch_artist_info`.
+- `[libraries]`: `paths`, `names`, `tracks`, `active`.
+- `[playback]`: `output_device`, `volume`, `replay_gain`, `preamp`, `untagged`,
+  `prevent_clipping`, `queue_end`, `remember_long_position`, `on_launch`.
+- `[sound]`: `equalizer_mode`, `equalizer`, `parametric`, `parametric_presets`,
+  `device_presets`, `switch_preset_with_device`, `crossfeed`,
+  `crossfeed_enabled`.
+- `[listening]`: `scrobble`, `now_playing`.
+- `[matching]`: `accept_confidence`, `fingerprints`.
+- `[maintenance]`: `enabled`.
+- `[lyrics]`: `fetch`.
+- `[appearance]`: `artwork`, `density`, `inspector`, `display_typeface`,
+  `tabular_numerals`, `reduce_animation`, `sidebar_counts`.
+- `[advanced]`: `log_level`.
+- `[view]`: `details`, `lyrics`, `signal_path`, `queue_history`, `album_sort`,
+  `albums_layout`, `album_columns`, `album_cover_size`, `artist_sort`,
+  `artists_layout`, `artists_role`, `genre`, `playlists_tab`, `playlists_sort`,
+  `playlists_layout`, `track_columns`, `track_column_widths`,
+  `track_columns_large`, `track_column_widths_large`.
+
 ### Screenshots
 
 `scripts/headless-gui.sh` screenshots `orca-gtk` at 1440×900 without putting
@@ -2053,13 +2114,18 @@ steps after the output path run in order:
 
 | Step | Effect |
 | --- | --- |
-| `key:SPEC` | One key with modifiers: `key:Return`, `key:ctrl+k` |
+| `key:SPEC` | One key with modifiers: `key:Return`, `key:ctrl+k`, `key:alt+Left` |
 | `type:TEXT` | Types `TEXT` |
 | `move:X,Y` | Moves the pointer, in output pixels |
 | `click:X,Y` | Moves the pointer there and left-clicks |
+| `dclick:X,Y` | Moves the pointer there and double-clicks |
 | `rclick:X,Y` | Moves the pointer there and right-clicks |
+| `drag:X1,Y1,X2,Y2` | Presses at `X1,Y1`, moves to `X2,Y2` in small steps, releases |
 | `scroll:N` | `N` wheel steps; positive scrolls down |
 | `wait:MS` | Waits `MS` milliseconds |
+| `shot:PATH` | Saves a screenshot to `PATH` at once, without waiting to settle |
+| `tree:PATH` | Saves sway's window tree, with window titles, as JSON |
+| `log:PATH` | Copies `orca-gtk`'s output so far; `ORCA_GTK_DEBUG` adds its debug reports |
 | `db:PATH` | Copies the app's library, with its `-wal`, to `PATH` |
 | `close` | Closes the window as its close button does and waits for `orca-gtk` to exit |
 
@@ -2098,7 +2164,7 @@ anything the script:
   the virtual Orca Silent Test Sink backed by `support.null-audio-sink`;
 - clears `WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`,
   `SWAYSOCK` and the other session variables, and gives the app scratch
-  `HOME` and XDG config, data and cache directories;
+  `HOME` and XDG config, data, cache and state directories;
 - points every provider URL at a closed local port.
 
 It then starts a D-Bus daemon with an empty service directory, headless sway

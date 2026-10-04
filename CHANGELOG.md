@@ -4,6 +4,14 @@
 
 ### Added
 
+- **The orca-gtk redesign.** `orca-gtk` is rebuilt page by page to a new
+  design: Albums, Artists, Tracks, Genres, Folders, Loved, Playlists, Now
+  Playing and Queue; Library Health with Duplicates, Audio Problems,
+  Artwork Review and Metadata Issues; Matches and Match Review; Activity
+  and Change History; First Run and Scan; Edit Metadata and Write to
+  Files; and Settings in eight tabs, with the bundled Newsreader, Geist and
+  Geist Mono fonts. liborca and `orca-cli` gain what those pages read; the
+  entries below describe each part.
 - **Multiple libraries.** `orca-gtk` keeps a list of libraries, each a
   name and a database, in the `[libraries]` group of `settings.ini`
   (`paths`, `names`, `tracks`, `active`); the library a single-library
@@ -1450,6 +1458,11 @@
 
 ### Fixed
 
+- **Headless GUI runs keep their state private.** `scripts/headless-gui.sh`
+  sets `XDG_STATE_HOME` to a directory inside its private runtime
+  directory, as it already did for `HOME` and the XDG config, data and
+  cache directories, so `orca-gtk`'s log file no longer lands in the
+  user's own state directory.
 - **A Track keeps its id when its file moves.** When an edit, a retag,
   an accepted match or Match Album puts a file on another album or
   position that no Track holds, liborca moves its Track there instead of

@@ -128,7 +128,8 @@ more identification sources.
 - A local play history: every listen (a track of 30 s or more, heard for half
   its length or four minutes) is recorded in the Library and kept forever.
   Play count, counted per recording, and last play appear in `orca-cli
-  track`, in the `orca-gtk` inspector and as sortable Songs columns. `orca-cli play-tracks` records listens too.
+  track`, in the `orca-gtk` inspector and as sortable Tracks columns.
+  `orca-cli play-tracks` records listens too.
 - ListenBrainz scrobbling, off until enabled: a leased, restart-safe queue, a
   gateway that identifies Orca, spaces requests and honours `429`, and a token
   held in the Secret Service (`orca-gtk` Settings > Listening) or read from
@@ -265,23 +266,30 @@ more identification sources.
 
 ### Clients
 
-- `orca-cli`: scan, browse, search, library edits, tag write-back, undo and
-  backup pruning, analysis, duplicates, artwork, queue playback, `feedback`,
-  ratings, playlists and smart playlists with M3U import and export,
-  folders, genres, search, lyrics, artist and release info, `scrobble`,
-  MusicBrainz and AcoustID matching, fingerprints and AcoustID submission.
-- `orca-gtk`: a dark libadwaita window with Songs, Albums, Artists, Genres,
-  Folders, Playlists, Loved, Queue, Now Playing, Library Health and Matches
-  pages, a Settings page of eight tabs, a command palette, an inspector with
-  track, lyrics and signal path modes, context menus, tag editing with
-  write-back and undo (Write Tags to Files on track and album menus), a
-  player bar with cover art, format, output menu and volume, job progress, a
-  welcome page, toasts, a shortcuts dialog, MPRIS, Health actions and
-  dismissals, an idle maintenance switch, ListenBrainz submission with play
-  counts in the inspector, love and dislike, star ratings, playlists with
-  M3U import and export, a Smart Playlist editor, a parametric equalizer
-  editor, the data sources Orca credits, MusicBrainz and AcoustID match
-  review, and AcoustID submission.
+- `orca-cli`: scan, folder estimates, browse, search, library edits, tag
+  write-back with its change history, undo and backup pruning, analysis,
+  duplicate groups and merges, metadata consistency issues, Health, artwork
+  and cover art candidates, queue playback and resume, `feedback`, ratings,
+  playlists and smart playlists with M3U import and export, folders, root
+  relocation and availability, genres, lyrics, artist and release info,
+  Jobs with pause, history and retry, `scrobble`, MusicBrainz and AcoustID
+  matching with release review, fingerprints and AcoustID submission.
+- `orca-gtk`: a dark libadwaita window with the bundled Newsreader, Geist and
+  Geist Mono fonts. Its sidebar opens Albums, Artists, Tracks, Genres,
+  Folders, Loved, Playlists, Now Playing, Queue, Health, Matches and
+  Settings. Album, artist and playlist pages, Edit Metadata, Write to Files
+  and the Smart Playlist editor open over them. Health leads to Duplicates,
+  Audio Problems, Artwork Review and Metadata Issues; Matches to Match
+  Review; the activity popover to Activity and Change History. First Run and
+  Scan cover an empty library. Settings has eight tabs, among them a
+  parametric equalizer editor and the data sources Orca credits. Around the
+  pages: a top bar with Back, Forward, a trail and the library search, a
+  search overlay and command palette, an inspector with track, lyrics and
+  signal path modes, context menus, a player bar with cover art, format,
+  output picker and volume, a banner for offline music folders, toasts, a
+  shortcuts dialog and MPRIS. It plays, loves and rates, keeps playlists,
+  submits listens to ListenBrainz, resumes the queue at launch and opens
+  more than one library.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`,
   with `liborca.so.0` exporting exactly its functions and `orca.pc` for
   pkg-config: browsing, search, folders, genres and track details, playback
@@ -326,7 +334,9 @@ In priority order. Each step leaves `orca-gtk` usable every day.
 3. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
-   only path that can be bit-perfect.
+   only path that can be bit-perfect. A Resampler quality setting (Highest
+   or Fast, used only when the device cannot match the source) arrives with
+   it.
 
 ## Releases
 
@@ -481,9 +491,6 @@ are sniffed or not recognized until then:
 
 ## Later
 
-- The Matches page's three-bucket layout from the design concepts
-  (Confident, Needs Review, Unmatched, each with its count). `orca-gtk`
-  lists proposals as flush rows under the page title.
 - Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files; a
   figure comes only from Orca's own analysis.
 - Exact album loudness: the album figure is a duration-weighted energy mean
@@ -511,7 +518,12 @@ are sniffed or not recognized until then:
   there.
 - Opt-in per write: embedding a Release's fetched cover only in files with no
   embedded picture, as one front cover, stored once per plan and referenced
-  by digest from each action rather than copied into every action.
+  by digest from each action rather than copied into every action. In
+  `orca-gtk` it brings an Embed artwork when writing setting (Ask each time,
+  Always, Never) on Settings › Library, Artwork Review's option to embed
+  the chosen cover the next time tags are written, Write to Files' Artwork
+  replaced card and Front cover rows, and Front cover rows in Change
+  History.
 - Opt-in writing of the AcoustID track ID (`ACOUSTID_ID`, `TXXX:Acoustid
   Id`) for matches accepted with a fingerprint, never the fingerprint
   itself.
@@ -563,17 +575,71 @@ are sniffed or not recognized until then:
   (`startCoverArtCandidates`, `libraryCoverArtCandidates`,
   `libraryUseCoverArtCandidate`, `librarySetReleaseArtwork`,
   `libraryStoredReleaseArtwork`, `libraryClearReleaseArtwork`), what an
-  `artwork_problem` issue found (`libraryArtworkProblem`) and a candidates
-  Job's counts (`MatchStats.cover_art_candidates`). The command lane (`submit`,
+  `artwork_problem` issue found (`libraryArtworkProblem`), the albums with
+  artwork problems (`libraryArtworkProblemReleasePage`,
+  `libraryArtworkProblemReleaseCount`), a candidates
+  Job's counts (`MatchStats.cover_art_candidates`), and the metadata
+  consistency pass and its issues (`startLibraryConsistencyPass`,
+  `libraryMetadataIssueCount`, `libraryMetadataIssuePage`,
+  `libraryApplyMetadataIssue`, `libraryApplyMetadataIssues`,
+  `librarySkipMetadataIssue`, `libraryMetadataIssueStatus`); and fields the
+  existing views leave out: where lyrics came from and their offset
+  (`Lyrics.source_name`, `Lyrics.offset_ms`, absent from
+  `orca_lyrics_view`), a duplicate copy's tagged date and track numbers
+  (`DuplicateCopy.tagged_date`, `tagged_track_number`,
+  `tagged_track_total`), and a folder entry's status, type and image role
+  (`FolderEntry.status`, `mime`, `artwork_role`). The command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump` and the
   request-correlated functions that use it.
+- A light theme and a System theme that follows the desktop. `orca-gtk`
+  defines dark tokens only.
+- Accent colour choices, as a fixed table of derived token sets.
+- Last.fm scrobbling as a second destination beside ListenBrainz, with its
+  account in Settings › Listening.
+- Exclusive output and an ALSA direct-hardware backend, which bypass the
+  system mixer. They land with the macOS backend.
+- Device hardware volume: setting the volume on the DAC so the signal stays
+  bit-perfect.
+- Spectral transcode detection, as a Suspicious transcodes category on
+  Audio Problems with the cutoff and a spectrum graph. KissFFT is already
+  compiled with Chromaprint.
+- Moving a file to the system trash as a journaled `MutationPlan` action,
+  for removing a duplicate copy after Merge Metadata, with trash rows in
+  Activity and Change History.
+- Writing the chosen cover into the album folder as `cover.jpg`.
+- A database change log with inverse payloads, so Change History can undo
+  Orca-only edits: metadata edits, accepted matches, chosen covers,
+  playlist reorders and removed folders, each with an Undo Orca Edit Only
+  action, and Undo on Activity's applied-metadata rows.
+- True-peak measurement, 4× oversampled, in a new column filled by
+  re-analysis and shown in the album inspector.
+- Crossfade, never applied between gapless album tracks.
+- Convolution DSP for room correction and headphone targets from impulse
+  responses.
+- Customizable keyboard shortcuts. The shortcuts dialog lists the fixed
+  set.
+- Localisation, with a Language setting.
+- Editing lyrics from Now Playing.
+- Automatic update checks and a release channel (Stable, Preview). Orca is
+  installed from the Nix flake.
+- Listening history retention. Settings › Listening's Keep history for is
+  fixed at Forever.
+- Starting a waiting Job ahead of the running one (Start now in Activity).
+  The runtime has no call that reorders its Jobs.
+- Song credits from MusicBrainz recording relationships: performers,
+  composers and producers.
 - Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain
   lyrics from a sidecar `.txt`. A `.txt` needs a rule for telling lyrics from
   the other text files that sit in album folders.
 - A terminal client built on the Zig API.
-- Conversion and encoding.
-- Synchronized multi-zone playback with drift correction.
-- Secure, verified CD ripping.
+- Conversion and encoding. In `orca-gtk`: a Convert dialog, Convert… in the
+  album inspector, and Converted rows in Activity.
+- Synchronized multi-zone playback with drift correction. In `orca-gtk`: a
+  Play in several rooms block in the output picker, which turns lossless
+  and exclusive output off, and an Experimental section in Settings ›
+  Advanced with a Multi-zone output switch.
+- Secure, verified CD ripping. In `orca-gtk`: a Rip page, an Audio CD group
+  under Devices in the sidebar, and Ripped CD rows in Activity.
 - Windows, then iOS and Android.
 - Streaming sources and cross-device sync.
 - Audio-feature similarity for radio, analysed from the audio itself. The
@@ -582,6 +648,8 @@ are sniffed or not recognized until then:
 
 ## Not planned
 
+- Preserving file modification dates on tag writes: it would hide the
+  write from the incremental scan.
 - A DAW, plugin host, or arbitrary DSP graph.
 - A required FFmpeg dependency.
 - A custom database engine, TLS stack or cryptography.
