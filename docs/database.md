@@ -162,6 +162,15 @@ a listing files by.
 English article, so "The Beatles" files under B and one plain index serves the
 whole listing under a BINARY collation. Hosts display `artists.name`.
 
+A Release listing sorted by `title` or `artist` leads its ORDER BY with
+whether the name starts with an ASCII letter, so names that do not come
+first and each initial is one contiguous run. `ReleaseRepository.letterIndex`
+counts the same filtered rows per initial (`'#'` for the rest) and sums the
+counts in that order, so each bucket's `first_offset` is exactly the
+`offset` at which `page` reaches it. The artist
+key strips a leading "The ", "A " or "An " from `releases.album_artist` in
+SQL unless `ReleaseQuery.name_order` is `as_written`.
+
 ### Ordering and paging
 
 `TrackRepository.page` takes a `TrackQuery`: a sort key (`id`, `artist`,

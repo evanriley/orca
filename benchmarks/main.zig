@@ -102,6 +102,9 @@ pub fn main(init: std.process.Init) !void {
         .{ "explicit", .{ .explicit_only = true } },
         .{ "combined", .{ .lossless = true, .min_sample_rate = 96_000, .year_min = 1990 } },
         .{ "loved_lossy", .{ .loved_only = true, .lossless = false } },
+        .{ "codec", .{ .codec = "FLAC" } },
+        .{ "max_rate", .{ .max_sample_rate = 44_100 } },
+        .{ "added", .{ .added_after = 1_700_900_000 } },
     };
     for (track_filters) |filter| {
         std.debug.print("track {s}", .{filter[0]});
@@ -122,19 +125,23 @@ pub fn main(init: std.process.Init) !void {
         const count_start = std.Io.Clock.awake.now(init.io);
         const matching = try library.tracks.countMatching(filter[1]);
         const count_ns = count_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        const totals_start = std.Io.Clock.awake.now(init.io);
+        _ = try library.tracks.totals(filter[1]);
+        const totals_ns = totals_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
         var search_query = filter[1];
         search_query.limit = 100;
         const filtered_search_start = std.Io.Clock.awake.now(init.io);
         var found = try library.tracks.search(allocator, "Synthetic", search_query);
         found.deinit();
         const filtered_search_ns = filtered_search_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
-        std.debug.print(", count {d} in {d} ms, search {d} ms\n", .{
+        std.debug.print(", count {d} in {d} ms, totals {d} ms, search {d} ms\n", .{
             matching,
             @divTrunc(count_ns, std.time.ns_per_ms),
+            @divTrunc(totals_ns, std.time.ns_per_ms),
             @divTrunc(filtered_search_ns, std.time.ns_per_ms),
         });
     }
-    for ([_]liborca.internal.database.ReleaseSort{ .title, .year, .recently_added }) |sort| {
+    for ([_]liborca.internal.database.ReleaseSort{ .title, .artist, .year, .recently_added }) |sort| {
         std.debug.print("release {t} page", .{sort});
         for ([_]u32{ 0, 2_500 }) |offset| {
             const page_ns = try timeReleasePage(&library, allocator, init.io, .{ .sort = sort, .limit = 100, .offset = offset });
@@ -149,6 +156,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "lossless", .{ .lossless_only = true } },
         .{ "years", .{ .year_min = 1990, .year_max = 1999 } },
         .{ "artwork", .{ .has_artwork = false } },
+        .{ "added", .{ .added_after = 1_700_000_100 } },
     };
     for (release_filters) |filter| {
         var query = filter[1];
@@ -164,6 +172,8 @@ pub fn main(init: std.process.Init) !void {
             @divTrunc(count_ns, std.time.ns_per_ms),
         });
     }
+
+    try timeReleaseIndex(&library, allocator, init.io);
 
     try seedGenres(&library, init.io);
     try timeGenreListing(&library, allocator, init.io);
@@ -343,6 +353,28 @@ fn timeLibrarySearch(library: *liborca.internal.database.LibraryDatabase, alloca
         });
     }
     std.debug.print("\n", .{});
+}
+
+fn timeReleaseIndex(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
+    for ([_]liborca.internal.database.ReleaseSort{ .title, .artist }) |sort| {
+        const start = std.Io.Clock.awake.now(io);
+        const buckets = try library.releases.letterIndex(allocator, .{ .sort = sort });
+        allocator.free(buckets);
+        std.debug.print("release {t} letters: {d} buckets in {d} ms\n", .{
+            sort,
+            buckets.len,
+            millisecondsSince(io, start),
+        });
+    }
+    for ([_]struct { []const u8, liborca.internal.database.ReleaseQuery }{
+        .{ "all", .{} },
+        .{ "lossless", .{ .lossless_only = true } },
+        .{ "added", .{ .added_after = 1_700_000_100 } },
+    }) |filter| {
+        const start = std.Io.Clock.awake.now(io);
+        const totals = try library.releases.totals(filter[1]);
+        std.debug.print("release {s} totals: {d} releases in {d} ms\n", .{ filter[0], totals.count, millisecondsSince(io, start) });
+    }
 }
 
 fn timeReleasePage(

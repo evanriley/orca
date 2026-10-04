@@ -246,7 +246,7 @@ const artist_columns =
     "           AND artist_info.photo IS NOT NULL),\n" ++
     "       " ++ cover_release ++ "\n";
 
-const cover_release_order = "ORDER BY " ++ ReleaseSort.artist.terms() ++ " LIMIT 1";
+const cover_release_order = "ORDER BY " ++ ReleaseSort.artist.terms(.ignore_articles) ++ " LIMIT 1";
 
 const cover_release = "COALESCE(\n" ++
     "    (SELECT releases.id FROM releases WHERE releases.album_artist_id = artists.id " ++ cover_release_order ++ "),\n" ++

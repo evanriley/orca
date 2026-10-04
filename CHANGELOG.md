@@ -4,6 +4,20 @@
 
 ### Added
 
+- **Letter index, added-since and codec filters, filtered totals.**
+  `ReleaseQuery.added_after` keeps the Releases whose Tracks' play files
+  were all first seen after a time, and `TrackQuery` adds `added_after`,
+  `codec` and `max_sample_rate`. `libraryReleaseLetterIndex` returns a
+  `LetterBucket` per initial (`'#'` for the rest) with its count and the
+  offset where the same query's pages reach it; `ReleaseQuery.name_order`
+  files the artist sort under the word after a leading "The", "A" or "An"
+  unless set to `as_written`. `libraryReleaseQueryTotals` and
+  `libraryTrackQueryTotals` return a query's count, album artists and
+  bytes, or count and duration. `orca-cli releases` takes `--added-days`,
+  `--letters` and `--totals`, and `orca-cli tracks` takes `--added-days`,
+  `--codec`, `--max-rate` and `--totals`. In orca-gtk, Recently Added lists
+  the albums added in the last 30 days, and Albums opens sorted by Date
+  Added under All Albums.
 - **The playing track, album and artist marked everywhere.** Folders,
   the search palette, album and artist grids and lists, Loved albums,
   artist pages and genre pages show the playing track, its album and its

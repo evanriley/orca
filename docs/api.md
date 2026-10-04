@@ -231,7 +231,24 @@ defer page.deinit();
   `needs_review_only`, `lossless_only`, `year_min` and `year_max` (inclusive;
   undated Releases are left out) and `has_artwork`, a cover embedded in a
   Track's file or fetched. `ReleaseSort.most_played` orders by the listens of
-  the Tracks' recordings.
+  the Tracks' recordings. `ReleaseQuery.added_after` (Unix seconds) keeps
+  the Releases whose Tracks' play files were all first seen after it, so a
+  Release that only gained a Track is not newly added.
+- `ReleaseQuery.name_order` (`NameOrder`) sets how `ReleaseSort.artist`
+  reads the album artist: `ignore_articles`, the default, files "The Low
+  Tides" under L by skipping a leading "The ", "A " or "An "; `as_written`
+  does not. `ReleaseSort.title` and `ReleaseSort.artist` put names that do
+  not start with an ASCII letter first, so each initial is one run.
+- `libraryReleaseLetterIndex` returns a caller-owned `[]LetterBucket` for a
+  `ReleaseQuery` sorted by `title` or `artist` (`error.SortHasNoLetters`
+  otherwise): one bucket per initial present, in sort order, each with its
+  `letter` (uppercase, or `'#'` for every name that does not start with an
+  ASCII letter), `count` and `first_offset`, the `offset` at which that
+  query's pages reach the bucket's first Release. The query's `limit` and
+  `offset` are ignored, and the counts sum to `libraryReleaseCountMatching`.
+- `libraryReleaseQueryTotals` returns `ReleaseTotals` for a `ReleaseQuery`:
+  `count`, the Releases it lists; `artists`, their distinct album artists;
+  and `bytes`, the size of the files their Tracks play.
 - `release_type` is the lowercased primary type ("album", "ep", "single",
   "compilation", ...) the files' `RELEASETYPE` / `MusicBrainz Album Type`
   tags state, else the MusicBrainz release group's primary type, which a
@@ -253,8 +270,12 @@ defer page.deinit();
   Release's date as `TrackSort.year` reads it; undated Tracks are left out),
   `lossless` (`true` for a lossless play file, `false` for a lossy one, a
   Track with no probed codec matching neither), `min_sample_rate` and
-  `explicit_only` (`Explicit.explicit`). Every filter combines with AND, and
-  `libraryTrackMatchCount` counts what the page lists. A text search in
+  `explicit_only` (`Explicit.explicit`), and by the play file's
+  `max_sample_rate`, `codec` (the lowercase codec id, compared without
+  case) and `added_after` (first seen after that Unix time). Every filter
+  combines with AND, `libraryTrackMatchCount` counts what the page lists,
+  and `libraryTrackQueryTotals` returns its `TrackTotals`: `count` and
+  `duration_ms` (an unknown duration adds 0), the page without search text. A text search in
   `libraryTrackQuery` keeps every filter of the query and orders the matches
   by relevance, so its `sort` and `direction` do not apply; a search has no
   count. Each word of its text must begin a word of the Track's title,

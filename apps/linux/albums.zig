@@ -77,8 +77,10 @@ const chip_labels = std.enums.EnumArray(Chip, [*:0]const u8).init(.{
     .needs_review = "Needs Review",
 });
 
-/// Which Releases the page lists; Recently Added is an order, not a shelf.
-pub const Shelf = enum { all, loved, high_resolution, needs_review };
+/// Which Releases the page lists.
+pub const Shelf = enum { all, recently_added, loved, high_resolution, needs_review };
+
+const recently_added_days = 30;
 
 pub const Layout = enum { grid, list };
 
@@ -506,6 +508,10 @@ fn request(self: *App, offset: u32) liborca.ReleaseQuery {
     return .{
         .text = self.album_search.value,
         .sort = self.album_sort,
+        .added_after = if (shelf(self) == .recently_added)
+            std.Io.Clock.real.now(self.io).toSeconds() - recently_added_days * std.time.s_per_day
+        else
+            null,
         .album_artist_id = if (scope != .appearances) artist_id else null,
         .appearing_artist_id = if (scope == .appearances) artist_id else null,
         .own_releases_only = scope == .albums or scope == .eps_and_singles,
@@ -607,6 +613,7 @@ fn emptyText(self: *const App) struct { title: [*:0]const u8, description: [*:0]
         return .{ .title = "No matching albums", .description = "Clear the filters to see more albums." };
     return switch (shelf(self)) {
         .all => .{ .title = "No albums yet", .description = "Add a music folder in Settings › Library." },
+        .recently_added => .{ .title = "Nothing added recently", .description = std.fmt.comptimePrint("Albums added in the last {d} days appear here.", .{recently_added_days}) },
         .loved => .{ .title = "No loved albums", .description = "Love an album from its page or its menu." },
         .high_resolution => .{ .title = "No high-resolution albums", .description = "Albums above 16-bit or 48 kHz appear here." },
         .needs_review => .{ .title = "Nothing to review", .description = "Albums with matches waiting for review appear here." },
@@ -686,7 +693,8 @@ fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn activeChip(self: *const App) Chip {
     return switch (shelf(self)) {
-        .all => if (self.album_sort == .recently_added) .recently_added else .all,
+        .all => .all,
+        .recently_added => .recently_added,
         .loved => .loved,
         .high_resolution => .high_resolution,
         .needs_review => .needs_review,
@@ -717,7 +725,6 @@ fn sortChanged(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     if (selected >= sorts.len) return;
     if (sorts[selected].sort == self.album_sort) return;
     self.album_sort = sorts[selected].sort;
-    if (self.album_sort != .recently_added) self.album_shelf_sort = self.album_sort;
     syncControls(self);
     settings.save(self);
     reload(self);
@@ -738,7 +745,6 @@ pub fn showGenre(self: *App, genre_id: i64) void {
     window.clearSearch(self);
     self.album_search.clear(self.allocator);
     self.album_shelf = .all;
-    if (self.album_sort == .recently_added) self.album_sort = self.album_shelf_sort;
     syncControls(self);
     settings.save(self);
     reload(self);
@@ -774,7 +780,6 @@ pub fn showArtist(self: *App, artist_id: i64, name: []const u8, scope: ArtistSco
     window.clearSearch(self);
     self.album_search.clear(self.allocator);
     self.album_shelf = .all;
-    if (self.album_sort == .recently_added) self.album_sort = self.album_shelf_sort;
     syncControls(self);
     showArtistChip(self);
     settings.save(self);
@@ -785,12 +790,10 @@ pub fn showArtist(self: *App, artist_id: i64, name: []const u8, scope: ArtistSco
 
 fn chooseChip(self: *App, chip: Chip) void {
     switch (chip) {
-        .all, .recently_added => {
-            self.album_shelf = .all;
-            if (chip == .recently_added)
-                self.album_sort = .recently_added
-            else if (self.album_sort == .recently_added)
-                self.album_sort = self.album_shelf_sort;
+        .all => self.album_shelf = .all,
+        .recently_added => {
+            self.album_shelf = .recently_added;
+            self.album_sort = .recently_added;
         },
         .loved => self.album_shelf = .loved,
         .high_resolution => self.album_shelf = .high_resolution,

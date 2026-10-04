@@ -530,8 +530,12 @@ are sniffed or not recognized until then:
   (`setOutputFactory`), Zone policy and render strategy (`setZonePolicy`,
   `zoneRenderStrategy`), playing a file outside a Library
   (`playerLoadFile`), drain detection (`playerDrained`), one-file analysis
-  on the caller's thread (`libraryAnalyzeFile`) and a Track's fingerprint
-  (`libraryTrackFingerprint`). The command lane (`submit`,
+  on the caller's thread (`libraryAnalyzeFile`), a Track's fingerprint
+  (`libraryTrackFingerprint`), the Albums letter index
+  (`libraryReleaseLetterIndex`) and filtered totals
+  (`libraryReleaseQueryTotals`, `libraryTrackQueryTotals`), with the
+  `added_after`, `name_order`, `codec` and `max_sample_rate` query fields they
+  share with the pages. The command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump` and the
   request-correlated functions that use it.
 - Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain

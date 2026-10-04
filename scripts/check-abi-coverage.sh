@@ -39,6 +39,9 @@ declare -A reasons=(
     [playerSeekToTail]="test and CLI aid for checking transitions; not for hosts"
     [libraryAnalyzeFile]="later: one-file analysis on the caller's thread (docs/roadmap.md, Later)"
     [libraryTrackFingerprint]="later: a Track's fingerprint (docs/roadmap.md, Later)"
+    [libraryReleaseLetterIndex]="later: the Albums letter index (docs/roadmap.md, Later)"
+    [libraryReleaseQueryTotals]="later: filtered Release totals (docs/roadmap.md, Later)"
+    [libraryTrackQueryTotals]="later: filtered Track totals (docs/roadmap.md, Later)"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

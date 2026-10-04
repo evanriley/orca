@@ -260,10 +260,7 @@ pub fn load(self: *App) void {
     loadAppearance(self, keys);
     if (getString(keys, "view", "album_sort")) |value| {
         defer gtk.g_free(value);
-        if (std.meta.stringToEnum(liborca.ReleaseSort, std.mem.span(value))) |sort| {
-            self.album_sort = sort;
-            if (sort != .recently_added) self.album_shelf_sort = sort;
-        }
+        if (std.meta.stringToEnum(liborca.ReleaseSort, std.mem.span(value))) |sort| self.album_sort = sort;
     }
     if (getString(keys, "view", "albums_layout")) |value| {
         defer gtk.g_free(value);

@@ -42,6 +42,7 @@ pub const JobHandle = runtime.JobHandle;
 
 // Library queries and the bounded pages they return.
 pub const TrackQuery = database.TrackQuery;
+pub const TrackTotals = database.TrackTotals;
 pub const TrackSort = database.TrackSort;
 pub const SortDirection = database.SortDirection;
 pub const TrackPage = database.TrackPage;
@@ -57,6 +58,9 @@ pub const ArtistSummary = database.ArtistSummary;
 pub const ReleaseQuery = database.ReleaseQuery;
 pub const ReleaseSort = database.ReleaseSort;
 pub const ReleaseKind = database.ReleaseKind;
+pub const NameOrder = database.NameOrder;
+pub const LetterBucket = database.LetterBucket;
+pub const ReleaseTotals = database.ReleaseTotals;
 pub const ReleasePage = database.ReleasePage;
 pub const ReleaseSummary = database.ReleaseSummary;
 pub const GenreQuery = database.GenreQuery;

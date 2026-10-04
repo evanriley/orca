@@ -141,8 +141,41 @@ pub const ReleaseQuery = struct {
     /// each word of this text, as `SearchRepository.find` matches them. Null,
     /// or text with no word, keeps every Release.
     text: ?[]const u8 = null,
+    /// Only Releases with a play file and whose Tracks' play files were all
+    /// first seen after this Unix time: those added since, not those that
+    /// only gained a Track.
+    added_after: ?i64 = null,
+    /// How `ReleaseSort.artist` and its letter index read the album artist.
+    name_order: NameOrder = .ignore_articles,
     limit: u32 = max_page,
     offset: u32 = 0,
+};
+
+/// How a name sorts and which letter it files under.
+pub const NameOrder = enum {
+    /// Without a leading "The ", "An " or "A ", as `text_key.sortKey`
+    /// drops them: "The Beatles" files under B.
+    ignore_articles,
+    as_written,
+};
+
+/// The Releases of one letter of a listing sorted by name: `'#'` for names
+/// that do not begin with an ASCII letter, which sort before A.
+pub const LetterBucket = struct {
+    letter: u8,
+    count: u64,
+    /// The offset of the bucket's first Release in the listing the same
+    /// query pages through.
+    first_offset: u64,
+};
+
+/// The size of what a `ReleaseQuery` matches.
+pub const ReleaseTotals = struct {
+    count: u64,
+    /// The distinct album Artists the Releases are filed under.
+    artists: u64,
+    /// The bytes of the files their Tracks play.
+    bytes: u64,
 };
 
 /// What `ReleaseQuery.release_kind` sorts a `release_type` into.
@@ -177,11 +210,17 @@ pub const ReleaseSort = enum {
     /// Most listens of the Tracks' recordings first.
     most_played,
 
-    pub fn terms(comptime self: ReleaseSort) []const u8 {
+    pub fn terms(comptime self: ReleaseSort, comptime name_order: NameOrder) []const u8 {
         return switch (self) {
-            .title => "releases.title COLLATE NOCASE, releases.id",
-            .artist => "releases.album_artist COLLATE NOCASE, releases.release_date IS NULL, " ++
-                "releases.release_date, releases.title COLLATE NOCASE, releases.id",
+            .title, .artist => {
+                const key = comptime self.nameKey(name_order).?;
+                const by_name = startsWithLetter(key) ++ ", " ++ key ++ " COLLATE NOCASE, ";
+                return by_name ++ switch (self) {
+                    .title => "releases.id",
+                    else => "releases.release_date IS NULL, releases.release_date, " ++
+                        "releases.title COLLATE NOCASE, releases.id",
+                };
+            },
             .year => "releases.release_date IS NULL, releases.release_date DESC, " ++
                 "releases.title COLLATE NOCASE, releases.id",
             .recently_added => "releases.id DESC",
@@ -191,7 +230,41 @@ pub const ReleaseSort = enum {
                 "    WHERE tracks.release_id = releases.id) DESC, releases.id",
         };
     }
+
+    /// The name a sort files Releases under by letter; null when it orders
+    /// them by something else.
+    pub fn nameKey(comptime self: ReleaseSort, comptime name_order: NameOrder) ?[]const u8 {
+        return switch (self) {
+            .title => "releases.title",
+            .artist => switch (name_order) {
+                .ignore_articles => withoutArticle("releases.album_artist"),
+                .as_written => "releases.album_artist",
+            },
+            .year, .recently_added, .loved, .most_played => null,
+        };
+    }
 };
+
+fn withoutArticle(comptime column: []const u8) []const u8 {
+    return "(CASE WHEN " ++ column ++ " LIKE 'the _%' THEN substr(" ++ column ++ ", 5)\n" ++
+        "      WHEN " ++ column ++ " LIKE 'an _%' THEN substr(" ++ column ++ ", 4)\n" ++
+        "      WHEN " ++ column ++ " LIKE 'a _%' THEN substr(" ++ column ++ ", 3) ELSE " ++ column ++ " END)";
+}
+
+fn initial(comptime key: []const u8) []const u8 {
+    return "upper(substr(" ++ key ++ ", 1, 1))";
+}
+
+/// Leads a name order so `'#'` names come first rather than split around
+/// the letters, and each letter's Releases are one run a letter index can
+/// point into.
+fn startsWithLetter(comptime key: []const u8) []const u8 {
+    return "(" ++ initial(key) ++ " BETWEEN 'A' AND 'Z')";
+}
+
+fn letterOf(comptime key: []const u8) []const u8 {
+    return "CASE WHEN " ++ startsWithLetter(key) ++ " THEN " ++ initial(key) ++ " ELSE '#' END";
+}
 
 const pending_state = std.fmt.comptimePrint("{d}", .{@intFromEnum(ProposalState.pending)});
 
@@ -220,7 +293,7 @@ pub const has_cover = "(EXISTS (SELECT 1 FROM release_artwork WHERE release_artw
     "    AND EXISTS (SELECT 1 FROM observed_file_tags WHERE observed_file_tags.file_id = play.id\n" ++
     "        AND observed_file_tags.artwork_mime_type IS NOT NULL AND observed_file_tags.artwork_byte_size > 0)))";
 
-/// The filters bound as parameters ?6 to ?15, each true when unset. They
+/// The filters bound as parameters ?6 to ?16, each true when unset. They
 /// read the same play files, codec list and pending state as
 /// `release_facts`, so a summary and the filters cannot disagree.
 const by_bound_filters =
@@ -237,7 +310,17 @@ const by_bound_filters =
     "    WHERE search_index MATCH ?12 AND rowid % 8 = " ++ release_search_kind ++ "))\n" ++
     "  AND (?13 IS NULL OR " ++ byAppearingArtist("?13") ++ ")\n" ++
     "  AND (?14 IS NULL OR " ++ release_kind ++ " = ?14)\n" ++
-    "  AND (?15 = 0 OR releases.album_artist_id = ?3)";
+    "  AND (?15 = 0 OR releases.album_artist_id = ?3)\n" ++
+    "  AND (?16 IS NULL OR (EXISTS (SELECT 1 FROM " ++ release_track_files ++ " AND play.first_seen_at > ?16)\n" ++
+    "    AND NOT EXISTS (SELECT 1 FROM " ++ release_track_files ++ " AND play.first_seen_at <= ?16)))";
+
+/// Every filter of a `ReleaseQuery`, each true when unset, as `countMatching`,
+/// `totals` and `letterIndex` share it.
+const matching_releases =
+    "(?3 IS NULL OR " ++ by_release_artist ++ ")\n" ++
+    "  AND (?4 = 0 OR " ++ by_loved_release ++ ")\n" ++
+    "  AND (?5 IS NULL OR " ++ by_release_genre ++ ")\n" ++
+    "  AND " ++ by_bound_filters;
 
 /// The Releases with a Track credited to `artist` that are not filed under
 /// them, read through `tracks_artist`.
@@ -300,6 +383,7 @@ const by_release_genre = "releases.id IN (SELECT tracks.release_id FROM track_ge
 
 fn releaseQueryText(
     comptime sort: ReleaseSort,
+    comptime name_order: NameOrder,
     comptime by_artist: bool,
     comptime loved_only: bool,
     comptime by_genre: bool,
@@ -313,7 +397,7 @@ fn releaseQueryText(
     }) |term| {
         if (term[0]) terms = terms ++ "\n  AND " ++ term[1];
     }
-    const order = "ORDER BY " ++ comptime sort.terms();
+    const order = "ORDER BY " ++ comptime sort.terms(name_order);
     return releaseSelect(
         "SELECT releases.id FROM releases\n" ++
             "LEFT JOIN release_loves ON release_loves.release_id = releases.id\n" ++
@@ -383,6 +467,24 @@ fn bindBoundFilters(
     try statement.bindOptionalInt64(13, query.appearing_artist_id);
     try statement.bindOptionalInt64(14, if (query.release_kind) |kind| @intFromEnum(kind) else null);
     try statement.bindInt64(15, @intFromBool(query.own_releases_only and query.album_artist_id != null));
+    try statement.bindOptionalInt64(16, query.added_after);
+}
+
+fn bindMatching(
+    statement: sqlite.Statement,
+    query: ReleaseQuery,
+    expression: *[search.max_match_expression]u8,
+) !void {
+    try statement.bindOptionalInt64(3, query.album_artist_id);
+    try statement.bindInt64(4, @intFromBool(query.loved_only));
+    try statement.bindOptionalInt64(5, query.genre_id);
+    try bindBoundFilters(statement, query, expression);
+}
+
+fn letterIndexText(comptime sort: ReleaseSort, comptime name_order: NameOrder) [:0]const u8 {
+    const key = comptime sort.nameKey(name_order).?;
+    return "SELECT " ++ letterOf(key) ++ " AS letter, count(*) FROM releases\nWHERE " ++
+        matching_releases ++ "\nGROUP BY letter ORDER BY letter;";
 }
 
 /// Releases as the projection resolves them, keyed by `release_key`.
@@ -469,12 +571,14 @@ pub const ReleaseRepository = struct {
         if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
         const by_artist = query.album_artist_id != null;
         var statement = switch (query.sort) {
-            inline else => |sort| switch (by_artist) {
-                inline else => |artist_filter| switch (query.loved_only) {
-                    inline else => |loved_filter| switch (query.genre_id != null) {
-                        inline else => |genre_filter| try self.db.prepare(
-                            comptime releaseQueryText(sort, artist_filter, loved_filter, genre_filter),
-                        ),
+            inline else => |sort| switch (if (sort == .artist) query.name_order else .ignore_articles) {
+                inline else => |name_order| switch (by_artist) {
+                    inline else => |artist_filter| switch (query.loved_only) {
+                        inline else => |loved_filter| switch (query.genre_id != null) {
+                            inline else => |genre_filter| try self.db.prepare(
+                                comptime releaseQueryText(sort, name_order, artist_filter, loved_filter, genre_filter),
+                            ),
+                        },
                     },
                 },
             },
@@ -495,20 +599,64 @@ pub const ReleaseRepository = struct {
     /// had its own copy and drifted from the page it counted the moment the
     /// definition widened, so the list showed rows the count above it denied.
     pub fn countMatching(self: *const ReleaseRepository, query: ReleaseQuery) !u64 {
-        var statement = try self.db.prepare(
-            "SELECT count(*) FROM releases\nWHERE (?3 IS NULL OR " ++ by_release_artist ++ ")\n" ++
-                "  AND (?4 = 0 OR " ++ by_loved_release ++ ")\n" ++
-                "  AND (?5 IS NULL OR " ++ by_release_genre ++ ")\n" ++
-                "  AND " ++ by_bound_filters ++ ";",
-        );
+        var statement = try self.db.prepare("SELECT count(*) FROM releases\nWHERE " ++ matching_releases ++ ";");
         defer statement.deinit();
-        try statement.bindOptionalInt64(3, query.album_artist_id);
-        try statement.bindInt64(4, @intFromBool(query.loved_only));
-        try statement.bindOptionalInt64(5, query.genre_id);
         var expression: [search.max_match_expression]u8 = undefined;
-        try bindBoundFilters(statement, query, &expression);
+        try bindMatching(statement, query, &expression);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    /// How many Releases `page` would return for the same query, the album
+    /// Artists they are filed under and the bytes their Tracks play.
+    pub fn totals(self: *const ReleaseRepository, query: ReleaseQuery) !ReleaseTotals {
+        var statement = try self.db.prepare(
+            "WITH matching(id, album_artist_id) AS MATERIALIZED (\n" ++
+                "SELECT releases.id, releases.album_artist_id FROM releases\nWHERE " ++ matching_releases ++ ")\n" ++
+                "SELECT (SELECT count(*) FROM matching), (SELECT count(DISTINCT album_artist_id) FROM matching),\n" ++
+                "       (SELECT COALESCE(sum(max(play.size_bytes, 0)), 0) FROM matching\n" ++
+                "        CROSS JOIN tracks ON tracks.release_id = matching.id\n" ++
+                "        CROSS JOIN files AS play ON play.id = " ++ track_play_file ++ ");",
+        );
+        defer statement.deinit();
+        var expression: [search.max_match_expression]u8 = undefined;
+        try bindMatching(statement, query, &expression);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{
+            .count = @intCast(statement.columnInt64(0)),
+            .artists = @intCast(statement.columnInt64(1)),
+            .bytes = @intCast(statement.columnInt64(2)),
+        };
+    }
+
+    /// One bucket per letter that begins a name of the Releases `page` would
+    /// return, in the order `query.sort` lists them, each with the offset its
+    /// first Release has there. Only the title and artist sorts file by
+    /// letter.
+    pub fn letterIndex(
+        self: *const ReleaseRepository,
+        allocator: std.mem.Allocator,
+        query: ReleaseQuery,
+    ) ![]LetterBucket {
+        var statement = switch (query.sort) {
+            inline .title, .artist => |sort| switch (query.name_order) {
+                inline else => |name_order| try self.db.prepare(comptime letterIndexText(sort, name_order)),
+            },
+            .year, .recently_added, .loved, .most_played => return error.SortHasNoLetters,
+        };
+        defer statement.deinit();
+        var expression: [search.max_match_expression]u8 = undefined;
+        try bindMatching(statement, query, &expression);
+        var buckets: std.ArrayList(LetterBucket) = .empty;
+        errdefer buckets.deinit(allocator);
+        var offset: u64 = 0;
+        while (try statement.step() == .row) {
+            const letter = statement.columnText(0);
+            const releases: u64 = @intCast(statement.columnInt64(1));
+            try buckets.append(allocator, .{ .letter = letter[0], .count = releases, .first_offset = offset });
+            offset += releases;
+        }
+        return buckets.toOwnedSlice(allocator);
     }
 
     pub fn byId(
@@ -723,6 +871,128 @@ test "release search text keeps only matching titles and album artists, composin
     try expectReleaseIds(&library, .{ .text = "\"NEAR\" OR (*", .sort = .recently_added }, &.{});
     try expectReleaseIds(&library, .{ .text = " - ", .sort = .recently_added }, &.{ 6, 5, 4, 3, 2, 1 });
     try std.testing.expectError(error.SearchTextTooLong, library.releases.countMatching(.{ .text = &(@as([300]u8, @splat('a'))) }));
+}
+
+fn nameLetter(name: []const u8, name_order: NameOrder) u8 {
+    var key = name;
+    if (name_order == .ignore_articles) for ([_][]const u8{ "the ", "an ", "a " }) |article| {
+        if (key.len > article.len and std.ascii.startsWithIgnoreCase(key, article)) {
+            key = key[article.len..];
+            break;
+        }
+    };
+    const letter = if (key.len == 0) 0 else std.ascii.toUpper(key[0]);
+    return if (std.ascii.isUpper(letter)) letter else '#';
+}
+
+/// Checks the letter index against the page it indexes: the buckets cover
+/// every matching Release once, in page order, and each starts where paging
+/// to its offset finds the first Release of that letter.
+fn expectLetterIndex(library: anytype, query: ReleaseQuery, expected: []const LetterBucket) !void {
+    const buckets = try library.releases.letterIndex(std.testing.allocator, query);
+    defer std.testing.allocator.free(buckets);
+    try std.testing.expectEqualSlices(LetterBucket, expected, buckets);
+
+    var whole_query = query;
+    whole_query.offset = 0;
+    whole_query.limit = max_page;
+    var whole = try library.releases.page(std.testing.allocator, whole_query);
+    defer whole.deinit();
+    var total: u64 = 0;
+    for (buckets) |bucket| {
+        try std.testing.expectEqual(total, bucket.first_offset);
+        total += bucket.count;
+        for (whole.items[bucket.first_offset..][0..bucket.count]) |item| {
+            const name = if (query.sort == .title) item.title else item.album_artist;
+            try std.testing.expectEqual(bucket.letter, nameLetter(name, if (query.sort == .title) .as_written else query.name_order));
+        }
+        var jumped_query = query;
+        jumped_query.offset = @intCast(bucket.first_offset);
+        jumped_query.limit = 1;
+        var jumped = try library.releases.page(std.testing.allocator, jumped_query);
+        defer jumped.deinit();
+        try std.testing.expectEqual(whole.items[bucket.first_offset].id, jumped.items[0].id);
+    }
+    try std.testing.expectEqual(@as(u64, whole.items.len), total);
+    try std.testing.expectEqual(total, try library.releases.countMatching(query));
+}
+
+test "each letter bucket starts at the offset where paging the same query reaches its first release, non-letters first" {
+    var library = try openFormatLibrary("letters");
+    defer library.close();
+    try library.database.exec(
+        \\UPDATE releases SET album_artist = CASE id WHEN 1 THEN 'The Zebras' WHEN 2 THEN '4 Hero'
+        \\    WHEN 3 THEN 'alpha' WHEN 4 THEN 'A Band' WHEN 5 THEN 'Beta' ELSE 'an Ocean' END;
+        \\UPDATE releases SET title = 'Émigré' WHERE id = 5;
+    );
+    try expectLetterIndex(&library, .{ .sort = .artist }, &.{
+        .{ .letter = '#', .count = 1, .first_offset = 0 },
+        .{ .letter = 'A', .count = 1, .first_offset = 1 },
+        .{ .letter = 'B', .count = 2, .first_offset = 2 },
+        .{ .letter = 'O', .count = 1, .first_offset = 4 },
+        .{ .letter = 'Z', .count = 1, .first_offset = 5 },
+    });
+    try expectReleaseIds(&library, .{ .sort = .artist }, &.{ 2, 3, 4, 5, 6, 1 });
+    try expectLetterIndex(&library, .{ .sort = .title }, &.{
+        .{ .letter = '#', .count = 1, .first_offset = 0 },
+        .{ .letter = 'G', .count = 1, .first_offset = 1 },
+        .{ .letter = 'H', .count = 1, .first_offset = 2 },
+        .{ .letter = 'L', .count = 1, .first_offset = 3 },
+        .{ .letter = 'M', .count = 1, .first_offset = 4 },
+        .{ .letter = 'U', .count = 1, .first_offset = 5 },
+    });
+    try expectLetterIndex(&library, .{ .sort = .artist, .lossless_only = true, .limit = 1, .offset = 2 }, &.{
+        .{ .letter = 'B', .count = 1, .first_offset = 0 },
+        .{ .letter = 'O', .count = 1, .first_offset = 1 },
+        .{ .letter = 'Z', .count = 1, .first_offset = 2 },
+    });
+    try expectLetterIndex(&library, .{ .sort = .artist, .text = "zz" }, &.{});
+    try std.testing.expectError(error.SortHasNoLetters, library.releases.letterIndex(std.testing.allocator, .{ .sort = .year }));
+}
+
+test "the artist sort files names under the word after a leading article unless they sort as written" {
+    var library = try openFormatLibrary("articles");
+    defer library.close();
+    try library.database.exec(
+        \\UPDATE releases SET album_artist = CASE id WHEN 1 THEN 'The Zebras' WHEN 2 THEN '4 Hero'
+        \\    WHEN 3 THEN 'alpha' WHEN 4 THEN 'A Band' WHEN 5 THEN 'Beta' ELSE 'an Ocean' END;
+    );
+    try expectReleaseIds(&library, .{ .sort = .artist, .name_order = .as_written }, &.{ 2, 4, 3, 6, 5, 1 });
+    try expectLetterIndex(&library, .{ .sort = .artist, .name_order = .as_written }, &.{
+        .{ .letter = '#', .count = 1, .first_offset = 0 },
+        .{ .letter = 'A', .count = 3, .first_offset = 1 },
+        .{ .letter = 'B', .count = 1, .first_offset = 4 },
+        .{ .letter = 'T', .count = 1, .first_offset = 5 },
+    });
+    try library.database.exec("UPDATE releases SET album_artist = 'The' WHERE id = 1;");
+    try expectReleaseIds(&library, .{ .sort = .artist }, &.{ 2, 3, 4, 5, 6, 1 });
+}
+
+test "a release is added after a time only when the play file of every one of its tracks was first seen after it" {
+    var library = try openFormatLibrary("added");
+    defer library.close();
+    try library.database.exec(
+        \\UPDATE files SET first_seen_at = CASE id WHEN 2 THEN 500 WHEN 5 THEN 2000 WHEN 9 THEN 2000 ELSE 1000 END;
+    );
+    try expectReleaseIds(&library, .{ .added_after = 999, .sort = .recently_added }, &.{ 6, 4, 3, 2 });
+    try expectReleaseIds(&library, .{ .added_after = 1000, .sort = .recently_added }, &.{3});
+    try expectReleaseIds(&library, .{ .added_after = 999, .lossless_only = true }, &.{ 6, 4 });
+    try expectReleaseIds(&library, .{ .added_after = 400, .sort = .recently_added }, &.{ 6, 4, 3, 2, 1 });
+}
+
+test "release totals count what the page lists, the album artists it is filed under and the bytes its tracks play" {
+    var library = try openFormatLibrary("totals");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name) VALUES (1, 'One'), (2, 'Two');
+        \\UPDATE releases SET album_artist_id = CASE WHEN id IN (1, 2) THEN 1 WHEN id = 6 THEN 2 END;
+        \\UPDATE files SET size_bytes = id * 100;
+        \\INSERT INTO files(id, recording_id, codec, size_bytes) VALUES (10, 1, 'flac', 100000);
+    );
+    try std.testing.expectEqual(ReleaseTotals{ .count = 6, .artists = 2, .bytes = 4500 }, try library.releases.totals(.{}));
+    try std.testing.expectEqual(ReleaseTotals{ .count = 3, .artists = 2, .bytes = 2400 }, try library.releases.totals(.{ .lossless_only = true }));
+    try std.testing.expectEqual(ReleaseTotals{ .count = 0, .artists = 0, .bytes = 0 }, try library.releases.totals(.{ .text = "zz" }));
+    try std.testing.expectEqual(ReleaseTotals{ .count = 1, .artists = 1, .bytes = 700 }, try library.releases.totals(.{ .album_artist_id = 1, .year_max = 2012 }));
 }
 
 fn containsRelease(items: []const ReleaseSummary, id: i64) bool {

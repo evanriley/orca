@@ -104,6 +104,9 @@ fn describe(err: anyerror) []const u8 {
         error.UnknownHealthKind => "KIND must be the kind health prints, such as clipping or exact_duplicate",
         error.SummaryWithPage => "--summary lists every kind at once; give it no --kind or OFFSET",
         error.LosslessAndLossy => "give either --lossless or --lossy, not both",
+        error.SortHasNoLetters => "--letters needs --sort title or --sort artist",
+        error.LettersAndTotals => "give either --letters or --totals, not both",
+        error.TotalsWithFilter => "--totals counts the filters other than --filter; leave --filter out",
         error.UnknownFile => "no file with that id",
         else => @errorName(err),
     };
@@ -239,8 +242,8 @@ const commands = [_]Command{
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
     .{ .name = "artists", .usage = "artists DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listArtists },
-    .{ .name = "releases", .usage = "releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--sort title|artist|year|recently_added|loved|most_played] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
-    .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--explicit] [--sort KEY] [--desc] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
+    .{ .name = "releases", .usage = "releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--letters | --totals] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
+    .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{ .name = "artwork", .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]", .min_arguments = 1, .max_arguments = null, .run = showArtwork },
@@ -3980,11 +3983,15 @@ const ReleaseFilters = struct {
     release_kind: ?liborca.ReleaseKind = null,
     appearing_artist_id: ?i64 = null,
     own_releases_only: bool = false,
+    added_days: ?u32 = null,
+    letters: bool = false,
+    totals: bool = false,
 
     fn any(self: ReleaseFilters) bool {
         return self.high_resolution_only or self.needs_review_only or self.lossless_only or
             self.year_min != null or self.year_max != null or self.has_artwork != null or
-            self.release_kind != null or self.appearing_artist_id != null or self.own_releases_only;
+            self.release_kind != null or self.appearing_artist_id != null or self.own_releases_only or
+            self.added_days != null;
     }
 };
 
@@ -4020,6 +4027,12 @@ fn parseReleaseFilters(arguments: []const []const u8, remaining: *std.ArrayList(
             filters.appearing_artist_id = try std.fmt.parseInt(i64, name["--appears=".len..], 10);
         } else if (std.mem.eql(u8, name, "--own")) {
             filters.own_releases_only = true;
+        } else if (std.mem.startsWith(u8, name, "--added-days=")) {
+            filters.added_days = try std.fmt.parseInt(u32, name["--added-days=".len..], 10);
+        } else if (std.mem.eql(u8, name, "--letters")) {
+            filters.letters = true;
+        } else if (std.mem.eql(u8, name, "--totals")) {
+            filters.totals = true;
         } else if (std.mem.eql(u8, name, "--year-from") or std.mem.eql(u8, name, "--year-to")) {
             index += 1;
             if (index >= arguments.len) return error.MissingOptionValue;
@@ -4049,6 +4062,7 @@ fn listReleases(context: Context) !void {
     const options = try parseBrowseOptions(browse_arguments.items);
     if (options.descending) return error.UnknownOption;
     if (filters.own_releases_only and options.artist_id == null) return error.OwnNeedsArtist;
+    if (filters.letters and filters.totals) return error.LettersAndTotals;
     const sort: liborca.ReleaseSort = if (options.sort) |key|
         std.meta.stringToEnum(liborca.ReleaseSort, key) orelse return error.UnknownOption
     else
@@ -4070,10 +4084,22 @@ fn listReleases(context: Context) !void {
         .year_min = filters.year_min,
         .year_max = filters.year_max,
         .has_artwork = filters.has_artwork,
+        .added_after = addedAfter(io, filters.added_days),
         .text = if (options.filter.len == 0) null else options.filter,
         .limit = options.limit,
         .offset = options.offset,
     };
+    if (filters.letters) {
+        const buckets = try runtime.libraryReleaseLetterIndex(library, allocator, query);
+        defer allocator.free(buckets);
+        for (buckets) |bucket| try stdout.print("{c}\t{d}\t{d}\n", .{ bucket.letter, bucket.count, bucket.first_offset });
+        return;
+    }
+    if (filters.totals) {
+        const totals = try runtime.libraryReleaseQueryTotals(library, query);
+        try stdout.print("count={d} artists={d} bytes={d}\n", .{ totals.count, totals.artists, totals.bytes });
+        return;
+    }
     var page = try runtime.libraryReleasePage(library, query);
     defer page.deinit();
     if (options.genre_id != null or options.filter.len != 0 or filters.any())
@@ -4154,7 +4180,11 @@ const TrackFilters = struct {
     year_max: ?i32 = null,
     lossless: ?bool = null,
     min_sample_rate: ?u32 = null,
+    max_sample_rate: ?u32 = null,
+    codec: ?[]const u8 = null,
+    added_days: ?u32 = null,
     explicit_only: bool = false,
+    totals: bool = false,
 };
 
 /// Takes the flags only `tracks` reads out of `arguments`, leaving the rest
@@ -4180,6 +4210,14 @@ fn parseTrackFilters(arguments: []const []const u8, remaining: *std.ArrayList([]
             index += 1;
             if (index >= arguments.len) return error.MissingOptionValue;
             filters.min_sample_rate = try std.fmt.parseInt(u32, arguments[index], 10);
+        } else if (std.mem.startsWith(u8, name, "--max-rate=")) {
+            filters.max_sample_rate = try std.fmt.parseInt(u32, name["--max-rate=".len..], 10);
+        } else if (std.mem.startsWith(u8, name, "--codec=")) {
+            filters.codec = name["--codec=".len..];
+        } else if (std.mem.startsWith(u8, name, "--added-days=")) {
+            filters.added_days = try std.fmt.parseInt(u32, name["--added-days=".len..], 10);
+        } else if (std.mem.eql(u8, name, "--totals")) {
+            filters.totals = true;
         } else {
             try remaining.append(allocator, name);
             if (std.mem.startsWith(u8, name, "--") and !std.mem.eql(u8, name, "--loved") and
@@ -4214,12 +4252,21 @@ fn listTracks(context: Context) !void {
         .year_max = filters.year_max,
         .lossless = filters.lossless,
         .min_sample_rate = filters.min_sample_rate,
+        .max_sample_rate = filters.max_sample_rate,
+        .codec = filters.codec,
+        .added_after = addedAfter(io, filters.added_days),
         .explicit_only = filters.explicit_only,
         .sort = try parseTrackSort(options.sort),
         .direction = if (options.descending) .descending else .ascending,
         .limit = options.limit,
         .offset = options.offset,
     };
+    if (filters.totals) {
+        if (options.filter.len != 0) return error.TotalsWithFilter;
+        const totals = try runtime.libraryTrackQueryTotals(library, query);
+        try stdout.print("count={d} duration_ms={d}\n", .{ totals.count, totals.duration_ms });
+        return;
+    }
     var page = try runtime.libraryTrackQuery(library, options.filter, query);
     defer page.deinit();
     if (options.filter.len == 0) try stdout.print(
@@ -4250,6 +4297,12 @@ fn listTracks(context: Context) !void {
         try writeOptionalNumber(stdout, track.disc_total);
         try stdout.print("{s}\n", .{if (track.has_playable_file) "" else "\tunreachable"});
     }
+}
+
+/// The Unix time `days` days before now, for an `--added-days` filter.
+fn addedAfter(io: std.Io, days: ?u32) ?i64 {
+    const count = days orelse return null;
+    return std.Io.Clock.real.now(io).toSeconds() - @as(i64, count) * std.time.s_per_day;
 }
 
 /// `n of N`, `n` alone without a total, `-` without a number.

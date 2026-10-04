@@ -721,6 +721,16 @@ pub const OrcaRuntime = struct {
         return (try libraryDatabase(self, library)).tracks.countMatching(query);
     }
 
+    /// How many Tracks `libraryTrackQuery` would page through for the same
+    /// filters without search text, and their summed duration.
+    pub fn libraryTrackQueryTotals(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.TrackQuery,
+    ) !database.TrackTotals {
+        return (try libraryDatabase(self, library)).tracks.totals(query);
+    }
+
     pub fn libraryArtistCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).artists.count();
     }
@@ -751,6 +761,30 @@ pub const OrcaRuntime = struct {
         query: database.ReleaseQuery,
     ) !u64 {
         return (try libraryDatabase(self, library)).releases.countMatching(query);
+    }
+
+    /// How many Releases `libraryReleasePage` would return for the same
+    /// query, the album Artists they are filed under and the bytes their
+    /// Tracks play.
+    pub fn libraryReleaseQueryTotals(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.ReleaseQuery,
+    ) !database.ReleaseTotals {
+        return (try libraryDatabase(self, library)).releases.totals(query);
+    }
+
+    /// The letters that begin the names of the Releases `libraryReleasePage`
+    /// would return, each with the offset of its first Release there, so a
+    /// host can jump to a letter by paging from it. Only the title and artist
+    /// sorts have letters; caller-owned, free with `allocator`.
+    pub fn libraryReleaseLetterIndex(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        query: database.ReleaseQuery,
+    ) ![]database.LetterBucket {
+        return (try libraryDatabase(self, library)).releases.letterIndex(allocator, query);
     }
 
     pub fn libraryArtist(

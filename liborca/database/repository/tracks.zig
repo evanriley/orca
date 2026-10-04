@@ -202,6 +202,12 @@ pub const SortDirection = enum {
     }
 };
 
+/// The size of what a `TrackQuery` matches.
+pub const TrackTotals = struct {
+    count: u64,
+    duration_ms: u64,
+};
+
 /// One bounded, ordered, filtered request for a page of Tracks.
 ///
 /// A filter is a relational one — `artist_id`, `release_id` — never a text
@@ -225,6 +231,13 @@ pub const TrackQuery = struct {
     lossless: ?bool = null,
     /// Only Tracks whose play file runs at this many hertz or more.
     min_sample_rate: ?u32 = null,
+    /// Only Tracks whose play file runs at this many hertz or fewer.
+    max_sample_rate: ?u32 = null,
+    /// Only Tracks whose play file is in this codec, a `codec_id` in any case.
+    codec: ?[]const u8 = null,
+    /// Only Tracks whose play file was first seen after this Unix time, the
+    /// time `TrackSort.date_added` orders by.
+    added_after: ?i64 = null,
     /// Only Tracks whose advisory is `Explicit.explicit`.
     explicit_only: bool = false,
     sort: TrackSort = .id,
@@ -424,6 +437,20 @@ pub const TrackRepository = struct {
         try bindFilters(statement, query, bounded);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    /// How many Tracks `page` would return for the same query and their
+    /// summed duration, a Track with none counting as zero.
+    pub fn totals(self: *const TrackRepository, query: TrackQuery) !TrackTotals {
+        const bounded = hasBoundFilter(query);
+        var statement = try self.db.prepare(switch (bounded) {
+            inline else => |with_bound| "SELECT count(*), COALESCE(sum(max(tracks.duration_ms, 0)), 0) FROM tracks\nWHERE " ++
+                comptime filterText(with_bound) ++ ";",
+        });
+        defer statement.deinit();
+        try bindFilters(statement, query, bounded);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{ .count = @intCast(statement.columnInt64(0)), .duration_ms = @intCast(statement.columnInt64(1)) };
     }
 
     fn countCarrying(self: *const TrackRepository, genre_id: i64) !u64 {
@@ -780,7 +807,8 @@ pub const by_release_artist =
     "(releases.album_artist_id = ?3 OR releases.id IN " ++
     "(SELECT release_id FROM tracks WHERE tracks.artist_id = ?3))";
 
-/// The filters bound as parameters ?7 to ?11, each true when unset. A year
+/// The filters bound as parameters ?7 to ?11 and ?13 to ?15, each true when
+/// unset; ?12 is a search's match expression. A year
 /// is read as `release_year` reads it and a codec as `codec_id.lossless`
 /// lists it, so a filter and the summary it filters cannot disagree.
 const by_bound_filters =
@@ -790,7 +818,13 @@ const by_bound_filters =
     "    AND bound_file.codec <> '' AND (bound_file.codec IN (" ++ lossless_codecs ++ ")) = ?9))\n" ++
     "  AND (?10 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
     "    AND bound_file.sample_rate >= ?10))\n" ++
-    "  AND (?11 = 0 OR tracks.explicit = " ++ explicit_value ++ ")";
+    "  AND (?11 = 0 OR tracks.explicit = " ++ explicit_value ++ ")\n" ++
+    "  AND (?13 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
+    "    AND bound_file.first_seen_at > ?13))\n" ++
+    "  AND (?14 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
+    "    AND bound_file.codec = lower(?14)))\n" ++
+    "  AND (?15 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
+    "    AND bound_file.sample_rate <= ?15))";
 
 const by_relational_filters =
     "(?3 IS NULL OR " ++ by_artist ++ ")\n" ++
@@ -819,7 +853,8 @@ const explicit_value = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Expl
 
 fn hasBoundFilter(query: TrackQuery) bool {
     return query.year_min != null or query.year_max != null or query.lossless != null or
-        query.min_sample_rate != null or query.explicit_only;
+        query.min_sample_rate != null or query.explicit_only or query.max_sample_rate != null or
+        query.codec != null or query.added_after != null;
 }
 
 fn bindBoundFilters(statement: sqlite.Statement, query: TrackQuery) !void {
@@ -828,6 +863,9 @@ fn bindBoundFilters(statement: sqlite.Statement, query: TrackQuery) !void {
     try statement.bindOptionalInt64(9, if (query.lossless) |lossless| @intFromBool(lossless) else null);
     try statement.bindOptionalInt64(10, if (query.min_sample_rate) |rate| rate else null);
     try statement.bindInt64(11, @intFromBool(query.explicit_only));
+    try statement.bindOptionalInt64(13, query.added_after);
+    try statement.bindOptionalText(14, query.codec);
+    try statement.bindOptionalInt64(15, if (query.max_sample_rate) |rate| rate else null);
 }
 
 fn bindFilters(statement: sqlite.Statement, query: TrackQuery, bounded: bool) !void {
@@ -1259,7 +1297,7 @@ test "a genre's Track count is the general filter's, alone, beside other filters
         }
     }
 }
-test "each Track filter keeps only its Tracks, alone, combined, counted and in a search" {
+test "each Track filter keeps only its Tracks, alone, combined, counted, totalled and in a search" {
     var library = try @import("../library.zig").LibraryDatabase.open(
         std.testing.allocator,
         std.testing.io,
@@ -1281,6 +1319,8 @@ test "each Track filter keeps only its Tracks, alone, combined, counted and in a
         \\INSERT INTO feedback(recording_id, score, updated_at) VALUES (1, 1, 1), (3, 1, 1), (6, -1, 1);
         \\INSERT INTO genres(id, name, key) VALUES (1, 'Folk', 'folk');
         \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (1, 1, 0, 0), (3, 1, 0, 0), (4, 1, 0, 0);
+        \\UPDATE files SET first_seen_at = id * 100;
+        \\UPDATE tracks SET duration_ms = id * 1000;
     );
     const Case = struct { query: TrackQuery, ids: []const i64 };
     const cases = [_]Case{
@@ -1297,6 +1337,15 @@ test "each Track filter keeps only its Tracks, alone, combined, counted and in a
         .{ .query = .{ .release_id = 2, .lossless = false, .min_sample_rate = 48000 }, .ids = &.{ 4, 8 } },
         .{ .query = .{ .genre_id = 1, .lossless = false }, .ids = &.{ 3, 4 } },
         .{ .query = .{ .genre_id = 1, .loved_only = true, .explicit_only = true }, .ids = &.{ 1, 3 } },
+        .{ .query = .{ .codec = "FLAC" }, .ids = &.{ 1, 2 } },
+        .{ .query = .{ .codec = "aac" }, .ids = &.{8} },
+        .{ .query = .{ .codec = "wav" }, .ids = &.{} },
+        .{ .query = .{ .max_sample_rate = 48000 }, .ids = &.{ 1, 3, 4, 8 } },
+        .{ .query = .{ .min_sample_rate = 48000, .max_sample_rate = 96000 }, .ids = &.{ 2, 4, 8 } },
+        .{ .query = .{ .added_after = 400 }, .ids = &.{ 5, 6, 8 } },
+        .{ .query = .{ .added_after = 400, .codec = "alac" }, .ids = &.{6} },
+        .{ .query = .{ .added_after = 100, .codec = "flac", .release_id = 1 }, .ids = &.{2} },
+        .{ .query = .{ .added_after = 300, .genre_id = 1 }, .ids = &.{4} },
     };
     for (cases) |case| {
         for (std.enums.values(TrackSort)) |sort| for ([_]SortDirection{ .ascending, .descending }) |direction| {
@@ -1310,6 +1359,12 @@ test "each Track filter keeps only its Tracks, alone, combined, counted and in a
             std.mem.sort(i64, ids[0..page.items.len], {}, std.sort.asc(i64));
             try std.testing.expectEqualSlices(i64, case.ids, ids[0..page.items.len]);
             try std.testing.expectEqual(@as(u64, case.ids.len), try library.tracks.countMatching(query));
+            var duration_ms: u64 = 0;
+            for (case.ids) |id| duration_ms += @intCast(id * 1000);
+            try std.testing.expectEqual(
+                TrackTotals{ .count = case.ids.len, .duration_ms = duration_ms },
+                try library.tracks.totals(query),
+            );
         };
     }
     const searches = [_]Case{
@@ -1320,6 +1375,9 @@ test "each Track filter keeps only its Tracks, alone, combined, counted and in a
         .{ .query = .{ .loved_only = true, .lossless = false }, .ids = &.{3} },
         .{ .query = .{ .min_sample_rate = 1 }, .ids = &.{ 1, 3 } },
         .{ .query = .{ .genre_id = 1, .year_min = 1990 }, .ids = &.{3} },
+        .{ .query = .{ .codec = "Flac" }, .ids = &.{1} },
+        .{ .query = .{ .added_after = 200 }, .ids = &.{ 3, 5 } },
+        .{ .query = .{ .max_sample_rate = 44100 }, .ids = &.{ 1, 3 } },
     };
     for (searches) |case| {
         var page = try library.tracks.search(std.testing.allocator, "Northern", case.query);
