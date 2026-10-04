@@ -171,11 +171,22 @@ counts in that order, so each bucket's `first_offset` is exactly the
 key strips a leading "The ", "A " or "An " from `releases.album_artist` in
 SQL unless `ReleaseQuery.name_order` is `as_written`.
 
+Version 39 indexes both orders on `releases`: `releases_artist_order` on the
+artist sort's terms with leading articles ignored and `releases_title_order` on
+the title sort's. SQLite uses an expression index only when the ORDER BY
+repeats its expressions exactly, so changing `ReleaseSort.terms` for either
+sort needs a migration that rebuilds its index; a releases test fails on a
+fresh library when the page plan stops using them. An unfiltered page then walks the index from its offset instead of
+sorting every Release: at 512,000 Releases a 512-row page by artist at offset
+13,806 drops from 22 ms to 6 ms, and by title from 24 ms to 5 ms.
+`letterIndex` still reads every matching Release, about 13 ms there.
+
 ### Ordering and paging
 
 `TrackRepository.page` takes a `TrackQuery`: a sort key (`id`, `artist`,
 `album`, `title`, `track_number`, `duration`, `date_added`, `rating`, `loved`,
-`play_count`, `last_played`, `year`), a direction, and
+`play_count`, `last_played`, `year`, `loudness`, `bitrate`, `path`,
+`album_artist`, `genre`), a direction, and
 relational filters on `artist_id`, `release_id` and `genre_id`.
 `ArtistRepository.page` and `ReleaseRepository.page` are the same shape for
 their own tables, and both also filter by `genre_id`; an Artist listing sorts
@@ -210,7 +221,8 @@ and Tracks without one, walked by id), so no part is read past the page. The
 indexes those walks use are `recording_play_stats_by_count`,
 `recording_play_stats_by_last_played`, `ratings_by_rating`, `feedback_loved`,
 `releases_by_year` (on the leading four-digit year of `release_date`) and
-`files_by_first_seen`, all version 32. Past that offset, or with an artist,
+`files_by_first_seen`, all version 32, and the version 40 indexes in
+[Track facts](#track-facts). Past that offset, or with an artist,
 release, genre or loved filter, the ids come from one ordered pass over the
 matching Tracks.
 
@@ -226,6 +238,18 @@ descending):
 | `loved` | 0 ms | 101 ms | 344 ms |
 | `year` | 1 ms | 54 ms | 380 ms |
 | `date_added` | 1 ms | 107 ms | 571 ms |
+| `loudness` | 2 ms | 236 ms | 599 ms |
+| `bitrate` | 130 ms | 220 ms | 557 ms |
+| `path` | 749 ms | 1,283 ms | 1,040 ms |
+| `album_artist` | 1 ms | 3 ms | 13 ms |
+| `genre` | 151 ms | 240 ms | 777 ms |
+
+The last five rows are timed at the end of the run, once every file has a
+size, a duration and two locations, two thirds a loudness, and every Track a
+genre. `genre` at offset 0 reads every Track looking for one without a first
+genre. `bitrate` read every Track the same way until version 41; its numbers
+predate that index. `path` descending walks the second
+location of every file, never its best one, before the first it keeps.
 
 The value filters (`year_min`, `year_max`, `lossless`, `min_sample_rate`,
 `explicit_only`) are bound parameters, each true when unset, as the Release
@@ -250,6 +274,30 @@ With value filters set (100-row pages, offset 0):
 A `title` page with a value filter stops once it has its rows (0 to 11 ms at
 offset 0); a page sorted by another key, and every count, test each Track. A
 search with a value filter takes 324 to 358 ms, against 279 ms without.
+
+A `codec`, `lossless`, sample-rate or `added_after` filter reads the Track's
+play file. With one of them set and no Artist, Release, genre or loved
+filter, a count, a total and a page whose sort reads every row (any sort but
+`id`, `artist`, `album`, `title`, `track_number`, `duration` and
+`album_artist`) collect the matching Tracks once, as one non-correlated `IN`
+set: the files that pass, joined to `tracks_by_preferred_file`, and for a
+Track without a preferred file the file `track_play_file` falls back to.
+Probing `files` once per Track instead costs a correlated subquery for each
+of 500,000 Tracks. A narrower filter keeps the per-Track probe, which reads
+only the Tracks the narrower filter leaves, and so does a page sorted by an
+index of `tracks`, which stops once it has its rows. The set costs a pass
+over every file, so a filter most files pass stays linear in the library.
+The `?N IS NULL OR` form of the bound filters keeps the planner off any
+index on `files.codec` or `files.sample_rate`, so the schema has none. At
+522,432 Tracks, each with its own file (`orca-cli tracks`, ReleaseFast):
+
+| Filter | Matches | Before | After |
+| --- | --- | --- | --- |
+| FLAC, above 48 kHz, added in the last year: totals | 26,176 | 238 ms | 61 ms |
+| the same, a 512-row page and its count | 26,176 | 246 ms | 67 ms |
+| the same, sorted by `date_added` descending | 26,176 | 473 ms | 128 ms |
+| lossless: totals | 472,064 | 388 ms | 387 ms |
+| lossy, sorted by `path`, offset 100 | 50,368 | 678 ms | 377 ms |
 
 Every unfiltered sort is an ordered index scan, and every Artist-filtered sort
 but one is an indexed SEARCH. Two cases build a temp B-tree, both over a
@@ -633,6 +681,24 @@ lowest tier and ordering by tier, then Track id, returns exactly the first
 match must explain, is the artist and album. Within a tier the order is by
 id, not by how well the Track matches.
 
+Each hit's detail is read only for the few hits a search returns, by
+correlated subqueries on indexes: an Artist's Releases and Tracks through
+`releases_by_artist`, `tracks_artist` and `tracks_release`, the predicates
+`ArtistSummary` counts with; a Release's Tracks through `tracks_release`; a
+Playlist's entries by its `playlist_entries` key and their duration through
+`tracks_by_recording`; a genre's Tracks from `genre_totals`. Whether a
+non-Track hit's title holds every word whole, which chooses
+`SearchResults.top`, is a whole-word `{title}:` match on `search_index`
+constrained to the hit's rowid. A Track's is its tier 0.
+
+The reason hits for the first Artist hit are two more queries. The
+Playlists holding its Tracks group the `playlist_entries` rows found
+through `playlist_entries_by_recording` for the recordings of its Tracks;
+its main genre groups `track_genres` by key over its Tracks. Both are
+bounded by the Artist's Tracks. In a 511,872-Track library, with the
+ReleaseFast build, the detail and reason hits move a search for `jun` from
+75 ms to 77 ms, `the` from 91 ms to 95 ms and `amb` from 9 ms to 11 ms.
+
 In the 500,000-Track benchmark (`zig build bench`), where `am` begins a word
 in 142,858 Track titles and `the` in 142,857, a search takes 6 ms and 32 ms;
 a three-word search takes 9 ms, and a Release page or count with text 14 ms
@@ -670,6 +736,46 @@ only while it is NULL or empty, so a tag always outranks the provider.
 first four digits of the Release date). `TrackSort.date_added` orders by that
 same `files.first_seen_at` of the playing file, not by `tracks.created_at`,
 which an edit that reprojects a Track resets.
+
+Version 40 adds what `TrackSummary.integrated_lufs`, `bitrate_kbps` and `path`
+read, and an index for each new sort:
+
+- `file_loudness(file_id, source_identity, integrated_lufs)` holds the
+  integrated loudness of each file's default `orca.audio-diagnostics` result
+  (version 4, default parameters). Triggers on `analysis_results` keep it: an
+  insert or a rewrite of `result` replaces the file's row, and deleting the
+  result deletes it. The value is decoded in SQL from the stored result's
+  little-endian `f32` at byte 8, written only when the result's flags say
+  loudness was measured. A row counts only while its `source_identity`
+  equals the file's `quick_hash`, so changed bytes make the loudness unknown
+  until the file is analysed again. The migration backfills it from the
+  results already stored. `file_loudness_by_lufs` orders it.
+- `files_by_bitrate` indexes `(size_bytes * 8 + duration_ms / 2) /
+  duration_ms`, the kbps `TrackSummary.bitrate_kbps` reports, for files with
+  a positive size and duration.
+- `TrackSort.path` walks `locations_by_uri` and keeps a location only when it
+  is the file's best one: not missing, `present` before `unverified`, then
+  the lowest id.
+- `tracks_sort_album_artist` orders `album_artist`, `album`, disc and track
+  number, all case-insensitive where text.
+- `genres_by_name` (`name COLLATE NOCASE`) and `track_genres_first` (the
+  ordinal-0 rows by `genre_id`) give `TrackSort.genre` its walk.
+
+Version 41 adds `files_without_bitrate`, the ids of files without a positive
+size and duration. `TrackSort.bitrate` walks it for the Tracks that have no
+bitrate, so a page no longer reads every Track to find them.
+
+Version 43 adds `locations_held`, `locations(file_id, state)` over the rows
+whose `state` is not `missing`. A test for a file's held location, as in
+`TrackSummary.has_playable_file`, `bestLocation` and `TrackSort.path`, reads
+only this index; `locations_file` holds no `state`, so each probe through it
+also read the row. `TrackSort.path` finds the Tracks whose preferred file has no held
+location by scanning `files` and probing `locations_held`, then joining
+`tracks_by_preferred_file`. Every such Track needs that scan, and it is the
+cost of a whole-library `path` page at offset 0: at 522,432 Tracks with a
+file each, 274 ms before and about 150 ms after, a page and the probe of
+every file; with 64 Tracks to a file, under 10 ms. A has-file flag kept on
+`tracks` by the projection would make it an index range.
 
 ## Identification proposals
 
@@ -1033,6 +1139,37 @@ take 2.9 s. Last, it creates `genre_totals`, `genre_release_tracks` and
 `genre_artist_refs`, fills them from the Tracks with one `GROUP BY` each,
 and then creates their triggers, described under [Genres](#genres).
 
+Version 42 adds `artist_info.origin`, the name of MusicBrainz's begin area,
+else its area, and **`artist_release_groups`**, primary key `(artist_id,
+mbid)`, `ON DELETE CASCADE` from `artists`: the Artist's MusicBrainz release
+groups from the artist-info browse, each with its `title`, `primary_type`,
+`first_release_year`, `credited_with` (the credit's other artists) and
+`position` in MusicBrainz's answer, at most `max_release_groups` (200).
+`storeReleaseGroups` replaces them in one transaction: it marks the Artist's
+rows by negating their positions, upserts the new groups, and deletes the
+rows still marked, so a group in both the old and new answers keeps its row.
+Every group is
+stored, held or not; `elsewhere` leaves out, when it reads them, each group
+whose MBID matches, without case, a `release_info`, `observed_file_tags` or
+`orca_metadata_values` release-group ID of a Release filed under
+the Artist or holding one of their Tracks, so the result follows the Library
+without a refetch.
+
+Version 44 adds **`release_group_covers`**, primary key `mbid`: the front
+cover the Cover Art Archive gives a release group, as `image` and `mime`, and
+`fetched_at` in Unix seconds, with a `CHECK` that `image` and `mime` are both
+set or both null. A null `image` records that the archive had none, which
+stands for 30 days. It is keyed by group ID rather than by Artist, so two
+Artists credited on one group share its cover. The index
+`artist_release_groups_mbid` and the trigger `artist_release_groups_cover_ad`
+keep it free of orphans: after a row of `artist_release_groups` is deleted,
+by `storeReleaseGroups` or by the cascade from `artists`, the cover goes once
+no row names its group. `storeReleaseGroupCover` writes a cover only while a
+row names the group. `elsewhere` reports each group's `cover` as
+`not_fetched`, `none` or `kept`; `releaseGroupCover` reads the bytes, which
+the artwork loader returns for `.{ .release_group = mbid }`, and
+`releaseGroupCoverMark` whether there is an image and when it was fetched.
+
 ## Folder browsing
 
 `LocationRepository.folderPage` lists one folder of a root from `locations`
@@ -1070,6 +1207,65 @@ uri>? AND uri<?)`. At 500,000 locations in 25,000 artist folders
 (`zig build bench`), the root's first page of 512 folders with totals takes
 about 12 ms, a page two levels down under 1 ms, and the root's page at
 offset 24,000, which seeks past 24,000 folders first, about 50 ms.
+
+Version 45 adds the folder's pictures and its last scan:
+
+- **`folder_images`**, unique on `(volume_id, uri)`, holds each image the
+  scanner found beside the music: its `root_id`, `mime` (from the file's
+  first 16 bytes; a file with no PNG, JPEG, GIF, WebP or BMP signature is not
+  recorded), `role` (0 front for a name stem of `cover`, `front` or
+  `folder`, 1 `back`, 2 `booklet`, 3 anything else; compared without case),
+  `size_bytes`, `modified_ns` and `last_seen_generation`. An image is never
+  a `files` row, so it never reaches projection, backfill, analysis or
+  stats. An unchanged size and modification time skip the read, as for
+  audio. The sweeps after an uncancelled run delete the rows the run did not
+  reach rather than marking them missing: they hold nothing a later scan
+  cannot observe again. `folder_images_sweep (root_id,
+  last_seen_generation)` serves the sweep and `folder_images_folder
+  (volume_id, rtrim(uri, replace(uri, '/', '')), uri)` lists the images
+  directly in one folder in name order, and finds a Release's front images
+  from the folder holding its Tracks' preferred files.
+- **`folder_scans`**, primary key `(root_id, relative_path)`, `WITHOUT
+  ROWID`: `scanned_at`, in Unix seconds, when a scan or reconcile last
+  finished walking the folder, `""` being the root. The scanner records each
+  folder once the depth-first walk leaves it, in the next batch's
+  transaction; a cancelled walk records only the folders it finished.
+
+Both tables go with their root (`ON DELETE CASCADE`). `folderPage` lists
+images after the audio files, so `offset` counts folders, then files, then
+images. A file's `status` is `unreadable` while it has an `unreadable_file`
+health issue, which property backfill records, and `imported` otherwise.
+The page also carries `image_count`, `last_scanned_at` and the Release
+directly in the folder: its id, title and album artist when every present
+Track preferred for a file in the folder belongs to that one Release, and
+null otherwise, or when the folder has more than 512 children, so a page of
+a library root never walks every folder in it. A folder holding only images, with no audio location below
+it, is not listed as a subfolder.
+
+Version 46 adds `releases.has_folder_cover`, 1 when the folder holding most
+of the Release's present preferred files, the lowest path on a tie, holds a
+front image, backfilled by the migration. It is stored because the
+`ReleaseQuery.has_artwork` filter, its count and the genre artwork list read
+it for every Release, and computing it there through `locations` and
+`folder_images` cost the 500,000-track count about 65 ms.
+`locations.releaseHasFolderCoverSql` is the one definition, and only these
+write the flag:
+
+- projection, for the Releases a folder's files project to and those they
+  left, in the step that settles `artwork_problem`, so a moved or regrouped
+  Track carries it;
+- the scanner, for the Releases with a Track in the folder of each front
+  image it records, retiring their `artwork_problem` when it is now 1;
+- the sweeps after a run, for the Releases with a Track on a location they
+  mark missing or in the folder of a front image they forget;
+- root removal, for the Releases that lost Tracks.
+
+A sweep does not raise `artwork_problem` again: a Release whose folder cover
+went away gets it back the next time its folder is projected.
+`releases.releaseCoverSql` adds a fetched Cover Art Archive cover to the
+flag, and `ReleaseQuery.has_artwork`, the smart playlist `has_artwork` rule,
+`TrackDetails.has_artwork`, the genre artwork list and projection's
+`artwork_problem` all read it.
 
 ## Library stats
 

@@ -14,6 +14,8 @@ const DuplicateCandidate = @import("duplicates.zig").DuplicateCandidate;
 const DuplicateCandidatePage = @import("duplicates.zig").DuplicateCandidatePage;
 const DuplicatePeer = @import("duplicates.zig").DuplicatePeer;
 const StorageIdentityKey = @import("locations.zig").StorageIdentityKey;
+const refresh_swept_folder_covers_sql = @import("locations.zig").refresh_swept_folder_covers_sql;
+const ArtworkRole = @import("locations.zig").ArtworkRole;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
 pub const FileUpsert = struct {
@@ -53,6 +55,64 @@ pub const mark_missing_under_sql =
     \\WHERE volume_id=?1 AND uri>=?2 || '/' AND uri<?2 || '0'
     \\    AND +root_id=?3 AND last_seen_generation<?4 AND state<>'missing';
 ;
+const forget_images_under_sql =
+    \\DELETE FROM folder_images
+    \\WHERE volume_id=?1 AND uri>=?2 || '/' AND uri<?2 || '0'
+    \\    AND +root_id=?3 AND last_seen_generation<?4;
+;
+const mark_missing_sql =
+    \\UPDATE locations SET state='missing', missing_since=unixepoch()
+    \\WHERE root_id=?1 AND last_seen_generation<?2 AND state<>'missing';
+;
+const forget_images_sql = "DELETE FROM folder_images WHERE root_id=?1 AND last_seen_generation<?2;";
+
+fn sweptCoverReleasesSql(comptime swept: []const u8, comptime gone: []const u8) [:0]const u8 {
+    const gone_folder = "rtrim(gone.uri, replace(gone.uri, '/', ''))";
+    const front = std.fmt.comptimePrint("{d}", .{@intFromEnum(ArtworkRole.front)});
+    return "INSERT OR IGNORE INTO temp.swept_cover_releases(id)\n" ++
+        "SELECT tracks.release_id FROM locations JOIN tracks ON tracks.preferred_file_id = locations.file_id\n" ++
+        "WHERE " ++ swept ++ " AND locations.state<>'missing' AND tracks.release_id IS NOT NULL\n" ++
+        "UNION SELECT tracks.release_id FROM folder_images AS gone\n" ++
+        "JOIN locations ON locations.volume_id = gone.volume_id AND locations.uri >= " ++ gone_folder ++ "\n" ++
+        "    AND locations.uri < substr(" ++ gone_folder ++ ", 1, length(" ++ gone_folder ++ ") - 1) || '0'\n" ++
+        "    AND rtrim(locations.uri, replace(locations.uri, '/', '')) = " ++ gone_folder ++ "\n" ++
+        "JOIN tracks ON tracks.preferred_file_id = locations.file_id\n" ++
+        "WHERE " ++ gone ++ " AND gone.role = " ++ front ++ " AND tracks.release_id IS NOT NULL;";
+}
+
+const swept_cover_releases_sql = sweptCoverReleasesSql(
+    "locations.root_id=?1 AND locations.last_seen_generation<?2",
+    "gone.root_id=?1 AND gone.last_seen_generation<?2",
+);
+const swept_cover_releases_under_sql = sweptCoverReleasesSql(
+    "locations.volume_id=?1 AND locations.uri>=?2 || '/' AND locations.uri<?2 || '0'" ++
+        " AND +locations.root_id=?3 AND locations.last_seen_generation<?4",
+    "gone.volume_id=?1 AND gone.uri>=?2 || '/' AND gone.uri<?2 || '0'" ++
+        " AND +gone.root_id=?3 AND gone.last_seen_generation<?4",
+);
+
+const SweepScope = struct {
+    volume_id: i64 = 0,
+    root_id: i64,
+    generation: i64,
+    prefix: ?[]const u8 = null,
+
+    fn run(self: SweepScope, db: sqlite.Database, sql: [:0]const u8) !u64 {
+        var statement = try db.prepare(sql);
+        defer statement.deinit();
+        if (self.prefix) |prefix| {
+            try statement.bindInt64(1, self.volume_id);
+            try statement.bindText(2, prefix);
+            try statement.bindInt64(3, self.root_id);
+            try statement.bindInt64(4, self.generation);
+        } else {
+            try statement.bindInt64(1, self.root_id);
+            try statement.bindInt64(2, self.generation);
+        }
+        if (try statement.step() != .done) return error.SqlFailed;
+        return db.changes();
+    }
+};
 
 /// Audio facts a probe learned about one already-recorded file.
 ///
@@ -555,23 +615,18 @@ pub const FileRepository = struct {
 
     /// Sweep after a completed, uncancelled run: locations under this root that
     /// the run did not reach become `missing`. Never a delete — an unmounted
-    /// drive must not eat a library.
+    /// drive must not eat a library. Folder images the run did not reach are
+    /// forgotten: they carry nothing a later scan cannot observe again.
     pub fn markMissingBelowGeneration(
         self: *FileRepository,
         root_id: i64,
         generation: i64,
     ) !u64 {
-        self.write_lane.acquire();
-        defer self.write_lane.release();
-        var statement = try self.db.prepare(
-            \\UPDATE locations SET state='missing', missing_since=unixepoch()
-            \\WHERE root_id=?1 AND last_seen_generation<?2 AND state<>'missing';
-        );
-        defer statement.deinit();
-        try statement.bindInt64(1, root_id);
-        try statement.bindInt64(2, generation);
-        if (try statement.step() != .done) return error.SqlFailed;
-        return self.db.changes();
+        return self.sweep(.{ .root_id = root_id, .generation = generation }, .{
+            .covers = swept_cover_releases_sql,
+            .mark = mark_missing_sql,
+            .forget = forget_images_sql,
+        });
     }
 
     /// The same sweep, limited to one directory: locations under `prefix`, the
@@ -585,16 +640,34 @@ pub const FileRepository = struct {
         generation: i64,
         prefix: []const u8,
     ) !u64 {
+        return self.sweep(
+            .{ .volume_id = volume_id, .root_id = root_id, .generation = generation, .prefix = prefix },
+            .{ .covers = swept_cover_releases_under_sql, .mark = mark_missing_under_sql, .forget = forget_images_under_sql },
+        );
+    }
+
+    /// Marks the scope's unreached locations missing and forgets its
+    /// unreached folder images, then recomputes `has_folder_cover` for the
+    /// Releases either could change, all in one savepoint.
+    fn sweep(
+        self: *FileRepository,
+        scope: SweepScope,
+        sql: struct { covers: [:0]const u8, mark: [:0]const u8, forget: [:0]const u8 },
+    ) !u64 {
         self.write_lane.acquire();
         defer self.write_lane.release();
-        var statement = try self.db.prepare(mark_missing_under_sql);
-        defer statement.deinit();
-        try statement.bindInt64(1, volume_id);
-        try statement.bindText(2, prefix);
-        try statement.bindInt64(3, root_id);
-        try statement.bindInt64(4, generation);
-        if (try statement.step() != .done) return error.SqlFailed;
-        return self.db.changes();
+        try self.db.exec("SAVEPOINT sweep;");
+        errdefer self.db.exec("ROLLBACK TO sweep; RELEASE sweep;") catch {};
+        try self.db.exec(
+            \\CREATE TEMP TABLE IF NOT EXISTS swept_cover_releases(id INTEGER PRIMARY KEY);
+            \\DELETE FROM temp.swept_cover_releases;
+        );
+        _ = try scope.run(self.db, sql.covers);
+        const marked = try scope.run(self.db, sql.mark);
+        _ = try scope.run(self.db, sql.forget);
+        try self.db.exec(refresh_swept_folder_covers_sql);
+        try self.db.exec("DELETE FROM temp.swept_cover_releases; RELEASE sweep;");
+        return marked;
     }
 
     /// Attach a file to the performance it encodes. Written only by the

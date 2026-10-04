@@ -357,7 +357,7 @@ fn exerciseLrc(allocator: std.mem.Allocator, input: []const u8) void {
 fn exerciseSmartPlaylist(allocator: std.mem.Allocator, input: []const u8) void {
     var rules = smart_playlist.parse(allocator, input) catch return;
     defer rules.deinit();
-    var compiled = smart_playlist.compile(allocator, &rules, 1_700_000_000) catch return;
+    var compiled = smart_playlist.compile(allocator, &rules, .{ .now = 1_700_000_000, .seed = 0x9e37_79b9_7f4a_7c15 }) catch return;
     defer compiled.deinit();
     const placeholders = std.mem.count(u8, compiled.predicate, "?");
     if (placeholders != compiled.values.len)

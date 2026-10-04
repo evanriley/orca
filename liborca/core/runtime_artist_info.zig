@@ -1,3 +1,4 @@
+const std = @import("std");
 const database = @import("../database/root.zig");
 const metadata = @import("../metadata/root.zig");
 const runtime = @import("runtime.zig");
@@ -15,6 +16,10 @@ pub fn libraryArtistPhoto(self: *OrcaRuntime, library: LibraryHandle, artist_id:
 
 pub fn libraryArtistLinks(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !database.ArtistLinks {
     return (try runtime.libraryDatabase(self, library)).artist_info.links(self.allocator, artist_id);
+}
+
+pub fn libraryArtistElsewhere(self: *OrcaRuntime, library: LibraryHandle, allocator: std.mem.Allocator, artist_id: i64) ![]database.ElsewhereRelease {
+    return (try runtime.libraryDatabase(self, library)).artist_info.elsewhere(allocator, artist_id);
 }
 
 pub fn libraryRelatedArtists(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !database.RelatedArtists {

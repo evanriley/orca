@@ -182,6 +182,29 @@ pub fn main(init: std.process.Init) !void {
     try timeLibrarySearch(&library, allocator, init.io);
     try timeFolders(&library, allocator, init.io);
     try timeLibraryStats(&library, init.io);
+    try timeFileSorts(&library, allocator, init.io);
+}
+
+fn timeFileSorts(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
+    const seed_start = std.Io.Clock.awake.now(io);
+    try library.database.exec(
+        \\UPDATE files SET duration_ms = 120000 + (id * 7919) % 240000, quick_hash = CAST(id AS BLOB);
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+        \\    SELECT id, quick_hash, -6.0 - ((id * 104729) % 2000) / 100.0 FROM files WHERE id % 3 <> 0;
+        \\UPDATE tracks SET album_artist = printf('Album Artist %05d', (id * 31) % 25000),
+        \\    album = printf('Album %d', id % 7);
+    );
+    std.debug.print("file sorts seeded: {d} ms\n", .{millisecondsSince(io, seed_start)});
+    for ([_]liborca.internal.database.TrackSort{
+        .title, .date_added, .loudness, .bitrate, .path, .album_artist, .genre,
+    }) |sort| {
+        std.debug.print("  {t} page", .{sort});
+        for ([_]u32{ 0, 50_000, 250_000 }) |offset| {
+            const page_ns = try timePage(library, allocator, io, sort, null, offset);
+            std.debug.print(", offset {d}: {d} ms", .{ offset, @divTrunc(page_ns, std.time.ns_per_ms) });
+        }
+        std.debug.print("\n", .{});
+    }
 }
 
 fn timeFolders(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
@@ -278,11 +301,11 @@ fn timeSmartPlaylists(library: *liborca.internal.database.LibraryDatabase, alloc
     };
     for (cases) |case| {
         const count_start = std.Io.Clock.awake.now(io);
-        const matching = try library.playlists.smartCount(allocator, case[1], now);
+        const matching = try library.playlists.smartCount(allocator, case[1], .{ .now = now, .seed = 0 });
         const count_ms = millisecondsSince(io, count_start);
         const playlist_id = try library.playlists.createSmart(allocator, case[0], case[1]);
         const page_start = std.Io.Clock.awake.now(io);
-        var page = try library.playlists.entries(allocator, playlist_id, 100, 0, now);
+        var page = try library.playlists.entries(allocator, playlist_id, 100, 0, .{ .now = now, .seed = 0 });
         defer page.deinit();
         std.debug.print("smart playlist {s}: count {d} in {d} ms, first page of {d} in {d} ms\n", .{
             case[0],

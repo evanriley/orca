@@ -108,7 +108,15 @@ defer page.deinit();
   subfolders first, each with `file_count`, `track_count` and
   `total_duration_ms` counted through every folder below it, then its files,
   each with its `file_id`, the `track_id` of the Track it is preferred for
-  and its duration. `FolderEntryKind` is `folder` or `file`. The path is
+  and its duration and `status` (`FolderEntryStatus.imported`, or
+  `unreadable` once property backfill could not decode it), then its images,
+  each with `mime` and `artwork_role` (`ArtworkRole`: `front`, `back`,
+  `booklet` or `other`, from the file name). `FolderEntryKind` is `folder`,
+  `file` or `image`. The page carries `image_count`, `last_scanned_at` (Unix
+  seconds, null before any scan finished the folder) and `release_id`,
+  `release_title` and `release_artist` when every Track in the folder
+  belongs to one Release. In the C ABI an image is
+  `ORCA_FOLDER_ENTRY_KIND_IMAGE` (2), with no ids and zero counts. The path is
   relative to the root, `""` being the root itself; a path with a `.`, `..`
   or empty component, a leading or trailing `/` or a NUL is
   `error.InvalidFolderPath`, an unknown root `error.UnknownRoot`, and a limit
@@ -218,9 +226,21 @@ defer page.deinit();
   song list shows: the playing file's `codec`, `sample_rate`, `bit_depth` and
   `lossy`, `added_at`, the recording's `play_count` and `last_played_at`,
   `explicit` (`Explicit`: `unknown`, `none`, `explicit`, `clean`),
-  `track_total`, `disc_total` and `year`. `TrackSort` appends `play_count`,
-  `last_played` and `year`; Tracks never played or undated sort last either
-  way. `ReleaseSummary.explicit` is explicit when any of its Tracks is.
+  `track_total`, `disc_total`, `year`, `integrated_lufs`, `bitrate_kbps`,
+  `path` and `album_artist_id`. `integrated_lufs` is the integrated loudness
+  of the playing file's current default analysis (null before one, or when
+  the file is too short or silent to measure); `bitrate_kbps` is the file's
+  average bitrate, size over duration rounded to the nearest kbps, lossless
+  or not (null when either is unknown or zero); `path` is the file's location
+  that is not missing, present before unverified, empty when there is none,
+  and is owned by the summary like the strings; `album_artist_id` is the
+  Release's album artist. `TrackSort` appends `play_count`, `last_played`,
+  `year`, `loudness`, `bitrate`, `path`, `album_artist` (the Track's album
+  artist, then album and position, as `artist` does) and `genre` (the name of
+  the Track's first genre, case-insensitively, then that genre's id); a Track
+  with no value for the sort sorts last either way. Smart playlist rules
+  accept the same names as `sort.field`. `ReleaseSummary.explicit` is
+  explicit when any of its Tracks is.
 - `ReleaseSummary` carries the facts an album grid shows, read from the files
   its Tracks play: `codec` (`mixed_codec` when they differ, empty when none
   was probed), `max_sample_rate`, `max_bit_depth`, `lossless` (every Track
@@ -230,7 +250,9 @@ defer page.deinit();
   file above 48 kHz or 16 bits, as `ReleaseSummary.isHighResolution`),
   `needs_review_only`, `lossless_only`, `year_min` and `year_max` (inclusive;
   undated Releases are left out) and `has_artwork`, a cover embedded in a
-  Track's file or fetched. `ReleaseSort.most_played` orders by the listens of
+  Track's file, fetched from the Cover Art Archive, or a front image in the
+  Release's folder, as `releases.has_folder_cover` records it
+  ([database.md](database.md#folder-browsing)). `ReleaseSort.most_played` orders by the listens of
   the Tracks' recordings. `ReleaseQuery.added_after` (Unix seconds) keeps
   the Releases whose Tracks' play files were all first seen after it, so a
   Release that only gained a Track is not newly added.
@@ -274,11 +296,15 @@ defer page.deinit();
   `max_sample_rate`, `codec` (the lowercase codec id, compared without
   case) and `added_after` (first seen after that Unix time). Every filter
   combines with AND, `libraryTrackMatchCount` counts what the page lists,
-  and `libraryTrackQueryTotals` returns its `TrackTotals`: `count` and
-  `duration_ms` (an unknown duration adds 0), the page without search text. A text search in
+  and `libraryTrackQueryTotals` takes the same search text and returns its
+  `TrackTotals`: `count` and `duration_ms` (an unknown duration adds 0).
+  `libraryTrackQueryPlayableIds` returns the ids of the Tracks with a playable
+  file among `limit` rows from `offset` of the same listing, in its order, up
+  to `max_track_id_window` (10,000, at least `playback_queue_capacity`) rows,
+  so a host can queue a listing from any row without paging through it. A text search in
   `libraryTrackQuery` keeps every filter of the query and orders the matches
-  by relevance, so its `sort` and `direction` do not apply; a search has no
-  count. Each word of its text must begin a word of the Track's title,
+  by relevance, so its `sort` and `direction` do not apply;
+  `libraryTrackMatchCount` does not count a search. Each word of its text must begin a word of the Track's title,
   artist, album or album artist, no character is FTS5 syntax, and text with
   no word matches nothing.
 - `librarySearch` finds Artists, Releases, Tracks, Playlists and genres in
@@ -291,15 +317,68 @@ defer page.deinit();
   word of the text must begin a word of the hit's title or subtitle,
   ignoring case and diacritics; quotes, operators and column filters are
   matched as text. Text longer than `max_search_text` (256 bytes) is
-  `error.SearchTextTooLong`. `ReleaseQuery.text` keeps the Releases the
+  `error.SearchTextTooLong`. Each hit carries what a result row shows:
+  an Artist its `release_count` and `track_count` (as `ArtistSummary`
+  counts them), a Release its `year`, `artist` and `track_count`, a Track
+  its `artist` and `duration_ms`, a manual Playlist its `track_count`
+  (entries) and `duration_ms` (a smart Playlist 0 and null), a genre its
+  `track_count`. A hit's `reason` is `name` when its text matched. The
+  first Artist hit adds reason hits after the `name` hits of their kind,
+  within the kind's cap and never repeating a hit: the Playlists holding
+  its Tracks (`tracks_by`, `reason_count` the entries that are its,
+  most first, then by id) and the genre most of its Tracks carry
+  (`main_genre_of`, `reason_count` those Tracks, ties by name), each with
+  `rank` 0. `SearchResults.top` is the hit to feature: among the `name`
+  hits, the first in `hits` order whose title holds every word of the text
+  as a whole word, else the first `name` hit, else null; a reason hit is
+  never top. It is a copy of that element of `hits`, sharing its text, and
+  is not freed separately. `ReleaseQuery.text` keeps the Releases the
   same search finds, under every filter and sort, and
   `libraryReleaseCountMatching` counts them.
 - Cover art is read either on the caller's thread (`libraryTrackArtwork`,
-  `libraryReleaseArtwork`) or off it: `libraryRequestArtwork` queues a lookup
+  `libraryReleaseArtwork`) or off it. Both return the front cover embedded in
+  a file first, then a front image (`folder_images` role `front`) in the
+  folder holding most of the Release's Tracks, ties to the lowest path,
+  preferring the stems `cover`, `front` and `folder` in that order, then the
+  largest; then the cover the Cover Art Archive fetch kept. The folder image
+  is read from disk on every call, bounded like embedded art and sniffed
+  again, so a replaced file shows once a scan records it, and a missing,
+  unreadable or no longer image file falls through to the archive's cover.
+  Off the caller's thread, `libraryRequestArtwork` queues a lookup
   on the Library's artwork loader, at most 64 outstanding, and
   `libraryTakeArtwork` collects finished ones. `libraryCancelArtwork` skips a
   request that has not started. `ArtworkSubject.artist` asks the loader for
   the photo the Artist's artist info stores, with no image when none is.
+  `ArtworkSubject.release_group`, a lowercase MusicBrainz release group ID
+  as `[36]u8`, asks for the cover an Artist fetch kept for the group, with
+  no image when none is; the loader makes no request. The C ABI has no
+  such subject yet. `startReleaseCoverArtFetch` sends no request for a
+  Release with an embedded or a folder cover and reports `embedded` or
+  `folder` as its `CoverArtOutcome`; the other outcomes are listed in
+  [providers.md](providers.md#cover-art-archive).
+- Track and Release listings can also be read off the caller's thread:
+  `libraryRequestBrowse` queues a `BrowseRequest` on the Library's browse
+  loader and returns its id, `libraryTakeBrowse` collects a finished
+  `BrowseResult`, and `libraryCancelBrowse` skips a request that has not
+  started and drops the result of one still running; a finished one still
+  arrives. A request is a `track_page` or `track_totals`
+  (`BrowseTrackListing`: the search text and `TrackQuery` that
+  `libraryTrackQuery` and `libraryTrackQueryTotals` take), or a
+  `release_page` or `release_count` (the `ReleaseQuery` that
+  `libraryReleasePage` and `libraryReleaseCountMatching` take), and its
+  result is what that method would return, or its error, in
+  `BrowseResult.payload`. The request's text and codec are copied, so the
+  caller's buffers may change once it returns; search text over
+  `max_search_text` is `error.SearchTextTooLong` and a codec over 32 bytes
+  `error.CodecNameTooLong`. At most 8 requests are outstanding, queued,
+  running or finished and not taken; another is `error.BrowseQueueFull`.
+  Results come in request order, and `BrowseResult.deinit` frees a page,
+  which is allocated with the Runtime's allocator. The loader reads on its
+  own read-only connection, so a result can predate a write the host has
+  just made; the host reloads on `library_changed` as it would after a
+  synchronous read. Destroying any Library joins every Library's browse
+  loader, as it does the artwork loaders, and drops their requests and
+  untaken results; a loader starts again on its Library's next request.
 - `ArtistSummary.has_photo` says whether an Artist's artist info stores a
   photo, and `ArtistSummary.cover_release_id` names the Release to show in
   its place: the first the Artist's `ReleaseQuery` lists with
@@ -312,7 +391,10 @@ defer page.deinit();
   `fetched`, `cached` (LRCLIB's earlier answer to the same query),
   `cached_miss`, `not_found` or `no_metadata` (no title or artist to ask
   with). `jobTakeLyrics` moves the `Lyrics` to the caller once, and
-  `Lyrics.lineAt` gives the synced line at a playback position. See
+  `Lyrics.lineAt` gives the synced line at a playback position;
+  `Lyrics.source_name` (the sidecar's file name, `embedded` or `LRCLIB`) and
+  `Lyrics.offset_ms` (the `[offset:]` tag, already applied to line starts)
+  describe where it came from. See
   [metadata.md](metadata.md#lyrics) and [providers.md](providers.md#lrclib).
 - Playback is recorded as local listening history. `processNextCommand`
   samples every Player bound to a Library at most every 100 ms; a play heard
@@ -361,6 +443,9 @@ defer page.deinit();
   love it is kept in the Library only and never sent. It shows as
   `ArtistSummary.loved`; `ArtistQuery.loved_only` lists only loved Artists
   and `ArtistSort.recently_loved` orders the most recently loved first.
+  `ArtistQuery.role` (`ArtistRole.all`, or `album_artists` for only the
+  Artists a Release is filed under) applies to the page and to
+  `libraryArtistCountMatching` alike.
 - `startArtistInfoFetch(library, artist_id, ArtistInfoOptions)` starts an
   `artist_info` Job that gathers an Artist's photo, biography, years active
   and links from a local image, MusicBrainz, Wikidata, Wikimedia Commons and
@@ -396,6 +481,23 @@ defer page.deinit();
   `RelatedArtistPhotoRecord` holds `source` (always `.commons`), `url` (the
   Commons page), `licence`, `licence_url`, `credit` and `fetched_at`, or
   null when no photo is kept; free it with `deinit`.
+  `ArtistInfoRecord.origin` is MusicBrainz's begin area, else its area,
+  named with the subdivision it lies in (`Portland, Oregon`), else the
+  country, found through at most 3 MusicBrainz area lookups; the name alone
+  when the area is a subdivision or country, or none is found.
+  `libraryArtistElsewhere(library, allocator, artist_id)` returns the
+  Artist's stored MusicBrainz release groups that the Library does not
+  hold, newest first, as caller-owned `ElsewhereRelease`s (free each with
+  `deinit`, then the slice): `mbid`, `title`, `primary_type`, `year`,
+  `credited_with`, the credit's other artists as MusicBrainz joins them, and
+  `cover`, a `ReleaseGroupCoverState`: `kept`, `none` (the Cover Art Archive
+  has none) or `not_fetched`. An Artist fetch asks the archive for the
+  covers of the first `artist_info.release_group_covers_per_fetch` (24)
+  groups listed, except with `offline`; request a kept one through
+  `libraryRequestArtwork` with `.{ .release_group = mbid }`. A
+  group is held when its release-group MBID, without case, is in the
+  `release_info`, file tags or Orca values of a Release filed under the
+  Artist or one they appear on, so `library_release_id` is always null here.
 - `startReleaseInfoFetch(library, release_id, ReleaseInfoOptions)` starts a
   `release_info` Job that keeps a Release's Wikipedia description, found
   through its MusicBrainz release group and Wikidata, and fills genres from
@@ -433,14 +535,23 @@ defer page.deinit();
   `PlaylistCreator` and ordered by `PlaylistSort`; `libraryPlaylistCount`
   counts the same query and `libraryPlaylist` returns one summary, with its
   description, pin, love, tags, whether its entries name several Artists and
-  its three most common genres. `libraryUpdatePlaylist(library, id,
+  its three most common genres; `PlaylistSummary.artist_count` counts the
+  distinct Artists. `libraryPlaylistFormats(library, allocator, id)` returns a
+  `PlaylistFormats`: up to 32 `CodecCount`s, the available entries per codec
+  id, most used first, and how many entries are `analyzed` (a loudness
+  measurement for their file's current bytes) or `unanalyzed`; the caller
+  frees it with `deinit(allocator)`. `libraryUpdatePlaylist(library, id,
   PlaylistUpdate)` sets the description, pin, love or tags (at most
   `max_playlist_tags`); `libraryPlaylistTags` returns the tags alone.
   `libraryCreateSmartPlaylist(library, name, rules_json)` creates a smart
   playlist, `librarySetSmartPlaylistRules` replaces its rules and
   `librarySmartPlaylistRules` returns them as stored, or null for a manual
   playlist. `librarySmartPlaylistCount(library, rules_json)` counts the Tracks
-  rules match now without storing anything. Rules are at most
+  rules match now without storing anything.
+  `librarySmartPlaylistPreview(library, allocator, rules_json, sample_limit)`
+  returns a `SmartPlaylistPreview` from one evaluation: the count, the total
+  `duration_ms` and the first `sample_limit` (at most 512,
+  `error.PageOutOfRange` beyond) Tracks in the rules' order. Rules are at most
   `max_smart_playlist_rules_bytes`, in the format under
   [Smart playlist rules](#smart-playlist-rules).
 - `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup`
@@ -534,9 +645,23 @@ matches each time it is read, one Track per Recording (the lowest id).
   levels deep (`error.RuleNestingTooDeep`) and 32 rules in all
   (`error.TooManyRules`). An unknown key, or a document over 16 KiB, is
   `error.InvalidSmartPlaylistRules`.
-- `sort.field` is a `TrackSort` name or `added_at`, `last_played_at` or
-  `duration_ms`; `sort.descending` defaults to false. `limit` is 1 to 10,000
-  and defaults to 10,000.
+- `sort.field` is a `TrackSort` name, `added_at`, `last_played_at`,
+  `duration_ms` or `random`; `sort.descending` defaults to false. `random`
+  orders by a hash of the Track id and a seed. A stored playlist's seed comes
+  from the runtime's shuffle seed and its id, so its order, and so its pages,
+  stay the same for the life of the runtime; rules read without a playlist
+  (`librarySmartPlaylistCount`, `librarySmartPlaylistPreview`) use the shuffle
+  seed itself. The shuffle seed is random per runtime, and
+  `libraryReshufflePlaylists()` draws a new one. `playlist_position` also
+  takes `playlist`, a manual playlist's id, and orders Tracks by the first
+  position of their Recording in it, Tracks it does not hold last. A
+  `playlist_position` sort without a positive integer `playlist` is
+  `error.InvalidRuleValue`, and `playlist` on any other sort is
+  `error.InvalidSmartPlaylistRules`. `limit` is 1 to 10,000
+  and defaults to 10,000. `limit_hours` (1 to 10,000) replaces it: the
+  leading Tracks, in the rules' order, whose lengths add up to at most that
+  many hours, a Track with no length counting as none. A document with both
+  is `error.InvalidSmartPlaylistRules`.
 - A rule is `field`, `op` and `value`. An unknown field is
   `error.UnknownRuleField`, an unknown operator `error.UnknownRuleOperator`,
   an operator the field's type does not take `error.RuleOperatorMismatch`,
@@ -548,12 +673,23 @@ matches each time it is read, one Track per Recording (the lowest id).
 | integer | `year`, `play_count`, `rating`, `duration_ms`, `sample_rate`, `bit_depth` | `is`, `is_not`, `gt`, `gte`, `lt`, `lte`, `between`, `is_set`, `is_not_set` |
 | date | `added_at`, `last_played_at` | `gt`, `gte`, `lt`, `lte`, `between`, `in_last_days`, `not_in_last_days`, `is_set`, `is_not_set` |
 | boolean | `loved`, `lossless`, `explicit`, `has_artwork` | `is`, `is_not` |
+| playlist | `in_playlist` | `is`, `is_not` |
 
 Text values are 1 to 256 bytes and compare ignoring ASCII case; `genre`
 compares the genre's folded key, the one `genres.key` stores. Dates are Unix seconds;
 `in_last_days` and `not_in_last_days` take 1 to 100,000 days counted back from
 now, and `not_in_last_days` includes Tracks never played. `between` takes
 `[low, high]` and includes both ends. `is_set` and `is_not_set` take no value.
+`in_playlist` takes a manual playlist's id and matches the Tracks of the
+Recordings it holds. Saving or counting rules that name a smart playlist,
+itself included, or no playlist is `error.InvalidRulePlaylist`, so membership
+never nests; a stored rule whose playlist is later deleted matches nothing.
+The same holds for a `playlist_position` sort's `playlist`; once that playlist
+is deleted, the sort falls back to Track id order.
+`has_artwork` matches a Track whose file embeds a cover or whose Release has
+a fetched or a folder cover, the test `TrackDetails.has_artwork` also uses;
+`ReleaseQuery.has_artwork` counts a cover embedded in any of the Release's
+files.
 Every value is bound as an SQL parameter, never spliced into the query.
 
 ## Client identity

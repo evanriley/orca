@@ -372,13 +372,14 @@ const export_mappings = .{
     },
     struct {
         pub const prefix = "ORCA_ARTWORK_SUBJECT_";
-        pub const Tag = std.meta.Tag(core.runtime.ArtworkSubject);
+        pub const Tag = enum { track, release, artist };
         pub fn produce(tag: Tag) ?i64 {
-            return c_api.exportArtworkSubject(switch (tag) {
+            const value = c_api.exportArtworkSubject(switch (tag) {
                 .track => .{ .track = 1 },
                 .release => .{ .release = 1 },
                 .artist => .{ .artist = 1 },
-            });
+            }) orelse return null;
+            return value;
         }
     },
     struct {

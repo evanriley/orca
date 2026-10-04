@@ -1023,6 +1023,7 @@ typedef void (*orca_root_callback)(void *context, const orca_root_view *root);
 typedef enum orca_folder_entry_kind {
     ORCA_FOLDER_ENTRY_KIND_FOLDER = 0,
     ORCA_FOLDER_ENTRY_KIND_FILE = 1,
+    ORCA_FOLDER_ENTRY_KIND_IMAGE = 2,
 } orca_folder_entry_kind;
 
 typedef struct orca_folder_entry_view {
@@ -3650,7 +3651,9 @@ typedef enum orca_busy_service {
  * NO_RELEASE_ID: neither a tag nor an accepted match gives the Release a
  * MusicBrainz release ID. REFUSED: the archive's answer was a redirect off
  * the archive, another 4xx, or a body that is not a JPEG or PNG of at most
- * 4 MiB. BUSY: another Orca process holds the archive. */
+ * 4 MiB. BUSY: another Orca process holds the archive. FOLDER: a front cover
+ * image in the Release's folder is shown before a fetched one, so nothing was
+ * fetched. */
 typedef enum orca_cover_art_outcome {
     ORCA_COVER_ART_OUTCOME_NOT_REQUESTED = 0,
     ORCA_COVER_ART_OUTCOME_EMBEDDED = 1,
@@ -3663,6 +3666,7 @@ typedef enum orca_cover_art_outcome {
     ORCA_COVER_ART_OUTCOME_UNAVAILABLE = 8,
     ORCA_COVER_ART_OUTCOME_BUSY = 9,
     ORCA_COVER_ART_OUTCOME_CANCELLED = 10,
+    ORCA_COVER_ART_OUTCOME_FOLDER = 11,
 } orca_cover_art_outcome;
 
 /* How a file's recording ID compared with what AcoustID heard in its

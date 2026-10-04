@@ -349,6 +349,37 @@ test "service streams codecs into cache and cancellation publishes nothing" {
     ));
 }
 
+test "the library keeps the integrated loudness a default analysis stores, as the stored float" {
+    const allocator = std.testing.allocator;
+    var library = try database.LibraryDatabase.open(
+        allocator,
+        std.testing.io,
+        "file:orca-analysis-loudness?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const codecs = codec.CodecRegistry.builtins();
+    const service: Service = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .codecs = &codecs,
+        .cache = &library.analysis_cache,
+    };
+    const binding = try library.resolveOrCreateFile(
+        std.testing.io,
+        "fixtures/audio/chromaprint-test.mp3",
+        .{ .stable_key = "test:loudness" },
+    );
+    var analysis = try service.analyzeFile(binding.file_id, "fixtures/audio/chromaprint-test.mp3", .{});
+    defer analysis.deinit();
+    const expected = analysis.diagnostics.integrated_lufs.?;
+
+    var statement = try library.database.prepare("SELECT integrated_lufs FROM file_loudness WHERE file_id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, binding.file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    try std.testing.expectEqual(expected, @as(f32, @floatCast(statement.columnDouble(0))));
+}
+
 test "the AcoustID fingerprint taken in the analysis decode is the one a standalone fingerprint takes" {
     const allocator = std.testing.allocator;
     const codecs = codec.CodecRegistry.builtins();

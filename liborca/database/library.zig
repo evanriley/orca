@@ -3351,7 +3351,7 @@ test "only loved Tracks are listed and counted, most recently loved first, and a
 const SortDirection = repository.SortDirection;
 
 fn expectPlaylist(library: *LibraryDatabase, playlist_id: i64, expected: []const i64) !void {
-    var page = try library.playlists.entries(std.testing.allocator, playlist_id, repository.max_page, 0, 0);
+    var page = try library.playlists.entries(std.testing.allocator, playlist_id, repository.max_page, 0, .{ .now = 0, .seed = 0 });
     defer page.deinit();
     try std.testing.expectEqual(expected.len, page.items.len);
     for (page.items, expected, 0..) |entry, recording_id, position| {
@@ -3374,7 +3374,7 @@ test "playlist names are trimmed, non-empty and unique" {
     try library.playlists.rename(mix, "Mix");
     try library.playlists.rename(mix, "A Mix");
 
-    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0, 0);
+    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0, .{ .now = 0, .seed = 0 });
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 2), page.items.len);
     try std.testing.expectEqualStrings("A Mix", page.items[0].name);
@@ -3421,7 +3421,7 @@ test "inserting, moving and removing playlist entries keeps positions contiguous
     try std.testing.expectEqual(@as(u32, 1), try library.playlists.remove(playlist, &.{ 0, 0 }));
     try expectPlaylist(&library, playlist, &.{ a, a });
 
-    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0, 0);
+    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0, .{ .now = 0, .seed = 0 });
     defer page.deinit();
     try std.testing.expectEqual(@as(u32, 2), page.items[0].entries);
     try std.testing.expectEqual(@as(u32, 2), page.items[0].available);
@@ -3463,7 +3463,7 @@ test "deleting a playlist removes its entries" {
     try library.playlists.delete(playlist);
 
     try std.testing.expectError(error.UnknownPlaylist, library.playlists.delete(playlist));
-    try std.testing.expectError(error.UnknownPlaylist, library.playlists.entries(std.testing.allocator, playlist, 10, 0, 0));
+    try std.testing.expectError(error.UnknownPlaylist, library.playlists.entries(std.testing.allocator, playlist, 10, 0, .{ .now = 0, .seed = 0 }));
     try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM playlist_entries;"));
 }
 
@@ -3480,7 +3480,7 @@ test "a playlist entry plays its recording's lowest Track id and is unavailable 
     var sql: [64]u8 = undefined;
     try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "DELETE FROM tracks WHERE id = {d};", .{leaving}, 0));
 
-    var page = try library.playlists.entries(std.testing.allocator, playlist, 10, 0, 0);
+    var page = try library.playlists.entries(std.testing.allocator, playlist, 10, 0, .{ .now = 0, .seed = 0 });
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 3), page.items.len);
     try std.testing.expectEqual(first, page.items[0].track.?.id);
@@ -3489,11 +3489,11 @@ test "a playlist entry plays its recording's lowest Track id and is unavailable 
     try std.testing.expectEqual(gone, page.items[1].recording_id);
     try std.testing.expectEqual(first, page.items[2].track.?.id);
 
-    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, 0);
+    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqualSlices(i64, &.{ first, first }, ids);
 
-    var playlists = try library.playlists.list(std.testing.allocator, 10, 0, 0);
+    var playlists = try library.playlists.list(std.testing.allocator, 10, 0, .{ .now = 0, .seed = 0 });
     defer playlists.deinit();
     try std.testing.expectEqual(@as(u32, 3), playlists.items[0].entries);
     try std.testing.expectEqual(@as(u32, 2), playlists.items[0].available);
@@ -3512,7 +3512,7 @@ test "playlist metadata keeps its tags in order, and only description and tag ch
     try library.playlists.update(playlist, .{ .description = "  Late night  ", .tags = &.{ " lofi ", "focus", "lofi" } });
     try std.testing.expect(try testScalar(library.database, "SELECT updated_at FROM playlists;") > 5);
     {
-        const summary = try library.playlists.summary(std.testing.allocator, playlist, 0);
+        const summary = try library.playlists.summary(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
         defer summary.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("Late night", summary.description);
         try std.testing.expect(summary.pinned and summary.loved);
@@ -3525,7 +3525,7 @@ test "playlist metadata keeps its tags in order, and only description and tag ch
 
     try library.playlists.update(playlist, .{ .pinned = false, .tags = &.{} });
     {
-        const summary = try library.playlists.summary(std.testing.allocator, playlist, 0);
+        const summary = try library.playlists.summary(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
         defer summary.deinit(std.testing.allocator);
         try std.testing.expect(!summary.pinned and summary.loved);
         try std.testing.expectEqual(@as(usize, 0), summary.tags.len);
@@ -3572,7 +3572,7 @@ test "playlist pages filter by name, kind, pin and creator and sort as asked" {
         .{ .query = .{ .limit = 1, .offset = 1 }, .ids = &.{beta} },
     };
     for (cases) |case| {
-        var page = try library.playlists.page(std.testing.allocator, case.query, 0);
+        var page = try library.playlists.page(std.testing.allocator, case.query, .{ .now = 0, .seed = 0 });
         defer page.deinit();
         try std.testing.expectEqual(case.ids.len, page.items.len);
         for (page.items, case.ids) |item, id| try std.testing.expectEqual(id, item.id);
@@ -3582,7 +3582,7 @@ test "playlist pages filter by name, kind, pin and creator and sort as asked" {
         if (case.query.limit == repository.max_page)
             try std.testing.expectEqual(@as(u64, case.ids.len), try library.playlists.pageCount(unpaged));
     }
-    try std.testing.expectError(error.PageOutOfRange, library.playlists.page(std.testing.allocator, .{ .limit = 0 }, 0));
+    try std.testing.expectError(error.PageOutOfRange, library.playlists.page(std.testing.allocator, .{ .limit = 0 }, .{ .now = 0, .seed = 0 }));
 }
 
 fn addSmartTrack(library: *LibraryDatabase, title: []const u8, artist: []const u8) !i64 {
@@ -3615,17 +3615,212 @@ test "a smart playlist's relative dates count back from the clock it is given, n
     const not_in_last =
         \\{"v":1,"rules":[{"field":"added_at","op":"not_in_last_days","value":30}]}
     ;
-    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(std.testing.allocator, in_last, 110 * day));
-    try std.testing.expectEqual(@as(u64, 1), try library.playlists.smartCount(std.testing.allocator, in_last, 210 * day));
-    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, in_last, 300 * day));
-    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, not_in_last, 110 * day));
-    try std.testing.expectEqual(@as(u64, 1), try library.playlists.smartCount(std.testing.allocator, not_in_last, 210 * day));
+    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(std.testing.allocator, in_last, .{ .now = 110 * day, .seed = 0 }));
+    try std.testing.expectEqual(@as(u64, 1), try library.playlists.smartCount(std.testing.allocator, in_last, .{ .now = 210 * day, .seed = 0 }));
+    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, in_last, .{ .now = 300 * day, .seed = 0 }));
+    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, not_in_last, .{ .now = 110 * day, .seed = 0 }));
+    try std.testing.expectEqual(@as(u64, 1), try library.playlists.smartCount(std.testing.allocator, not_in_last, .{ .now = 210 * day, .seed = 0 }));
 
     const playlist = try library.playlists.createSmart(std.testing.allocator, "Recent", in_last);
-    var page = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 0, 210 * day);
+    var page = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 0, .{ .now = 210 * day, .seed = 0 });
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 1), page.items.len);
     try std.testing.expectEqual(recent, page.items[0].track.?.id);
+}
+
+fn smartTrackIds(library: *LibraryDatabase, rules: []const u8, seed: u64) ![]i64 {
+    var preview = try library.playlists.smartPreview(std.testing.allocator, rules, repository.max_page, .{ .now = 0, .seed = seed });
+    defer preview.deinit(std.testing.allocator);
+    const ids = try std.testing.allocator.alloc(i64, preview.sample.len);
+    for (ids, preview.sample) |*id, track| id.* = track.id;
+    return ids;
+}
+
+test "a random smart playlist order is fixed by its seed and two seeds give the same Tracks in another order" {
+    var library = try openFeedbackLibrary("playlist-smart-random");
+    defer library.close();
+    var title_buffer: [16]u8 = undefined;
+    for (0..40) |index| _ = try addSmartTrack(&library, try std.fmt.bufPrint(&title_buffer, "Song {d}", .{index}), "Artist");
+    const rules =
+        \\{"v":1,"rules":[],"sort":{"field":"random"}}
+    ;
+    const first = try smartTrackIds(&library, rules, 1);
+    defer std.testing.allocator.free(first);
+    const again = try smartTrackIds(&library, rules, 1);
+    defer std.testing.allocator.free(again);
+    const second = try smartTrackIds(&library, rules, 2);
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqual(@as(usize, 40), first.len);
+    try std.testing.expectEqualSlices(i64, first, again);
+    try std.testing.expect(!std.mem.eql(i64, first, second));
+    const sorted_first = try std.testing.allocator.dupe(i64, first);
+    defer std.testing.allocator.free(sorted_first);
+    const sorted_second = try std.testing.allocator.dupe(i64, second);
+    defer std.testing.allocator.free(sorted_second);
+    std.mem.sort(i64, sorted_first, {}, std.sort.asc(i64));
+    std.mem.sort(i64, sorted_second, {}, std.sort.asc(i64));
+    try std.testing.expectEqualSlices(i64, sorted_first, sorted_second);
+
+    const playlist = try library.playlists.createSmart(std.testing.allocator, "Shuffled", rules);
+    const stored = try library.playlists.trackIds(std.testing.allocator, playlist, .{ .now = 0, .seed = 1 });
+    defer std.testing.allocator.free(stored);
+    try std.testing.expect(!std.mem.eql(i64, first, stored));
+    var page = try library.playlists.entries(std.testing.allocator, playlist, 10, 10, .{ .now = 0, .seed = 1 });
+    defer page.deinit();
+    for (page.items, stored[10..20]) |entry, id| try std.testing.expectEqual(id, entry.track.?.id);
+}
+
+test "an hour limit keeps the leading Tracks whose lengths fit in it" {
+    var library = try openFeedbackLibrary("playlist-smart-hours");
+    defer library.close();
+    var title_buffer: [16]u8 = undefined;
+    for (0..30) |index| _ = try addSmartTrack(&library, try std.fmt.bufPrint(&title_buffer, "Song {d:0>2}", .{index}), "Artist");
+    try library.database.exec("UPDATE tracks SET duration_ms = 250000;");
+    const rules =
+        \\{"v":1,"rules":[],"sort":{"field":"title"},"limit_hours":1}
+    ;
+    var preview = try library.playlists.smartPreview(std.testing.allocator, rules, 0, .{ .now = 0, .seed = 0 });
+    defer preview.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 14), preview.count);
+    try std.testing.expectEqual(@as(u64, 14 * 250000), preview.duration_ms);
+    try std.testing.expect(preview.duration_ms <= std.time.ms_per_hour);
+    try std.testing.expectEqual(@as(usize, 0), preview.sample.len);
+
+    const playlist = try library.playlists.createSmart(std.testing.allocator, "Hour", rules);
+    const summary = try library.playlists.summary(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 14), summary.entries);
+    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 14), ids.len);
+
+    try library.database.exec("UPDATE tracks SET duration_ms = 3600001 WHERE title = 'Song 00';");
+    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, rules, .{ .now = 0, .seed = 0 }));
+}
+
+test "an in_playlist rule matches a manual playlist's Tracks and refuses any other playlist" {
+    var library = try openFeedbackLibrary("playlist-smart-membership");
+    defer library.close();
+    const northern = try addSmartTrack(&library, "Northern Sky", "Nick Drake");
+    const pink = try addSmartTrack(&library, "Pink Moon", "Nick Drake");
+    const sky = try addSmartTrack(&library, "Sky Blue", "Peter Gabriel");
+    const manual = try library.playlists.create("Manual");
+    _ = try library.playlists.insert(manual, &.{ sky, northern }, null);
+
+    var rules_buffer: [160]u8 = undefined;
+    const member = try std.fmt.bufPrint(&rules_buffer, "{{\"v\":1,\"rules\":[{{\"field\":\"in_playlist\",\"op\":\"is\",\"value\":{d}}}]}}", .{manual});
+    const member_ids = try smartTrackIds(&library, member, 0);
+    defer std.testing.allocator.free(member_ids);
+    try std.testing.expectEqualSlices(i64, &.{ northern, sky }, member_ids);
+    var other_buffer: [160]u8 = undefined;
+    const not_member = try std.fmt.bufPrint(&other_buffer, "{{\"v\":1,\"rules\":[{{\"field\":\"in_playlist\",\"op\":\"is_not\",\"value\":{d}}}]}}", .{manual});
+    const other_ids = try smartTrackIds(&library, not_member, 0);
+    defer std.testing.allocator.free(other_ids);
+    try std.testing.expectEqualSlices(i64, &.{pink}, other_ids);
+
+    const smart = try library.playlists.createSmart(std.testing.allocator, "Members", member);
+    var self_buffer: [160]u8 = undefined;
+    const itself = try std.fmt.bufPrint(&self_buffer, "{{\"v\":1,\"rules\":[{{\"field\":\"in_playlist\",\"op\":\"is\",\"value\":{d}}}]}}", .{smart});
+    try std.testing.expectError(error.InvalidRulePlaylist, library.playlists.setRules(std.testing.allocator, smart, itself));
+    try std.testing.expectError(error.InvalidRulePlaylist, library.playlists.createSmart(std.testing.allocator, "Nested", itself));
+    try std.testing.expectError(error.InvalidRulePlaylist, library.playlists.smartCount(
+        std.testing.allocator,
+        "{\"v\":1,\"rules\":[{\"field\":\"in_playlist\",\"op\":\"is\",\"value\":9999}]}",
+        .{ .now = 0, .seed = 0 },
+    ));
+
+    try library.playlists.delete(manual);
+    const ids = try library.playlists.trackIds(std.testing.allocator, smart, .{ .now = 0, .seed = 0 });
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 0), ids.len);
+}
+
+test "a playlist position sort lists Tracks in a manual playlist's order and the rest after them" {
+    var library = try openFeedbackLibrary("playlist-smart-position");
+    defer library.close();
+    const northern = try addSmartTrack(&library, "Northern Sky", "Nick Drake");
+    const pink = try addSmartTrack(&library, "Pink Moon", "Nick Drake");
+    const sky = try addSmartTrack(&library, "Sky Blue", "Peter Gabriel");
+    const manual = try library.playlists.create("Manual");
+    _ = try library.playlists.insert(manual, &.{ sky, northern, sky }, null);
+
+    var rules_buffer: [200]u8 = undefined;
+    const members = try std.fmt.bufPrint(&rules_buffer, "{{\"v\":1,\"rules\":[{{\"field\":\"in_playlist\",\"op\":\"is\",\"value\":{d}}}],\"sort\":{{\"field\":\"playlist_position\",\"playlist\":{d}}}}}", .{ manual, manual });
+    const member_ids = try smartTrackIds(&library, members, 0);
+    defer std.testing.allocator.free(member_ids);
+    try std.testing.expectEqualSlices(i64, &.{ sky, northern }, member_ids);
+
+    var everything_buffer: [200]u8 = undefined;
+    const everything = try std.fmt.bufPrint(&everything_buffer, "{{\"v\":1,\"rules\":[],\"sort\":{{\"field\":\"playlist_position\",\"playlist\":{d},\"descending\":true}}}}", .{manual});
+    const all_ids = try smartTrackIds(&library, everything, 0);
+    defer std.testing.allocator.free(all_ids);
+    try std.testing.expectEqualSlices(i64, &.{ northern, sky, pink }, all_ids);
+
+    var preview = try library.playlists.smartPreview(std.testing.allocator, members, 1, .{ .now = 0, .seed = 0 });
+    defer preview.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 2), preview.count);
+    try std.testing.expectEqual(sky, preview.sample[0].id);
+
+    const smart = try library.playlists.createSmart(std.testing.allocator, "Ordered", members);
+    var self_buffer: [160]u8 = undefined;
+    const by_itself = try std.fmt.bufPrint(&self_buffer, "{{\"v\":1,\"rules\":[],\"sort\":{{\"field\":\"playlist_position\",\"playlist\":{d}}}}}", .{smart});
+    try std.testing.expectError(error.InvalidRulePlaylist, library.playlists.setRules(std.testing.allocator, smart, by_itself));
+    try std.testing.expectError(error.InvalidRulePlaylist, library.playlists.smartCount(std.testing.allocator, by_itself, .{ .now = 0, .seed = 0 }));
+    const stored = try library.playlists.trackIds(std.testing.allocator, smart, .{ .now = 0, .seed = 0 });
+    defer std.testing.allocator.free(stored);
+    try std.testing.expectEqualSlices(i64, &.{ sky, northern }, stored);
+}
+
+test "a playlist's formats count each codec and the entries measured for their file's current bytes" {
+    var library = try openFeedbackLibrary("playlist-formats");
+    defer library.close();
+    const first = try addSmartTrack(&library, "One", "Nick Drake");
+    const second = try addSmartTrack(&library, "Two", "Nick Drake");
+    const third = try addSmartTrack(&library, "Three", "Peter Gabriel");
+    const fourth = try addSmartTrack(&library, "Four", "Kate Bush");
+    try library.database.exec(
+        \\INSERT INTO artists(name) SELECT DISTINCT artist FROM tracks;
+        \\UPDATE tracks SET artist_id = (SELECT id FROM artists WHERE artists.name = tracks.artist);
+        \\UPDATE files SET codec = 'flac', quick_hash = x'01' WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('One', 'Two'));
+        \\UPDATE files SET codec = 'alac', quick_hash = x'02' WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Three');
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+        \\    SELECT preferred_file_id, x'01', -14.0 FROM tracks WHERE title = 'One';
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+        \\    SELECT preferred_file_id, x'09', -14.0 FROM tracks WHERE title = 'Three';
+    );
+    const manual = try library.playlists.create("Manual");
+    _ = try library.playlists.insert(manual, &.{ first, second, third, fourth, first }, null);
+
+    const formats = try library.playlists.formats(std.testing.allocator, manual, .{ .now = 0, .seed = 0 });
+    defer formats.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), formats.codecs.len);
+    try std.testing.expectEqualStrings("flac", formats.codecs[0].codec);
+    try std.testing.expectEqual(@as(u64, 3), formats.codecs[0].count);
+    try std.testing.expectEqualStrings("alac", formats.codecs[1].codec);
+    try std.testing.expectEqual(@as(u64, 1), formats.codecs[1].count);
+    try std.testing.expectEqual(@as(u64, 2), formats.analyzed);
+    try std.testing.expectEqual(@as(u64, 3), formats.unanalyzed);
+
+    const summary = try library.playlists.summary(std.testing.allocator, manual, .{ .now = 0, .seed = 0 });
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 3), summary.artist_count);
+    try std.testing.expect(summary.mixed_artists);
+
+    const smart = try library.playlists.createSmart(
+        std.testing.allocator,
+        "Drake",
+        "{\"v\":1,\"rules\":[{\"field\":\"artist\",\"op\":\"is\",\"value\":\"Nick Drake\"}]}",
+    );
+    const smart_formats = try library.playlists.formats(std.testing.allocator, smart, .{ .now = 0, .seed = 0 });
+    defer smart_formats.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), smart_formats.codecs.len);
+    try std.testing.expectEqual(@as(u64, 2), smart_formats.codecs[0].count);
+    try std.testing.expectEqual(@as(u64, 1), smart_formats.analyzed);
+    try std.testing.expectEqual(@as(u64, 1), smart_formats.unanalyzed);
+    const smart_summary = try library.playlists.summary(std.testing.allocator, smart, .{ .now = 0, .seed = 0 });
+    defer smart_summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), smart_summary.artist_count);
+    try std.testing.expect(!smart_summary.mixed_artists);
 }
 test "a smart playlist lists one Track per matching recording in its rules' order up to its limit and refuses entry edits" {
     var library = try openFeedbackLibrary("playlist-smart");
@@ -3646,35 +3841,35 @@ test "a smart playlist lists one Track per matching recording in its rules' orde
     ;
     const playlist = try library.playlists.createSmart(std.testing.allocator, "Skies", rules);
 
-    var page = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 0, 0);
+    var page = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 0, .{ .now = 0, .seed = 0 });
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 2), page.items.len);
     try std.testing.expectEqual(sky, page.items[0].track.?.id);
     try std.testing.expectEqual(pink, page.items[1].track.?.id);
     try std.testing.expectEqual(@as(u32, 1), page.items[1].position);
-    var second = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 1, 0);
+    var second = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 1, .{ .now = 0, .seed = 0 });
     defer second.deinit();
     try std.testing.expectEqual(@as(usize, 1), second.items.len);
     try std.testing.expectEqual(@as(u32, 1), second.items[0].position);
 
-    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, 0);
+    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqualSlices(i64, &.{ sky, pink }, ids);
-    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(std.testing.allocator, rules, 0));
+    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(std.testing.allocator, rules, .{ .now = 0, .seed = 0 }));
     try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(
         std.testing.allocator,
         "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"contains\",\"value\":\"sky\"}]}",
-        0,
+        .{ .now = 0, .seed = 0 },
     ));
 
-    const summary = try library.playlists.summary(std.testing.allocator, playlist, 0);
+    const summary = try library.playlists.summary(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
     defer summary.deinit(std.testing.allocator);
     try std.testing.expectEqual(repository.PlaylistKind.smart, summary.kind);
     try std.testing.expectEqual(@as(u32, 2), summary.entries);
     try std.testing.expectEqual(@as(u32, 2), summary.available);
     try std.testing.expect(summary.mixed_artists);
 
-    const exported = try library.playlists.exportRows(std.testing.allocator, playlist, 0);
+    const exported = try library.playlists.exportRows(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
     defer exported.deinit();
     try std.testing.expectEqual(@as(usize, 0), exported.items.len);
     try std.testing.expectEqual(@as(u32, 2), exported.unavailable);
@@ -3700,7 +3895,7 @@ test "a smart playlist lists one Track per matching recording in its rules' orde
         "{\"v\":1,\"rules\":[{\"field\":\"path\",\"op\":\"is\",\"value\":\"x\"}]}",
     ));
     try library.playlists.setRules(std.testing.allocator, playlist, "{\"v\":1,\"rules\":[{\"field\":\"artist\",\"op\":\"is\",\"value\":\"peter gabriel\"}]}");
-    const now_ids = try library.playlists.trackIds(std.testing.allocator, playlist, 0);
+    const now_ids = try library.playlists.trackIds(std.testing.allocator, playlist, .{ .now = 0, .seed = 0 });
     defer std.testing.allocator.free(now_ids);
     try std.testing.expectEqualSlices(i64, &.{sky}, now_ids);
 }
@@ -3717,7 +3912,7 @@ test "a hostile smart playlist value is matched literally and never runs as SQL"
         "Hostile",
         "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"is\",\"value\":\"x'); DROP TABLE tracks; --\"}]}",
     );
-    const ids = try library.playlists.trackIds(std.testing.allocator, is_hostile, 0);
+    const ids = try library.playlists.trackIds(std.testing.allocator, is_hostile, .{ .now = 0, .seed = 0 });
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqualSlices(i64, &.{hostile}, ids);
 
@@ -3726,7 +3921,7 @@ test "a hostile smart playlist value is matched literally and never runs as SQL"
         "Wildcard",
         "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"contains\",\"value\":\"%_\"}]}",
     );
-    const literal = try library.playlists.trackIds(std.testing.allocator, wildcard, 0);
+    const literal = try library.playlists.trackIds(std.testing.allocator, wildcard, .{ .now = 0, .seed = 0 });
     defer std.testing.allocator.free(literal);
     try std.testing.expectEqualSlices(i64, &.{percent}, literal);
     try std.testing.expectEqual(@as(i64, 3), try testScalar(library.database, "SELECT count(*) FROM tracks;"));
@@ -3736,6 +3931,9 @@ test "every rule field with every operator it accepts runs against the library" 
     var library = try openFeedbackLibrary("playlist-smart-fields");
     defer library.close();
     _ = try addSmartTrack(&library, "Northern Sky", "Nick Drake");
+    const manual = try library.playlists.create("Manual");
+    var manual_value_buffer: [32]u8 = undefined;
+    const manual_value = try std.fmt.bufPrint(&manual_value_buffer, ",\"value\":{d}", .{manual});
     const smart_playlist = @import("../library/smart_playlist.zig");
     var checked: usize = 0;
     inline for (std.meta.fields(smart_playlist.Field)) |field_info| {
@@ -3751,6 +3949,7 @@ test "every rule field with every operator it accepts runs against the library" 
                         .text => ",\"value\":\"sky\"",
                         .integer, .date => ",\"value\":1",
                         .boolean => ",\"value\":true",
+                        .playlist => manual_value,
                     },
                 };
                 var buffer: [256]u8 = undefined;
@@ -3759,7 +3958,7 @@ test "every rule field with every operator it accepts runs against the library" 
                     "{{\"v\":1,\"rules\":[{{\"field\":\"{s}\",\"op\":\"{s}\"{s}}}],\"sort\":{{\"field\":\"{s}\"}}}}",
                     .{ field_info.name, operator_info.name, value, if (field == .added_at) "added_at" else "title" },
                 );
-                _ = library.playlists.smartCount(std.testing.allocator, rules, 1_000_000) catch |err| {
+                _ = library.playlists.smartCount(std.testing.allocator, rules, .{ .now = 1_000_000, .seed = 0 }) catch |err| {
                     std.debug.print("{s}\n", .{rules});
                     return err;
                 };
@@ -3770,12 +3969,50 @@ test "every rule field with every operator it accepts runs against the library" 
     try std.testing.expect(checked > 100);
 }
 
+test "a front image in a Release's folder or a fetched cover gives its Tracks artwork in details and in a has_artwork rule" {
+    var library = try openFeedbackLibrary("folder-cover-artwork");
+    defer library.close();
+    const covered = try addSmartTrack(&library, "Northern Sky", "Nick Drake");
+    const bare = try addSmartTrack(&library, "Pink Moon", "Nick Drake");
+    var sql: [192]u8 = undefined;
+    try library.database.exec("INSERT INTO releases(id, title, release_key) VALUES (71, 'Covered', 'covered'), (72, 'Bare', 'bare');");
+    for ([_]struct { i64, i64, []const u8 }{ .{ covered, 71, "Covered" }, .{ bare, 72, "Bare" } }) |row| {
+        try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET release_id = {d} WHERE id = {d};", .{ row[1], row[0] }, 0));
+        try library.database.exec(try std.fmt.bufPrintSentinel(&sql,
+            \\INSERT INTO locations(file_id, volume_id, uri, state)
+            \\    SELECT preferred_file_id, 1, '/m/{s}/1.flac', 'present' FROM tracks WHERE id = {d};
+        , .{ row[2], row[0] }, 0));
+    }
+    try library.database.exec(
+        \\INSERT INTO folder_images(volume_id, uri, mime, role, size_bytes, modified_ns) VALUES
+        \\    (1, '/m/Covered/cover.jpg', 'image/jpeg', 0, 10, 0), (1, '/m/Bare/back.jpg', 'image/jpeg', 1, 10, 0);
+    );
+    for ([_]i64{ 71, 72 }) |release_id| _ = try repository.refreshFolderCoverLocked(library.database, release_id);
+
+    const with_artwork =
+        \\{"v":1,"rules":[{"field":"has_artwork","op":"is","value":true}]}
+    ;
+    for ([_]bool{ false, true }) |fetched| {
+        if (fetched) try library.database.exec(
+            "INSERT INTO release_artwork(release_id, musicbrainz_release_id, image, mime, fetched_at) VALUES (72, 'mbid', x'01', 'image/jpeg', 1);",
+        );
+        for ([_]struct { i64, bool }{ .{ covered, true }, .{ bare, fetched } }) |row| {
+            const facts = (try library.tracks.fileFacts(std.testing.allocator, row[0])).?;
+            defer facts.deinit();
+            try std.testing.expectEqual(row[1], facts.has_artwork);
+        }
+        const ids = try smartTrackIds(&library, with_artwork, 0);
+        defer std.testing.allocator.free(ids);
+        try std.testing.expectEqualSlices(i64, if (fetched) &.{ covered, bare } else &.{covered}, ids);
+    }
+}
+
 test "an imported playlist is created by import, not by the user" {
     var library = try openFeedbackLibrary("playlist-imported");
     defer library.close();
     const recording = try addRecording(&library);
     const imported = try library.playlists.createWithRecordings(std.testing.allocator, "From file", &.{recording});
-    const summary = try library.playlists.summary(std.testing.allocator, imported, 0);
+    const summary = try library.playlists.summary(std.testing.allocator, imported, .{ .now = 0, .seed = 0 });
     defer summary.deinit(std.testing.allocator);
     try std.testing.expectEqual(repository.PlaylistCreator.imported, summary.creator);
 }

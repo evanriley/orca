@@ -15,7 +15,9 @@ pub const max_playlist_tags = 8;
 pub const max_playlist_tag_bytes = 64;
 pub const max_playlist_description_bytes = 4096;
 pub const playlist_top_genres = 3;
+pub const max_playlist_codecs = 32;
 const info_tolerance_ms = 2 * std.time.ms_per_s;
+const Evaluation = smart_playlist.Evaluation;
 
 pub const PlaylistKind = enum(u8) {
     /// Entries the user placed, in the order they placed them.
@@ -88,6 +90,8 @@ pub const PlaylistSummary = struct {
     tags: [][]u8,
     /// The available entries name more than one Artist.
     mixed_artists: bool,
+    /// How many distinct Artists the available entries name.
+    artist_count: u64,
     /// The genres the most available entries carry, most first, at most
     /// three.
     top_genres: [][]u8,
@@ -97,6 +101,40 @@ pub const PlaylistSummary = struct {
         allocator.free(self.description);
         freeStrings(allocator, self.tags);
         freeStrings(allocator, self.top_genres);
+    }
+};
+
+/// How many of a playlist's available entries play a file in one codec.
+pub const CodecCount = struct {
+    /// The codec id, as `TrackSummary.codec` names it.
+    codec: []u8,
+    count: u64,
+};
+
+/// The codecs a playlist's available entries play, most used first, and how
+/// many of those entries have a loudness measurement for their file's
+/// current bytes.
+pub const PlaylistFormats = struct {
+    codecs: []CodecCount,
+    analyzed: u64,
+    unanalyzed: u64,
+
+    pub fn deinit(self: PlaylistFormats, allocator: std.mem.Allocator) void {
+        for (self.codecs) |item| allocator.free(item.codec);
+        allocator.free(self.codecs);
+    }
+};
+
+/// What a smart playlist's rules select now: how many Tracks, their total
+/// length, and the first of them in the rules' order.
+pub const SmartPlaylistPreview = struct {
+    count: u64,
+    duration_ms: u64,
+    sample: []TrackSummary,
+
+    pub fn deinit(self: SmartPlaylistPreview, allocator: std.mem.Allocator) void {
+        for (self.sample) |track| track.deinit(allocator);
+        allocator.free(self.sample);
     }
 };
 
@@ -180,7 +218,7 @@ const summary_sql =
     "       playlists.kind, playlists.creator, playlists.rules,\n" ++
     "       (SELECT count(DISTINCT tracks.artist_id) FROM playlist_entries\n" ++
     "          JOIN tracks ON tracks.id = " ++ entry_track ++ "\n" ++
-    "          WHERE playlist_entries.playlist_id = playlists.id) > 1\n" ++
+    "          WHERE playlist_entries.playlist_id = playlists.id)\n" ++
     "FROM playlists\n";
 
 const page_filter =
@@ -221,11 +259,20 @@ fn smartSql(
     );
 }
 
-fn compileRules(allocator: std.mem.Allocator, rules_json: []const u8, now: i64) !smart_playlist.Compiled {
-    var rules = try smart_playlist.parse(allocator, rules_json);
-    defer rules.deinit();
-    return smart_playlist.compile(allocator, &rules, now);
-}
+const formats_from_entries =
+    "FROM playlist_entries\n" ++
+    "JOIN tracks ON tracks.id = " ++ entry_track ++ "\n" ++
+    tracks.recording_joins ++
+    "WHERE playlist_entries.playlist_id = ?1\n" ++
+    "LIMIT ?2";
+
+const format_columns = "SELECT play_file.codec AS codec, " ++ tracks.play_file_loudness ++ " IS NOT NULL AS analyzed";
+
+const codec_counts_head = "SELECT codec, count(*) FROM (";
+const codec_counts_tail = std.fmt.comptimePrint(") AS chosen WHERE NULLIF(codec, '') IS NOT NULL\n" ++
+    "GROUP BY codec ORDER BY count(*) DESC, codec LIMIT {d};", .{max_playlist_codecs});
+const analyzed_head = "SELECT count(*), COALESCE(sum(analyzed), 0) FROM (";
+const analyzed_tail = ") AS chosen;";
 
 pub const PlaylistRepository = struct {
     db: sqlite.Database,
@@ -238,7 +285,7 @@ pub const PlaylistRepository = struct {
     /// Creates a smart playlist; `rules_json` must parse as
     /// `smart_playlist.parse` requires and is stored as given.
     pub fn createSmart(self: *PlaylistRepository, allocator: std.mem.Allocator, name: []const u8, rules_json: []const u8) !i64 {
-        try smart_playlist.validate(allocator, rules_json);
+        try self.validateRules(allocator, rules_json);
         return self.createKind(name, rules_json);
     }
 
@@ -267,7 +314,7 @@ pub const PlaylistRepository = struct {
     /// Replaces a smart playlist's rules. `error.PlaylistIsManual` for a
     /// manual playlist.
     pub fn setRules(self: *PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, rules_json: []const u8) !void {
-        try smart_playlist.validate(allocator, rules_json);
+        try self.validateRules(allocator, rules_json);
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
@@ -292,10 +339,183 @@ pub const PlaylistRepository = struct {
     }
 
     /// How many Tracks `rules_json` matches now, up to its limit.
-    pub fn smartCount(self: *const PlaylistRepository, allocator: std.mem.Allocator, rules_json: []const u8, now: i64) !u64 {
-        var compiled = try compileRules(allocator, rules_json, now);
+    pub fn smartCount(self: *const PlaylistRepository, allocator: std.mem.Allocator, rules_json: []const u8, evaluation: Evaluation) !u64 {
+        var compiled = try self.compileChecked(allocator, rules_json, evaluation);
         defer compiled.deinit();
         return self.countCompiled(allocator, &compiled);
+    }
+
+    /// How many Tracks `rules_json` matches now, up to its limit, their total
+    /// length, and the first `sample_limit` of them in the rules' order, all
+    /// from one evaluation.
+    pub fn smartPreview(
+        self: *const PlaylistRepository,
+        allocator: std.mem.Allocator,
+        rules_json: []const u8,
+        sample_limit: u32,
+        evaluation: Evaluation,
+    ) !SmartPlaylistPreview {
+        if (sample_limit > max_page) return error.PageOutOfRange;
+        var compiled = try self.compileChecked(allocator, rules_json, evaluation);
+        defer compiled.deinit();
+        const totals = try self.smartTotals(allocator, &compiled);
+        var entries_page = try self.smartEntries(allocator, &compiled, sample_limit, 0);
+        defer entries_page.deinit();
+        const sample = try allocator.alloc(TrackSummary, entries_page.items.len);
+        for (sample, entries_page.items) |*track, *entry| {
+            track.* = entry.track.?;
+            entry.track = null;
+        }
+        return .{ .count = totals.count, .duration_ms = totals.duration_ms, .sample = sample };
+    }
+
+    const SmartTotals = struct { count: u64, duration_ms: u64, artist_count: u64 };
+
+    fn smartTotals(self: *const PlaylistRepository, allocator: std.mem.Allocator, compiled: *const smart_playlist.Compiled) !SmartTotals {
+        const sql = try smartSql(
+            allocator,
+            "SELECT count(*), COALESCE(sum(duration_ms), 0), count(DISTINCT artist_id) FROM (" ++
+                "SELECT tracks.duration_ms AS duration_ms, tracks.artist_id AS artist_id",
+            compiled,
+            "LIMIT ?);",
+        );
+        defer allocator.free(sql);
+        var statement = try self.db.prepare(sql);
+        defer statement.deinit();
+        const next = try compiled.bind(statement, 1);
+        try statement.bindInt64(next, compiled.limit);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{
+            .count = @intCast(statement.columnInt64(0)),
+            .duration_ms = std.math.cast(u64, statement.columnInt64(1)) orelse 0,
+            .artist_count = @intCast(statement.columnInt64(2)),
+        };
+    }
+
+    /// Compiles rules a caller gives, refusing an `in_playlist` rule that
+    /// names no manual playlist.
+    fn compileChecked(self: *const PlaylistRepository, allocator: std.mem.Allocator, rules_json: []const u8, evaluation: Evaluation) !smart_playlist.Compiled {
+        var parsed = try smart_playlist.parse(allocator, rules_json);
+        defer parsed.deinit();
+        try self.checkReferences(&parsed);
+        var compiled = try smart_playlist.compile(allocator, &parsed, evaluation);
+        errdefer compiled.deinit();
+        try self.cutAtDuration(allocator, &compiled);
+        return compiled;
+    }
+
+    fn validateRules(self: *const PlaylistRepository, allocator: std.mem.Allocator, rules_json: []const u8) !void {
+        var parsed = try smart_playlist.parse(allocator, rules_json);
+        defer parsed.deinit();
+        try self.checkReferences(&parsed);
+    }
+
+    fn checkReferences(self: *const PlaylistRepository, parsed: *const smart_playlist.Rules) !void {
+        var buffer: [smart_playlist.max_referenced_playlists]i64 = undefined;
+        for (smart_playlist.referencedPlaylists(parsed, &buffer)) |playlist_id| {
+            const kind = self.playlistKind(playlist_id) catch |err| switch (err) {
+                error.UnknownPlaylist => return error.InvalidRulePlaylist,
+                else => return err,
+            };
+            if (kind != .manual) return error.InvalidRulePlaylist;
+        }
+    }
+
+    /// Compiles rules as stored. An `in_playlist` rule whose playlist has
+    /// since gone matches nothing.
+    fn compileStored(
+        self: *const PlaylistRepository,
+        allocator: std.mem.Allocator,
+        playlist_id: i64,
+        rules_json: []const u8,
+        evaluation: Evaluation,
+    ) !smart_playlist.Compiled {
+        var parsed = smart_playlist.parse(allocator, rules_json) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidStoredPlaylist,
+        };
+        defer parsed.deinit();
+        var compiled = try smart_playlist.compile(allocator, &parsed, evaluation.forPlaylist(playlist_id));
+        errdefer compiled.deinit();
+        try self.cutAtDuration(allocator, &compiled);
+        return compiled;
+    }
+
+    /// Turns an hour limit into the number of leading Tracks, in the rules'
+    /// order, whose lengths add up to at most it; a Track with no length
+    /// counts as none.
+    fn cutAtDuration(self: *const PlaylistRepository, allocator: std.mem.Allocator, compiled: *smart_playlist.Compiled) !void {
+        const limit_ms = compiled.limit_ms orelse return;
+        const sql = try smartSql(allocator, "SELECT COALESCE(tracks.duration_ms, 0)", compiled, "LIMIT ?;");
+        defer allocator.free(sql);
+        var statement = try self.db.prepare(sql);
+        defer statement.deinit();
+        const next = try compiled.bind(statement, 1);
+        try statement.bindInt64(next, compiled.limit);
+        var total_ms: i64 = 0;
+        var kept: u32 = 0;
+        while (try statement.step() == .row) {
+            total_ms +|= @max(statement.columnInt64(0), 0);
+            if (total_ms > limit_ms) break;
+            kept += 1;
+        }
+        compiled.limit = kept;
+        compiled.limit_ms = null;
+    }
+
+    /// The codecs a playlist's available entries play and how many of them
+    /// are analyzed; a smart playlist's entries are its rules evaluated now.
+    pub fn formats(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, evaluation: Evaluation) !PlaylistFormats {
+        var compiled_rules = try self.compiledRules(allocator, playlist_id, evaluation);
+        defer if (compiled_rules) |*compiled| compiled.deinit();
+        var codec_statement = if (compiled_rules) |*compiled|
+            try self.smartFormatStatement(allocator, compiled, codec_counts_head, codec_counts_tail)
+        else
+            try self.manualFormatStatement(playlist_id, codec_counts_head, codec_counts_tail);
+        defer codec_statement.deinit();
+        var codecs: std.ArrayList(CodecCount) = .empty;
+        errdefer {
+            for (codecs.items) |item| allocator.free(item.codec);
+            codecs.deinit(allocator);
+        }
+        while (try codec_statement.step() == .row) {
+            const codec = try allocator.dupe(u8, codec_statement.columnText(0));
+            errdefer allocator.free(codec);
+            try codecs.append(allocator, .{ .codec = codec, .count = @intCast(codec_statement.columnInt64(1)) });
+        }
+        var analyzed_statement = if (compiled_rules) |*compiled|
+            try self.smartFormatStatement(allocator, compiled, analyzed_head, analyzed_tail)
+        else
+            try self.manualFormatStatement(playlist_id, analyzed_head, analyzed_tail);
+        defer analyzed_statement.deinit();
+        if (try analyzed_statement.step() != .row) return error.SqlFailed;
+        const total: u64 = @intCast(analyzed_statement.columnInt64(0));
+        const analyzed: u64 = @intCast(analyzed_statement.columnInt64(1));
+        return .{ .codecs = try codecs.toOwnedSlice(allocator), .analyzed = analyzed, .unanalyzed = total - analyzed };
+    }
+
+    fn smartFormatStatement(
+        self: *const PlaylistRepository,
+        allocator: std.mem.Allocator,
+        compiled: *const smart_playlist.Compiled,
+        comptime head: []const u8,
+        comptime tail: []const u8,
+    ) !sqlite.Statement {
+        const sql = try smartSql(allocator, head ++ format_columns, compiled, "LIMIT ?" ++ tail);
+        defer allocator.free(sql);
+        const statement = try self.db.prepare(sql);
+        errdefer statement.deinit();
+        const next = try compiled.bind(statement, 1);
+        try statement.bindInt64(next, compiled.limit);
+        return statement;
+    }
+
+    fn manualFormatStatement(self: *const PlaylistRepository, playlist_id: i64, comptime head: []const u8, comptime tail: []const u8) !sqlite.Statement {
+        const statement = try self.db.prepare(head ++ format_columns ++ "\n" ++ formats_from_entries ++ tail);
+        errdefer statement.deinit();
+        try statement.bindInt64(1, playlist_id);
+        try statement.bindInt64(2, max_playlist_entries);
+        return statement;
     }
 
     fn countCompiled(self: *const PlaylistRepository, allocator: std.mem.Allocator, compiled: *const smart_playlist.Compiled) !u64 {
@@ -384,13 +604,12 @@ pub const PlaylistRepository = struct {
         if (self.db.changes() == 0) return error.UnknownPlaylist;
     }
 
-    pub fn list(self: *const PlaylistRepository, allocator: std.mem.Allocator, limit: u32, offset: u32, now: i64) !PlaylistPage {
-        return self.page(allocator, .{ .sort = .name, .limit = limit, .offset = offset }, now);
+    pub fn list(self: *const PlaylistRepository, allocator: std.mem.Allocator, limit: u32, offset: u32, evaluation: Evaluation) !PlaylistPage {
+        return self.page(allocator, .{ .sort = .name, .limit = limit, .offset = offset }, evaluation);
     }
 
-    /// A page of playlists. `now` (Unix seconds) evaluates smart playlists'
-    /// relative dates.
-    pub fn page(self: *const PlaylistRepository, allocator: std.mem.Allocator, query: PlaylistQuery, now: i64) !PlaylistPage {
+    /// A page of playlists, smart playlists evaluated as `evaluation` says.
+    pub fn page(self: *const PlaylistRepository, allocator: std.mem.Allocator, query: PlaylistQuery, evaluation: Evaluation) !PlaylistPage {
         if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
         var statement = switch (query.sort) {
             inline else => |sort| try self.db.prepare(summary_sql ++ page_filter ++ comptime sort.terms() ++ "LIMIT ?1 OFFSET ?2;"),
@@ -405,7 +624,7 @@ pub const PlaylistRepository = struct {
             results.deinit(allocator);
         }
         while (try statement.step() == .row) {
-            const item = try self.readSummary(allocator, statement, now);
+            const item = try self.readSummary(allocator, statement, evaluation);
             errdefer item.deinit(allocator);
             try results.append(allocator, item);
         }
@@ -422,12 +641,12 @@ pub const PlaylistRepository = struct {
     }
 
     /// One playlist's summary.
-    pub fn summary(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, now: i64) !PlaylistSummary {
+    pub fn summary(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, evaluation: Evaluation) !PlaylistSummary {
         var statement = try self.db.prepare(summary_sql ++ "WHERE playlists.id = ?1;");
         defer statement.deinit();
         try statement.bindInt64(1, playlist_id);
         if (try statement.step() != .row) return error.UnknownPlaylist;
-        return self.readSummary(allocator, statement, now);
+        return self.readSummary(allocator, statement, evaluation);
     }
 
     fn bindPageFilter(self: *const PlaylistRepository, statement: sqlite.Statement, query: PlaylistQuery) !void {
@@ -438,7 +657,7 @@ pub const PlaylistRepository = struct {
         try statement.bindOptionalInt64(6, if (query.created_by) |creator| @intFromEnum(creator) else null);
     }
 
-    fn readSummary(self: *const PlaylistRepository, allocator: std.mem.Allocator, statement: sqlite.Statement, now: i64) !PlaylistSummary {
+    fn readSummary(self: *const PlaylistRepository, allocator: std.mem.Allocator, statement: sqlite.Statement, evaluation: Evaluation) !PlaylistSummary {
         const id = statement.columnInt64(0);
         const kind = std.enums.fromInt(PlaylistKind, statement.columnInt64(10)) orelse return error.InvalidStoredPlaylist;
         const creator = std.enums.fromInt(PlaylistCreator, statement.columnInt64(11)) orelse return error.InvalidStoredPlaylist;
@@ -462,7 +681,8 @@ pub const PlaylistRepository = struct {
             .kind = kind,
             .creator = creator,
             .tags = tag_list,
-            .mixed_artists = statement.columnInt64(13) != 0,
+            .mixed_artists = statement.columnInt64(13) > 1,
+            .artist_count = @intCast(statement.columnInt64(13)),
             .top_genres = &.{},
         };
         switch (kind) {
@@ -474,10 +694,7 @@ pub const PlaylistRepository = struct {
                 result.top_genres = try readStrings(allocator, genres, 0);
             },
             .smart => {
-                var compiled = compileRules(allocator, statement.columnText(12), now) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return error.InvalidStoredPlaylist,
-                };
+                var compiled = try self.compileStored(allocator, id, statement.columnText(12), evaluation);
                 defer compiled.deinit();
                 try self.smartStats(allocator, &compiled, &result);
             },
@@ -492,24 +709,13 @@ pub const PlaylistRepository = struct {
         result: *PlaylistSummary,
     ) !void {
         {
-            const sql = try smartSql(
-                allocator,
-                "SELECT count(*), COALESCE(sum(duration_ms), 0), count(DISTINCT artist_id) FROM (" ++
-                    "SELECT tracks.duration_ms AS duration_ms, tracks.artist_id AS artist_id",
-                compiled,
-                "LIMIT ?);",
-            );
-            defer allocator.free(sql);
-            var statement = try self.db.prepare(sql);
-            defer statement.deinit();
-            const next = try compiled.bind(statement, 1);
-            try statement.bindInt64(next, compiled.limit);
-            if (try statement.step() != .row) return error.SqlFailed;
-            const matched = std.math.cast(u32, statement.columnInt64(0)) orelse return error.InvalidStoredPlaylist;
+            const totals = try self.smartTotals(allocator, compiled);
+            const matched = std.math.cast(u32, totals.count) orelse return error.InvalidStoredPlaylist;
             result.entries = matched;
             result.available = matched;
-            result.duration_ms = statement.columnInt64(1);
-            result.mixed_artists = statement.columnInt64(2) > 1;
+            result.duration_ms = std.math.cast(i64, totals.duration_ms) orelse return error.InvalidStoredPlaylist;
+            result.mixed_artists = totals.artist_count > 1;
+            result.artist_count = totals.artist_count;
         }
         const sql = try smartSql(allocator, "SELECT genres.name FROM (SELECT tracks.id AS track_id", compiled, "LIMIT ?) AS matched\n" ++
             "JOIN track_genres ON track_genres.track_id = matched.track_id\n" ++
@@ -543,10 +749,10 @@ pub const PlaylistRepository = struct {
         playlist_id: i64,
         limit: u32,
         offset: u32,
-        now: i64,
+        evaluation: Evaluation,
     ) !PlaylistEntryPage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        if (try self.compiledRules(allocator, playlist_id, now)) |compiled_rules| {
+        if (try self.compiledRules(allocator, playlist_id, evaluation)) |compiled_rules| {
             var compiled = compiled_rules;
             defer compiled.deinit();
             return self.smartEntries(allocator, &compiled, limit, offset);
@@ -615,8 +821,8 @@ pub const PlaylistRepository = struct {
         return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
     }
 
-    pub fn trackIds(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, now: i64) ![]i64 {
-        var compiled_rules = try self.compiledRules(allocator, playlist_id, now);
+    pub fn trackIds(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, evaluation: Evaluation) ![]i64 {
+        var compiled_rules = try self.compiledRules(allocator, playlist_id, evaluation);
         defer if (compiled_rules) |*compiled| compiled.deinit();
         var statement = if (compiled_rules) |*compiled| smart: {
             const sql = try smartSql(allocator, "SELECT tracks.id", compiled, "LIMIT ?;");
@@ -648,13 +854,10 @@ pub const PlaylistRepository = struct {
     }
 
     /// A smart playlist's compiled rules; null for a manual playlist.
-    fn compiledRules(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, now: i64) !?smart_playlist.Compiled {
+    fn compiledRules(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, evaluation: Evaluation) !?smart_playlist.Compiled {
         const stored = try self.rules(allocator, playlist_id) orelse return null;
         defer allocator.free(stored);
-        return compileRules(allocator, stored, now) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.InvalidStoredPlaylist,
-        };
+        return try self.compileStored(allocator, playlist_id, stored, evaluation);
     }
 
     pub fn insert(self: *PlaylistRepository, playlist_id: i64, track_ids: []const i64, at: ?u32) !PlaylistInsertion {
@@ -889,8 +1092,8 @@ pub const PlaylistRepository = struct {
     /// Each entry's Track and the location `TrackRepository.playableLocation`
     /// picks, in order; entries with no Track or no location are counted as
     /// unavailable. A smart playlist exports the Tracks its rules match now.
-    pub fn exportRows(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, now: i64) !PlaylistExportRows {
-        var compiled_rules = try self.compiledRules(allocator, playlist_id, now);
+    pub fn exportRows(self: *const PlaylistRepository, allocator: std.mem.Allocator, playlist_id: i64, evaluation: Evaluation) !PlaylistExportRows {
+        var compiled_rules = try self.compiledRules(allocator, playlist_id, evaluation);
         defer if (compiled_rules) |*compiled| compiled.deinit();
         var statement = if (compiled_rules) |*compiled| smart: {
             const sql = try smartSql(allocator, "SELECT tracks.id, tracks.title, tracks.artist, tracks.duration_ms", compiled, "LIMIT ?;");

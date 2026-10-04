@@ -135,6 +135,10 @@ pub fn load(
     var summary = (try library.tracks.byId(allocator, track_id)) orelse return null;
     allocator.free(summary.codec);
     summary.codec = &.{};
+    allocator.free(summary.path);
+    summary.path = &.{};
+    allocator.free(summary.genre);
+    summary.genre = &.{};
     errdefer summary.deinit(allocator);
     const facts = try library.tracks.fileFacts(allocator, track_id);
     errdefer if (facts) |value| value.deinit();

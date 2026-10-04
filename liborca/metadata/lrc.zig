@@ -97,7 +97,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) !?Content {
             line.* = .{ .start_ms = @intCast(start), .text = entry.text };
         }
         lyrics.sortLines(lines);
-        return .{ .kind = .synced, .lines = lines };
+        return .{ .kind = .synced, .offset_ms = offset_ms, .lines = lines };
     }
 
     var first: usize = 0;
@@ -108,7 +108,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) !?Content {
     for (plain.items[first..last], lines) |row, *line| {
         line.* = .{ .start_ms = null, .text = try allocator.dupe(u8, row) };
     }
-    return .{ .kind = .plain, .lines = lines };
+    return .{ .kind = .plain, .offset_ms = offset_ms, .lines = lines };
 }
 
 fn parseTimestamp(inner: []const u8) Timestamp {

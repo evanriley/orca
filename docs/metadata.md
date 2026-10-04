@@ -330,6 +330,11 @@ its four encodings is read, and the frame's language becomes
 lyrics. A sidecar named with another case, such as `Song.LRC` for
 `Song.flac`, is not found on a case-sensitive filesystem.
 
+`Lyrics.source_name` says where the text came from: the sidecar's file name
+such as `Song.lrc`, `embedded` or `LRCLIB`. `Lyrics.offset_ms` is the text's
+`[offset:]` tag in milliseconds, 0 without one. Synced line starts already
+include the offset, so it is reported, not left to the caller to apply.
+
 ### Choice order
 
 1. A synced sidecar.

@@ -498,6 +498,9 @@ are sniffed or not recognized until then:
   took the 500,000-Track benchmark's insert from 3.8 s to 10.3 s.
 - The output kind is unknown for device id 0, the system default, and for
   any sink past the 64th PipeWire discovers.
+- Folders that hold only images, such as a `Scans/` folder of booklet pages,
+  in `orca-cli folders` and the Folders page. The scanner records images
+  only in folders that hold audio, so such a folder has no entry to list.
 - `orca-gtk`'s Settings equalizer band captions are written in
   `preferences.zig` rather than taken from `equalizer_band_frequencies_hz`.
 - macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
@@ -533,9 +536,24 @@ are sniffed or not recognized until then:
   on the caller's thread (`libraryAnalyzeFile`), a Track's fingerprint
   (`libraryTrackFingerprint`), the Albums letter index
   (`libraryReleaseLetterIndex`) and filtered totals
-  (`libraryReleaseQueryTotals`, `libraryTrackQueryTotals`), with the
+  (`libraryReleaseQueryTotals`, `libraryTrackQueryTotals`), a listing's
+  playable ids from a row (`libraryTrackQueryPlayableIds`), with the
   `added_after`, `name_order`, `codec` and `max_sample_rate` query fields they
-  share with the pages. The command lane (`submit`,
+  share with the pages; also `TrackSummary`'s `integrated_lufs`,
+  `bitrate_kbps`, `path` and `album_artist_id` and the `loudness`, `bitrate`,
+  `path`, `album_artist` and `genre` Track sorts; an Artist's release groups
+  outside the library (`libraryArtistElsewhere`, `ElsewhereRelease`) and
+  their covers (the `release_group` artwork subject, which
+  `orca_library_request_artwork` refuses as unsupported), its origin (`ArtistInfoRecord.origin`) and the album-artist role filter
+  (`ArtistQuery.role`); Track and Release pages, totals and counts read off
+  the host's thread (`libraryRequestBrowse`, `libraryCancelBrowse`,
+  `libraryTakeBrowse`); a playlist's codecs and analysis counts
+  (`libraryPlaylistFormats`), its Artist count (`PlaylistSummary.artist_count`)
+  and a smart playlist preview with its length and a sample
+  (`librarySmartPlaylistPreview`), and new random orders
+  (`libraryReshufflePlaylists`); a search hit's detail fields, its reason
+  hits (`SearchHit.reason`, which `orca_library_search` leaves out) and the
+  hit to feature (`SearchResults.top`). The command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump` and the
   request-correlated functions that use it.
 - Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain

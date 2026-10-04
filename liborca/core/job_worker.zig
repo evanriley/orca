@@ -61,6 +61,7 @@ pub const ArtistInfoSetup = struct {
     wikipedia_server: ?OwnedServer,
     listenbrainz_server: OwnedServer,
     listenbrainz_labs_server: OwnedServer,
+    coverartarchive_server: OwnedServer,
 };
 
 /// A Wikipedia language code the request owns.
@@ -698,6 +699,7 @@ const InfoServices = struct {
     gateways: [names.len]network.Gateway,
     musicbrainz: providers.musicbrainz.MusicBrainz,
     clients: [4]providers.cached_get.CachedGet,
+    coverartarchive: providers.coverartarchive.CoverArtArchive,
     setup: *const ArtistInfoSetup,
 
     const names = [_][]const u8{
@@ -707,6 +709,7 @@ const InfoServices = struct {
         providers.wikipedia.service,
         providers.listenbrainz_labs.service,
         providers.listenbrainz.service,
+        providers.coverartarchive.service,
     };
 
     fn init(self: *InfoServices, worker: *JobWorker, setup: *const ArtistInfoSetup, offline: bool) void {
@@ -726,6 +729,9 @@ const InfoServices = struct {
             .sharing = .{ .store = shared_state, .service = service },
         };
         self.gateways[2].config.max_response_bytes = providers.wikimedia_commons.max_image_bytes;
+        if (setup.hooks.cover_art_transport) |transport| self.gateways[6].transport = transport;
+        self.gateways[6].config.max_response_bytes = providers.coverartarchive.max_image_bytes;
+        self.coverartarchive = .{ .gateway = &self.gateways[6], .server = setup.coverartarchive_server.view() };
         self.musicbrainz = .{
             .gateway = &self.gateways[0],
             .cache = &worker.database.provider_cache,
@@ -759,6 +765,7 @@ const InfoServices = struct {
             .listenbrainz_server = self.setup.listenbrainz_server.view(),
             .labs = &self.clients[3],
             .labs_server = self.setup.listenbrainz_labs_server.view(),
+            .coverartarchive = &self.coverartarchive,
         };
     }
 };
@@ -899,6 +906,7 @@ pub const JobWorker = struct {
             .wall_clock = services.wall_clock,
             .language = request.language.view(),
             .force = request.force,
+            .offline = request.offline,
             .include_releases = request.include_releases,
         };
         const outcome = fetch.run(request.artist_id) catch {
@@ -1225,7 +1233,7 @@ pub const JobWorker = struct {
         switch (outcome) {
             .cancelled => stats.cancelled.store(true, .release),
             .refused, .unavailable, .busy => self.failed.store(true, .release),
-            .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id => {},
+            .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id, .folder => {},
         }
     }
 
@@ -1782,6 +1790,7 @@ fn accumulate(totals: *library_pass.scanner.Result, result: library_pass.scanner
     totals.changed += result.changed;
     totals.unchanged += result.unchanged;
     totals.unsupported += result.unsupported;
+    totals.images += result.images;
     totals.errors += result.errors;
     totals.batches_committed += result.batches_committed;
     totals.cancelled = totals.cancelled or result.cancelled;

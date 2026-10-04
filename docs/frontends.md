@@ -32,7 +32,8 @@ The boundary covers the whole engine, not a fragment of it:
 - **Folders.** `orca_library_query_folder` pages one folder of a root as
   `orca_folder_entry_view` values: subfolders first, with file and Track
   counts and duration counted through every folder below, then files with
-  their file id and, when `has_track_id` is set, the Track. The path is
+  their file id and, when `has_track_id` is set, the Track, then images
+  beside them as `ORCA_FOLDER_ENTRY_KIND_IMAGE`, with no ids. The path is
   relative to the root and empty for the root itself; one with a `.`, `..`
   or empty component, a leading `/` or a NUL is
   `ORCA_STATUS_INVALID_ARGUMENT`. `orca_player_play_folder` plays every

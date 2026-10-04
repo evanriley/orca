@@ -88,7 +88,7 @@ entries as they are at that moment. The rules format is in
 zig build run -- playlist-update DATABASE ID --description=TEXT --pin --love --tags=focus,lofi
 zig build run -- playlists DATABASE --smart
 zig build run -- smart-playlist-create DATABASE NAME RULES_FILE
-zig build run -- smart-playlist-count DATABASE RULES_FILE
+zig build run -- smart-playlist-count DATABASE RULES_FILE [--sample=N]
 ```
 
 ## M3U import

@@ -4,6 +4,84 @@
 
 ### Added
 
+- **Folder covers.** A Release whose files carry no cover shows the front
+  image in its folder (`cover`, then `front`, then `folder`, then the
+  largest), before the Cover Art Archive's, in `libraryTrackArtwork`,
+  `libraryReleaseArtwork`, the artwork loader, `orca-cli artwork` and
+  orca-gtk. The image is read and sniffed on every call; a deleted or
+  unreadable one falls through. A folder cover counts as artwork for the
+  `has_artwork` Release filter and smart playlist rule, `TrackDetails`, the
+  genre artwork list and the `artwork_problem` health issue, and a cover
+  fetch for such a Release sends no request and reports `folder`
+  (`ORCA_COVER_ART_OUTCOME_FOLDER`, `orca-cli cover-art` `source=folder`).
+  `TrackDetails.has_artwork` now also counts a fetched cover. Migration 46
+  stores the flag as `releases.has_folder_cover`.
+- **Folder entries with images, status and last scan.** Scans record the
+  PNG, JPEG, GIF, WebP and BMP files beside the music in `folder_images`
+  (schema version 45), never as Tracks, with a role from the file name
+  (`front`, `back`, `booklet`, `other`), and record when each folder was last
+  walked in `folder_scans`. `FolderPage` lists images after the audio files
+  as `FolderEntryKind.image` with `mime` and `artwork_role`, gives each file a
+  `status` (`imported`, or `unreadable` once property backfill could not
+  decode it), and carries `image_count`, `last_scanned_at` and the folder's
+  Release when all its Tracks share one. `orca-cli folders DATABASE ROOT
+  [PATH]` prints a `folder:` line and `kind=`, `status=` and `role=` on each
+  entry; the C ABI adds `ORCA_FOLDER_ENTRY_KIND_IMAGE`.
+- **Search hit detail.** Each `SearchHit` carries what a result row shows:
+  an Artist's `release_count` and `track_count`, a Release's `year`,
+  `artist` and `track_count`, a Track's `artist` and `duration_ms`, a
+  Playlist's `track_count` and `duration_ms`, a genre's `track_count`. The
+  first Artist hit adds the Playlists holding its Tracks
+  (`reason = .tracks_by`, `reason_count` its entries) and its main genre
+  (`main_genre_of`) within each kind's cap, and `SearchResults.top` is the
+  `name` hit to feature: the first whose title holds every word whole,
+  else the first. `orca-cli search` prints them and a `top` line; the C ABI
+  leaves the reason hits out and does not carry the detail yet.
+- Lyrics report where they came from and their `[offset:]` tag: `Lyrics.source_name` (the sidecar's file name, `embedded` or `LRCLIB`) and `Lyrics.offset_ms`, printed by `orca-cli lyrics` as `source_name=` and `offset_ms=`.
+- **Playlist inspector data and richer smart playlists.** Rules gain an
+  `in_playlist` field (`is`, `is_not`) that matches a manual playlist's
+  Tracks and refuses a smart or missing playlist with
+  `error.InvalidRulePlaylist`; a `random` sort, whose order each playlist
+  keeps for the life of the runtime until `libraryReshufflePlaylists`; and `limit_hours` (1 to 10,000), which keeps the leading Tracks
+  whose lengths fit, in place of `limit`. Rules stay version 1.
+  `PlaylistSummary.artist_count` counts a playlist's Artists,
+  `libraryPlaylistFormats` returns its codecs and how many entries are
+  analyzed, and `librarySmartPlaylistPreview` returns the count, total length
+  and a sample of what rules select. The C ABI does not offer the new
+  methods yet. `orca-cli playlist` prints a `formats:` line, and
+  `orca-cli smart-playlist-count` prints `duration_ms=` and takes
+  `--sample=N`.
+- **Elsewhere covers and origin with its subdivision.** An artist-info fetch
+  asks the Cover Art Archive for the 250-pixel front cover of the first 24
+  release groups Elsewhere lists, keeps each in the new
+  `release_group_covers` table (schema version 44), keeps a group without
+  one as a miss for 30 days, and drops a cover once no Artist's release
+  groups name its group. `ArtworkSubject.release_group` serves a kept cover
+  through the artwork loader; the C ABI does not offer it yet. The origin
+  now names the subdivision the area lies in, such as `Portland, Oregon`,
+  through at most 3 cached MusicBrainz area lookups. `--offline` asks for
+  no cover. `orca-cli artist-info --include-releases` prints `cover=yes`,
+  `no` or `-` on each `elsewhere:` line, and `orca-cli release-group-cover`
+  writes a kept cover to a file.
+- **Artist origin, album artists and Elsewhere release groups.** An
+  artist-info fetch keeps the Artist's origin (MusicBrainz's begin area,
+  else its area) and, in one more MusicBrainz request, up to 100 of its
+  release groups with their type, first release year and the other artists
+  credited. Schema version 42 adds `artist_info.origin` and
+  `artist_release_groups`. `libraryArtistElsewhere` lists the groups the
+  Library does not hold, matched by release-group MusicBrainz ID, newest
+  first, and `ArtistQuery.role = .album_artists` lists only the Artists a
+  Release is filed under. `orca-cli artist-info` prints `origin=` and, with
+  `--include-releases`, `elsewhere:` lines; `orca-cli artists` takes
+  `--album-artists`.
+- **Files-without-bitrate index.** Schema version 41 adds
+  `files_without_bitrate`, so a bitrate-sorted Track page finds the Tracks
+  without a bitrate through it instead of reading every Track.
+- **Release name order indexes.** Schema version 39 adds
+  `releases_artist_order` and `releases_title_order`, built from the same
+  terms as the artist and title sorts, so a Release page in either order
+  walks an index instead of sorting every Release: 22 ms to 6 ms per page
+  at 512,000 Releases.
 - **Letter index, added-since and codec filters, filtered totals.**
   `ReleaseQuery.added_after` keeps the Releases whose Tracks' play files
   were all first seen after a time, and `TrackQuery` adds `added_after`,
@@ -18,6 +96,16 @@
   `--codec`, `--max-rate` and `--totals`. In orca-gtk, Recently Added lists
   the albums added in the last 30 days, and Albums opens sorted by Date
   Added under All Albums.
+- **Track loudness, bitrate, path and album artist.** `TrackSummary` adds
+  `integrated_lufs` (the playing file's analysed loudness), `bitrate_kbps`
+  (its average bitrate), `path` (its best location) and `album_artist_id`,
+  and `TrackSort` adds `loudness`, `bitrate`, `path`, `album_artist` and
+  `genre` (the first genre's name), each walking an index for a whole-library
+  page. Schema version 40 adds `file_loudness`, kept from stored analysis
+  results by triggers and backfilled, and the indexes `file_loudness_by_lufs`,
+  `files_by_bitrate`, `tracks_sort_album_artist`, `genres_by_name` and
+  `track_genres_first`. `orca-cli tracks` takes the new sorts and ends each
+  line `lufs= kbps= path=`; smart playlists accept them as a sort.
 - **The playing track, album and artist marked everywhere.** Folders,
   the search palette, album and artist grids and lists, Loved albums,
   artist pages and genre pages show the playing track, its album and its
@@ -698,6 +786,16 @@
   Analyze, in place of the banner. Kinds with no issues sit behind "Show
   kinds with no issues", and a side panel explains the opened kind. Matches
   and its Corrections are cards of flush rows under the page title.
+- **Faster path sort and file filters on Tracks.** Schema version 43 adds
+  `locations_held`, an index of the locations that are not missing, so a
+  Track's has-file test and the path sort read no table rows. A path sort
+  finds the Tracks with no held location from `files`, and a Tracks count,
+  total or full-sort page filtered by codec, lossless, sample rate or date
+  added, with no Artist, Release, genre or loved filter, collects the
+  matching files once instead of probing one per Track. At 522,432 Tracks a
+  whole-library path page takes 150 ms instead of 274 ms, and the totals for
+  FLAC above 48 kHz added in the last year 61 ms instead of 238 ms. Results
+  do not change.
 
 ### Fixed
 

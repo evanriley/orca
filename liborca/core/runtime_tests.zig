@@ -1823,6 +1823,92 @@ test "a cover embedded in a Release's file beats one fetched for it, and none is
     try std.testing.expectEqual(@as(u32, 0), archive.requestCount());
 }
 
+const TrackAndRelease = struct { track_id: i64, release_id: i64 };
+
+fn onlyTrackAndRelease(runtime: *OrcaRuntime, library: LibraryHandle) !TrackAndRelease {
+    var statement = try (try libraryDatabase(runtime, library)).database.prepare("SELECT id, release_id FROM tracks;");
+    defer statement.deinit();
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    const found: TrackAndRelease = .{ .track_id = statement.columnInt64(0), .release_id = statement.columnInt64(1) };
+    try std.testing.expectEqual(database.sqlite.Step.done, try statement.step());
+    return found;
+}
+
+fn expectReleaseCover(runtime: *OrcaRuntime, library: LibraryHandle, ids: TrackAndRelease, expected: ?[]const u8) !void {
+    const release_cover = try runtime.libraryReleaseArtwork(library, std.testing.io, ids.release_id);
+    defer if (release_cover) |image| image.deinit();
+    const track_cover = try runtime.libraryTrackArtwork(library, std.testing.io, ids.track_id);
+    defer if (track_cover) |image| image.deinit();
+    if (expected) |bytes| {
+        try std.testing.expectEqualStrings(bytes, release_cover.?.bytes);
+        try std.testing.expectEqualStrings("image/jpeg", release_cover.?.mime_type);
+        try std.testing.expectEqual(metadata.ArtworkKind.front_cover, release_cover.?.kind);
+        try std.testing.expectEqualStrings(bytes, track_cover.?.bytes);
+    } else {
+        try std.testing.expect(release_cover == null);
+        try std.testing.expect(track_cover == null);
+    }
+}
+
+test "a Release whose files carry no cover shows the cover.jpg in its folder" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "Album/song.flac");
+    const cover = "\xff\xd8\xff\xe0folder cover";
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = cover });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/back.jpg", .data = "\xff\xd8\xff\xe0back" });
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-artwork-folder?mode=memory&cache=shared");
+    const ids = try onlyTrackAndRelease(&runtime, library);
+
+    try expectReleaseCover(&runtime, library, ids, cover);
+}
+
+test "a cover embedded in a Release's file beats the cover.jpg in its folder" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/covered-reference.flac", "Album/song.flac");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = "\xff\xd8\xff\xe0folder cover" });
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-artwork-folder-embedded?mode=memory&cache=shared");
+    const ids = try onlyTrackAndRelease(&runtime, library);
+
+    const release_cover = (try runtime.libraryReleaseArtwork(library, std.testing.io, ids.release_id)).?;
+    defer release_cover.deinit();
+    try std.testing.expectEqualStrings("image/png", release_cover.mime_type);
+    try std.testing.expectEqual(@as(usize, 217), release_cover.bytes.len);
+}
+
+test "a replaced cover.jpg is shown after a rescan, and a deleted or no longer image one gives no cover" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "Album/song.flac");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = "\xff\xd8\xff\xe0first" });
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-artwork-folder-replaced?mode=memory&cache=shared");
+    const ids = try onlyTrackAndRelease(&runtime, library);
+    try expectReleaseCover(&runtime, library, ids, "\xff\xd8\xff\xe0first");
+
+    const replacement = "\xff\xd8\xff\xe0a larger second cover";
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = replacement });
+    try rescan(&runtime, library);
+    try expectReleaseCover(&runtime, library, ids, replacement);
+
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = "not a picture any more" });
+    try expectReleaseCover(&runtime, library, ids, null);
+
+    try temporary.dir.deleteFile(std.testing.io, "Album/cover.jpg");
+    try expectReleaseCover(&runtime, library, ids, null);
+    try rescan(&runtime, library);
+    try expectReleaseCover(&runtime, library, ids, null);
+}
+
 test "a library edit regroups a track without touching its file, and clearing it reverts" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -3850,4 +3936,136 @@ test "#EXTINF lines without a length match only a unique recording when several 
     const ids = try fixture.entryTrackIds(imported.playlist_id);
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqualSlices(?i64, &.{ unique, @min(shared, copy), unique }, ids);
+}
+
+fn randomPageIds(fixture: *PlaylistFileFixture, playlist_id: i64, ids: *std.ArrayList(i64)) !void {
+    var offset: u32 = 0;
+    while (true) : (offset += 12) {
+        var page = try fixture.runtime.libraryPlaylistEntries(fixture.library, playlist_id, 12, offset);
+        defer page.deinit();
+        if (page.items.len == 0) return;
+        for (page.items) |entry| try ids.append(std.testing.allocator, entry.track.?.id);
+    }
+}
+
+test "a random smart playlist's pages read through the runtime are disjoint and together hold every Track, before and after a reshuffle" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-random-pages?mode=memory&cache=shared");
+    defer fixture.deinit();
+    fixture.runtime.playlist_shuffle_seed = 0x5eed;
+    var expected: [30]i64 = undefined;
+    var name_buffer: [32]u8 = undefined;
+    for (&expected, 0..) |*id, index| {
+        const name = try std.fmt.bufPrint(&name_buffer, "Music/{d:0>2}.flac", .{index});
+        id.* = try fixture.addTrack(name, name, "Album", @intCast(index + 1), 200_000);
+    }
+    const playlist = try fixture.runtime.libraryCreateSmartPlaylist(
+        fixture.library,
+        "Shuffle",
+        "{\"v\":1,\"rules\":[],\"sort\":{\"field\":\"random\"}}",
+    );
+
+    var first: std.ArrayList(i64) = .empty;
+    defer first.deinit(std.testing.allocator);
+    try randomPageIds(&fixture, playlist, &first);
+    var again: std.ArrayList(i64) = .empty;
+    defer again.deinit(std.testing.allocator);
+    try randomPageIds(&fixture, playlist, &again);
+    try std.testing.expectEqualSlices(i64, first.items, again.items);
+    try std.testing.expect(!std.mem.eql(i64, &expected, first.items));
+
+    fixture.runtime.libraryReshufflePlaylists();
+    var reshuffled: std.ArrayList(i64) = .empty;
+    defer reshuffled.deinit(std.testing.allocator);
+    try randomPageIds(&fixture, playlist, &reshuffled);
+
+    for ([_][]i64{ first.items, reshuffled.items }) |ids| {
+        std.mem.sort(i64, ids, {}, std.sort.asc(i64));
+        try std.testing.expectEqualSlices(i64, &expected, ids);
+    }
+}
+
+test "the thirty-third waiting Job is refused with JobQueueFull until a cancelled one leaves the queue" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-job-queue-full?mode=memory&cache=shared");
+    try runtime.pauseAll(library);
+    var waiting: [runtime_module.max_waiting_jobs]JobHandle = undefined;
+    for (&waiting) |*job_handle| {
+        job_handle.* = try runtime.startLibraryProjection(library);
+        const snapshot = try runtime.jobSnapshotSynced(job_handle.*);
+        try std.testing.expectEqual(job.State.waiting, snapshot.state);
+        try std.testing.expect(snapshot.paused);
+    }
+    try std.testing.expectError(error.JobQueueFull, runtime.startLibraryProjection(library));
+    try std.testing.expectEqual(@as(usize, 0), runtime.job_workers.items.len);
+
+    const queue = try runtime.jobQueuePage(library, std.testing.allocator);
+    defer std.testing.allocator.free(queue);
+    try std.testing.expectEqual(waiting.len, queue.len);
+    try std.testing.expect(queue[0].after == null);
+    for (queue, waiting, 0..) |entry, job_handle, index| {
+        try std.testing.expect(entry.job.eql(job_handle));
+        try std.testing.expectEqual(job.Kind.projection, entry.kind);
+        if (index != 0) try std.testing.expect(entry.after.?.eql(waiting[index - 1]));
+    }
+
+    try runtime.cancelJob(waiting[0]);
+    try std.testing.expectError(error.JobQueueFull, runtime.startLibraryProjection(library));
+    runtime.pump();
+    try std.testing.expectEqual(job.State.cancelled, (try runtime.jobSnapshotSynced(waiting[0])).state);
+    _ = try runtime.startLibraryProjection(library);
+    try std.testing.expectError(error.JobQueueFull, runtime.startLibraryProjection(library));
+}
+
+test "Jobs pauseAll holds wait for resumeAll, and a Library's history keeps every finished Job and retries a cancelled one" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-job-history?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const scan = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, scan));
+
+    try runtime.pauseAll(library);
+    try std.testing.expect(try runtime.libraryJobsPaused(library));
+    const held = try runtime.startLibraryProjection(library);
+    const dropped = try runtime.startLibraryProjection(library);
+    try runtime.cancelJob(dropped);
+    runtime.pump();
+    try std.testing.expectEqual(job.State.cancelled, (try runtime.jobSnapshotSynced(dropped)).state);
+    try std.testing.expectEqual(job.State.waiting, (try runtime.jobSnapshotSynced(held)).state);
+    try std.testing.expectEqual(@as(usize, 0), inFlightWorkCount(&runtime));
+
+    try runtime.resumeAll(library);
+    try std.testing.expect(!try runtime.libraryJobsPaused(library));
+    try std.testing.expect(!(try runtime.jobSnapshotSynced(held)).paused);
+    runtime.pump();
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, held));
+
+    const problems = try runtime.jobHistoryPage(library, std.testing.allocator, .problems, 10, 0);
+    defer std.testing.allocator.free(problems);
+    try std.testing.expectEqual(@as(usize, 1), problems.len);
+    try std.testing.expectEqual(job.Kind.projection, problems[0].kind);
+    try std.testing.expectEqual(job.State.cancelled, problems[0].state);
+    try std.testing.expectEqualStrings("cancelled", problems[0].error_text.slice());
+    try std.testing.expect(problems[0].retryable);
+
+    const retried = try runtime.jobRetry(library, problems[0].id);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, retried));
+
+    const history = try runtime.jobHistoryPage(library, std.testing.allocator, .all, 10, 0);
+    defer std.testing.allocator.free(history);
+    const kinds = [_]job.Kind{ .projection, .projection, .projection, .scan };
+    const states = [_]job.State{ .succeeded, .succeeded, .cancelled, .succeeded };
+    try std.testing.expectEqual(kinds.len, history.len);
+    for (history, kinds, states) |entry, kind, state| {
+        try std.testing.expectEqual(kind, entry.kind);
+        try std.testing.expectEqual(state, entry.state);
+        try std.testing.expect(entry.started_at <= entry.finished_at);
+    }
+    try std.testing.expectEqual(problems[0].id, history[2].id);
+    try std.testing.expect(!history[3].retryable);
+    try std.testing.expect(history[3].summary.slice().len != 0);
+    try std.testing.expectError(error.JobNotRetryable, runtime.jobRetry(library, history[3].id));
+    try std.testing.expectError(error.UnknownJobHistory, runtime.jobRetry(library, history[0].id + 1));
 }

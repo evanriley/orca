@@ -2223,6 +2223,7 @@ pub export fn orca_library_search(
         return box.fail(@src(), err);
     defer results.deinit();
     for (results.hits) |hit| {
+        if (hit.reason != .name) continue;
         const view: SearchHitView = .{
             .id = hit.id,
             .title = stringView(hit.title),
@@ -3103,6 +3104,7 @@ pub export fn orca_library_request_artwork(
         .track => .{ .track = id },
         .release => .{ .release = id },
         .artist => .{ .artist = id },
+        .release_group => return box.reject(@src(), .unsupported, "release group covers are not in the C ABI"),
     };
     destination.* = box.runtime.libraryRequestArtwork(importLibrary(library), box.io(), wanted) catch |err|
         return box.fail(@src(), err);
@@ -3134,8 +3136,9 @@ pub export fn orca_library_take_artwork(
         .request = result.request,
         .subject_id = switch (result.subject) {
             .track, .release, .artist => |id| id,
+            .release_group => return box.reject(@src(), .unsupported, "release group covers are not in the C ABI"),
         },
-        .subject = exportArtworkSubject(result.subject),
+        .subject = exportArtworkSubject(result.subject).?,
         .has_image = @intFromBool(result.image != null),
         .image = if (result.image) |image| imageView(image) else .{
             .bytes = "",
@@ -4482,6 +4485,7 @@ pub fn exportCoverArtOutcome(outcome: core.runtime.CoverArtOutcome) u8 {
         .unavailable => 8,
         .busy => 9,
         .cancelled => 10,
+        .folder => 11,
     };
 }
 
@@ -5750,11 +5754,12 @@ pub fn importArtworkSubject(value: u8) ?std.meta.Tag(core.runtime.ArtworkSubject
     };
 }
 
-pub fn exportArtworkSubject(subject: core.runtime.ArtworkSubject) u8 {
+pub fn exportArtworkSubject(subject: core.runtime.ArtworkSubject) ?u8 {
     return switch (subject) {
         .track => 0,
         .release => 1,
         .artist => 2,
+        .release_group => null,
     };
 }
 
@@ -6782,6 +6787,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidRuleValue,
         error.RuleNestingTooDeep,
         error.TooManyRules,
+        error.InvalidRulePlaylist,
         => .invalid_argument,
         else => .internal,
     };

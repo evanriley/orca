@@ -30,10 +30,22 @@ pub const CoverArtArchive = struct {
     /// `GET {server}/release/{mbid}/front-500`. A 404 is `.missing`; any
     /// other refusal, or a body that is not a JPEG or PNG, is an error.
     pub fn frontCover(self: *CoverArtArchive, allocator: std.mem.Allocator, release_mbid: []const u8) !FrontCover {
-        if (!metadata.isMusicBrainzId(release_mbid)) return error.InvalidMusicBrainzId;
-        const url = try std.fmt.allocPrint(allocator, "{s}/release/{s}/front-500", .{
+        return self.front(allocator, "release", release_mbid, "front-500");
+    }
+
+    /// `GET {server}/release-group/{mbid}/front-250`: the front cover of the
+    /// release the archive picks for the group, answered as `frontCover` is.
+    pub fn releaseGroupFrontCover(self: *CoverArtArchive, allocator: std.mem.Allocator, group_mbid: []const u8) !FrontCover {
+        return self.front(allocator, "release-group", group_mbid, "front-250");
+    }
+
+    fn front(self: *CoverArtArchive, allocator: std.mem.Allocator, entity: []const u8, mbid: []const u8, size: []const u8) !FrontCover {
+        if (!metadata.isMusicBrainzId(mbid)) return error.InvalidMusicBrainzId;
+        const url = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}", .{
             std.mem.trimEnd(u8, self.server, "/"),
-            release_mbid,
+            entity,
+            mbid,
+            size,
         });
         defer allocator.free(url);
         const response = try self.gateway.fetch(allocator, url, &.{}, redirect_allowance);
@@ -111,4 +123,20 @@ test "a redirect off the archive is refused and its target never requested" {
     var archive: CoverArtArchive = .{ .gateway = &net.gateway };
     try testing.expectError(error.RedirectRefused, archive.frontCover(testing.allocator, test_release_mbid));
     try testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+}
+
+test "a release group's front cover is asked for at 250 pixels, and a group without one is missing" {
+    var net: network.testing.TestGateway = undefined;
+    testGateway(&net);
+    defer net.deinit();
+    net.transport.keep_history = true;
+    try net.transport.script(.{ .respond = .{ .body = jpeg } });
+    try net.transport.script(.{ .respond = .{ .status = 404, .body = "" } });
+    var archive: CoverArtArchive = .{ .gateway = &net.gateway };
+    const cover = try archive.releaseGroupFrontCover(testing.allocator, test_release_mbid);
+    defer testing.allocator.free(cover.image.bytes);
+    try testing.expectEqualStrings("image/jpeg", cover.image.mime_type);
+    try testing.expectEqualStrings("https://coverartarchive.org/release-group/" ++ test_release_mbid ++ "/front-250", net.transport.history.items[0].url);
+    try testing.expectEqual(FrontCover.missing, try archive.releaseGroupFrontCover(testing.allocator, test_release_mbid));
+    try testing.expectError(error.InvalidMusicBrainzId, archive.releaseGroupFrontCover(testing.allocator, "../x"));
 }

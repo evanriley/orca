@@ -560,7 +560,8 @@ ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 `Runtime.startReleaseCoverArtFetch(library, release_id)`, and a matching job
 with `MatchRequest.cover_art`, fetch a Release's front cover from the Cover
 Art Archive into the Library. Nothing is fetched for a Release one of whose
-files carries a readable cover, and media files are never written. The
+files carries a readable cover, or whose folder holds a readable front image,
+and media files are never written. The
 cover is stored in `release_artwork` ([database.md](database.md#release-artwork)),
 and `libraryReleaseArtwork`, `libraryTrackArtwork` and the artwork loader
 return it when no file of the Release has one: an embedded cover always
@@ -589,7 +590,7 @@ wins.
   not asked for again while its release ID stays the same.
 
 `jobMatchStats(job).cover_art` reports the `CoverArtOutcome`: `embedded`,
-`fetched`, `cached`, `cached_miss`, `not_found`, `no_release_id`, or, failing
+`folder`, `fetched`, `cached`, `cached_miss`, `not_found`, `no_release_id`, or, failing
 the job, `refused`, `unavailable` or `busy`.
 
 ```sh
@@ -598,8 +599,13 @@ orca-cli cover-art DATABASE RELEASE_ID
 orca-cli artwork DATABASE --release=ID --out=PATH
 ```
 
-`ORCA_COVERARTARCHIVE_URL` points `match`, `cover-art` and `orca-gtk` at
-another server.
+`ORCA_COVERARTARCHIVE_URL` points `match`, `cover-art`, `artist-info
+--fetch` and `orca-gtk` at another server.
+
+The [Artist info](#artist-info) fetch also asks the archive for release
+group covers, `GET /release-group/{mbid}/front-250`, under the same service,
+redirects and image rules. They are kept in `release_group_covers`
+([database.md](database.md#artist-info)), apart from `release_artwork`.
 
 ## LRCLIB
 
@@ -696,10 +702,27 @@ what was kept.
      `https://{language}.wikipedia.org`, as the service `wikipedia`: the
      article's lead as plain text, at most 16 KiB, and its page. A
      disambiguation page is no biography.
-  6. **Genres.** Unless genre fill is off, the MusicBrainz artist's genres
+  6. **Release groups.** `GET
+     /ws/2/release-group?artist={mbid}&inc=artist-credits&limit=100&fmt=json`,
+     as the service `musicbrainz`: one request, so at most MusicBrainz's
+     largest page of 100 groups, each with its title, primary type, first
+     release year and the other artists of its credit, joined as MusicBrainz
+     joins them. They replace the Artist's `artist_release_groups`, at most
+     `max_release_groups` (200). A failed browse keeps the groups already
+     stored, unless the Artist's MusicBrainz ID changed, which clears them.
+     The MusicBrainz lookup also gives the Artist's origin: its begin area,
+     else its area, named with the subdivision it lies in, such as
+     `Portland, Oregon`. Unless the area is itself a subdivision or a
+     country, `GET /ws/2/area/{id}?inc=area-rels&fmt=json` follows its
+     current backward `part of` relations upward, at most 3 lookups,
+     preferring a subdivision to a country, so the country is named only
+     when no subdivision is found. The lookups are cached like every other
+     MusicBrainz answer; when none finds a subdivision or country, or one
+     fails, the origin is the area's name alone.
+  7. **Genres.** Unless genre fill is off, the MusicBrainz artist's genres
      go on the Artist's Tracks that have none
      ([Genres from MusicBrainz](#genres-from-musicbrainz)).
-  7. **ListenBrainz.** `POST /1/popularity/artist` with
+  8. **ListenBrainz.** `POST /1/popularity/artist` with
      `{"artist_mbids":[mbid]}` on the ListenBrainz server, as the service
      `listenbrainz`, needing no token: its `total_user_count` is kept as the
      Artist's listeners. Then `GET
@@ -708,7 +731,7 @@ what was kept.
      `listenbrainz-labs`: the 12 highest-scored related artists other than
      the Artist itself are kept. Both run at most once in 7 days per Artist,
      unless `force` is set; the Labs answer is cached for 7 days.
-  8. **Related artist photos.** For each of the first 8 related artists
+  9. **Related artist photos.** For each of the first 8 related artists
      with no library Artist and no photo or no-photo marker kept less than
      30 days ago (with `force`, the first 8 such artists whatever their
      age), the photo is found as for the Artist itself: MusicBrainz on the
@@ -725,7 +748,19 @@ what was kept.
      Commons page), `photo_licence`, `photo_licence_url` and `photo_credit`
      from the `imageinfo` reply's `extmetadata`, which
      `libraryRelatedArtistPhotoInfo` returns for a host to show with it.
-  9. **Releases.** With `options.include_releases`, each of up to 64 of the
+  10. **Release group covers.** For each of the first 24 groups Elsewhere
+     lists (`libraryArtistElsewhere`, newest first), `GET
+     /release-group/{mbid}/front-250` on the Cover Art Archive, as the
+     service `coverartarchive`, under its redirect and image rules
+     ([Cover Art Archive](#cover-art-archive)). A cover is kept in
+     `release_group_covers` by group ID and not asked for again, `force`
+     included; a `404` or refusal keeps a row without an image, asked about
+     again after 30 days. An unavailable or busy archive ends the step and
+     keeps nothing for the groups left. `options.offline` skips the step.
+     None of these change the outcome. A cover goes when no Artist's
+     release groups name its group any more. The artwork loader serves it
+     for the subject `.{ .release_group = mbid }`, without a request.
+  11. **Releases.** With `options.include_releases`, each of up to 64 of the
      Artist's Releases with a MusicBrainz release ID gets its
      [release info](#release-info).
 - **Years active.** For a `Group`, `Orchestra` or `Choir`, MusicBrainz's
@@ -735,7 +770,7 @@ what was kept.
   earliest release date among the Artist's Releases in the Library, and
   end at P2032. Such an Artist is `ended` when P2032 is set or MusicBrainz
   says it ended, with no end year unless P2032 gives one.
-- **What is sent.** Only the MusicBrainz artist and release IDs, the
+- **What is sent.** Only the MusicBrainz artist, area and release IDs, the
   release group, Wikidata item and Commons file IDs and the article title
   the services themselves returned, and the language. No path, file name, tag or other Library
   content leaves the machine.
@@ -772,18 +807,22 @@ info.
 orca-cli artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx]
 orca-cli artist-photo DATABASE ARTIST_ID --out=PATH
 orca-cli related-photo DATABASE MBID --out=PATH
+orca-cli release-group-cover DATABASE MBID --out=PATH
 ```
 
-`ORCA_MUSICBRAINZ_URL`, `ORCA_WIKIDATA_URL`, `ORCA_WIKIMEDIA_URL`,
-`ORCA_WIKIPEDIA_URL`, `ORCA_LISTENBRAINZ_URL` and `ORCA_LISTENBRAINZ_LABS_URL`
-point `artist-info --fetch`, `release-info --fetch` and
-`genres --fill-from-musicbrainz` at other servers. With `ORCA_WIKIPEDIA_URL`
+`ORCA_MUSICBRAINZ_URL`, `ORCA_COVERARTARCHIVE_URL`, `ORCA_WIKIDATA_URL`,
+`ORCA_WIKIMEDIA_URL`, `ORCA_WIKIPEDIA_URL`, `ORCA_LISTENBRAINZ_URL` and
+`ORCA_LISTENBRAINZ_LABS_URL` point `artist-info --fetch`, `release-info
+--fetch` and `genres --fill-from-musicbrainz` at other servers. With `ORCA_WIKIPEDIA_URL`
 set, every language is asked of that one server. `artist-info` prints
 `listeners=N (ListenBrainz)` and `related: N` with one line per related
 artist, each ending in `photo=yes` or `photo=no`; `orca-cli related
 DATABASE ARTIST_ID` prints those lines alone, and `related-photo` writes a
 related artist's kept photo, then prints `source=`, `licence=`, `credit=`,
-`photo-url=` and `photo-licence-url=` lines.
+`photo-url=` and `photo-licence-url=` lines. With `--include-releases`, each
+`elsewhere:` line carries `cover=yes`, `cover=no` (the archive has none) or
+`cover=-` (not asked yet), and `release-group-cover` writes a kept cover to
+PATH and prints `source=coverartarchive`, its type and its size.
 
 ## Release info
 

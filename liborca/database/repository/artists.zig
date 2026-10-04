@@ -151,7 +151,9 @@ pub const ArtistRepository = struct {
             inline else => |sort| switch (needle.len != 0) {
                 inline else => |by_needle| switch (query.genre_id != null) {
                     inline else => |by_genre| switch (query.loved_only) {
-                        inline else => |by_loved| try self.db.prepare(comptime artistQueryText(sort, by_needle, by_genre, by_loved)),
+                        inline else => |by_loved| switch (query.role) {
+                            inline else => |role| try self.db.prepare(comptime artistQueryText(sort, by_needle, by_genre, by_loved, role)),
+                        },
                     },
                 },
             },
@@ -168,16 +170,18 @@ pub const ArtistRepository = struct {
     pub fn countMatching(self: *const ArtistRepository, query: ArtistQuery) !u64 {
         var folded: [text_key.key_buffer_size]u8 = undefined;
         const needle = text_key.normalizeInto(&folded, query.filter);
-        if (needle.len == 0 and query.genre_id == null and !query.loved_only) return self.count();
+        if (needle.len == 0 and query.genre_id == null and !query.loved_only and query.role == .all) return self.count();
         var statement = try self.db.prepare(
             "SELECT count(*) FROM artists WHERE (?3 = '' OR instr(artists.key, ?3) > 0)\n" ++
                 "  AND (?4 IS NULL OR " ++ comptime artistsOfGenre("?4") ++ ")\n" ++
-                "  AND (?5 = 0 OR EXISTS (SELECT 1 FROM artist_loves WHERE artist_loves.artist_id = artists.id));",
+                "  AND (?5 = 0 OR EXISTS (SELECT 1 FROM artist_loves WHERE artist_loves.artist_id = artists.id))\n" ++
+                "  AND (?6 = 0 OR " ++ album_artist_term ++ ");",
         );
         defer statement.deinit();
         try statement.bindText(3, needle);
         try statement.bindOptionalInt64(4, query.genre_id);
         try statement.bindInt64(5, @intFromBool(query.loved_only));
+        try statement.bindInt64(6, @intFromBool(query.role == .album_artists));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -260,11 +264,12 @@ const artist_from = "FROM artists LEFT JOIN artist_loves ON artist_loves.artist_
 const newest_release = "max(COALESCE((SELECT max(releases.id) FROM releases WHERE releases.album_artist_id = artists.id), 0),\n" ++
     "    COALESCE((SELECT max(tracks.release_id) FROM tracks WHERE tracks.artist_id = artists.id), 0))";
 
-fn artistQueryText(comptime sort: ArtistSort, comptime by_needle: bool, comptime by_genre: bool, comptime by_loved: bool) [:0]const u8 {
+fn artistQueryText(comptime sort: ArtistSort, comptime by_needle: bool, comptime by_genre: bool, comptime by_loved: bool, comptime role: ArtistRole) [:0]const u8 {
     var terms: []const []const u8 = &.{};
     if (by_needle) terms = terms ++ .{"instr(artists.key, ?3) > 0"};
     if (by_genre) terms = terms ++ .{artistsOfGenre("?4")};
     if (by_loved) terms = terms ++ .{"artist_loves.artist_id IS NOT NULL"};
+    if (role == .album_artists) terms = terms ++ .{album_artist_term};
     var where: []const u8 = "";
     for (terms, 0..) |term, index| where = where ++ (if (index == 0) "WHERE " else " AND ") ++ term;
     if (where.len != 0) where = where ++ "\n";
@@ -322,10 +327,19 @@ pub const ArtistQuery = struct {
     genre_id: ?i64 = null,
     /// Only the Artists the user loved.
     loved_only: bool = false,
+    role: ArtistRole = .all,
     sort: ArtistSort = .name,
     limit: u32 = max_page,
     offset: u32 = 0,
 };
+
+pub const ArtistRole = enum {
+    all,
+    /// Only the Artists at least one Release is filed under.
+    album_artists,
+};
+
+const album_artist_term = "EXISTS (SELECT 1 FROM releases WHERE releases.album_artist_id = artists.id)";
 
 /// The orders an Artist listing comes in. Each ends in `artists.id`.
 pub const ArtistSort = enum {
@@ -439,4 +453,18 @@ test "an artist's cover release is their first own release in shelf order, else 
     });
     defer shelf.deinit();
     try std.testing.expectEqual(shelf.items[0].id, covers[1].?);
+}
+
+test "only the artists a release is filed under are album artists, and the count agrees with the page" {
+    var library = try openArtistLibrary("album-artists");
+    defer library.close();
+    try library.database.exec("UPDATE artists SET key = lower(name);");
+    var listed = try library.artists.page(std.testing.allocator, .{ .role = .album_artists });
+    defer listed.deinit();
+    var ids: [4]i64 = undefined;
+    for (listed.items, 0..) |item, index| ids[index] = item.id;
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, ids[0..listed.items.len]);
+    try std.testing.expectEqual(@as(u64, 2), try library.artists.countMatching(.{ .role = .album_artists }));
+    try std.testing.expectEqual(@as(u64, 1), try library.artists.countMatching(.{ .role = .album_artists, .filter = "oth" }));
+    try std.testing.expectEqual(@as(u64, 4), try library.artists.countMatching(.{}));
 }

@@ -501,6 +501,7 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
         .no_release_id => "No release ID — review matches, then Fetch Cover Art",
         .fetched => "Found the album's cover",
         .embedded => "The album's files already carry a cover",
+        .folder => "The album's folder already has a cover",
         .cached => "The album's cover was already fetched",
         .cached_miss, .not_found => "The Cover Art Archive has no cover for this album",
         .not_requested, .refused, .unavailable, .busy, .cancelled => "Done",

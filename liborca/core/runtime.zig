@@ -63,6 +63,9 @@ pub const PlaylistCreator = database.PlaylistCreator;
 pub const PlaylistSort = database.PlaylistSort;
 pub const PlaylistQuery = database.PlaylistQuery;
 pub const PlaylistUpdate = database.PlaylistUpdate;
+pub const PlaylistFormats = database.PlaylistFormats;
+pub const CodecCount = database.CodecCount;
+pub const SmartPlaylistPreview = database.SmartPlaylistPreview;
 pub const PlaylistImport = runtime_playlists.PlaylistImport;
 pub const PlaylistExport = runtime_playlists.PlaylistExport;
 pub const PlaylistExportOptions = runtime_playlists.PlaylistExportOptions;
@@ -458,6 +461,9 @@ pub const OrcaRuntime = struct {
     /// taking and releasing a tag write's journal lock only.
     control_threaded: std.Io.Threaded = .init_single_threaded,
     last_listen_sample_ms: ?i64 = null,
+    /// Fixes every random smart playlist order until
+    /// `libraryReshufflePlaylists`; drawn on first use.
+    playlist_shuffle_seed: ?u64 = null,
     /// Replaced by tests that must not reach a network or wait in real time.
     listen_hooks: listen_worker.Hooks = .{},
     matching_hooks: MatchingHooks = .{},
@@ -702,8 +708,11 @@ pub const OrcaRuntime = struct {
 
     /// The Artists, Releases, Tracks, Playlists and Genres where every word of
     /// `text` begins a word of the name or `SearchHit.subtitle`, ignoring case
-    /// and diacritics, up to each kind's cap in `limits`. Text with no word
-    /// gives no hits.
+    /// and diacritics, up to each kind's cap in `limits`, with each kind's
+    /// detail and the hit to feature as `SearchResults.top`. Within their caps,
+    /// the Playlists holding Tracks of the first Artist hit and that Artist's
+    /// main genre follow, with `SearchHit.reason` saying why. Text with no
+    /// word gives no hits.
     pub fn librarySearch(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -722,13 +731,31 @@ pub const OrcaRuntime = struct {
     }
 
     /// How many Tracks `libraryTrackQuery` would page through for the same
-    /// filters without search text, and their summed duration.
+    /// search text and filters, and their summed duration.
     pub fn libraryTrackQueryTotals(
         self: *OrcaRuntime,
         library: LibraryHandle,
+        text_query: []const u8,
         query: database.TrackQuery,
     ) !database.TrackTotals {
-        return (try libraryDatabase(self, library)).tracks.totals(query);
+        const tracks = &(try libraryDatabase(self, library)).tracks;
+        if (text_query.len == 0) return tracks.totals(query);
+        return tracks.searchTotals(text_query, query);
+    }
+
+    /// The ids of the playable Tracks among `query.limit` rows from
+    /// `query.offset` of the listing `libraryTrackQuery` pages through for the
+    /// same text and filters, in its order: a whole playback queue's worth,
+    /// up to `database.max_track_id_window` rows. Caller-owned, freed with
+    /// `allocator`.
+    pub fn libraryTrackQueryPlayableIds(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        text_query: []const u8,
+        query: database.TrackQuery,
+    ) ![]i64 {
+        return (try libraryDatabase(self, library)).tracks.playableIds(allocator, text_query, query);
     }
 
     pub fn libraryArtistCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -1230,6 +1257,14 @@ pub const OrcaRuntime = struct {
         return runtime_artist_info.libraryRelatedArtistPhotoInfo(self, library, musicbrainz_artist_id);
     }
 
+    /// The MusicBrainz release groups `startArtistInfoFetch` kept for an
+    /// Artist that none of its Releases or appearances in the Library
+    /// belongs to, newest first, at most `database.artist_release_groups_max`.
+    /// The caller frees each with `deinit` and the slice with `allocator`.
+    pub fn libraryArtistElsewhere(self: *OrcaRuntime, library: LibraryHandle, allocator: std.mem.Allocator, artist_id: i64) ![]database.ElsewhereRelease {
+        return runtime_artist_info.libraryArtistElsewhere(self, library, allocator, artist_id);
+    }
+
     /// What `startReleaseInfoFetch` last kept for a Release; null when
     /// nothing was ever fetched. The caller frees it with `deinit`.
     pub fn libraryReleaseInfo(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !?database.ReleaseInfo {
@@ -1350,6 +1385,31 @@ pub const OrcaRuntime = struct {
     /// saving it.
     pub fn librarySmartPlaylistCount(self: *OrcaRuntime, library: LibraryHandle, rules_json: []const u8) !u64 {
         return runtime_playlists.librarySmartPlaylistCount(self, library, rules_json);
+    }
+
+    /// What `rules_json` selects now, without saving it: the count and total
+    /// length up to its limit and the first `sample_limit` (at most 512)
+    /// Tracks in its order, owned by `allocator`.
+    pub fn librarySmartPlaylistPreview(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        rules_json: []const u8,
+        sample_limit: u32,
+    ) !SmartPlaylistPreview {
+        return runtime_playlists.librarySmartPlaylistPreview(self, library, allocator, rules_json, sample_limit);
+    }
+
+    /// Draws new random orders for every smart playlist sorted at random.
+    /// Until then each one keeps its order across reads, so its pages agree.
+    pub fn libraryReshufflePlaylists(self: *OrcaRuntime) void {
+        runtime_playlists.libraryReshufflePlaylists(self);
+    }
+
+    /// The codecs a playlist's available entries play and how many of them
+    /// are analyzed, owned by `allocator`.
+    pub fn libraryPlaylistFormats(self: *OrcaRuntime, library: LibraryHandle, allocator: std.mem.Allocator, playlist_id: i64) !PlaylistFormats {
+        return runtime_playlists.libraryPlaylistFormats(self, library, allocator, playlist_id);
     }
 
     pub fn libraryCreatePlaylist(self: *OrcaRuntime, library: LibraryHandle, name: []const u8) !i64 {

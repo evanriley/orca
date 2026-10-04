@@ -1,6 +1,6 @@
 //! A Release's front cover from the Cover Art Archive, fetched only when none
-//! of its files carries one, and kept in the Library. Media files are never
-//! written.
+//! of its files carries one and its folder holds no front cover image, and
+//! kept in the Library. Media files are never written.
 
 const std = @import("std");
 const artwork = @import("artwork.zig");
@@ -33,6 +33,9 @@ pub const Outcome = enum(u8) {
     /// Another Orca process holds the Cover Art Archive.
     busy,
     cancelled,
+    /// A front cover image in the Release's folder is shown before a fetched
+    /// one, so nothing was fetched.
+    folder,
 };
 
 /// How long the archive's "no cover" stands before it is asked again.
@@ -50,6 +53,10 @@ pub const Fetch = struct {
         if (try artwork.releaseEmbeddedArtwork(self.allocator, self.io, self.library, release_id)) |image| {
             image.deinit();
             return .embedded;
+        }
+        if (try artwork.releaseFolderArtwork(self.allocator, self.io, self.library, release_id)) |image| {
+            image.deinit();
+            return .folder;
         }
         const release_mbid = try self.library.release_artwork.coverReleaseMbid(self.allocator, release_id) orelse
             return .no_release_id;

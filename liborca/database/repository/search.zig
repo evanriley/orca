@@ -1,5 +1,8 @@
 const std = @import("std");
 const sqlite = @import("../sqlite.zig");
+const tracks = @import("tracks.zig");
+const release_year = @import("releases.zig").release_year;
+const PlaylistKind = @import("playlists.zig").PlaylistKind;
 
 /// The longest search text a query accepts, in bytes.
 pub const max_search_text = 256;
@@ -9,6 +12,16 @@ pub const max_search_hits_per_kind = 50;
 /// What a search hit names. The values are `search_index.kind`, which holds
 /// no Tracks: they are searched in `track_search`.
 pub const SearchKind = enum(u8) { artist, release, track, playlist, genre };
+
+/// Why a search returned a hit.
+pub const SearchReason = enum(u8) {
+    /// Every word of the text begins a word of its title or subtitle.
+    name,
+    /// A Playlist holding Tracks of the search's first Artist hit.
+    tracks_by,
+    /// The genre most of the search's first Artist hit's Tracks carry.
+    main_genre_of,
+};
 
 pub const SearchHit = struct {
     kind: SearchKind,
@@ -21,12 +34,33 @@ pub const SearchHit = struct {
     /// Lower is more relevant, comparable only within one kind of one search.
     /// For a Track, 0 when every word is a whole word of the title, 1 when
     /// every word begins a word of the title, 2 otherwise; for any other kind,
-    /// bm25 over title and subtitle, title weighted higher.
+    /// bm25 over title and subtitle, title weighted higher. 0 for a hit whose
+    /// `reason` is not `name`.
     rank: f32,
+    /// An Artist's Releases, as `ArtistSummary.release_count` counts them;
+    /// 0 for any other kind.
+    release_count: u64 = 0,
+    /// An Artist's Tracks as `ArtistSummary.track_count` counts them, a
+    /// Release's Tracks, a manual Playlist's entries, a genre's Tracks; 0 for
+    /// a Track or a smart Playlist.
+    track_count: u64 = 0,
+    /// A Release's year; null for any other kind or an undated Release.
+    year: ?i32 = null,
+    /// A Track's length, or a manual Playlist's summed as
+    /// `PlaylistSummary.duration_ms` sums it; null for any other kind.
+    duration_ms: ?i64 = null,
+    /// A Release's album artist or a Track's artist; empty for any other kind.
+    artist: []u8,
+    reason: SearchReason = .name,
+    /// For `tracks_by`, the Playlist's entries whose recording has a Track of
+    /// the Artist; for `main_genre_of`, the Artist's Tracks carrying the
+    /// genre; 0 for `name`.
+    reason_count: u64 = 0,
 
     pub fn deinit(self: SearchHit, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
         allocator.free(self.subtitle);
+        allocator.free(self.artist);
     }
 };
 
@@ -40,10 +74,15 @@ pub const SearchLimits = struct {
     genres: u8 = 3,
 };
 
-/// Hits in kind order, most relevant first within each kind.
+/// Hits in kind order: within each kind the `name` hits most relevant first,
+/// then any reason hits, most `reason_count` first.
 pub const SearchResults = struct {
     allocator: std.mem.Allocator,
     hits: []SearchHit,
+    /// The `name` hit to feature: the first, in `hits` order, of those whose
+    /// title holds every word of the text as a whole word, else the first
+    /// `name` hit. It shares its text with that element of `hits`.
+    top: ?SearchHit = null,
 
     pub fn deinit(self: SearchResults) void {
         for (self.hits) |hit| hit.deinit(self.allocator);
@@ -113,8 +152,56 @@ fn isSeparator(codepoint: u21) bool {
     };
 }
 
-const track_hits_sql = "SELECT " ++ std.fmt.comptimePrint("{d}", .{@intFromEnum(SearchKind.track)}) ++
-    \\ AS kind, tracks.id, tracks.title, tracks.artist || ' ' || tracks.album, tiered.score FROM (
+fn kindNumber(comptime kind: SearchKind) []const u8 {
+    return std.fmt.comptimePrint("{d}", .{@intFromEnum(kind)});
+}
+
+fn ofArtist(comptime predicate: []const u8, comptime artist: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var rest = predicate;
+        while (std.mem.indexOf(u8, rest, "?3")) |at| {
+            out = out ++ rest[0..at] ++ artist;
+            rest = rest[at + 2 ..];
+        }
+        return out ++ rest;
+    }
+}
+
+fn playlistDuration(comptime playlist: []const u8) []const u8 {
+    return "(SELECT COALESCE(sum(tracks.duration_ms), 0) FROM playlist_entries\n" ++
+        "    JOIN tracks ON tracks.id = (SELECT min(candidate.id) FROM tracks AS candidate\n" ++
+        "        WHERE candidate.recording_id = playlist_entries.recording_id)\n" ++
+        "    WHERE playlist_entries.playlist_id = " ++ playlist ++ ")";
+}
+
+fn playlistEntryCount(comptime playlist: []const u8) []const u8 {
+    return "(SELECT count(*) FROM playlist_entries WHERE playlist_entries.playlist_id = " ++ playlist ++ ")";
+}
+
+const entry_details =
+    "CASE WHEN EXISTS (SELECT 1 FROM search_index AS whole WHERE whole.search_index MATCH '{title}: (' || ?7 || ')'\n" ++
+    "    AND whole.rowid = ranked.hit) THEN 0 ELSE 1 END AS tier,\n" ++
+    "CASE entry.kind WHEN " ++ kindNumber(.artist) ++ " THEN (SELECT count(*) FROM releases WHERE " ++
+    ofArtist(tracks.by_release_artist, "entry.entity_id") ++ ") ELSE 0 END AS release_count,\n" ++
+    "CASE entry.kind\n" ++
+    "    WHEN " ++ kindNumber(.artist) ++ " THEN (SELECT count(*) FROM tracks WHERE " ++
+    ofArtist(tracks.by_artist, "entry.entity_id") ++ ")\n" ++
+    "    WHEN " ++ kindNumber(.release) ++ " THEN (SELECT count(*) FROM tracks WHERE tracks.release_id = entry.entity_id)\n" ++
+    "    WHEN " ++ kindNumber(.playlist) ++ " THEN " ++ playlistEntryCount("entry.entity_id") ++ "\n" ++
+    "    WHEN " ++ kindNumber(.genre) ++ " THEN COALESCE((SELECT track_count FROM genre_totals\n" ++
+    "        WHERE genre_totals.genre_id = entry.entity_id), 0)\n" ++
+    "    ELSE 0 END AS track_count,\n" ++
+    "CASE entry.kind WHEN " ++ kindNumber(.release) ++ " THEN (SELECT " ++ release_year ++
+    " FROM releases WHERE releases.id = entry.entity_id) END AS year,\n" ++
+    "CASE WHEN entry.kind = " ++ kindNumber(.playlist) ++ " AND (SELECT playlists.kind FROM playlists\n" ++
+    "    WHERE playlists.id = entry.entity_id) = " ++ std.fmt.comptimePrint("{d}", .{@intFromEnum(PlaylistKind.manual)}) ++
+    " THEN " ++ playlistDuration("entry.entity_id") ++ " END AS duration_ms,\n" ++
+    "CASE entry.kind WHEN " ++ kindNumber(.release) ++ " THEN entry.subtitle ELSE '' END AS artist\n";
+
+const track_hits_sql = "SELECT " ++ kindNumber(.track) ++
+    \\ AS kind, tracks.id, tracks.title, tracks.artist || ' ' || tracks.album, tiered.score,
+    \\    min(tiered.score, 1) AS tier, 0, 0, NULL, tracks.duration_ms, tracks.artist FROM (
     \\    SELECT hit, min(tier) AS score FROM (
     \\        SELECT * FROM (
     \\            SELECT rowid AS hit, 0 AS tier FROM track_search
@@ -147,10 +234,29 @@ const ranked_hits_sql = blk: {
             \\
         , .{ kind, kind + 2 });
     }
-    break :blk "SELECT entry.kind AS kind, entry.entity_id AS id, entry.title, entry.subtitle, ranked.score AS score FROM (\n" ++
+    break :blk "SELECT entry.kind AS kind, entry.entity_id AS id, entry.title, entry.subtitle, ranked.score AS score,\n" ++
+        entry_details ++ "FROM (\n" ++
         arms ++ ") AS ranked JOIN search_index AS entry ON entry.rowid = ranked.hit\nUNION ALL\n" ++
         track_hits_sql ++ "ORDER BY kind, score, id;";
 };
+
+const playlists_with_artist_sql =
+    "SELECT playlists.id, playlists.name, playlists.description, matched.tracks,\n" ++
+    "       " ++ playlistEntryCount("playlists.id") ++ ",\n" ++
+    "       " ++ playlistDuration("playlists.id") ++ "\n" ++
+    "FROM (SELECT playlist_id, count(*) AS tracks FROM playlist_entries\n" ++
+    "      WHERE recording_id IN (SELECT recording_id FROM tracks WHERE " ++ tracks.by_artist ++ ")\n" ++
+    "      GROUP BY playlist_id) AS matched\n" ++
+    "CROSS JOIN playlists ON playlists.id = matched.playlist_id\n" ++
+    "ORDER BY matched.tracks DESC, playlists.id LIMIT ?1;";
+
+const main_genre_sql =
+    "SELECT genres.id, genres.name, count(*),\n" ++
+    "       COALESCE((SELECT track_count FROM genre_totals WHERE genre_totals.genre_id = genres.id), 0)\n" ++
+    "FROM tracks CROSS JOIN track_genres ON track_genres.track_id = tracks.id\n" ++
+    "JOIN genres ON genres.id = track_genres.genre_id\n" ++
+    "WHERE " ++ tracks.by_artist ++ "\nGROUP BY genres.id\n" ++
+    "ORDER BY count(*) DESC, genres.name COLLATE NOCASE, genres.id LIMIT 1;";
 
 pub const SearchRepository = struct {
     db: sqlite.Database,
@@ -178,22 +284,131 @@ pub const SearchRepository = struct {
             for (hits.items) |hit| hit.deinit(allocator);
             hits.deinit(allocator);
         }
+        var top: ?SearchHit = null;
+        var top_whole = false;
         while (try statement.step() == .row) {
             const title = try allocator.dupe(u8, statement.columnText(2));
             errdefer allocator.free(title);
             const subtitle = try allocator.dupe(u8, statement.columnText(3));
             errdefer allocator.free(subtitle);
-            try hits.append(allocator, .{
+            const artist = try allocator.dupe(u8, statement.columnText(10));
+            errdefer allocator.free(artist);
+            const hit: SearchHit = .{
                 .kind = @enumFromInt(@as(u8, @intCast(statement.columnInt64(0)))),
                 .id = statement.columnInt64(1),
                 .title = title,
                 .subtitle = subtitle,
                 .rank = @floatCast(statement.columnDouble(4)),
-            });
+                .release_count = @intCast(statement.columnInt64(6)),
+                .track_count = @intCast(statement.columnInt64(7)),
+                .year = if (statement.columnIsNull(8)) null else @intCast(statement.columnInt64(8)),
+                .duration_ms = if (statement.columnIsNull(9)) null else statement.columnInt64(9),
+                .artist = artist,
+            };
+            try hits.append(allocator, hit);
+            const whole = statement.columnInt64(5) == 0;
+            if (top == null or (whole and !top_whole)) {
+                top = hit;
+                top_whole = whole;
+            }
         }
-        return .{ .allocator = allocator, .hits = try hits.toOwnedSlice(allocator) };
+        const first_artist = for (hits.items) |hit| {
+            if (hit.kind == .artist) break hit.id;
+        } else null;
+        if (first_artist) |artist_id| {
+            try self.addPlaylistsWithArtist(allocator, &hits, artist_id, limits.playlists);
+            try self.addMainGenre(allocator, &hits, artist_id, limits.genres);
+        }
+        return .{ .allocator = allocator, .hits = try hits.toOwnedSlice(allocator), .top = top };
+    }
+
+    fn addPlaylistsWithArtist(
+        self: *const SearchRepository,
+        allocator: std.mem.Allocator,
+        hits: *std.ArrayList(SearchHit),
+        artist_id: i64,
+        limit: u8,
+    ) !void {
+        var room = limit - countKind(hits.items, .playlist);
+        if (room == 0) return;
+        var statement = try self.db.prepare(playlists_with_artist_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(3, artist_id);
+        while (room > 0 and try statement.step() == .row) {
+            const id = statement.columnInt64(0);
+            if (containsHit(hits.items, .playlist, id)) continue;
+            const title = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(title);
+            const subtitle = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(subtitle);
+            const artist = try allocator.dupe(u8, "");
+            errdefer allocator.free(artist);
+            try hits.insert(allocator, kindEnd(hits.items, .playlist), .{
+                .kind = .playlist,
+                .id = id,
+                .title = title,
+                .subtitle = subtitle,
+                .rank = 0,
+                .track_count = @intCast(statement.columnInt64(4)),
+                .duration_ms = statement.columnInt64(5),
+                .artist = artist,
+                .reason = .tracks_by,
+                .reason_count = @intCast(statement.columnInt64(3)),
+            });
+            room -= 1;
+        }
+    }
+
+    fn addMainGenre(
+        self: *const SearchRepository,
+        allocator: std.mem.Allocator,
+        hits: *std.ArrayList(SearchHit),
+        artist_id: i64,
+        limit: u8,
+    ) !void {
+        if (countKind(hits.items, .genre) >= limit) return;
+        var statement = try self.db.prepare(main_genre_sql);
+        defer statement.deinit();
+        try statement.bindInt64(3, artist_id);
+        if (try statement.step() != .row) return;
+        const id = statement.columnInt64(0);
+        if (containsHit(hits.items, .genre, id)) return;
+        const title = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(title);
+        const subtitle = try allocator.dupe(u8, "");
+        errdefer allocator.free(subtitle);
+        const artist = try allocator.dupe(u8, "");
+        errdefer allocator.free(artist);
+        try hits.insert(allocator, kindEnd(hits.items, .genre), .{
+            .kind = .genre,
+            .id = id,
+            .title = title,
+            .subtitle = subtitle,
+            .rank = 0,
+            .track_count = @intCast(statement.columnInt64(3)),
+            .artist = artist,
+            .reason = .main_genre_of,
+            .reason_count = @intCast(statement.columnInt64(2)),
+        });
     }
 };
+
+fn countKind(hits: []const SearchHit, kind: SearchKind) u8 {
+    var count: u8 = 0;
+    for (hits) |hit| count += @intFromBool(hit.kind == kind);
+    return count;
+}
+
+fn containsHit(hits: []const SearchHit, kind: SearchKind, id: i64) bool {
+    for (hits) |hit| if (hit.kind == kind and hit.id == id) return true;
+    return false;
+}
+
+fn kindEnd(hits: []const SearchHit, kind: SearchKind) usize {
+    for (hits, 0..) |hit, index| if (@intFromEnum(hit.kind) > @intFromEnum(kind)) return index;
+    return hits.len;
+}
 
 const LibraryDatabase = @import("../library.zig").LibraryDatabase;
 
@@ -446,4 +661,149 @@ test "quotes, stars, operators and brackets in search text are matched as text, 
     var quotes: [max_search_text]u8 = @splat('"');
     quotes[0] = 'a';
     try std.testing.expect(try matchExpression(&expression, &quotes) != null);
+}
+
+fn findHit(results: SearchResults, kind: SearchKind, id: i64) !SearchHit {
+    for (results.hits) |hit| if (hit.kind == kind and hit.id == id) return hit;
+    return error.TestExpectedHit;
+}
+
+test "each kind of hit carries its counts, year, length and artist" {
+    var library = try openSearchLibrary("details");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Aminé', 'Aminé', 'amine');
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id, release_date) VALUES
+        \\    (1, 'Limbo', 'Aminé', 1, '2020-08-07'), (2, 'Good For You', 'Aminé', 1, NULL), (3, 'Comp', 'Various', NULL, '2019');
+        \\INSERT INTO recordings(id, title) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+        \\INSERT INTO tracks(id, release_id, recording_id, artist_id, title, artist, album, duration_ms) VALUES
+        \\    (1, 1, 1, 1, 'Woodlawn', 'Aminé', 'Limbo', 200000), (2, 1, 2, 1, 'Shimmy', 'Aminé', 'Limbo', 150000),
+        \\    (3, 2, 3, 1, 'Caroline', 'Aminé', 'Good For You', 210000), (4, 3, 4, 1, 'Guest Spot', 'Aminé', 'Comp', NULL);
+        \\INSERT INTO playlists(id, name, created_at, updated_at, kind) VALUES (1, 'Amine Mix', 0, 0, 0), (2, 'Amine Rules', 0, 0, 1);
+        \\INSERT INTO playlist_entries(playlist_id, position, recording_id, added_at) VALUES (1, 0, 1, 0), (1, 1, 3, 0), (1, 2, 3, 0);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Amine Core', 'amine core');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (1, 1, 0, 0), (2, 1, 0, 0);
+    );
+    var results = try library.search.find(std.testing.allocator, "amine", .{});
+    defer results.deinit();
+    try std.testing.expectEqual(@as(usize, 1 + 2 + 4 + 2 + 1), results.hits.len);
+    for (results.hits) |hit| try std.testing.expectEqual(SearchReason.name, hit.reason);
+
+    const artist = try findHit(results, .artist, 1);
+    try std.testing.expectEqual(@as(u64, 3), artist.release_count);
+    try std.testing.expectEqual(@as(u64, 4), artist.track_count);
+    try std.testing.expectEqualStrings("", artist.artist);
+
+    const dated = try findHit(results, .release, 1);
+    try std.testing.expectEqual(@as(?i32, 2020), dated.year);
+    try std.testing.expectEqual(@as(u64, 2), dated.track_count);
+    try std.testing.expectEqualStrings("Aminé", dated.artist);
+    try std.testing.expectEqual(@as(?i32, null), (try findHit(results, .release, 2)).year);
+
+    const track = try findHit(results, .track, 1);
+    try std.testing.expectEqual(@as(?i64, 200000), track.duration_ms);
+    try std.testing.expectEqualStrings("Aminé", track.artist);
+    try std.testing.expectEqual(@as(?i64, null), (try findHit(results, .track, 4)).duration_ms);
+
+    const manual = try findHit(results, .playlist, 1);
+    try std.testing.expectEqual(@as(u64, 3), manual.track_count);
+    try std.testing.expectEqual(@as(?i64, 620000), manual.duration_ms);
+    const smart = try findHit(results, .playlist, 2);
+    try std.testing.expectEqual(@as(u64, 0), smart.track_count);
+    try std.testing.expectEqual(@as(?i64, null), smart.duration_ms);
+
+    const genre = try findHit(results, .genre, 1);
+    try std.testing.expectEqual(@as(u64, 2), genre.track_count);
+    try std.testing.expectEqual(@as(u64, 0), genre.reason_count);
+}
+
+test "the first Artist hit adds the Playlists holding its Tracks, most first, and its main genre, within each kind's cap" {
+    var library = try openSearchLibrary("reasons");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Okafor', 'a', 'a'), (2, 'Other', 'b', 'b');
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id) VALUES (1, 'Split', 'Someone', 1);
+        \\INSERT INTO recordings(id, title) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e');
+        \\INSERT INTO tracks(id, release_id, recording_id, artist_id, title, artist, album, duration_ms) VALUES
+        \\    (1, NULL, 1, 1, 'One', 'Okafor', '', 10), (2, NULL, 2, 1, 'Two', 'Okafor', '', 20),
+        \\    (3, NULL, 3, 1, 'Three', 'Okafor', '', 30), (4, NULL, 4, 2, 'Four', 'Other', '', 40),
+        \\    (5, 1, 5, 2, 'Five', 'Other', 'Split', 50);
+        \\INSERT INTO playlists(id, name, created_at, updated_at) VALUES
+        \\    (1, 'Morning', 0, 0), (2, 'Evening', 0, 0), (3, 'Night', 0, 0), (4, 'Noon', 0, 0), (5, 'Okafor Faves', 0, 0);
+        \\INSERT INTO playlist_entries(playlist_id, position, recording_id, added_at) VALUES
+        \\    (1, 0, 1, 0), (1, 1, 4, 0), (2, 0, 1, 0), (2, 1, 2, 0), (2, 2, 5, 0), (3, 0, 4, 0), (4, 0, 3, 0);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Soul', 'soul'), (2, 'Jazz', 'jazz');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES
+        \\    (1, 1, 0, 0), (2, 1, 0, 0), (3, 1, 0, 0), (1, 2, 1, 0), (4, 2, 0, 0);
+    );
+    var results = try library.search.find(std.testing.allocator, "okafor", .{});
+    defer results.deinit();
+    const Reasoned = struct { kind: SearchKind, id: i64, reason: SearchReason, count: u64 };
+    var actual: std.ArrayList(Reasoned) = .empty;
+    defer actual.deinit(std.testing.allocator);
+    for (results.hits) |hit| {
+        if (hit.kind == .playlist or hit.kind == .genre) try actual.append(std.testing.allocator, .{
+            .kind = hit.kind,
+            .id = hit.id,
+            .reason = hit.reason,
+            .count = hit.reason_count,
+        });
+    }
+    try std.testing.expectEqualSlices(Reasoned, &.{
+        .{ .kind = .playlist, .id = 5, .reason = .name, .count = 0 },
+        .{ .kind = .playlist, .id = 2, .reason = .tracks_by, .count = 3 },
+        .{ .kind = .playlist, .id = 1, .reason = .tracks_by, .count = 1 },
+        .{ .kind = .playlist, .id = 4, .reason = .tracks_by, .count = 1 },
+        .{ .kind = .genre, .id = 1, .reason = .main_genre_of, .count = 3 },
+    }, actual.items);
+    const evening = try findHit(results, .playlist, 2);
+    try std.testing.expectEqual(@as(u64, 3), evening.track_count);
+    try std.testing.expectEqual(@as(?i64, 80), evening.duration_ms);
+    try std.testing.expectEqual(@as(f32, 0), evening.rank);
+    try std.testing.expectEqual(@as(u64, 3), (try findHit(results, .genre, 1)).track_count);
+
+    try expectHits(&library, "okafor", .{ .tracks = 0, .playlists = 2, .genres = 0 }, &.{
+        .{ .kind = .artist, .id = 1 },
+        .{ .kind = .playlist, .id = 5 },
+        .{ .kind = .playlist, .id = 2 },
+    });
+    try expectHits(&library, "okafor", .{ .artists = 0, .tracks = 0 }, &.{.{ .kind = .playlist, .id = 5 }});
+}
+
+test "the top hit is the first whose title holds every word whole, else the first name hit, never a reason hit" {
+    var library = try openSearchLibrary("top");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Bluebird', 'a', 'a');
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id) VALUES (1, 'Kind of Blue', 'Miles', NULL);
+        \\INSERT INTO recordings(id, title) VALUES (1, 'a');
+        \\INSERT INTO tracks(id, release_id, recording_id, artist_id, title, artist, album) VALUES (1, NULL, 1, 1, 'Wings', 'Bluebird', '');
+        \\INSERT INTO playlists(id, name, created_at, updated_at) VALUES (1, 'Mix', 0, 0);
+        \\INSERT INTO playlist_entries(playlist_id, position, recording_id, added_at) VALUES (1, 0, 1, 0);
+    );
+    {
+        var results = try library.search.find(std.testing.allocator, "blue", .{});
+        defer results.deinit();
+        const top = results.top orelse return error.TestExpectedTop;
+        try std.testing.expectEqual(SearchKind.release, top.kind);
+        try std.testing.expectEqual(@as(i64, 1), top.id);
+        try std.testing.expectEqual(SearchReason.tracks_by, (try findHit(results, .playlist, 1)).reason);
+    }
+    {
+        var results = try library.search.find(std.testing.allocator, "blu", .{});
+        defer results.deinit();
+        const top = results.top orelse return error.TestExpectedTop;
+        try std.testing.expectEqual(SearchKind.artist, top.kind);
+        try std.testing.expectEqual(@as(i64, 1), top.id);
+    }
+    {
+        var results = try library.search.find(std.testing.allocator, "wings", .{});
+        defer results.deinit();
+        try std.testing.expectEqual(SearchKind.track, results.top.?.kind);
+    }
+    {
+        var results = try library.search.find(std.testing.allocator, "mix", .{ .playlists = 0 });
+        defer results.deinit();
+        try std.testing.expectEqual(@as(?SearchHit, null), results.top);
+    }
 }

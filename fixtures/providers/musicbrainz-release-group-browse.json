@@ -1,0 +1,152 @@
+{
+  "release-group-count": 7,
+  "release-group-offset": 0,
+  "release-groups": [
+    {
+      "id": "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01",
+      "title": "Good for You",
+      "primary-type": "Album",
+      "primary-type-id": null,
+      "secondary-types": [],
+      "first-release-date": "2017-07-28",
+      "disambiguation": "",
+      "artist-credit": [
+        {
+          "name": "Aminé",
+          "joinphrase": "",
+          "artist": {
+            "id": "12398bf3-1b99-47b7-930c-f3956773f35a",
+            "name": "Aminé",
+            "sort-name": "Aminé",
+            "disambiguation": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02",
+      "title": "ONEPOINTFIVE",
+      "primary-type": "Album",
+      "primary-type-id": null,
+      "secondary-types": [],
+      "first-release-date": "2018-08-14",
+      "disambiguation": "",
+      "artist-credit": [
+        {
+          "name": "Aminé",
+          "joinphrase": "",
+          "artist": {
+            "id": "12398bf3-1b99-47b7-930c-f3956773f35a",
+            "name": "Aminé",
+            "sort-name": "Aminé",
+            "disambiguation": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03",
+      "title": "Limbo",
+      "primary-type": "Album",
+      "primary-type-id": null,
+      "secondary-types": [],
+      "first-release-date": "2020-08-07",
+      "disambiguation": "",
+      "artist-credit": [
+        {
+          "name": "Aminé",
+          "joinphrase": "",
+          "artist": {
+            "id": "12398bf3-1b99-47b7-930c-f3956773f35a",
+            "name": "Aminé",
+            "sort-name": "Aminé",
+            "disambiguation": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04",
+      "title": "KAYTRAMINÉ",
+      "primary-type": "Album",
+      "primary-type-id": null,
+      "secondary-types": [],
+      "first-release-date": "2023-05-19",
+      "disambiguation": "",
+      "artist-credit": [
+        {
+          "name": "Aminé",
+          "joinphrase": " & ",
+          "artist": {
+            "id": "12398bf3-1b99-47b7-930c-f3956773f35a",
+            "name": "Aminé",
+            "sort-name": "Aminé",
+            "disambiguation": ""
+          }
+        },
+        {
+          "name": "Kaytranada",
+          "joinphrase": "",
+          "artist": {
+            "id": "6f4e1b4c-6d5e-4ee6-8cc7-4b8c2dbd7a33",
+            "name": "Kaytranada",
+            "sort-name": "Kaytranada",
+            "disambiguation": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e05",
+      "title": "Compensating",
+      "primary-type": "Single",
+      "primary-type-id": null,
+      "secondary-types": [],
+      "first-release-date": "2023-08-04",
+      "disambiguation": "",
+      "artist-credit": [
+        {
+          "name": "Aminé",
+          "joinphrase": " feat. ",
+          "artist": {
+            "id": "12398bf3-1b99-47b7-930c-f3956773f35a",
+            "name": "Aminé",
+            "sort-name": "Aminé",
+            "disambiguation": ""
+          }
+        },
+        {
+          "name": "Leon Thomas",
+          "joinphrase": "",
+          "artist": {
+            "id": "2b9b6a3e-7a1d-4a8e-9a43-6f0c5e1d2b77",
+            "name": "Leon Thomas",
+            "sort-name": "Thomas, Leon",
+            "disambiguation": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e06",
+      "title": "Caroline (demos)",
+      "primary-type": null,
+      "primary-type-id": null,
+      "secondary-types": [],
+      "first-release-date": "",
+      "disambiguation": "",
+      "artist-credit": [
+        {
+          "name": "Aminé",
+          "joinphrase": "",
+          "artist": {
+            "id": "12398bf3-1b99-47b7-930c-f3956773f35a",
+            "name": "Aminé",
+            "sort-name": "Aminé",
+            "disambiguation": ""
+          }
+        }
+      ]
+    }
+  ]
+}

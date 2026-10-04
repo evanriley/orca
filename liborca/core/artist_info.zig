@@ -1,8 +1,9 @@
-//! An Artist's photo, biography, years active and links: a local image from
-//! the Artist's folder, then MusicBrainz, Wikidata, Wikimedia Commons and
-//! Wikipedia; its listeners from ListenBrainz and related artists from
-//! ListenBrainz Labs; and, unless turned off, MusicBrainz genres for its
-//! Tracks that have none. Kept in the Library; no media file is written.
+//! An Artist's photo, biography, origin, years active, links and
+//! MusicBrainz release groups: a local image from the Artist's folder, then
+//! MusicBrainz, Wikidata, Wikimedia Commons and Wikipedia; its listeners
+//! from ListenBrainz and related artists from ListenBrainz Labs; and, unless
+//! turned off, MusicBrainz genres for its Tracks that have none. Kept in the
+//! Library; no media file is written.
 
 const std = @import("std");
 const database = @import("../database/root.zig");
@@ -15,8 +16,10 @@ const wikimedia_commons = providers.wikimedia_commons;
 const wikipedia = providers.wikipedia;
 const listenbrainz_labs = providers.listenbrainz_labs;
 const release_info = @import("release_info.zig");
+const cover_art = @import("cover_art.zig");
 const CachedGet = providers.cached_get.CachedGet;
 const MusicBrainz = providers.musicbrainz.MusicBrainz;
+const CoverArtArchive = providers.coverartarchive.CoverArtArchive;
 const ArtistInfoRecord = database.ArtistInfoRecord;
 const ArtistLink = database.ArtistLink;
 
@@ -69,6 +72,11 @@ pub const refresh_after_s: i64 = 30 * 24 * 60 * 60;
 /// At most this many related artists outside the Library have their photo
 /// looked for in one fetch.
 pub const related_photos_per_fetch = 8;
+/// Only the first this many release groups Elsewhere lists have their cover
+/// asked for.
+pub const release_group_covers_per_fetch = 24;
+/// The most area lookups one fetch makes to name the area an origin lies in.
+pub const max_origin_area_lookups = 3;
 /// The largest local image read from an Artist's folder.
 pub const max_local_image_bytes: usize = 8 * 1024 * 1024;
 /// Looked for in this order in the Artist's folder.
@@ -87,6 +95,7 @@ pub const Services = struct {
     listenbrainz_server: []const u8,
     labs: *CachedGet,
     labs_server: []const u8,
+    coverartarchive: *CoverArtArchive,
 };
 
 pub const Fetch = struct {
@@ -98,6 +107,8 @@ pub const Fetch = struct {
     wall_clock: network.client.Clock,
     language: []const u8 = "en",
     force: bool = false,
+    /// Ask no release group cover; the gateways answer only from caches.
+    offline: bool = false,
     include_releases: bool = false,
 
     pub fn run(self: *Fetch, artist_id: i64) !Outcome {
@@ -129,6 +140,7 @@ pub const Fetch = struct {
             }
         }
         if (!try self.fetchRelatedPhotos(artist_id, now_s)) return .cancelled;
+        if (!try self.fetchReleaseGroupCovers(artist_id, now_s)) return .cancelled;
         if (self.include_releases) {
             const releases = try self.library.release_info.artistReleases(self.allocator, artist_id);
             defer self.allocator.free(releases);
@@ -227,6 +239,60 @@ pub const Fetch = struct {
         return true;
     }
 
+    /// Front covers from the Cover Art Archive for the first
+    /// `release_group_covers_per_fetch` groups Elsewhere lists, skipping a
+    /// group whose cover is kept or that was found to have none less than
+    /// `cover_art.retry_missing_after_s` ago. A refusal is kept as none; an
+    /// unavailable or busy archive ends the step. Neither fails the fetch.
+    /// False when cancelled.
+    fn fetchReleaseGroupCovers(self: *Fetch, artist_id: i64, now_s: i64) !bool {
+        if (self.offline) return true;
+        const info = &self.library.artist_info;
+        const groups = try info.elsewhere(self.allocator, artist_id);
+        defer {
+            for (groups) |group| group.deinit(self.allocator);
+            self.allocator.free(groups);
+        }
+        for (groups[0..@min(groups.len, release_group_covers_per_fetch)]) |group| {
+            if (!metadata.isMusicBrainzId(group.mbid)) continue;
+            if (try info.releaseGroupCoverMark(group.mbid)) |mark|
+                if (mark.has_image or now_s - mark.fetched_at < cover_art.retry_missing_after_s) continue;
+            switch (try lookUp(self.services.coverartarchive.releaseGroupFrontCover(self.allocator, group.mbid))) {
+                .value => |cover| switch (cover) {
+                    .missing => try info.storeReleaseGroupCover(group.mbid, null, now_s),
+                    .image => |image| {
+                        defer self.allocator.free(image.bytes);
+                        try info.storeReleaseGroupCover(group.mbid, .{ .bytes = image.bytes, .mime_type = image.mime_type }, now_s);
+                    },
+                },
+                .failed => |outcome| switch (outcome) {
+                    .cancelled => return false,
+                    .refused => try info.storeReleaseGroupCover(group.mbid, null, now_s),
+                    else => return true,
+                },
+            }
+        }
+        return true;
+    }
+
+    /// The origin as its name and the subdivision it lies in, such as
+    /// `Portland, Oregon`, else the country; the name alone when the area is
+    /// itself a subdivision or country, or nothing containing it is found
+    /// within `max_origin_area_lookups` lookups.
+    fn resolveOrigin(self: *Fetch, arena: std.mem.Allocator, progress: *Progress, artist: *const providers.musicbrainz.ArtistLookup) !?[]const u8 {
+        const name = artist.origin orelse return null;
+        if (isTopArea(artist.origin_area_type)) return name;
+        var area_id = artist.origin_area_id orelse return name;
+        for (0..max_origin_area_lookups) |looked| {
+            const area = progress.step(try lookUp(self.services.musicbrainz.lookUpArea(arena, area_id))) orelse return name;
+            if (looked == 0 and isTopArea(area.area.type)) return name;
+            const parent = containingArea(area.parents) orelse return name;
+            if (isTopArea(parent.type)) return try std.fmt.allocPrint(arena, "{s}, {s}", .{ name, parent.name });
+            area_id = parent.id;
+        }
+        return name;
+    }
+
     const RelatedPhoto = union(enum) {
         /// A step failed in a way that may pass, so nothing is kept.
         unknown,
@@ -303,8 +369,9 @@ pub const Fetch = struct {
         if (!self.force) if (stored) |row| if (self.isCurrent(row, mbid, now_s)) return .cached;
 
         var record: ArtistInfoRecord = .{};
+        const same_artist = if (stored) |row| std.mem.eql(u8, row.musicbrainz_artist_id orelse "", mbid orelse "") else false;
         if (stored) |row| {
-            if (std.mem.eql(u8, row.musicbrainz_artist_id orelse "", mbid orelse "")) {
+            if (same_artist) {
                 record = row.*;
             } else setPhotoDetails(&record, row.photo_source, .{
                 .page_url = row.photo_url,
@@ -331,6 +398,7 @@ pub const Fetch = struct {
 
         const artist_mbid = mbid orelse {
             record.outcome = @intFromEnum(Outcome.no_musicbrainz_id);
+            try info.storeReleaseGroups(artist_id, &.{});
             try info.store(artist_id, &record, photo, null);
             return .no_musicbrainz_id;
         };
@@ -344,6 +412,7 @@ pub const Fetch = struct {
             record.artist_type = artist.artist_type;
             life_span = .{ .begin_year = artist.begin_year, .end_year = artist.end_year, .ended = artist.ended };
             record.wikidata_id = artist.wikidata_id;
+            record.origin = try self.resolveOrigin(arena, &progress, &artist);
             genres.* = artist.genres;
             commons_file = .from(artist.commons_image_file);
             if (artist.wikidata_id == null) article = .none;
@@ -450,6 +519,12 @@ pub const Fetch = struct {
                 if (link.kind == .wikipedia and std.mem.eql(u8, link.url, page)) break;
             } else try found.append(arena, .{ .kind = .wikipedia, .url = page });
         };
+        if (progress.step(try lookUp(self.services.musicbrainz.browseReleaseGroups(arena, artist_mbid)))) |browse| {
+            try info.storeReleaseGroups(artist_id, browse.groups);
+        } else if (progress.cancelled) {
+            return .cancelled;
+        } else if (!same_artist) try info.storeReleaseGroups(artist_id, &.{});
+
         const outcome = progress.failure orelse .fetched;
         record.outcome = @intFromEnum(outcome);
         try info.store(artist_id, &record, photo, if (links) |found| found.items else null);
@@ -522,6 +597,19 @@ const LifeSpan = struct { begin_year: ?i32, end_year: ?i32, ended: bool };
 const WorkPeriod = struct { start_year: ?i32 = null, end_year: ?i32 = null };
 
 const group_types = [_][]const u8{ "Group", "Orchestra", "Choir" };
+
+fn isTopArea(area_type: ?[]const u8) bool {
+    const kind = area_type orelse return false;
+    return std.mem.eql(u8, kind, "Subdivision") or std.mem.eql(u8, kind, "Country");
+}
+
+/// The area to name an origin by among those it lies in: a subdivision,
+/// else a country, else the first, to look further up from.
+fn containingArea(parents: []const providers.musicbrainz.Area) ?providers.musicbrainz.Area {
+    for (parents) |parent| if (std.mem.eql(u8, parent.type orelse "", "Subdivision")) return parent;
+    for (parents) |parent| if (std.mem.eql(u8, parent.type orelse "", "Country")) return parent;
+    return if (parents.len == 0) null else parents[0];
+}
 
 fn isGroup(artist_type: ?[]const u8) bool {
     const kind = artist_type orelse return false;

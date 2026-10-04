@@ -1,6 +1,7 @@
 const std = @import("std");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
+const metadata_model = @import("../metadata/root.zig").model;
 const storage = @import("../storage/root.zig");
 const projection = @import("projection.zig");
 const tag_reader = @import("tag_reader.zig");
@@ -23,6 +24,7 @@ pub const Result = struct {
     changed: u64 = 0,
     unchanged: u64 = 0,
     unsupported: u64 = 0,
+    images: u64 = 0,
     errors: u64 = 0,
     batches_committed: u64 = 0,
     cancelled: bool = false,
@@ -45,6 +47,22 @@ const PendingEntry = struct {
         allocator.free(self.path);
     }
 };
+
+const image_extensions = [_][]const u8{ ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp" };
+
+fn hasImageExtension(basename: []const u8) bool {
+    for (image_extensions) |extension| {
+        if (basename.len > extension.len and
+            std.ascii.endsWithIgnoreCase(basename, extension)) return true;
+    }
+    return false;
+}
+
+fn isFolderOrBelow(folder: []const u8, path: []const u8) bool {
+    if (folder.len == 0) return true;
+    if (!std.mem.startsWith(u8, path, folder)) return false;
+    return path.len == folder.len or path[folder.len] == '/';
+}
 
 /// Walks a root and records what the filesystem currently says.
 ///
@@ -94,11 +112,31 @@ pub const Scanner = struct {
     /// stamp. Bounded like a write batch: seeing a file and recording that we
     /// saw it must not be separated by an unbounded amount of work.
     seen: std.ArrayList(i64) = .empty,
+    seen_images: std.ArrayList(i64) = .empty,
+    pending_images: std.ArrayList(database.repository.FolderImageUpsert) = .empty,
+    /// Root-relative folders this run finished walking, recorded with the
+    /// next batch so a folder's scan time commits with its files.
+    finished_folders: std.ArrayList([]u8) = .empty,
 
     pub fn deinit(self: *Scanner) void {
         self.seen.deinit(self.allocator);
+        self.seen_images.deinit(self.allocator);
+        self.clearPendingImages();
+        self.pending_images.deinit(self.allocator);
+        self.clearFinishedFolders();
+        self.finished_folders.deinit(self.allocator);
         self.projected.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn clearPendingImages(self: *Scanner) void {
+        for (self.pending_images.items) |image| self.allocator.free(image.uri);
+        self.pending_images.clearRetainingCapacity();
+    }
+
+    fn clearFinishedFolders(self: *Scanner) void {
+        for (self.finished_folders.items) |folder| self.allocator.free(folder);
+        self.finished_folders.clearRetainingCapacity();
     }
 
     pub fn scan(self: *Scanner, root_path: []const u8) !Result {
@@ -146,6 +184,12 @@ pub const Scanner = struct {
             pending.deinit(self.allocator);
         }
         var result: Result = .{};
+        var open_folders: std.ArrayList([]u8) = .empty;
+        defer {
+            for (open_folders.items) |folder| self.allocator.free(folder);
+            open_folders.deinit(self.allocator);
+        }
+        try open_folders.append(self.allocator, try self.allocator.dupe(u8, ""));
 
         while (try walker.next(self.io)) |entry| {
             if (self.cancellation) |token| if (token.isCancelled()) {
@@ -156,20 +200,107 @@ pub const Scanner = struct {
                 if (entry.kind == .directory) walker.leave(self.io);
                 continue;
             }
+            try self.enterFolder(&open_folders, std.fs.path.dirnamePosix(entry.path) orelse "", subtree);
             if (entry.kind != .file) continue;
             result.files_seen += 1;
             if (self.progress) |counter| counter.store(result.files_seen, .release);
 
             const path = try pathUnder(self.allocator, start_path, entry.path);
-            try self.examine(path, codecs, &pending, &result, .skip_unchanged);
+            if (hasImageExtension(entry.basename) and try self.examineImage(path, entry.basename, &result)) {
+                self.allocator.free(path);
+            } else {
+                try self.examine(path, codecs, &pending, &result, .skip_unchanged);
+            }
+            if (self.pending_images.items.len >= self.batch_size or
+                self.finished_folders.items.len >= self.batch_size)
+            {
+                try self.flush(&pending);
+                result.batches_committed += 1;
+                try self.project(&result);
+            }
         }
-        if (pending.items.len > 0) {
+        if (!result.cancelled) {
+            while (open_folders.pop()) |folder| try self.finishFolder(folder, subtree);
+        }
+        if (pending.items.len > 0 or self.pending_images.items.len > 0 or self.finished_folders.items.len > 0) {
             try self.flush(&pending);
             result.batches_committed += 1;
         }
         try self.flushSeen();
         try self.project(&result);
         return result;
+    }
+
+    /// Finishes every open folder that `parent`, relative to the walk's
+    /// start, is not inside, then opens `parent`. The walk is depth first, so
+    /// a folder left behind is never entered again.
+    fn enterFolder(
+        self: *Scanner,
+        open_folders: *std.ArrayList([]u8),
+        parent: []const u8,
+        subtree: ?[]const u8,
+    ) !void {
+        while (open_folders.items.len > 0 and
+            !isFolderOrBelow(open_folders.items[open_folders.items.len - 1], parent))
+        {
+            try self.finishFolder(open_folders.pop().?, subtree);
+        }
+        const top = open_folders.items[open_folders.items.len - 1];
+        if (std.mem.eql(u8, top, parent)) return;
+        const opened = try self.allocator.dupe(u8, parent);
+        errdefer self.allocator.free(opened);
+        try open_folders.append(self.allocator, opened);
+    }
+
+    /// Takes ownership of `folder`, relative to the walk's start.
+    fn finishFolder(self: *Scanner, folder: []u8, subtree: ?[]const u8) !void {
+        const prefix = subtree orelse "";
+        const relative = if (prefix.len == 0)
+            folder
+        else if (folder.len == 0)
+            try self.allocator.dupe(u8, prefix)
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, folder });
+        if (relative.ptr != folder.ptr) self.allocator.free(folder);
+        if (self.root_id == null) {
+            self.allocator.free(relative);
+            return;
+        }
+        errdefer self.allocator.free(relative);
+        try self.finished_folders.append(self.allocator, relative);
+    }
+
+    /// Records `path` as a folder image when its bytes are one, and reports
+    /// whether they were. Only a header is read.
+    fn examineImage(self: *Scanner, path: []const u8, basename: []const u8, result: *Result) !bool {
+        var local = storage.LocalFileSource.open(self.io, path) catch return false;
+        defer local.close();
+        const storage_identity = local.readable().identity();
+        const size_bytes = std.math.cast(i64, storage_identity.size) orelse return false;
+        const modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse return false;
+        if (try self.locations.unchangedImageId(self.volume_id, path, size_bytes, modified_ns)) |image_id| {
+            try self.seen_images.append(self.allocator, image_id);
+            if (self.seen_images.items.len >= self.batch_size) try self.flushSeen();
+            result.images += 1;
+            return true;
+        }
+        var header: [16]u8 = undefined;
+        const header_len = local.readable().readAt(0, &header) catch return false;
+        const mime = metadata_model.sniffImageMimeType(header[0..header_len]) orelse return false;
+        const uri = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(uri);
+        try self.pending_images.append(self.allocator, .{
+            .volume_id = self.volume_id,
+            .root_id = self.root_id,
+            .uri = uri,
+            .mime = mime,
+            .role = database.repository.ArtworkRole.ofName(basename),
+            .size_bytes = size_bytes,
+            .modified_ns = modified_ns,
+            .last_seen_generation = self.generation,
+        });
+        result.images += 1;
+        return true;
     }
 
     const Unchanged = enum { skip_unchanged, observe_always };
@@ -302,11 +433,13 @@ pub const Scanner = struct {
 
     /// Stamp the run's generation onto Locations it skipped as unchanged.
     fn flushSeen(self: *Scanner) !void {
-        if (self.seen.items.len == 0) return;
+        if (self.seen.items.len == 0 and self.seen_images.items.len == 0) return;
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.locations.markSeenLocked(self.seen.items, self.generation);
         self.seen.clearRetainingCapacity();
+        try self.locations.markImagesSeenLocked(self.seen_images.items, self.generation);
+        self.seen_images.clearRetainingCapacity();
     }
 
     /// Reproject exactly what the last batches changed.
@@ -383,9 +516,18 @@ pub const Scanner = struct {
                 if (resolution == .diverged) try self.projected.append(self.allocator, resolution.diverged);
             }
         }
+        for (self.pending_images.items) |image| {
+            try self.locations.upsertImageLocked(image);
+            if (image.role == .front) try self.locations.refreshFolderCoversLocked(self.allocator, image.volume_id, image.uri);
+        }
+        if (self.root_id) |root_id| {
+            for (self.finished_folders.items) |folder| try self.locations.recordFolderScanLocked(root_id, folder);
+        }
         try self.database_handle.exec("COMMIT;");
         for (pending.items) |entry| entry.deinit(self.allocator);
         pending.clearRetainingCapacity();
+        self.clearPendingImages();
+        self.clearFinishedFolders();
     }
 };
 
@@ -1605,4 +1747,119 @@ test "a shared file with no quick hash is updated in place rather than split" {
     try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
     try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
     try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
+}
+
+test "an image in a scanned folder is listed as a front cover beside the music, never as a Track" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album/Scans");
+    try copyFixtureTo(temporary.dir, "tagged-reference.flac", "Album/song.flac");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/notes.jpg", .data = "not a picture" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/Scans/Back.PNG", .data = "\x89PNG\r\n\x1a\n a png" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-images?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:images" });
+
+    const ScanOnce = struct {
+        fn run(lib: *database.LibraryDatabase, bind: database.RootBinding, path: []const u8) !Result {
+            const scan_run = try lib.scan_runs.begin(bind.root_id);
+            var scanner = Scanner{
+                .allocator = std.testing.allocator,
+                .io = std.testing.io,
+                .files = &lib.files,
+                .locations = &lib.locations,
+                .observed_tags = &lib.observed_tags,
+                .write_lane = lib.write_lane,
+                .database_handle = lib.database,
+                .volume_id = bind.volume_id,
+                .root_id = bind.root_id,
+                .generation = scan_run.generation,
+            };
+            defer scanner.deinit();
+            const result = try scanner.scan(path);
+            _ = try lib.files.markMissingBelowGeneration(bind.root_id, scan_run.generation);
+            return result;
+        }
+    };
+
+    const first = try ScanOnce.run(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 2), first.images);
+    try std.testing.expectEqual(@as(u64, 1), first.unsupported);
+    try std.testing.expectEqual(@as(u64, 1), try library.files.count());
+
+    const album = try library.locations.folderPage(std.testing.allocator, binding.root_id, "Album", 512, 0);
+    defer album.deinit();
+    try std.testing.expectEqual(@as(usize, 2), album.items.len);
+    try std.testing.expectEqual(database.repository.FolderEntryKind.file, album.items[0].kind);
+    try std.testing.expectEqualStrings("song.flac", album.items[0].name);
+    try std.testing.expectEqual(database.repository.FolderEntryKind.image, album.items[1].kind);
+    try std.testing.expectEqualStrings("cover.jpg", album.items[1].name);
+    try std.testing.expectEqualStrings("image/jpeg", album.items[1].mime.?);
+    try std.testing.expectEqual(@as(?database.repository.ArtworkRole, .front), album.items[1].artwork_role);
+    try std.testing.expectEqual(@as(u32, 1), album.image_count);
+    try std.testing.expect(album.last_scanned_at != null);
+
+    const scans = try library.locations.folderPage(std.testing.allocator, binding.root_id, "Album/Scans", 512, 0);
+    defer scans.deinit();
+    try std.testing.expectEqual(@as(usize, 1), scans.items.len);
+    try std.testing.expectEqual(@as(?database.repository.ArtworkRole, .back), scans.items[0].artwork_role);
+    try std.testing.expect(scans.last_scanned_at != null);
+    const root = try library.locations.folderPage(std.testing.allocator, binding.root_id, "", 512, 0);
+    defer root.deinit();
+    try std.testing.expect(root.last_scanned_at != null);
+
+    try temporary.dir.deleteFile(std.testing.io, "Album/cover.jpg");
+    const second = try ScanOnce.run(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), second.images);
+    try std.testing.expectEqual(@as(u64, 1), second.unchanged);
+    const after = try library.locations.folderPage(std.testing.allocator, binding.root_id, "Album", 512, 0);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(usize, 1), after.items.len);
+    try std.testing.expectEqual(@as(u32, 0), after.image_count);
+    const kept = try library.locations.folderPage(std.testing.allocator, binding.root_id, "Album/Scans", 512, 0);
+    defer kept.deinit();
+    try std.testing.expectEqual(@as(usize, 1), kept.items.len);
+}
+
+test "a cancelled walk records no scan time for the folders it did not finish" {
+    var token: CancellationToken = .{};
+    token.cancel();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "cover.jpg", .data = "\xff\xd8\xff\xe0" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-cancelled-folders?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:cancelled-folders" });
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .volume_id = binding.volume_id,
+        .root_id = binding.root_id,
+        .cancellation = &token,
+    };
+    defer scanner.deinit();
+    const result = try scanner.scan(root_path);
+    try std.testing.expect(result.cancelled);
+    const root = try library.locations.folderPage(std.testing.allocator, binding.root_id, "", 512, 0);
+    defer root.deinit();
+    try std.testing.expectEqual(@as(?i64, null), root.last_scanned_at);
+    try std.testing.expectEqual(@as(u32, 0), root.image_count);
 }

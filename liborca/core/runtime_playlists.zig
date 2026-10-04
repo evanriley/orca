@@ -15,6 +15,9 @@ const PlaylistPage = runtime.PlaylistPage;
 const PlaylistQuery = runtime.PlaylistQuery;
 const PlaylistSummary = runtime.PlaylistSummary;
 const PlaylistUpdate = runtime.PlaylistUpdate;
+const PlaylistFormats = runtime.PlaylistFormats;
+const SmartPlaylistPreview = runtime.SmartPlaylistPreview;
+const Evaluation = @import("../library/smart_playlist.zig").Evaluation;
 const RatingChange = runtime.RatingChange;
 const ReleaseLoveChange = runtime.ReleaseLoveChange;
 
@@ -37,15 +40,28 @@ pub fn librarySetReleaseLove(
 }
 
 pub fn libraryPlaylists(self: *OrcaRuntime, library: LibraryHandle, limit: u32, offset: u32) !PlaylistPage {
-    return (try runtime.libraryDatabase(self, library)).playlists.list(self.allocator, limit, offset, now(self));
+    return (try runtime.libraryDatabase(self, library)).playlists.list(self.allocator, limit, offset, evaluation(self));
 }
 
-fn now(self: *OrcaRuntime) i64 {
-    return std.Io.Clock.real.now(self.control_threaded.io()).toSeconds();
+fn evaluation(self: *OrcaRuntime) Evaluation {
+    const seed = self.playlist_shuffle_seed orelse drawShuffleSeed(self);
+    return .{ .now = std.Io.Clock.real.now(self.control_threaded.io()).toSeconds(), .seed = seed };
+}
+
+fn drawShuffleSeed(self: *OrcaRuntime) u64 {
+    var bytes: [8]u8 = undefined;
+    self.control_threaded.io().random(&bytes);
+    const seed = std.mem.readInt(u64, &bytes, .little);
+    self.playlist_shuffle_seed = seed;
+    return seed;
+}
+
+pub fn libraryReshufflePlaylists(self: *OrcaRuntime) void {
+    _ = drawShuffleSeed(self);
 }
 
 pub fn libraryPlaylistPage(self: *OrcaRuntime, library: LibraryHandle, query: PlaylistQuery) !PlaylistPage {
-    return (try runtime.libraryDatabase(self, library)).playlists.page(self.allocator, query, now(self));
+    return (try runtime.libraryDatabase(self, library)).playlists.page(self.allocator, query, evaluation(self));
 }
 
 pub fn libraryPlaylistCount(self: *OrcaRuntime, library: LibraryHandle, query: PlaylistQuery) !u64 {
@@ -53,7 +69,7 @@ pub fn libraryPlaylistCount(self: *OrcaRuntime, library: LibraryHandle, query: P
 }
 
 pub fn libraryPlaylist(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64) !PlaylistSummary {
-    return (try runtime.libraryDatabase(self, library)).playlists.summary(self.allocator, playlist_id, now(self));
+    return (try runtime.libraryDatabase(self, library)).playlists.summary(self.allocator, playlist_id, evaluation(self));
 }
 
 pub fn libraryUpdatePlaylist(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64, change: PlaylistUpdate) !void {
@@ -77,7 +93,21 @@ pub fn libraryPlaylistTags(self: *OrcaRuntime, library: LibraryHandle, playlist_
 }
 
 pub fn librarySmartPlaylistCount(self: *OrcaRuntime, library: LibraryHandle, rules_json: []const u8) !u64 {
-    return (try runtime.libraryDatabase(self, library)).playlists.smartCount(self.allocator, rules_json, now(self));
+    return (try runtime.libraryDatabase(self, library)).playlists.smartCount(self.allocator, rules_json, evaluation(self));
+}
+
+pub fn librarySmartPlaylistPreview(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    rules_json: []const u8,
+    sample_limit: u32,
+) !SmartPlaylistPreview {
+    return (try runtime.libraryDatabase(self, library)).playlists.smartPreview(allocator, rules_json, sample_limit, evaluation(self));
+}
+
+pub fn libraryPlaylistFormats(self: *OrcaRuntime, library: LibraryHandle, allocator: std.mem.Allocator, playlist_id: i64) !PlaylistFormats {
+    return (try runtime.libraryDatabase(self, library)).playlists.formats(allocator, playlist_id, evaluation(self));
 }
 
 pub fn libraryCreatePlaylist(self: *OrcaRuntime, library: LibraryHandle, name: []const u8) !i64 {
@@ -99,7 +129,7 @@ pub fn libraryPlaylistEntries(
     limit: u32,
     offset: u32,
 ) !PlaylistEntryPage {
-    return (try runtime.libraryDatabase(self, library)).playlists.entries(self.allocator, playlist_id, limit, offset, now(self));
+    return (try runtime.libraryDatabase(self, library)).playlists.entries(self.allocator, playlist_id, limit, offset, evaluation(self));
 }
 
 pub fn libraryPlaylistInsert(
@@ -133,7 +163,7 @@ pub fn playerPlayPlaylist(
     playlist_id: i64,
     start: u32,
 ) !void {
-    const track_ids = try (try runtime.libraryDatabase(self, library)).playlists.trackIds(self.allocator, playlist_id, now(self));
+    const track_ids = try (try runtime.libraryDatabase(self, library)).playlists.trackIds(self.allocator, playlist_id, evaluation(self));
     defer self.allocator.free(track_ids);
     if (track_ids.len == 0) return error.PlaylistEmpty;
     return self.playerPlayTracks(player, library, io, track_ids, start);
@@ -267,7 +297,7 @@ pub fn libraryExportPlaylist(
 ) !PlaylistExport {
     const allocator = self.allocator;
     const library_database = try runtime.libraryDatabase(self, library);
-    const rows = try library_database.playlists.exportRows(allocator, playlist_id, now(self));
+    const rows = try library_database.playlists.exportRows(allocator, playlist_id, evaluation(self));
     defer rows.deinit();
     const absolute_path = try absolutePath(allocator, io, target_path);
     defer allocator.free(absolute_path);

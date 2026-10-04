@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 
 const WriteLane = @import("write_lane.zig").WriteLane;
+const refreshFolderCoverLocked = @import("locations.zig").refreshFolderCoverLocked;
 
 pub const LibraryRoot = struct {
     id: i64,
@@ -192,6 +193,7 @@ pub const LibraryRootRepository = struct {
         _ = try self.execWithRoot("DELETE FROM locations WHERE root_id = ?1;", root_id);
         try self.db.exec("DELETE FROM files WHERE id IN (SELECT id FROM temp.forgotten_files);");
         _ = try self.execWithRoot("DELETE FROM library_roots WHERE id = ?1;", root_id);
+        for (releases.items) |release_id| _ = try refreshFolderCoverLocked(self.db, release_id);
         try self.db.exec("DROP TABLE temp.forgotten_files;");
         try self.db.exec("COMMIT;");
         return .{

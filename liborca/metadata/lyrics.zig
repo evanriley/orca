@@ -34,6 +34,7 @@ pub const max_lines: usize = 4096;
 pub const Content = struct {
     kind: Kind,
     language: ?[3]u8 = null,
+    offset_ms: i64 = 0,
     lines: []const Line,
 };
 
@@ -44,7 +45,18 @@ pub const Lyrics = struct {
     kind: Kind,
     /// ISO 639-2 code, lower case, when the source names one.
     language: ?[3]u8,
+    /// The text's `[offset:]` tag in milliseconds, 0 without one. Synced line
+    /// starts already include it.
+    offset_ms: i64,
+    /// The sidecar's file name, "embedded" or "LRCLIB"; null for a sidecar
+    /// parsed without a name.
+    source_name: ?[]const u8,
     lines: []const Line,
+
+    /// Copies `name` into the lyrics' own storage.
+    pub fn setSourceName(self: *Lyrics, name: []const u8) std.mem.Allocator.Error!void {
+        self.source_name = try self.arena.allocator().dupe(u8, name);
+    }
 
     /// The last synced line starting at or before `position_ms`, or null
     /// before the first line and for lyrics that are not synced.
@@ -150,6 +162,12 @@ fn adopt(arena: *std.heap.ArenaAllocator, content: Content, origin: Source) Lyri
         .source = origin,
         .kind = content.kind,
         .language = content.language,
+        .offset_ms = content.offset_ms,
+        .source_name = switch (origin) {
+            .sidecar => null,
+            .embedded => "embedded",
+            .lrclib => "LRCLIB",
+        },
         .lines = content.lines,
     };
 }

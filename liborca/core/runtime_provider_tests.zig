@@ -5208,6 +5208,14 @@ const saba_entity =
     \\"datavalue":{"value":"Related Saba.jpg","type":"string"}},"type":"statement","rank":"normal"}]},"sitelinks":{}}}}
 ;
 
+const portland_area_id = "2b748d6e-bc1c-4434-9f7b-ecd6332bc557";
+const portland_area =
+    \\{"id":"2b748d6e-bc1c-4434-9f7b-ecd6332bc557","name":"Portland","type":"City","relations":[
+    \\{"type":"part of","direction":"backward","target-type":"area","ended":false,
+    \\"area":{"id":"6e9a5b1c-2d7f-4a3e-8c1b-0f4d2e6a8b10","name":"Oregon","type":"Subdivision"}}]}
+;
+const group_cover_jpeg = "\xff\xd8\xff\xe0JFIF group";
+
 const FakeArtistInfo = struct {
     http: network.testing.ScriptedTransport = .{},
     clock: network.testing.TestClock = .{ .wall_offset_ms = 1_800_000_000_000 },
@@ -5219,6 +5227,7 @@ const FakeArtistInfo = struct {
     similar: []u8 = &.{},
     release: []u8 = &.{},
     release_group: []u8 = &.{},
+    release_group_browse: []u8 = &.{},
     musicbrainz_requests: std.atomic.Value(u32) = .init(0),
     wikidata_requests: std.atomic.Value(u32) = .init(0),
     commons_requests: std.atomic.Value(u32) = .init(0),
@@ -5228,12 +5237,15 @@ const FakeArtistInfo = struct {
     similar_requests: std.atomic.Value(u32) = .init(0),
     release_requests: std.atomic.Value(u32) = .init(0),
     release_group_requests: std.atomic.Value(u32) = .init(0),
+    release_group_browse_requests: std.atomic.Value(u32) = .init(0),
     release_wikidata_requests: std.atomic.Value(u32) = .init(0),
     release_wikipedia_requests: std.atomic.Value(u32) = .init(0),
     related_musicbrainz_requests: std.atomic.Value(u32) = .init(0),
     related_wikidata_requests: std.atomic.Value(u32) = .init(0),
     related_commons_requests: std.atomic.Value(u32) = .init(0),
     related_image_requests: std.atomic.Value(u32) = .init(0),
+    area_requests: std.atomic.Value(u32) = .init(0),
+    group_cover_requests: std.atomic.Value(u32) = .init(0),
     /// A related artist whose MusicBrainz lookup answers 503.
     related_unavailable: ?[]const u8 = null,
     /// A related artist MusicBrainz names no image or Wikidata item for.
@@ -5251,11 +5263,13 @@ const FakeArtistInfo = struct {
         self.similar = try dir.readFileAlloc(std.testing.io, "fixtures/providers/listenbrainz-labs-similar-artists.json", std.testing.allocator, limit);
         self.release = try dir.readFileAlloc(std.testing.io, "fixtures/providers/musicbrainz-release-lookup.json", std.testing.allocator, limit);
         self.release_group = try dir.readFileAlloc(std.testing.io, "fixtures/providers/musicbrainz-release-group-lookup.json", std.testing.allocator, limit);
+        self.release_group_browse = try dir.readFileAlloc(std.testing.io, "fixtures/providers/musicbrainz-release-group-browse.json", std.testing.allocator, limit);
     }
 
     fn artistInfoRequests(self: *const FakeArtistInfo) u32 {
         return self.requestCount() - self.popularity_requests.load(.monotonic) - self.similar_requests.load(.monotonic) -
-            self.relatedPhotoRequests();
+            self.release_group_browse_requests.load(.monotonic) - self.relatedPhotoRequests() -
+            self.area_requests.load(.monotonic) - self.group_cover_requests.load(.monotonic);
     }
 
     fn relatedPhotoRequests(self: *const FakeArtistInfo) u32 {
@@ -5293,8 +5307,8 @@ const FakeArtistInfo = struct {
 
     fn deinit(self: *FakeArtistInfo) void {
         for ([_][]u8{
-            self.musicbrainz, self.wikidata, self.commons,       self.wikipedia, self.popularity,
-            self.similar,     self.release,  self.release_group,
+            self.musicbrainz, self.wikidata, self.commons,       self.wikipedia,            self.popularity,
+            self.similar,     self.release,  self.release_group, self.release_group_browse,
         }) |body| std.testing.allocator.free(body);
         self.http.deinit();
     }
@@ -5306,14 +5320,27 @@ const FakeArtistInfo = struct {
     fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
         const self: *FakeArtistInfo = @ptrCast(@alignCast(context));
         const url = exchange.request.url;
+        const group_cover_prefix = "https://coverartarchive.org/release-group/";
+        if (std.mem.startsWith(u8, url, group_cover_prefix) and url.len >= group_cover_prefix.len + 36) {
+            _ = self.group_cover_requests.fetchAdd(1, .monotonic);
+            const last = url[group_cover_prefix.len + 35];
+            return if (last == '1' or last == '3' or last == '5')
+                .{ .respond = .{ .body = group_cover_jpeg } }
+            else
+                .{ .respond = .{ .status = 404, .body = "" } };
+        }
         const artist_prefix = "https://musicbrainz.org/ws/2/artist/";
         if (std.mem.startsWith(u8, url, artist_prefix) and !std.mem.startsWith(u8, url, artist_prefix ++ amine_mbid) and
             url.len >= artist_prefix.len + 36)
             return self.respondRelatedArtist(url[artist_prefix.len..][0..36]);
         const counter: *std.atomic.Value(u32), const body: []const u8 = if (std.mem.startsWith(u8, url, artist_prefix))
             .{ &self.musicbrainz_requests, self.musicbrainz }
+        else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/area/" ++ portland_area_id ++ "?"))
+            .{ &self.area_requests, portland_area }
         else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/release/"))
             .{ &self.release_requests, self.release }
+        else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/release-group?artist=" ++ amine_mbid ++ "&"))
+            .{ &self.release_group_browse_requests, self.release_group_browse }
         else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/release-group/"))
             .{ &self.release_group_requests, self.release_group }
         else if (std.mem.startsWith(u8, url, "https://api.listenbrainz.org/1/popularity/artist"))
@@ -5396,6 +5423,11 @@ fn runArtistInfo(runtime: *OrcaRuntime, library: LibraryHandle, artist_id: i64, 
     const handle = try runtime.startArtistInfoFetch(library, artist_id, options);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, handle));
     return runtime.jobArtistInfoOutcome(handle);
+}
+
+fn freeElsewhere(groups: []database.ElsewhereRelease) void {
+    for (groups) |group| group.deinit(std.testing.allocator);
+    std.testing.allocator.free(groups);
 }
 
 fn hasLink(links: database.ArtistLinks, kind: database.ArtistLinkKind, url: []const u8) bool {
@@ -6067,4 +6099,197 @@ test "a related artist whose lookup fails leaves the other related artists' phot
     const photo = (try runtime.libraryRelatedArtistPhoto(library, saba_mbid)).?;
     defer photo.deinit();
     try std.testing.expectEqualStrings(related_thumbnail, photo.bytes);
+}
+
+test "an Artist's fetch stores its origin and release groups in one browse, a second fetch asks nothing, and Elsewhere leaves out the groups the library has" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-elsewhere?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 1), fake.release_group_browse_requests.load(.monotonic));
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqualStrings("Portland, Oregon", info.record.origin.?);
+    try std.testing.expectEqual(@as(u32, 1), fake.area_requests.load(.monotonic));
+
+    const all = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
+    defer freeElsewhere(all);
+    try std.testing.expectEqual(@as(usize, 6), all.len);
+    try std.testing.expectEqualStrings("KAYTRAMINÉ", all[0].title);
+    try std.testing.expectEqualStrings("Kaytranada", all[0].credited_with.?);
+
+    try library_database.database.exec(
+        \\UPDATE observed_file_tags SET musicbrainz_release_group_id = '0C1F6A8E-3D5B-4C2A-9E7F-1A2B3C4D5E01';
+    );
+    const elsewhere = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
+    defer freeElsewhere(elsewhere);
+    try std.testing.expectEqual(@as(usize, 5), elsewhere.len);
+    for (elsewhere) |group| try std.testing.expect(!std.mem.eql(u8, group.title, "Good for You"));
+
+    const requests = fake.artistInfoRequests();
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(requests, fake.artistInfoRequests());
+    try std.testing.expectEqual(@as(u32, 1), fake.release_group_browse_requests.load(.monotonic));
+}
+
+const CoverCounts = struct { kept: usize = 0, none: usize = 0, not_fetched: usize = 0 };
+
+fn elsewhereCovers(runtime: *OrcaRuntime, library: LibraryHandle, artist: i64) !CoverCounts {
+    const groups = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
+    defer freeElsewhere(groups);
+    var counts: CoverCounts = .{};
+    for (groups) |group| switch (group.cover) {
+        .kept => counts.kept += 1,
+        .none => counts.none += 1,
+        .not_fetched => counts.not_fetched += 1,
+    };
+    return counts;
+}
+
+fn releaseGroupBrowse(allocator: std.mem.Allocator, count: usize, first: usize) ![]u8 {
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    errdefer body.deinit();
+    try body.writer.writeAll("{\"release-group-count\":");
+    try body.writer.print("{d},\"release-group-offset\":0,\"release-groups\":[", .{count});
+    for (0..count) |index| {
+        if (index != 0) try body.writer.writeAll(",");
+        try body.writer.print(
+            \\{{"id":"0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d{d:0>4}","title":"Group {d}","primary-type":"Album",
+            \\"secondary-types":[],"first-release-date":"{d}-01-01","artist-credit":[{{"name":"Aminé","joinphrase":"",
+            \\"artist":{{"id":"{s}","name":"Aminé"}}}}]}}
+        , .{ first + index, first + index, 2050 - first - index, amine_mbid });
+    }
+    try body.writer.writeAll("]}");
+    return body.toOwnedSlice();
+}
+
+test "an Artist's fetch keeps the release group covers the Cover Art Archive has, and neither a second fetch nor a forced one asks it or MusicBrainz's areas again" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group-covers?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    _ = try runArtistInfo(&runtime, library, artist, .{ .offline = true });
+    try std.testing.expectEqual(@as(u32, 0), fake.group_cover_requests.load(.monotonic));
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 6), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.area_requests.load(.monotonic));
+    try std.testing.expectEqual(CoverCounts{ .kept = 3, .none = 3 }, try elsewhereCovers(&runtime, library, artist));
+
+    const subject: runtime_module.ArtworkSubject = .{ .release_group = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03".* };
+    const request = try runtime.libraryRequestArtwork(library, std.testing.io, subject);
+    const result = while (true) {
+        if (runtime.libraryTakeArtwork(library)) |result| break result;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    };
+    try std.testing.expectEqual(request, result.request);
+    const image = result.image.?;
+    defer image.deinit();
+    try std.testing.expectEqualStrings(group_cover_jpeg, image.bytes);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
+    try std.testing.expectEqual(@as(u32, 6), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.area_requests.load(.monotonic));
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqualStrings("Portland, Oregon", info.record.origin.?);
+}
+
+test "a release group the Cover Art Archive has no cover for is kept as none and asked about again only after 30 days" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group-cover-miss?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    const miss = (try library_database.artist_info.releaseGroupCoverMark("0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02")).?;
+    try std.testing.expect(!miss.has_image);
+    try std.testing.expect(try library_database.artist_info.releaseGroupCover(std.testing.allocator, "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02") == null);
+
+    fake.clock.advance(29 * std.time.ms_per_day);
+    _ = try runArtistInfo(&runtime, library, artist, .{ .force = true });
+    try std.testing.expectEqual(@as(u32, 6), fake.group_cover_requests.load(.monotonic));
+
+    fake.clock.advance(2 * std.time.ms_per_day);
+    _ = try runArtistInfo(&runtime, library, artist, .{});
+    try std.testing.expectEqual(@as(u32, 6 + 3), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(CoverCounts{ .kept = 3, .none = 3 }, try elsewhereCovers(&runtime, library, artist));
+}
+
+test "an Artist's fetch asks the Cover Art Archive about the first 24 release groups Elsewhere lists, newest first, and no more on the next fetch" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    std.testing.allocator.free(fake.release_group_browse);
+    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 30, 0);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group-cover-cap?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 24), fake.group_cover_requests.load(.monotonic));
+    const groups = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
+    defer freeElsewhere(groups);
+    try std.testing.expectEqual(@as(usize, 30), groups.len);
+    for (groups, 0..) |group, index|
+        try std.testing.expectEqual(index >= 24, group.cover == .not_fetched);
+
+    _ = try runArtistInfo(&runtime, library, artist, .{});
+    try std.testing.expectEqual(@as(u32, 24), fake.group_cover_requests.load(.monotonic));
+}
+
+test "release groups an Artist's browse no longer names take their covers with them" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group-cover-replace?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    std.testing.allocator.free(fake.release_group_browse);
+    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 4, 0);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(CoverCounts{ .kept = 2, .none = 2 }, try elsewhereCovers(&runtime, library, artist));
+
+    std.testing.allocator.free(fake.release_group_browse);
+    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 4, 2);
+    fake.clock.advance(31 * std.time.ms_per_day);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    for ([_][]const u8{ "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d0000", "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d0001" }) |gone|
+        try std.testing.expect(try library_database.artist_info.releaseGroupCoverMark(gone) == null);
+    try std.testing.expect((try library_database.artist_info.releaseGroupCoverMark("0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d0003")).?.has_image);
+    var rows = try library_database.database.prepare("SELECT count(*) FROM release_group_covers;");
+    defer rows.deinit();
+    try std.testing.expectEqual(database.sqlite.Step.row, try rows.step());
+    try std.testing.expectEqual(@as(i64, 4), rows.columnInt64(0));
 }

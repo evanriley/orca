@@ -42,6 +42,11 @@ declare -A reasons=(
     [libraryReleaseLetterIndex]="later: the Albums letter index (docs/roadmap.md, Later)"
     [libraryReleaseQueryTotals]="later: filtered Release totals (docs/roadmap.md, Later)"
     [libraryTrackQueryTotals]="later: filtered Track totals (docs/roadmap.md, Later)"
+    [libraryTrackQueryPlayableIds]="later: playing a listing from a row (docs/roadmap.md, Later)"
+    [libraryArtistElsewhere]="later: an Artist's release groups outside the library and their covers, the release_group artwork subject (docs/roadmap.md, Later)"
+    [libraryPlaylistFormats]="later: a playlist's codecs and analysis counts (docs/roadmap.md, Later)"
+    [libraryReshufflePlaylists]="later: drawing new random smart playlist orders (docs/roadmap.md, Later)"
+    [librarySmartPlaylistPreview]="later: a smart playlist preview with its length and a sample (docs/roadmap.md, Later)"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

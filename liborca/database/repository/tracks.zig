@@ -7,10 +7,15 @@ const columns = @import("../columns.zig");
 
 const digestColumn = columns.digestColumn;
 const max_page = columns.max_page;
+
+/// The most rows `TrackRepository.playableIds` reads at once: a playback
+/// queue's capacity.
+pub const max_id_window = 10_000;
 const optionalInt64 = columns.optionalInt64;
 const Feedback = @import("feedback.zig").Feedback;
 const WriteLane = @import("write_lane.zig").WriteLane;
 const search_text = @import("search.zig");
+const releases = @import("releases.zig");
 
 /// The projection's input. A Track is a position on a Release, so this is
 /// written by `library/projection.zig` after resolving artists, releases and
@@ -131,8 +136,16 @@ pub const TrackSummary = struct {
     disc_total: ?i64 = null,
     /// The leading year of the Release's date.
     year: ?i32 = null,
+    integrated_lufs: ?f32 = null,
+    bitrate_kbps: ?u32 = null,
+    path: []u8 = &.{},
+    album_artist_id: ?i64 = null,
+    /// The name of the Track's first genre; empty when it has none.
+    genre: []u8 = &.{},
 
     pub fn deinit(self: TrackSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.genre);
+        allocator.free(self.path);
         allocator.free(self.codec);
         allocator.free(self.title);
         allocator.free(self.artist);
@@ -153,12 +166,11 @@ pub const TrackPage = struct {
 
 /// What a Track listing is ordered by.
 ///
-/// Every one of these but `rating` and `loved` names an index created by
-/// migration 9, and every ORDER BY they produce ends in `tracks.id`. Both
-/// matter. Without the unique tiebreaker a LIMIT/OFFSET walk over a column
-/// with ties is free to return one row on two pages and skip a third, because
-/// SQLite may order equal keys differently between two evaluations of the
-/// same statement.
+/// Every one of these but `rating` and `loved` names an index, and every
+/// ORDER BY they produce ends in `tracks.id`. Both matter. Without the unique
+/// tiebreaker a LIMIT/OFFSET walk over a column with ties is free to return
+/// one row on two pages and skip a third, because SQLite may order equal keys
+/// differently between two evaluations of the same statement.
 pub const TrackSort = enum {
     /// Insertion order. The cheapest listing there is, and the default, so a
     /// caller that has no opinion pays for none.
@@ -181,6 +193,11 @@ pub const TrackSort = enum {
     last_played,
     /// The Release's year; Tracks without one sort last in either direction.
     year,
+    loudness,
+    bitrate,
+    path,
+    album_artist,
+    genre,
 };
 
 pub const SortDirection = enum {
@@ -347,7 +364,7 @@ pub const TrackRepository = struct {
                 "JOIN tracks ON tracks.id = track_search.rowid\n" ++
                 recording_joins ++
                 "WHERE track_search MATCH ?12\n" ++
-                "  AND " ++ comptime filterText(with_bound) ++ "\n" ++
+                "  AND " ++ comptime filterText(if (with_bound) .per_track else .none) ++ "\n" ++
                 "ORDER BY rank\n" ++
                 "LIMIT ?1 OFFSET ?2;",
         });
@@ -373,22 +390,8 @@ pub const TrackRepository = struct {
         query: TrackQuery,
     ) !TrackPage {
         if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
-        const filter: TrackFilter = if (query.artist_id != null and query.release_id != null)
-            .artist_and_release
-        else if (query.artist_id != null)
-            .artist
-        else if (query.release_id != null)
-            .release
-        else
-            .none;
-        const form: PageForm = if (hasBoundFilter(query))
-            .bounded
-        else if (filter == .none and !query.loved_only and query.genre_id == null and
-            query.offset <= candidate_offset_max)
-            .candidates
-        else
-            .scan;
-        return self.pageAs(allocator, query, filter, form);
+        const filter = trackFilter(query);
+        return self.pageAs(allocator, query, filter, pageForm(query, filter));
     }
 
     fn pageAs(
@@ -404,13 +407,7 @@ pub const TrackRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, query.limit);
         try statement.bindInt64(2, query.offset);
-        if (query.artist_id) |artist_id| try statement.bindInt64(3, artist_id);
-        if (query.release_id) |release_id| try statement.bindInt64(4, release_id);
-        if (query.genre_id) |genre_id| try statement.bindInt64(6, genre_id);
-        if (form == .bounded) {
-            try statement.bindInt64(5, @intFromBool(query.loved_only));
-            try bindBoundFilters(statement, query);
-        }
+        try bindPage(statement, query, form);
         return collectTrackPage(allocator, statement);
     }
 
@@ -429,12 +426,27 @@ pub const TrackRepository = struct {
                 !hasBoundFilter(query))
                 return self.countCarrying(genre_id);
         }
-        const bounded = hasBoundFilter(query);
-        var statement = try self.db.prepare(switch (bounded) {
-            inline else => |with_bound| "SELECT count(*) FROM tracks\nWHERE " ++ comptime filterText(with_bound) ++ ";",
+        const bound = boundForm(query);
+        var statement = try self.db.prepare(switch (bound) {
+            inline else => |resolved_bound| "SELECT count(*) FROM tracks\nWHERE " ++ comptime filterText(resolved_bound) ++ ";",
         });
         defer statement.deinit();
-        try bindFilters(statement, query, bounded);
+        try bindFilters(statement, query, bound != .none);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// Tracks whose preferred file has no location other than a missing one,
+    /// as the last scan or open recorded it; nothing on disk is asked.
+    pub fn missingFileCount(self: *const TrackRepository) !u64 {
+        var statement = try self.db.prepare(
+            \\SELECT count(*) FROM tracks
+            \\WHERE NOT EXISTS (
+            \\    SELECT 1 FROM locations
+            \\    WHERE locations.file_id = tracks.preferred_file_id AND locations.state <> 'missing'
+            \\);
+        );
+        defer statement.deinit();
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -443,14 +455,91 @@ pub const TrackRepository = struct {
     /// summed duration, a Track with none counting as zero.
     pub fn totals(self: *const TrackRepository, query: TrackQuery) !TrackTotals {
         const bounded = hasBoundFilter(query);
-        var statement = try self.db.prepare(switch (bounded) {
-            inline else => |with_bound| "SELECT count(*), COALESCE(sum(max(tracks.duration_ms, 0)), 0) FROM tracks\nWHERE " ++
-                comptime filterText(with_bound) ++ ";",
+        if (!bounded and trackFilter(query) == .none and !query.loved_only and query.genre_id == null) {
+            var statement = try self.db.prepare("SELECT count(*), COALESCE(sum(max(duration_ms, 0)), 0) FROM tracks;");
+            defer statement.deinit();
+            if (try statement.step() != .row) return error.SqlFailed;
+            return .{ .count = @intCast(statement.columnInt64(0)), .duration_ms = @intCast(statement.columnInt64(1)) };
+        }
+        var statement = try self.db.prepare(switch (boundForm(query)) {
+            inline else => |resolved_bound| "SELECT count(*), COALESCE(sum(max(tracks.duration_ms, 0)), 0) FROM tracks\nWHERE " ++
+                comptime filterText(resolved_bound) ++ ";",
         });
         defer statement.deinit();
         try bindFilters(statement, query, bounded);
         if (try statement.step() != .row) return error.SqlFailed;
         return .{ .count = @intCast(statement.columnInt64(0)), .duration_ms = @intCast(statement.columnInt64(1)) };
+    }
+
+    /// How many Tracks `search` would return for `text` and the same
+    /// filters, and their summed duration; text with no word matches nothing.
+    pub fn searchTotals(self: *const TrackRepository, text: []const u8, query: TrackQuery) !TrackTotals {
+        var expression_buffer: [search_text.max_match_expression]u8 = undefined;
+        const expression = try search_text.matchExpression(&expression_buffer, text) orelse
+            return .{ .count = 0, .duration_ms = 0 };
+        const bounded = hasBoundFilter(query);
+        var statement = try self.db.prepare(switch (bounded) {
+            inline else => |with_bound| "SELECT count(*), COALESCE(sum(max(tracks.duration_ms, 0)), 0)\n" ++
+                "FROM track_search\n" ++
+                "JOIN tracks ON tracks.id = track_search.rowid\n" ++
+                "WHERE track_search MATCH ?12\n" ++
+                "  AND " ++ comptime filterText(if (with_bound) .per_track else .none) ++ ";",
+        });
+        defer statement.deinit();
+        try bindFilters(statement, query, bounded);
+        try statement.bindText(12, expression);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{ .count = @intCast(statement.columnInt64(0)), .duration_ms = @intCast(statement.columnInt64(1)) };
+    }
+
+    /// The ids of the Tracks with a playable file among the `limit` rows from
+    /// `offset` of the listing `page`, or `search` when `text` is not empty,
+    /// returns for `query`, in that listing's order. `limit` may exceed a
+    /// page, up to `max_id_window`.
+    pub fn playableIds(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        text: []const u8,
+        query: TrackQuery,
+    ) ![]i64 {
+        if (query.limit == 0 or query.limit > max_id_window) return error.PageOutOfRange;
+        var statement = if (text.len != 0) blk: {
+            var expression_buffer: [search_text.max_match_expression]u8 = undefined;
+            const expression = try search_text.matchExpression(&expression_buffer, text) orelse
+                return allocator.alloc(i64, 0);
+            const bounded = hasBoundFilter(query);
+            const statement = try self.db.prepare(switch (bounded) {
+                inline else => |with_bound| "SELECT tracks.id, EXISTS(SELECT 1 FROM locations\n" ++
+                    "    WHERE locations.file_id = tracks.preferred_file_id AND locations.state <> 'missing')\n" ++
+                    "FROM track_search\n" ++
+                    "JOIN tracks ON tracks.id = track_search.rowid\n" ++
+                    "WHERE track_search MATCH ?12\n" ++
+                    "  AND " ++ comptime filterText(if (with_bound) .per_track else .none) ++ "\n" ++
+                    "ORDER BY rank\n" ++
+                    "LIMIT ?1 OFFSET ?2;",
+            });
+            errdefer statement.deinit();
+            try bindFilters(statement, query, bounded);
+            try statement.bindText(12, expression);
+            break :blk statement;
+        } else blk: {
+            const filter = trackFilter(query);
+            const statement = try self.db.prepare(
+                trackQueryText(filter, query.loved_only, query.genre_id != null, query.sort, query.direction, pageForm(query, filter)),
+            );
+            errdefer statement.deinit();
+            try bindPage(statement, query, pageForm(query, filter));
+            break :blk statement;
+        };
+        defer statement.deinit();
+        try statement.bindInt64(1, query.limit);
+        try statement.bindInt64(2, query.offset);
+        var ids: std.ArrayList(i64) = .empty;
+        errdefer ids.deinit(allocator);
+        while (try statement.step() == .row) {
+            if (statement.columnInt64(if (text.len != 0) 1 else 8) != 0) try ids.append(allocator, statement.columnInt64(0));
+        }
+        return ids.toOwnedSlice(allocator);
     }
 
     fn countCarrying(self: *const TrackRepository, genre_id: i64) !u64 {
@@ -586,6 +675,16 @@ pub const TrackRepository = struct {
         };
     }
 
+    /// The Release a Track is filed under, or null when it has none or does
+    /// not exist.
+    pub fn releaseId(self: *const TrackRepository, track_id: i64) !?i64 {
+        var statement = try self.db.prepare("SELECT release_id FROM tracks WHERE id = ?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row or statement.columnIsNull(0)) return null;
+        return statement.columnInt64(0);
+    }
+
     /// The recorded facts of the file a Track resolves to, or null when the
     /// Track does not exist or has no file. One row: nothing on disk is read.
     pub fn fileFacts(
@@ -601,7 +700,8 @@ pub const TrackRepository = struct {
             \\        ORDER BY CASE locations.state WHEN 'present' THEN 0 ELSE 1 END, locations.id
             \\        LIMIT 1),
             \\       COALESCE(observed_file_tags.artwork_byte_size, 0) > 0
-            \\           AND observed_file_tags.artwork_mime_type IS NOT NULL,
+            \\           AND observed_file_tags.artwork_mime_type IS NOT NULL
+        ++ "\n           OR " ++ releases.releaseCoverSql("releases") ++ ",\n" ++
             \\       releases.release_date, releases.is_compilation, files.first_seen_at,
             \\       (SELECT locations.modified_ns FROM locations
             \\        WHERE locations.file_id = files.id AND locations.state <> 'missing'
@@ -726,22 +826,45 @@ pub const track_columns =
     "       ratings.rating, play_file.codec, play_file.sample_rate, play_file.bit_depth,\n" ++
     "       play_file.first_seen_at, COALESCE(recording_play_stats.play_count, 0),\n" ++
     "       recording_play_stats.last_played_at, tracks.explicit, tracks.track_total,\n" ++
-    "       tracks.disc_total, " ++ release_year ++ "\n";
+    "       tracks.disc_total, " ++ release_year ++ ", " ++ play_file_loudness ++ ",\n" ++
+    "       " ++ play_file_bitrate ++ ",\n" ++
+    "       COALESCE(" ++ play_file_path ++ ", ''), track_release.album_artist_id,\n" ++
+    "       COALESCE(" ++ first_genre_name ++ ", '')\n";
 
 /// How many columns `track_columns` selects, so a query that appends its own
 /// columns can read them past the end.
-pub const track_column_count = 24;
+pub const track_column_count = 29;
 
 /// The Release's leading four-digit year, or NULL when its date has none.
 pub const release_year =
     "CASE WHEN substr(track_release.release_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]' " ++
     "THEN CAST(substr(track_release.release_date, 1, 4) AS INTEGER) END";
 
+const play_file_bitrate =
+    "CASE WHEN play_file.size_bytes > 0 AND play_file.duration_ms > 0 THEN " ++ indexed_bitrate ++ " END";
+
+const indexed_bitrate = "(play_file.size_bytes * 8 + play_file.duration_ms / 2) / play_file.duration_ms";
+
+fn bestLocation(comptime column: []const u8, comptime file_id: []const u8) []const u8 {
+    return "(SELECT best_location." ++ column ++ " FROM locations AS best_location\n" ++
+        "    WHERE best_location.file_id = " ++ file_id ++ " AND best_location.state <> 'missing'\n" ++
+        "    ORDER BY CASE best_location.state WHEN 'present' THEN 0 ELSE 1 END, best_location.id LIMIT 1)";
+}
+
+const play_file_join = "LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n";
+pub const play_file_loudness = "(SELECT file_loudness.integrated_lufs FROM file_loudness " ++
+    "WHERE file_loudness.file_id = play_file.id AND file_loudness.source_identity = play_file.quick_hash)";
+const play_file_path = bestLocation("uri", "play_file.id");
+const first_genre_id = "(SELECT first_track_genre.genre_id FROM track_genres AS first_track_genre " ++
+    "WHERE first_track_genre.track_id = tracks.id AND first_track_genre.ordinal = 0)";
+const first_genre_name = "(SELECT first_genre.name FROM genres AS first_genre WHERE first_genre.id = " ++
+    first_genre_id ++ ")";
+
 pub const recording_joins =
     "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n" ++
     "LEFT JOIN ratings ON ratings.recording_id = tracks.recording_id\n" ++
     "LEFT JOIN recording_play_stats ON recording_play_stats.recording_id = tracks.recording_id\n" ++
-    "LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n" ++
+    play_file_join ++
     "LEFT JOIN releases AS track_release ON track_release.id = tracks.release_id\n";
 
 const TrackFilter = enum { none, artist, release, artist_and_release };
@@ -780,6 +903,14 @@ pub fn orderTerms(comptime sort: TrackSort, comptime direction: SortDirection) [
         .last_played => "recording_play_stats.last_played_at IS NULL, " ++
             "recording_play_stats.last_played_at" ++ suffix ++ tiebreak,
         .year => "(" ++ release_year ++ ") IS NULL, " ++ release_year ++ suffix ++ tiebreak,
+        .loudness => play_file_loudness ++ suffix ++ " NULLS LAST" ++ tiebreak,
+        .bitrate => "(" ++ play_file_bitrate ++ ") IS NULL, " ++ play_file_bitrate ++ suffix ++ tiebreak,
+        .path => play_file_path ++ suffix ++ " NULLS LAST" ++ tiebreak,
+        .album_artist => "tracks.album_artist COLLATE NOCASE" ++ suffix ++
+            ", tracks.album COLLATE NOCASE" ++ suffix ++
+            ", " ++ positionTerms(direction) ++ tiebreak,
+        .genre => first_genre_name ++ " COLLATE NOCASE" ++ suffix ++ " NULLS LAST, " ++
+            first_genre_id ++ suffix ++ tiebreak,
     };
 }
 
@@ -811,20 +942,37 @@ pub const by_release_artist =
 /// unset; ?12 is a search's match expression. A year
 /// is read as `release_year` reads it and a codec as `codec_id.lossless`
 /// lists it, so a filter and the summary it filters cannot disagree.
-const by_bound_filters =
-    "(?7 IS NULL OR tracks.release_id IN (SELECT id FROM releases WHERE " ++ bare_release_year ++ " >= ?7))\n" ++
-    "  AND (?8 IS NULL OR tracks.release_id IN (SELECT id FROM releases WHERE " ++ bare_release_year ++ " <= ?8))\n" ++
-    "  AND (?9 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
+const by_bound_filters = by_bound_track_filters ++ "\n  AND " ++
+    "(?9 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
     "    AND bound_file.codec <> '' AND (bound_file.codec IN (" ++ lossless_codecs ++ ")) = ?9))\n" ++
     "  AND (?10 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
     "    AND bound_file.sample_rate >= ?10))\n" ++
-    "  AND (?11 = 0 OR tracks.explicit = " ++ explicit_value ++ ")\n" ++
     "  AND (?13 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
     "    AND bound_file.first_seen_at > ?13))\n" ++
     "  AND (?14 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
     "    AND bound_file.codec = lower(?14)))\n" ++
     "  AND (?15 IS NULL OR EXISTS (SELECT 1 FROM files AS bound_file WHERE bound_file.id = " ++ track_play_file ++ "\n" ++
     "    AND bound_file.sample_rate <= ?15))";
+
+const by_bound_track_filters =
+    "(?7 IS NULL OR tracks.release_id IN (SELECT id FROM releases WHERE " ++ bare_release_year ++ " >= ?7))\n" ++
+    "  AND (?8 IS NULL OR tracks.release_id IN (SELECT id FROM releases WHERE " ++ bare_release_year ++ " <= ?8))\n" ++
+    "  AND (?11 = 0 OR tracks.explicit = " ++ explicit_value ++ ")";
+
+const by_bound_filters_from_files = by_bound_track_filters ++ "\n" ++
+    "  AND tracks.id IN (SELECT tracks.id FROM files AS bound_file\n" ++
+    "    CROSS JOIN tracks ON tracks.preferred_file_id = bound_file.id\n" ++
+    "    WHERE " ++ bound_file_terms ++ "\n" ++
+    "    UNION ALL SELECT tracks.id FROM tracks\n" ++
+    "    CROSS JOIN files AS bound_file ON bound_file.id = " ++ track_play_file ++ "\n" ++
+    "    WHERE tracks.preferred_file_id IS NULL AND " ++ bound_file_terms ++ ")";
+
+const bound_file_terms =
+    "(?9 IS NULL OR bound_file.codec <> '' AND (bound_file.codec IN (" ++ lossless_codecs ++ ")) = ?9)\n" ++
+    "      AND (?10 IS NULL OR bound_file.sample_rate >= ?10)\n" ++
+    "      AND (?13 IS NULL OR bound_file.first_seen_at > ?13)\n" ++
+    "      AND (?14 IS NULL OR bound_file.codec = lower(?14))\n" ++
+    "      AND (?15 IS NULL OR bound_file.sample_rate <= ?15)";
 
 const by_relational_filters =
     "(?3 IS NULL OR " ++ by_artist ++ ")\n" ++
@@ -835,8 +983,23 @@ const by_relational_filters =
 /// Every filter of a `TrackQuery`, each true when unset, on the parameter
 /// positions `buildTrackQuery` gives them; the bound filters only when
 /// `with_bound`, so a listing without them never tests them.
-fn filterText(comptime with_bound: bool) []const u8 {
-    return if (with_bound) by_relational_filters ++ "\n  AND " ++ by_bound_filters else by_relational_filters;
+fn filterText(comptime bound: BoundForm) []const u8 {
+    return switch (bound) {
+        .none => by_relational_filters,
+        .per_track => by_relational_filters ++ "\n  AND " ++ by_bound_filters,
+        .from_files => by_relational_filters ++ "\n  AND " ++ by_bound_filters_from_files,
+    };
+}
+
+const BoundForm = enum { none, per_track, from_files };
+
+fn boundForm(query: TrackQuery) BoundForm {
+    if (!hasBoundFilter(query)) return .none;
+    const file_filter = query.lossless != null or query.min_sample_rate != null or
+        query.max_sample_rate != null or query.codec != null or query.added_after != null;
+    if (file_filter and query.artist_id == null and query.release_id == null and !query.loved_only and
+        query.genre_id == null) return .from_files;
+    return .per_track;
 }
 
 const bare_release_year =
@@ -868,6 +1031,41 @@ fn bindBoundFilters(statement: sqlite.Statement, query: TrackQuery) !void {
     try statement.bindOptionalInt64(15, if (query.max_sample_rate) |rate| rate else null);
 }
 
+fn trackFilter(query: TrackQuery) TrackFilter {
+    if (query.artist_id != null and query.release_id != null) return .artist_and_release;
+    if (query.artist_id != null) return .artist;
+    if (query.release_id != null) return .release;
+    return .none;
+}
+
+fn pageForm(query: TrackQuery, filter: TrackFilter) PageForm {
+    if (hasBoundFilter(query)) return if (boundForm(query) == .from_files and !walksTrackIndex(query.sort))
+        .from_files
+    else
+        .bounded;
+    if (filter == .none and !query.loved_only and query.genre_id == null and
+        query.offset <= candidate_offset_max)
+        return .candidates;
+    return .scan;
+}
+
+fn walksTrackIndex(sort: TrackSort) bool {
+    return switch (sort) {
+        .id, .artist, .album, .title, .track_number, .duration, .album_artist => true,
+        .date_added, .rating, .loved, .play_count, .last_played, .year, .loudness, .bitrate, .path, .genre => false,
+    };
+}
+
+fn bindPage(statement: sqlite.Statement, query: TrackQuery, form: PageForm) !void {
+    if (query.artist_id) |artist_id| try statement.bindInt64(3, artist_id);
+    if (query.release_id) |release_id| try statement.bindInt64(4, release_id);
+    if (query.genre_id) |genre_id| try statement.bindInt64(6, genre_id);
+    if (form == .bounded or form == .from_files) {
+        try statement.bindInt64(5, @intFromBool(query.loved_only));
+        try bindBoundFilters(statement, query);
+    }
+}
+
 fn bindFilters(statement: sqlite.Statement, query: TrackQuery, bounded: bool) !void {
     try statement.bindOptionalInt64(3, query.artist_id);
     try statement.bindOptionalInt64(4, query.release_id);
@@ -896,9 +1094,13 @@ fn buildTrackQuery(
         filter_terms,
         if (loved_only) by_loved_recording else "",
         if (genre) by_genre else "",
-        if (form == .bounded) "(?5 = 0 OR " ++ by_loved_recording ++ ")" else "",
-        if (form == .bounded) "(?6 IS NULL OR " ++ by_genre ++ ")" else "",
-        if (form == .bounded) by_bound_filters else "",
+        if (form == .bounded or form == .from_files) "(?5 = 0 OR " ++ by_loved_recording ++ ")" else "",
+        if (form == .bounded or form == .from_files) "(?6 IS NULL OR " ++ by_genre ++ ")" else "",
+        switch (form) {
+            .scan, .candidates => "",
+            .bounded => by_bound_filters,
+            .from_files => by_bound_filters_from_files,
+        },
     }) |term| {
         if (term.len != 0) terms = terms ++ (if (terms.len == 0) "WHERE " else " AND ") ++ term;
     }
@@ -926,7 +1128,11 @@ fn buildTrackQuery(
 /// apart so a page with none of them does not test them on every row; it
 /// binds the loved and genre filters rather than spelling them out, so it
 /// adds one statement per relational filter, sort and direction.
-const PageForm = enum { scan, candidates, bounded };
+/// `from_files` is `bounded` with `by_bound_filters_from_files`, for a page
+/// with no relational filter, a play-file filter and a sort that reads
+/// every row anyway; a sort that walks a Track index stays `bounded`, which
+/// stops at the page instead of collecting every match first.
+const PageForm = enum { scan, candidates, bounded, from_files };
 
 const candidate_offset_max = 50_000;
 
@@ -943,7 +1149,7 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
     const with_stats = "recording_play_stats CROSS JOIN tracks " ++
         "ON tracks.recording_id = recording_play_stats.recording_id";
     return switch (sort) {
-        .id, .artist, .album, .title, .track_number, .duration => null,
+        .id, .artist, .album, .title, .track_number, .duration, .album_artist => null,
         .play_count => candidatePart(with_stats, "recording_play_stats.play_count" ++ suffix ++ ", " ++ by_id) ++
             "UNION ALL\n" ++ candidatePart(no_stats, by_id),
         .last_played => candidatePart(with_stats, "recording_play_stats.last_played_at" ++ suffix ++ ", " ++ by_id) ++
@@ -975,12 +1181,52 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
         .date_added => candidatePart(
             "files AS play_file CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id",
             "play_file.first_seen_at" ++ suffix ++ ", " ++ by_id,
+        ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction),
+        .loudness => candidatePart(
+            "file_loudness CROSS JOIN files AS play_file ON play_file.id = file_loudness.file_id " ++
+                "AND play_file.quick_hash = file_loudness.source_identity\n" ++
+                "CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id",
+            "file_loudness.integrated_lufs" ++ suffix ++ ", " ++ by_id,
+        ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
+            "tracks WHERE tracks.preferred_file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM files " ++
+                "CROSS JOIN file_loudness ON file_loudness.file_id = files.id " ++
+                "AND file_loudness.source_identity = files.quick_hash WHERE files.id = tracks.preferred_file_id)",
+            by_id,
+        ),
+        .bitrate => candidatePart(
+            "files AS play_file CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id\n" ++
+                "WHERE play_file.size_bytes > 0 AND play_file.duration_ms > 0",
+            indexed_bitrate ++ suffix ++ ", " ++ by_id,
+        ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
+            "files AS play_file CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id\n" ++
+                "WHERE (play_file.size_bytes > 0 AND play_file.duration_ms > 0) IS NOT 1",
+            by_id,
+        ),
+        .path => candidatePart(
+            "locations AS play_location CROSS JOIN tracks ON tracks.preferred_file_id = play_location.file_id\n" ++
+                "WHERE play_location.id = " ++ bestLocation("id", "play_location.file_id"),
+            "play_location.uri" ++ suffix ++ ", " ++ by_id,
+        ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
+            "files AS unlocated_file CROSS JOIN tracks ON tracks.preferred_file_id = unlocated_file.id\n" ++
+                "WHERE NOT EXISTS (SELECT 1 FROM locations " ++
+                "WHERE locations.file_id = unlocated_file.id AND locations.state <> 'missing')",
+            by_id,
+        ),
+        .genre => candidatePart(
+            "genres AS first_genre CROSS JOIN track_genres AS first_track_genre " ++
+                "ON first_track_genre.genre_id = first_genre.id AND first_track_genre.ordinal = 0\n" ++
+                "CROSS JOIN tracks ON tracks.id = first_track_genre.track_id",
+            "first_genre.name COLLATE NOCASE" ++ suffix ++ ", first_genre.id" ++ suffix ++ ", " ++ by_id,
         ) ++ "UNION ALL\n" ++ candidatePart(
-            "tracks LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++
-                "\nWHERE tracks.preferred_file_id IS NULL",
-            orderTerms(.date_added, direction),
+            "tracks WHERE NOT EXISTS (SELECT 1 FROM track_genres " ++
+                "WHERE track_genres.track_id = tracks.id AND track_genres.ordinal = 0)",
+            by_id,
         ),
     };
+}
+
+fn withoutPreferredFile(comptime sort: TrackSort, comptime direction: SortDirection) []const u8 {
+    return candidatePart("tracks " ++ sortJoin(sort) ++ "WHERE tracks.preferred_file_id IS NULL", orderTerms(sort, direction));
 }
 
 fn candidatePart(comptime from: []const u8, comptime order: []const u8) []const u8 {
@@ -992,8 +1238,8 @@ fn candidatePart(comptime from: []const u8, comptime order: []const u8) []const 
 /// chosen without joining every row of the library to all of them.
 fn sortJoin(comptime sort: TrackSort) []const u8 {
     return switch (sort) {
-        .id, .artist, .album, .title, .track_number, .duration => "",
-        .date_added => "LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n",
+        .id, .artist, .album, .title, .track_number, .duration, .album_artist, .genre => "",
+        .date_added, .bitrate, .loudness, .path => play_file_join,
         .rating => "LEFT JOIN ratings ON ratings.recording_id = tracks.recording_id\n",
         .loved => "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n",
         .play_count, .last_played => "LEFT JOIN recording_play_stats ON recording_play_stats.recording_id = tracks.recording_id\n",
@@ -1003,9 +1249,10 @@ fn sortJoin(comptime sort: TrackSort) []const u8 {
 
 /// Every (filter, loved filter, genre filter, sort, direction, form)
 /// combination as its own prepared-once statement text, the `bounded` form
-/// once for every loved and genre filter. There are 492 distinct ones;
-/// concatenating SQL at runtime instead would mean an allocation and a string the caller could
-/// influence, and this boundary refuses both on principle.
+/// once for every loved and genre filter and `from_files` once per sort and
+/// direction. There are 734 distinct ones; concatenating SQL at runtime
+/// instead would mean an allocation and a string the caller could influence,
+/// and this boundary refuses both on principle.
 fn trackQueryText(
     filter: TrackFilter,
     loved_only: bool,
@@ -1014,6 +1261,18 @@ fn trackQueryText(
     direction: SortDirection,
     form: PageForm,
 ) [:0]const u8 {
+    if (form == .from_files) return switch (sort) {
+        inline else => |resolved_sort| switch (direction) {
+            inline else => |resolved_direction| comptime buildTrackQuery(
+                .none,
+                false,
+                false,
+                resolved_sort,
+                resolved_direction,
+                .from_files,
+            ),
+        },
+    };
     if (form == .bounded) return switch (filter) {
         inline else => |resolved_filter| switch (sort) {
             inline else => |resolved_sort| switch (direction) {
@@ -1034,7 +1293,7 @@ fn trackQueryText(
                 inline else => |resolved_genre| switch (sort) {
                     inline else => |resolved_sort| switch (direction) {
                         inline else => |resolved_direction| switch (form) {
-                            .bounded => unreachable,
+                            .bounded, .from_files => unreachable,
                             inline .scan, .candidates => |resolved_form| comptime buildTrackQuery(
                                 resolved_filter,
                                 resolved_loved_only,
@@ -1077,6 +1336,10 @@ pub fn readTrackSummary(allocator: std.mem.Allocator, statement: sqlite.Statemen
     errdefer allocator.free(album_artist);
     const codec = try allocator.dupe(u8, statement.columnText(14));
     errdefer allocator.free(codec);
+    const path = try allocator.dupe(u8, statement.columnText(26));
+    errdefer allocator.free(path);
+    const genre = try allocator.dupe(u8, statement.columnText(28));
+    errdefer allocator.free(genre);
     return .{
         .id = statement.columnInt64(0),
         .title = title,
@@ -1107,6 +1370,11 @@ pub fn readTrackSummary(allocator: std.mem.Allocator, statement: sqlite.Statemen
         .track_total = optionalInt64(statement, 21),
         .disc_total = optionalInt64(statement, 22),
         .year = if (statement.columnIsNull(23)) null else std.math.cast(i32, statement.columnInt64(23)),
+        .integrated_lufs = if (statement.columnIsNull(24)) null else @floatCast(statement.columnDouble(24)),
+        .bitrate_kbps = positiveU32(statement, 25),
+        .path = path,
+        .album_artist_id = optionalInt64(statement, 27),
+        .genre = genre,
     };
 }
 
@@ -1190,10 +1458,29 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
         \\    SELECT v, 1, 0, 0 FROM numbers WHERE v % 3 <> 1;
         \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
         \\    SELECT v, 2, 1, 0 FROM numbers WHERE v % 5 = 0;
+        \\INSERT INTO genres(id, name, key) VALUES (3, 'ROCK', 'rock-upper');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
+        \\    SELECT v, 3, 0, 0 FROM numbers WHERE v % 3 = 1 AND v % 2 = 0;
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (7, 2, 0, 0);
+        \\UPDATE tracks SET album_artist = CASE id % 4 WHEN 0 THEN 'b' WHEN 1 THEN 'A' WHEN 2 THEN '' ELSE 'a' END,
+        \\    album = CASE id % 3 WHEN 0 THEN 'x' ELSE 'Y' END;
+        \\UPDATE files SET size_bytes = (id * 7919) % 5 * 1000000,
+        \\    duration_ms = CASE WHEN id % 7 = 0 THEN NULL ELSE 200000 + (id % 3) * 1000 END,
+        \\    quick_hash = CAST(id AS BLOB);
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+        \\    SELECT id, quick_hash, -((id * 13) % 6) - 0.5 FROM files WHERE id % 5 <> 0;
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES (5, x'ff', -1.0);
+        \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
+        \\INSERT INTO locations(file_id, volume_id, uri, state)
+        \\    SELECT id, 1, '/m/' || char(65 + (id * 7) % 5) || id,
+        \\        CASE id % 6 WHEN 0 THEN 'missing' WHEN 1 THEN 'unverified' ELSE 'present' END
+        \\    FROM files;
+        \\INSERT INTO locations(file_id, volume_id, uri, state)
+        \\    SELECT id, 1, '/a/' || id, 'present' FROM files WHERE id % 3 = 1;
     );
 
     const windows = [_][2]u32{ .{ 30, 0 }, .{ 5, 0 }, .{ 5, 7 }, .{ 4, 26 }, .{ 10, 25 } };
-    inline for (.{ .play_count, .last_played, .rating, .loved, .year, .date_added }) |sort| {
+    inline for (.{ .play_count, .last_played, .rating, .loved, .year, .date_added, .loudness, .bitrate, .path, .album_artist, .genre }) |sort| {
         inline for (.{ .ascending, .descending }) |direction| {
             var expected = try library.database.prepare("SELECT tracks.id FROM tracks\n" ++
                 recording_joins ++ "ORDER BY " ++
@@ -1245,6 +1532,158 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
             }
         }
     }
+}
+
+test "a Track reads loudness, bitrate and path from the file it plays and its first genre, and sorts by them and album artist with unknowns last" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-file-sorts?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'AA', 'AA', 'aa');
+        \\INSERT INTO releases(id, title, album_artist_id) VALUES (1, 'X', 1);
+        \\INSERT INTO recordings(id, title) VALUES (1, 'r'), (2, 'r'), (3, 'r'), (4, 'r');
+        \\INSERT INTO files(id, recording_id, size_bytes, duration_ms, quick_hash) VALUES
+        \\    (1, 1, 4012500, 200000, x'01'), (2, 2, 0, 200000, x'02'), (4, 4, 1000000, 100000, x'04');
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES
+        \\    (1, x'01', -9.5), (2, x'ff', -3.0), (4, x'04', -20.0);
+        \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
+        \\INSERT INTO locations(file_id, volume_id, uri, state) VALUES
+        \\    (1, 1, '/z/1', 'missing'), (1, 1, '/u/1', 'unverified'), (1, 1, '/p/1', 'present'),
+        \\    (2, 1, '/z/2', 'missing'), (4, 1, '/a/4', 'present');
+        \\INSERT INTO tracks(id, recording_id, release_id, title, album, album_artist, track_number, preferred_file_id) VALUES
+        \\    (1, 1, 1, 't', 'Y', 'beta', 1, 1), (2, 2, NULL, 't', 'X', 'Alpha', 2, 2),
+        \\    (3, 3, NULL, 't', '', '', 1, NULL), (4, 4, NULL, 't', 'x', 'alpha', 1, 4);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Rock', 'rock'), (2, 'ambient', 'ambient');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES
+        \\    (1, 1, 0, 0), (1, 2, 1, 0), (2, 1, 0, 0), (4, 2, 0, 0);
+    );
+
+    const first = (try library.tracks.byId(std.testing.allocator, 1)).?;
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?f32, -9.5), first.integrated_lufs);
+    try std.testing.expectEqual(@as(?u32, 161), first.bitrate_kbps);
+    try std.testing.expectEqualStrings("/p/1", first.path);
+    try std.testing.expectEqual(@as(?i64, 1), first.album_artist_id);
+    try std.testing.expectEqualStrings("Rock", first.genre);
+    const second = (try library.tracks.byId(std.testing.allocator, 2)).?;
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?f32, null), second.integrated_lufs);
+    try std.testing.expectEqual(@as(?u32, null), second.bitrate_kbps);
+    try std.testing.expectEqualStrings("", second.path);
+    try std.testing.expectEqual(@as(?i64, null), second.album_artist_id);
+    const third = (try library.tracks.byId(std.testing.allocator, 3)).?;
+    defer third.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", third.genre);
+
+    const Case = struct { sort: TrackSort, direction: SortDirection, ids: [4]i64 };
+    const cases = [_]Case{
+        .{ .sort = .loudness, .direction = .ascending, .ids = .{ 4, 1, 2, 3 } },
+        .{ .sort = .loudness, .direction = .descending, .ids = .{ 1, 4, 3, 2 } },
+        .{ .sort = .bitrate, .direction = .ascending, .ids = .{ 4, 1, 2, 3 } },
+        .{ .sort = .bitrate, .direction = .descending, .ids = .{ 1, 4, 3, 2 } },
+        .{ .sort = .path, .direction = .ascending, .ids = .{ 4, 1, 2, 3 } },
+        .{ .sort = .path, .direction = .descending, .ids = .{ 1, 4, 3, 2 } },
+        .{ .sort = .album_artist, .direction = .ascending, .ids = .{ 3, 4, 2, 1 } },
+        .{ .sort = .album_artist, .direction = .descending, .ids = .{ 1, 2, 4, 3 } },
+        .{ .sort = .genre, .direction = .ascending, .ids = .{ 4, 1, 2, 3 } },
+        .{ .sort = .genre, .direction = .descending, .ids = .{ 2, 1, 4, 3 } },
+    };
+    for (cases) |case| for ([_]PageForm{ .scan, .candidates }) |form| {
+        var page = try library.tracks.pageAs(std.testing.allocator, .{
+            .sort = case.sort,
+            .direction = case.direction,
+            .limit = 10,
+        }, .none, form);
+        defer page.deinit();
+        try std.testing.expectEqual(@as(usize, 4), page.items.len);
+        for (case.ids, page.items) |id, item| try std.testing.expectEqual(id, item.id);
+    };
+}
+
+test "a whole-library page by loudness, bitrate, path, album artist or first genre walks that sort's index" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-sort-plans?mode=memory&cache=shared",
+    );
+    defer library.close();
+    inline for (.{
+        .{ TrackSort.loudness, PageForm.candidates, "SCAN file_loudness USING INDEX file_loudness_by_lufs\n" },
+        .{ TrackSort.bitrate, PageForm.candidates, "SCAN play_file USING INDEX files_by_bitrate\n" },
+        .{ TrackSort.bitrate, PageForm.candidates, "SCAN play_file USING INDEX files_without_bitrate\n" },
+        .{ TrackSort.path, PageForm.candidates, "SCAN play_location USING INDEX locations_by_uri\n" },
+        .{ TrackSort.album_artist, PageForm.scan, "SCAN tracks USING INDEX tracks_sort_album_artist\n" },
+        .{ TrackSort.genre, PageForm.candidates, "SCAN first_genre USING COVERING INDEX genres_by_name\n" },
+    }) |case| inline for (.{ SortDirection.ascending, SortDirection.descending }) |direction| {
+        var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++
+            comptime trackQueryText(.none, false, false, case[0], direction, case[1]));
+        defer statement.deinit();
+        var plan: std.ArrayList(u8) = .empty;
+        defer plan.deinit(std.testing.allocator);
+        while (try statement.step() == .row) {
+            try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+            try plan.append(std.testing.allocator, '\n');
+        }
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, case[2]) != null);
+    };
+}
+
+test "a whole-library page by path tests each file's locations from the index of those not missing" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-path-plan?mode=memory&cache=shared",
+    );
+    defer library.close();
+    inline for (.{ SortDirection.ascending, SortDirection.descending }) |direction| {
+        const plan = try explainPlan(&library, comptime trackQueryText(.none, false, false, .path, direction, .candidates));
+        defer std.testing.allocator.free(plan);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN unlocated_file") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH locations USING COVERING INDEX locations_held (file_id=?)\n") != null);
+    }
+}
+
+test "an unnarrowed listing filtered by its files collects the matching files once, and a narrowed one does not" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-file-filter-plan?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try std.testing.expectEqual(BoundForm.from_files, boundForm(.{ .codec = "flac" }));
+    try std.testing.expectEqual(BoundForm.from_files, boundForm(.{ .added_after = 1, .year_min = 1990 }));
+    try std.testing.expectEqual(BoundForm.per_track, boundForm(.{ .codec = "flac", .artist_id = 1 }));
+    try std.testing.expectEqual(BoundForm.per_track, boundForm(.{ .min_sample_rate = 1, .genre_id = 1 }));
+    try std.testing.expectEqual(BoundForm.per_track, boundForm(.{ .year_min = 1990 }));
+    try std.testing.expectEqual(PageForm.from_files, pageForm(.{ .codec = "flac", .sort = .date_added }, .none));
+    try std.testing.expectEqual(PageForm.bounded, pageForm(.{ .codec = "flac", .sort = .title }, .none));
+    try std.testing.expectEqual(PageForm.bounded, pageForm(.{ .codec = "flac", .sort = .date_added, .loved_only = true }, .none));
+    const statements = .{
+        "SELECT count(*) FROM tracks\nWHERE " ++ comptime filterText(.from_files) ++ ";",
+        comptime trackQueryText(.none, false, false, .date_added, .descending, .from_files),
+    };
+    inline for (statements) |sql| {
+        const plan = try explainPlan(&library, sql);
+        defer std.testing.allocator.free(plan);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "LIST SUBQUERY") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN bound_file\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH tracks USING COVERING INDEX tracks_by_preferred_file (preferred_file_id=?)\n") != null);
+    }
+}
+
+fn explainPlan(library: anytype, comptime sql: []const u8) ![]u8 {
+    var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++ sql);
+    defer statement.deinit();
+    var plan: std.ArrayList(u8) = .empty;
+    errdefer plan.deinit(std.testing.allocator);
+    while (try statement.step() == .row) {
+        try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+        try plan.append(std.testing.allocator, '\n');
+    }
+    return plan.toOwnedSlice(std.testing.allocator);
 }
 
 test "a genre's Track count is the general filter's, alone, beside other filters and after a Track goes" {
@@ -1324,6 +1763,7 @@ test "each Track filter keeps only its Tracks, alone, combined, counted, totalle
     );
     const Case = struct { query: TrackQuery, ids: []const i64 };
     const cases = [_]Case{
+        .{ .query = .{}, .ids = &.{ 1, 2, 3, 4, 5, 6, 7, 8 } },
         .{ .query = .{ .year_min = 1990 }, .ids = &.{ 3, 4, 8 } },
         .{ .query = .{ .year_max = 1990 }, .ids = &.{ 1, 2 } },
         .{ .query = .{ .year_min = 1971, .year_max = 1971 }, .ids = &.{ 1, 2 } },
@@ -1386,7 +1826,66 @@ test "each Track filter keeps only its Tracks, alone, combined, counted, totalle
         for (page.items, 0..) |item, index| ids[index] = item.id;
         std.mem.sort(i64, ids[0..page.items.len], {}, std.sort.asc(i64));
         try std.testing.expectEqualSlices(i64, case.ids, ids[0..page.items.len]);
+        var duration_ms: u64 = 0;
+        for (case.ids) |id| duration_ms += @intCast(id * 1000);
+        try std.testing.expectEqual(
+            TrackTotals{ .count = case.ids.len, .duration_ms = duration_ms },
+            try library.tracks.searchTotals("Northern", case.query),
+        );
     }
+    try std.testing.expectEqual(TrackTotals{ .count = 0, .duration_ms = 0 }, try library.tracks.searchTotals("\"", .{}));
+}
+
+test "a listing's playable ids are its rows with a playable file, in its order, past one page and in a search" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-playable-ids?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\CREATE TEMP TABLE numbers AS
+        \\    WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM n WHERE v < 1200) SELECT v FROM n;
+        \\INSERT INTO recordings(id, title) SELECT v, 'r' FROM numbers;
+        \\INSERT INTO files(id, recording_id, first_seen_at) SELECT v, v, v % 50 FROM numbers;
+        \\INSERT INTO tracks(id, recording_id, title, preferred_file_id)
+        \\    SELECT v, v, CASE WHEN v % 2 = 0 THEN 'Even ' ELSE 'Odd ' END || v, v FROM numbers;
+        \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
+        \\INSERT INTO locations(file_id, volume_id, uri, state)
+        \\    SELECT v, 1, '/m/' || v, CASE WHEN v % 3 = 0 THEN 'missing' ELSE 'present' END FROM numbers;
+    );
+    const windows = [_][2]u32{ .{ 1200, 0 }, .{ 700, 300 }, .{ 10, 1195 } };
+    for ([_]TrackSort{ .title, .date_added }) |sort| for (windows) |window| {
+        const query: TrackQuery = .{ .sort = sort, .direction = .descending, .limit = window[0], .offset = window[1] };
+        const ids = try library.tracks.playableIds(std.testing.allocator, "", query);
+        defer std.testing.allocator.free(ids);
+        var expected: std.ArrayList(i64) = .empty;
+        defer expected.deinit(std.testing.allocator);
+        var offset = window[1];
+        while (offset < window[0] + window[1]) : (offset += max_page) {
+            var paged = query;
+            paged.offset = offset;
+            paged.limit = @min(max_page, window[0] + window[1] - offset);
+            var page = try library.tracks.page(std.testing.allocator, paged);
+            defer page.deinit();
+            for (page.items) |item| if (item.has_playable_file) try expected.append(std.testing.allocator, item.id);
+        }
+        try std.testing.expectEqualSlices(i64, expected.items, ids);
+    };
+    const query: TrackQuery = .{ .limit = 1000, .offset = 50 };
+    const ids = try library.tracks.playableIds(std.testing.allocator, "even", query);
+    defer std.testing.allocator.free(ids);
+    var expected: std.ArrayList(i64) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    var offset: u32 = 50;
+    while (offset < 1050) : (offset += max_page) {
+        var page = try library.tracks.search(std.testing.allocator, "even", .{ .limit = @min(max_page, 1050 - offset), .offset = offset });
+        defer page.deinit();
+        for (page.items) |item| if (item.has_playable_file) try expected.append(std.testing.allocator, item.id);
+    }
+    try std.testing.expectEqual(@as(usize, 366), expected.items.len);
+    try std.testing.expectEqualSlices(i64, expected.items, ids);
+    try std.testing.expectError(error.PageOutOfRange, library.tracks.playableIds(std.testing.allocator, "", .{ .limit = max_id_window + 1 }));
 }
 
 test "quotes and FTS5 operators in Track search text are matched as text, never as query syntax" {

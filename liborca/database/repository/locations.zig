@@ -3,7 +3,10 @@ const sqlite = @import("../sqlite.zig");
 
 const WriteLane = @import("write_lane.zig").WriteLane;
 const max_page = @import("../columns.zig").max_page;
+const scalar = @import("../columns.zig").scalar;
 const max_playlist_entries = @import("playlists.zig").max_playlist_entries;
+const health = @import("health.zig");
+const HealthIssueKind = health.HealthIssueKind;
 
 pub const LocationState = enum {
     present,
@@ -46,31 +49,88 @@ pub const PresentLocation = struct {
     generation: i64,
 };
 
-pub const FolderEntryKind = enum { folder, file };
+/// `file` is an audio file; `image` is a picture beside the music.
+pub const FolderEntryKind = enum { folder, file, image };
+
+pub const FolderEntryStatus = enum { imported, unreadable };
+
+/// What a picture in a folder shows, by its name: a stem of `cover`, `front`
+/// or `folder` is the front cover.
+pub const ArtworkRole = enum {
+    front,
+    back,
+    booklet,
+    other,
+
+    pub fn ofName(basename: []const u8) ArtworkRole {
+        const stem = if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| basename[0..dot] else basename;
+        for ([_][]const u8{ "cover", "front", "folder" }) |name|
+            if (std.ascii.eqlIgnoreCase(stem, name)) return .front;
+        if (std.ascii.eqlIgnoreCase(stem, "back")) return .back;
+        if (std.ascii.eqlIgnoreCase(stem, "booklet")) return .booklet;
+        return .other;
+    }
+};
+
+pub const FolderImageUpsert = struct {
+    volume_id: i64,
+    root_id: ?i64,
+    uri: []const u8,
+    mime: []const u8,
+    role: ArtworkRole,
+    size_bytes: i64,
+    modified_ns: i64,
+    last_seen_generation: i64,
+};
 
 /// One child of a folder under a library root. A folder's counts cover every
-/// non-missing location below it; a file's describe that one location.
+/// non-missing location below it; a file's describe that one location; an
+/// image has no counts.
 pub const FolderEntry = struct {
     name: []u8,
     kind: FolderEntryKind,
-    /// The Track whose preferred file this is; always null for a folder.
+    /// `unreadable` when the file holds an `unreadable_file` health issue.
+    status: FolderEntryStatus,
+    /// The Track whose preferred file this is; null for a folder or image.
     track_id: ?i64,
-    /// Always null for a folder.
+    /// Null for a folder or image.
     file_id: ?i64,
     file_count: u32,
     track_count: u32,
     total_duration_ms: i64,
+    /// Images only, sniffed from the bytes.
+    mime: ?[]u8,
+    /// Images only.
+    artwork_role: ?ArtworkRole,
 };
 
 pub const FolderPage = struct {
     allocator: std.mem.Allocator,
     items: []FolderEntry,
+    /// When a scan last finished walking this folder.
+    last_scanned_at: ?i64,
+    /// The one Release every Track directly in this folder belongs to; null
+    /// when there are none or they belong to more than one.
+    release_id: ?i64,
+    release_title: ?[]u8,
+    release_artist: ?[]u8,
+    /// Images directly in this folder.
+    image_count: u32,
 
     pub fn deinit(self: FolderPage) void {
-        for (self.items) |item| self.allocator.free(item.name);
+        freeEntries(self.allocator, self.items);
         self.allocator.free(self.items);
+        if (self.release_title) |title| self.allocator.free(title);
+        if (self.release_artist) |artist| self.allocator.free(artist);
     }
 };
+
+fn freeEntries(allocator: std.mem.Allocator, items: []const FolderEntry) void {
+    for (items) |item| {
+        allocator.free(item.name);
+        if (item.mime) |mime| allocator.free(mime);
+    }
+}
 
 /// A folder path relative to a library root, as the scanner stores it below
 /// the root: empty for the root itself, otherwise `/`-separated components
@@ -114,6 +174,69 @@ const folder_track_ids_sql =
     "SELECT tracks.id FROM locations JOIN tracks ON tracks.preferred_file_id=locations.file_id WHERE " ++
     "locations.volume_id=?1 AND +locations.root_id=?4 AND locations.state<>'missing'" ++
     " AND locations.uri>=?2 AND locations.uri<?3 ORDER BY locations.uri, tracks.id;";
+const folder_images_filter = "volume_id=?1 AND rtrim(uri, replace(uri, '/', ''))=?2 AND +root_id=?3";
+const folder_images_sql = "SELECT uri, mime, role FROM folder_images WHERE " ++ folder_images_filter ++
+    " ORDER BY uri LIMIT ?4 OFFSET ?5;";
+const folder_image_count_sql = "SELECT count(*) FROM folder_images WHERE " ++ folder_images_filter ++ ";";
+
+const front_role = std.fmt.comptimePrint("{d}", .{@intFromEnum(ArtworkRole.front)});
+
+/// The `(volume_id, folder path)` of the folder holding most of a Release's
+/// present preferred files, the lowest path on a tie: the one folder whose
+/// front image is the Release's cover. `release_id` is an SQL expression.
+inline fn releaseCoverFolderSql(comptime release_id: []const u8) []const u8 {
+    return "(SELECT cover_location.volume_id, rtrim(cover_location.uri, replace(cover_location.uri, '/', ''))\n" ++
+        "    FROM tracks AS cover_track JOIN locations AS cover_location ON cover_location.file_id = cover_track.preferred_file_id\n" ++
+        "    WHERE cover_track.release_id = " ++ release_id ++ " AND cover_location.state <> 'missing'\n" ++
+        "    GROUP BY 1, 2 ORDER BY count(DISTINCT cover_track.id) DESC, 2 LIMIT 1)";
+}
+
+const folder_image_folder = "(cover_image.volume_id, rtrim(cover_image.uri, replace(cover_image.uri, '/', '')))";
+
+/// True when the Release's cover folder (`releaseCoverFolderSql`) holds a
+/// front image, so `releases.has_folder_cover` agrees with the image
+/// `releaseFrontImages` returns. Migration 46 holds a frozen copy.
+inline fn releaseHasFolderCoverSql(comptime release_id: []const u8) []const u8 {
+    return "EXISTS (SELECT 1 FROM folder_images AS cover_image WHERE cover_image.role = " ++ front_role ++
+        " AND " ++ folder_image_folder ++ " = " ++ releaseCoverFolderSql(release_id) ++ ")";
+}
+
+fn releaseFrontImagesSql(comptime release_id: []const u8) [:0]const u8 {
+    return "SELECT cover_image.uri FROM folder_images AS cover_image\n" ++
+        "WHERE cover_image.role = " ++ front_role ++ " AND " ++ folder_image_folder ++ " = " ++
+        releaseCoverFolderSql(release_id) ++ "\n" ++
+        "ORDER BY CASE lower(substr(cover_image.uri,\n" ++
+        "        length(rtrim(cover_image.uri, replace(cover_image.uri, '/', ''))) + 1, 5))\n" ++
+        "    WHEN 'cover' THEN 0 WHEN 'front' THEN 1 ELSE 2 END,\n" ++
+        "    cover_image.size_bytes DESC, cover_image.uri\n" ++
+        "LIMIT ?2;";
+}
+
+const release_front_images_sql = releaseFrontImagesSql("?1");
+const track_release_front_images_sql = releaseFrontImagesSql("(SELECT release_id FROM tracks WHERE id = ?1)");
+const folder_releases_sql =
+    "SELECT DISTINCT tracks.release_id FROM locations JOIN tracks ON tracks.preferred_file_id = locations.file_id\n" ++
+    "WHERE locations.uri >= ?2 AND locations.uri < ?3 AND locations.volume_id = ?1\n" ++
+    "  AND rtrim(locations.uri, replace(locations.uri, '/', '')) = ?2 AND tracks.release_id IS NOT NULL;";
+const refresh_folder_cover_sql =
+    "UPDATE releases SET has_folder_cover = " ++ releaseHasFolderCoverSql("releases.id") ++
+    " WHERE id = ?1 RETURNING has_folder_cover;";
+
+pub const refresh_swept_folder_covers_sql =
+    "UPDATE releases SET has_folder_cover = " ++ releaseHasFolderCoverSql("releases.id") ++
+    " WHERE id IN (SELECT id FROM temp.swept_cover_releases);";
+
+/// Recomputes `releases.has_folder_cover` for one Release and returns it.
+/// Caller holds the write lane.
+pub fn refreshFolderCoverLocked(db: sqlite.Database, release_id: i64) !bool {
+    var statement = try db.prepare(refresh_folder_cover_sql);
+    defer statement.deinit();
+    try statement.bindInt64(1, release_id);
+    if (try statement.step() != .row) return false;
+    const covered = statement.columnInt64(0) != 0;
+    _ = try statement.step();
+    return covered;
+}
 
 /// Visits a folder's direct children in uri order, one indexed seek per
 /// child: a subfolder is reported once and its whole range skipped.
@@ -512,14 +635,14 @@ pub const LocationRepository = struct {
     }
 
     /// One page of the folder at `relative_path` under library root
-    /// `root_id`: its subfolders, then its files.
+    /// `root_id`: its subfolders, then its audio files, then its images.
     ///
     /// Children are found by seeking along the `(volume_id, uri)` unique
     /// index and jumping over each subfolder's range once its name is known,
     /// so a page costs the children up to its end plus the rows inside the
     /// subfolders it shows, never the whole tree. Folders are in byte order
-    /// of `name/`, files in byte order of their name; paths match as stored.
-    /// Missing locations are left out.
+    /// of `name/`, files and images in byte order of their name; paths match
+    /// as stored. Missing locations are left out.
     pub fn folderPage(
         self: *const LocationRepository,
         allocator: std.mem.Allocator,
@@ -532,9 +655,94 @@ pub const LocationRepository = struct {
         const range = try self.folderRange(allocator, root_id, relative_path);
         defer range.deinit(allocator);
 
+        var page: FolderPage = .{
+            .allocator = allocator,
+            .items = &.{},
+            .last_scanned_at = try self.folderScannedAt(root_id, relative_path),
+            .release_id = null,
+            .release_title = null,
+            .release_artist = null,
+            .image_count = try self.folderImageCount(&range),
+        };
+        errdefer page.deinit();
+        try self.folderRelease(allocator, &range, &page);
+        page.items = try self.folderEntries(allocator, &range, limit, offset);
+        return page;
+    }
+
+    fn folderScannedAt(self: *const LocationRepository, root_id: i64, relative_path: []const u8) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT scanned_at FROM folder_scans WHERE root_id=?1 AND relative_path=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        try statement.bindText(2, relative_path);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    fn folderImageCount(self: *const LocationRepository, range: *const FolderRange) !u32 {
+        var statement = try self.db.prepare(folder_image_count_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, range.volume_id);
+        try statement.bindText(2, range.prefix);
+        try statement.bindInt64(3, range.root_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// Names the Release on `page` when every Track directly in the folder
+    /// belongs to that one Release. A folder with more than `max_page`
+    /// children names none, so a page never walks a whole library root.
+    fn folderRelease(
+        self: *const LocationRepository,
+        allocator: std.mem.Allocator,
+        range: *const FolderRange,
+        page: *FolderPage,
+    ) !void {
+        var releases = try self.db.prepare("SELECT release_id FROM tracks WHERE preferred_file_id=?1;");
+        defer releases.deinit();
+        var release_id: ?i64 = null;
+        var walk = try FolderWalk.init(self.db, allocator, range);
+        defer walk.deinit();
+        var children: usize = 0;
+        while (try walk.next()) |kind| {
+            children += 1;
+            if (children > max_page) return;
+            if (kind != .file) continue;
+            try releases.reset();
+            try releases.bindInt64(1, walk.file_id);
+            while (try releases.step() == .row) {
+                if (releases.columnIsNull(0)) return;
+                const found = releases.columnInt64(0);
+                if (release_id) |known| {
+                    if (known != found) return;
+                } else release_id = found;
+            }
+        }
+        const id = release_id orelse return;
+        var release = try self.db.prepare("SELECT title, album_artist FROM releases WHERE id=?1;");
+        defer release.deinit();
+        try release.bindInt64(1, id);
+        if (try release.step() != .row) return;
+        const title = try allocator.dupe(u8, release.columnText(0));
+        errdefer allocator.free(title);
+        const artist = try allocator.dupe(u8, release.columnText(1));
+        page.release_id = id;
+        page.release_title = title;
+        page.release_artist = artist;
+    }
+
+    fn folderEntries(
+        self: *const LocationRepository,
+        allocator: std.mem.Allocator,
+        range: *const FolderRange,
+        limit: u32,
+        offset: u32,
+    ) ![]FolderEntry {
         var items: std.ArrayList(FolderEntry) = .empty;
         errdefer {
-            for (items.items) |item| allocator.free(item.name);
+            freeEntries(allocator, items.items);
             items.deinit(allocator);
         }
 
@@ -545,7 +753,7 @@ pub const LocationRepository = struct {
 
         var folders: u32 = 0;
         {
-            var walk = try FolderWalk.init(self.db, allocator, &range);
+            var walk = try FolderWalk.init(self.db, allocator, range);
             defer walk.deinit();
             while (items.items.len < limit) {
                 const kind = try walk.next() orelse break;
@@ -568,48 +776,227 @@ pub const LocationRepository = struct {
                 try items.append(allocator, .{
                     .name = name,
                     .kind = .folder,
+                    .status = .imported,
                     .track_id = null,
                     .file_id = null,
                     .file_count = @intCast(totals.columnInt64(0)),
                     .track_count = @intCast(totals.columnInt64(1)),
                     .total_duration_ms = totals.columnInt64(2),
+                    .mime = null,
+                    .artwork_role = null,
                 });
                 try totals.reset();
             }
         }
-        if (items.items.len == limit) return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+        if (items.items.len == limit) return items.toOwnedSlice(allocator);
 
         var file_facts = try self.db.prepare(
             \\SELECT (SELECT id FROM tracks WHERE preferred_file_id=?1 ORDER BY id LIMIT 1),
-            \\       (SELECT duration_ms FROM files WHERE id=?1);
+            \\       (SELECT duration_ms FROM files WHERE id=?1),
+            \\       EXISTS (SELECT 1 FROM library_health_issues WHERE file_id=?1 AND kind=?2);
         );
         defer file_facts.deinit();
         const file_offset = offset -| folders;
         var files: u32 = 0;
-        var walk = try FolderWalk.init(self.db, allocator, &range);
-        defer walk.deinit();
-        while (items.items.len < limit) {
-            const kind = try walk.next() orelse break;
-            if (kind != .file) continue;
-            files += 1;
-            if (files <= file_offset) continue;
-            try file_facts.reset();
-            try file_facts.bindInt64(1, walk.file_id);
-            if (try file_facts.step() != .row) return error.SqlFailed;
-            const track_id: ?i64 = if (file_facts.columnIsNull(0)) null else file_facts.columnInt64(0);
-            const name = try allocator.dupe(u8, walk.name.items);
+        {
+            var walk = try FolderWalk.init(self.db, allocator, range);
+            defer walk.deinit();
+            while (items.items.len < limit) {
+                const kind = try walk.next() orelse break;
+                if (kind != .file) continue;
+                files += 1;
+                if (files <= file_offset) continue;
+                try file_facts.reset();
+                try file_facts.bindInt64(1, walk.file_id);
+                try file_facts.bindInt64(2, @intFromEnum(HealthIssueKind.unreadable_file));
+                if (try file_facts.step() != .row) return error.SqlFailed;
+                const track_id: ?i64 = if (file_facts.columnIsNull(0)) null else file_facts.columnInt64(0);
+                const name = try allocator.dupe(u8, walk.name.items);
+                errdefer allocator.free(name);
+                try items.append(allocator, .{
+                    .name = name,
+                    .kind = .file,
+                    .status = if (file_facts.columnInt64(2) != 0) .unreadable else .imported,
+                    .track_id = track_id,
+                    .file_id = walk.file_id,
+                    .file_count = 1,
+                    .track_count = if (track_id == null) 0 else 1,
+                    .total_duration_ms = if (file_facts.columnIsNull(1)) 0 else file_facts.columnInt64(1),
+                    .mime = null,
+                    .artwork_role = null,
+                });
+            }
+        }
+        if (items.items.len == limit) return items.toOwnedSlice(allocator);
+
+        var images = try self.db.prepare(folder_images_sql);
+        defer images.deinit();
+        try images.bindInt64(1, range.volume_id);
+        try images.bindText(2, range.prefix);
+        try images.bindInt64(3, range.root_id);
+        try images.bindInt64(4, @intCast(limit - items.items.len));
+        try images.bindInt64(5, file_offset -| files);
+        while (try images.step() == .row) {
+            const name = try allocator.dupe(u8, images.columnText(0)[range.prefix.len..]);
             errdefer allocator.free(name);
+            const mime = try allocator.dupe(u8, images.columnText(1));
+            errdefer allocator.free(mime);
             try items.append(allocator, .{
                 .name = name,
-                .kind = .file,
-                .track_id = track_id,
-                .file_id = walk.file_id,
-                .file_count = 1,
-                .track_count = if (track_id == null) 0 else 1,
-                .total_duration_ms = if (file_facts.columnIsNull(1)) 0 else file_facts.columnInt64(1),
+                .kind = .image,
+                .status = .imported,
+                .track_id = null,
+                .file_id = null,
+                .file_count = 0,
+                .track_count = 0,
+                .total_duration_ms = 0,
+                .mime = mime,
+                .artwork_role = std.enums.fromInt(ArtworkRole, images.columnInt64(2)) orelse .other,
             });
         }
-        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+        return items.toOwnedSlice(allocator);
+    }
+
+    /// The id of the image row this identity already describes, or null when
+    /// the image is new or its bytes changed. The caller must stamp what this
+    /// returns through `markImagesSeenLocked`, as with `unchangedLocationId`.
+    pub fn unchangedImageId(
+        self: *const LocationRepository,
+        volume_id: i64,
+        path: []const u8,
+        size_bytes: i64,
+        modified_ns: i64,
+    ) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT id FROM folder_images WHERE volume_id=?1 AND uri=?2 AND size_bytes=?3 AND modified_ns=?4;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, path);
+        try statement.bindInt64(3, size_bytes);
+        try statement.bindInt64(4, modified_ns);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Caller holds the write lane.
+    pub fn markImagesSeenLocked(self: *LocationRepository, ids: []const i64, generation: i64) !void {
+        if (ids.len == 0) return;
+        var statement = try self.db.prepare("UPDATE folder_images SET last_seen_generation=?2 WHERE id=?1;");
+        defer statement.deinit();
+        for (ids) |id| {
+            try statement.reset();
+            try statement.bindInt64(1, id);
+            try statement.bindInt64(2, generation);
+            if (try statement.step() != .done) return error.SqlFailed;
+        }
+    }
+
+    /// Caller holds the write lane.
+    pub fn upsertImageLocked(self: *LocationRepository, input: FolderImageUpsert) !void {
+        var statement = try self.db.prepare(
+            \\INSERT INTO folder_images(
+            \\    volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            \\ON CONFLICT(volume_id, uri) DO UPDATE SET
+            \\    root_id=COALESCE(excluded.root_id, folder_images.root_id),
+            \\    mime=excluded.mime,
+            \\    role=excluded.role,
+            \\    size_bytes=excluded.size_bytes,
+            \\    modified_ns=excluded.modified_ns,
+            \\    last_seen_generation=excluded.last_seen_generation;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, input.volume_id);
+        try statement.bindOptionalInt64(2, input.root_id);
+        try statement.bindText(3, input.uri);
+        try statement.bindText(4, input.mime);
+        try statement.bindInt64(5, @intFromEnum(input.role));
+        try statement.bindInt64(6, input.size_bytes);
+        try statement.bindInt64(7, input.modified_ns);
+        try statement.bindInt64(8, input.last_seen_generation);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Recomputes `has_folder_cover` for the Releases with a Track in the
+    /// folder of `image_uri`, and retires `artwork_problem` for those it
+    /// covers, as a fetched cover does. Caller holds the write lane.
+    pub fn refreshFolderCoversLocked(
+        self: *LocationRepository,
+        allocator: std.mem.Allocator,
+        volume_id: i64,
+        image_uri: []const u8,
+    ) !void {
+        const slash = std.mem.lastIndexOfScalar(u8, image_uri, '/') orelse return;
+        const folder = image_uri[0 .. slash + 1];
+        const upper = try std.mem.concat(allocator, u8, &.{ image_uri[0..slash], "0" });
+        defer allocator.free(upper);
+        var release_ids: std.ArrayList(i64) = .empty;
+        defer release_ids.deinit(allocator);
+        {
+            var statement = try self.db.prepare(folder_releases_sql);
+            defer statement.deinit();
+            try statement.bindInt64(1, volume_id);
+            try statement.bindText(2, folder);
+            try statement.bindText(3, upper);
+            while (try statement.step() == .row) try release_ids.append(allocator, statement.columnInt64(0));
+        }
+        for (release_ids.items) |release_id| {
+            if (try refreshFolderCoverLocked(self.db, release_id))
+                try health.clearReleaseLocked(self.db, release_id, .artwork_problem);
+        }
+    }
+
+    /// The uris of the front cover images in the folder holding most of a
+    /// Release's Tracks' preferred files, the lowest folder path on a tie: a
+    /// `cover` stem first, then `front`, then `folder`, the largest first
+    /// within each. At most `limit`, allocated in `arena`.
+    pub fn releaseFrontImages(
+        self: *const LocationRepository,
+        arena: std.mem.Allocator,
+        release_id: i64,
+        limit: u32,
+    ) ![]const []const u8 {
+        return self.frontImages(arena, release_front_images_sql, release_id, limit);
+    }
+
+    /// `releaseFrontImages` for the Release a Track belongs to.
+    pub fn trackReleaseFrontImages(
+        self: *const LocationRepository,
+        arena: std.mem.Allocator,
+        track_id: i64,
+        limit: u32,
+    ) ![]const []const u8 {
+        return self.frontImages(arena, track_release_front_images_sql, track_id, limit);
+    }
+
+    fn frontImages(
+        self: *const LocationRepository,
+        arena: std.mem.Allocator,
+        sql: [:0]const u8,
+        id: i64,
+        limit: u32,
+    ) ![]const []const u8 {
+        var statement = try self.db.prepare(sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, id);
+        try statement.bindInt64(2, limit);
+        var uris: std.ArrayList([]const u8) = .empty;
+        while (try statement.step() == .row) try uris.append(arena, try arena.dupe(u8, statement.columnText(0)));
+        return uris.toOwnedSlice(arena);
+    }
+
+    /// Records that a scan finished walking the folder at `relative_path`.
+    /// Caller holds the write lane.
+    pub fn recordFolderScanLocked(self: *LocationRepository, root_id: i64, relative_path: []const u8) !void {
+        var statement = try self.db.prepare(
+            \\INSERT INTO folder_scans(root_id, relative_path, scanned_at) VALUES (?1, ?2, unixepoch())
+            \\ON CONFLICT(root_id, relative_path) DO UPDATE SET scanned_at=excluded.scanned_at;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        try statement.bindText(2, relative_path);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 
     /// The Tracks whose preferred file is located anywhere below the folder,
@@ -842,4 +1229,328 @@ test "a folder's Tracks come recursively in path order, each once" {
     const all = try library.locations.folderTrackIds(std.testing.allocator, 1, "");
     defer std.testing.allocator.free(all);
     try std.testing.expectEqualSlices(i64, &.{ 20, 10, 30, 40 }, all);
+}
+
+fn insertTestImage(library: anytype, uri: []const u8, role: ArtworkRole) !void {
+    try library.locations.upsertImageLocked(.{
+        .volume_id = 2,
+        .root_id = 1,
+        .uri = uri,
+        .mime = "image/jpeg",
+        .role = role,
+        .size_bytes = 10,
+        .modified_ns = 20,
+        .last_seen_generation = 1,
+    });
+}
+
+test "a picture's role comes from its name, whatever its case" {
+    try std.testing.expectEqual(ArtworkRole.front, ArtworkRole.ofName("cover.jpg"));
+    try std.testing.expectEqual(ArtworkRole.front, ArtworkRole.ofName("Folder.JPG"));
+    try std.testing.expectEqual(ArtworkRole.front, ArtworkRole.ofName("FRONT.png"));
+    try std.testing.expectEqual(ArtworkRole.back, ArtworkRole.ofName("Back.webp"));
+    try std.testing.expectEqual(ArtworkRole.booklet, ArtworkRole.ofName("booklet.gif"));
+    try std.testing.expectEqual(ArtworkRole.other, ArtworkRole.ofName("cover 2.jpg"));
+    try std.testing.expectEqual(ArtworkRole.other, ArtworkRole.ofName("scan.cover.jpg"));
+    try std.testing.expectEqual(ArtworkRole.front, ArtworkRole.ofName("cover"));
+}
+
+test "images list after the audio files of their own folder only, and count toward it" {
+    var library = try openFolderTestLibrary("images");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO files(id, duration_ms) VALUES (1, 10), (2, 20);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 2, 1, '/m/A/1.flac', 'present'),
+        \\    (2, 2, 1, '/m/A/Sub/2.flac', 'present');
+    );
+    try insertTestImage(&library, "/m/A/cover.jpg", .front);
+    try insertTestImage(&library, "/m/A/back.jpg", .back);
+    try insertTestImage(&library, "/m/A/Sub/scan.jpg", .other);
+    try insertTestImage(&library, "/m/A0/cover.jpg", .front);
+    try insertTestImage(&library, "/m/cover.jpg", .front);
+
+    const page = try library.locations.folderPage(std.testing.allocator, 1, "A", 512, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(u32, 2), page.image_count);
+    try std.testing.expectEqual(@as(usize, 4), page.items.len);
+    try expectFolderEntry(page.items[0], .folder, "Sub", 1, 0, 20);
+    try expectFolderEntry(page.items[1], .file, "1.flac", 1, 0, 10);
+    try expectFolderEntry(page.items[2], .image, "back.jpg", 0, 0, 0);
+    try expectFolderEntry(page.items[3], .image, "cover.jpg", 0, 0, 0);
+    try std.testing.expectEqual(@as(?ArtworkRole, .back), page.items[2].artwork_role);
+    try std.testing.expectEqual(@as(?ArtworkRole, .front), page.items[3].artwork_role);
+    try std.testing.expectEqualStrings("image/jpeg", page.items[3].mime.?);
+    try std.testing.expectEqual(FolderEntryStatus.imported, page.items[3].status);
+    try std.testing.expectEqual(@as(?i64, null), page.items[3].file_id);
+    try std.testing.expectEqual(@as(?ArtworkRole, null), page.items[1].artwork_role);
+
+    const expected = [_][]const u8{ "Sub", "1.flac", "back.jpg", "cover.jpg" };
+    for (0..expected.len + 1) |offset| {
+        const part = try library.locations.folderPage(std.testing.allocator, 1, "A", 1, @intCast(offset));
+        defer part.deinit();
+        const want = expected[@min(offset, expected.len)..@min(offset + 1, expected.len)];
+        try std.testing.expectEqual(want.len, part.items.len);
+        for (want, part.items) |name, item| try std.testing.expectEqualStrings(name, item.name);
+    }
+}
+
+test "folder images are read through their folder index, never by scanning" {
+    var library = try openFolderTestLibrary("image-plan");
+    defer library.close();
+    for ([_][]const u8{ folder_images_sql, folder_image_count_sql }) |sql| {
+        const explain = try std.mem.concatWithSentinel(std.testing.allocator, u8, &.{ "EXPLAIN QUERY PLAN ", sql }, 0);
+        defer std.testing.allocator.free(explain);
+        var statement = try library.database.prepare(explain);
+        defer statement.deinit();
+        var plan: std.ArrayList(u8) = .empty;
+        defer plan.deinit(std.testing.allocator);
+        while (try statement.step() == .row) {
+            try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+            try plan.append(std.testing.allocator, '\n');
+        }
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "folder_images_folder") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN folder_images") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN locations") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN tracks") == null);
+    }
+}
+
+test "a new front image retires the missing artwork issue of the Releases it now covers, and only theirs" {
+    var library = try openFolderTestLibrary("folder-cover-health");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Here', 'here'), (2, 'Elsewhere', 'elsewhere');
+        \\INSERT INTO files(id) VALUES (1), (2), (3), (4);
+        \\INSERT INTO tracks(id, title, release_id, preferred_file_id) VALUES
+        \\    (10, 'a', 1, 1), (11, 'b', 1, 2), (20, 'c', 2, 3), (21, 'd', 2, 4);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 2, 1, '/m/Here/1.flac', 'present'),
+        \\    (2, 2, 1, '/m/Here/2.flac', 'present'),
+        \\    (3, 2, 1, '/m/Here/3.flac', 'present'),
+        \\    (4, 2, 1, '/m/Elsewhere/4.flac', 'present');
+    );
+    for ([_]i64{ 1, 2, 3, 4 }) |file_id|
+        try health.recordIssueLocked(library.database, file_id, .{ .kind = .artwork_problem, .severity = .information });
+    try insertSizedFrontImage(&library, "/m/Here/back.jpg", 10);
+    try library.locations.refreshFolderCoversLocked(std.testing.allocator, 2, "/m/Here/back.jpg");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
+    try insertSizedFrontImage(&library, "/m/Here/cover.jpg", 10);
+    try library.locations.refreshFolderCoversLocked(std.testing.allocator, 2, "/m/Here/cover.jpg");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 2;"));
+
+    var remaining = try library.database.prepare(
+        "SELECT file_id FROM library_health_issues WHERE kind = ?1 ORDER BY file_id;",
+    );
+    defer remaining.deinit();
+    try remaining.bindInt64(1, @intFromEnum(HealthIssueKind.artwork_problem));
+    var file_ids: std.ArrayList(i64) = .empty;
+    defer file_ids.deinit(std.testing.allocator);
+    while (try remaining.step() == .row) try file_ids.append(std.testing.allocator, remaining.columnInt64(0));
+    try std.testing.expectEqualSlices(i64, &.{ 3, 4 }, file_ids.items);
+}
+
+fn insertSizedFrontImage(library: anytype, uri: []const u8, size_bytes: i64) !void {
+    try library.locations.upsertImageLocked(.{
+        .volume_id = 2,
+        .root_id = 1,
+        .uri = uri,
+        .mime = "image/jpeg",
+        .role = ArtworkRole.ofName(std.fs.path.basename(uri)),
+        .size_bytes = size_bytes,
+        .modified_ns = 20,
+        .last_seen_generation = 1,
+    });
+}
+
+test "a Release's front images come from the folder holding most of its Tracks, cover before front before folder, largest first" {
+    var library = try openFolderTestLibrary("release-front-images");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Split', 'split'), (2, 'Tied', 'tied');
+        \\INSERT INTO files(id) VALUES (1), (2), (3), (4), (5);
+        \\INSERT INTO tracks(id, title, release_id, preferred_file_id) VALUES
+        \\    (10, 'a', 1, 1), (11, 'b', 1, 2), (12, 'c', 1, 3), (20, 'd', 2, 4), (21, 'e', 2, 5);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 2, 1, '/m/Split/CD2/1.flac', 'present'),
+        \\    (2, 2, 1, '/m/Split/CD2/2.flac', 'present'),
+        \\    (3, 2, 1, '/m/Split/CD1/1.flac', 'present'),
+        \\    (4, 2, 1, '/m/Tied/B/1.flac', 'present'),
+        \\    (5, 2, 1, '/m/Tied/A/1.flac', 'present');
+    );
+    try insertSizedFrontImage(&library, "/m/Split/CD1/cover.jpg", 900);
+    try insertSizedFrontImage(&library, "/m/Split/CD2/folder.jpg", 900);
+    try insertSizedFrontImage(&library, "/m/Split/CD2/Front.png", 10);
+    try insertSizedFrontImage(&library, "/m/Split/CD2/cover.png", 10);
+    try insertSizedFrontImage(&library, "/m/Split/CD2/COVER.jpg", 20);
+    try insertSizedFrontImage(&library, "/m/Split/CD2/back.jpg", 999);
+    try insertSizedFrontImage(&library, "/m/Split/CD2/Sub/cover.jpg", 999);
+    try insertSizedFrontImage(&library, "/m/Tied/A/folder.jpg", 1);
+    try insertSizedFrontImage(&library, "/m/Tied/B/cover.jpg", 1);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const split = try library.locations.releaseFrontImages(arena, 1, 8);
+    try std.testing.expectEqual(@as(usize, 4), split.len);
+    for ([_][]const u8{ "/m/Split/CD2/COVER.jpg", "/m/Split/CD2/cover.png", "/m/Split/CD2/Front.png", "/m/Split/CD2/folder.jpg" }, split) |want, got|
+        try std.testing.expectEqualStrings(want, got);
+    try std.testing.expectEqual(@as(usize, 2), (try library.locations.releaseFrontImages(arena, 1, 2)).len);
+
+    const tied = try library.locations.trackReleaseFrontImages(arena, 21, 8);
+    try std.testing.expectEqual(@as(usize, 1), tied.len);
+    try std.testing.expectEqualStrings("/m/Tied/A/folder.jpg", tied[0]);
+
+    try library.database.exec("UPDATE locations SET state = 'missing' WHERE file_id = 5;");
+    const moved = try library.locations.releaseFrontImages(arena, 2, 8);
+    try std.testing.expectEqualStrings("/m/Tied/B/cover.jpg", moved[0]);
+    try std.testing.expectEqual(@as(usize, 0), (try library.locations.releaseFrontImages(arena, 3, 8)).len);
+}
+
+test "a Release's front images are found through the folder index, never by scanning" {
+    var library = try openFolderTestLibrary("release-front-image-plan");
+    defer library.close();
+    try library.database.exec("CREATE TEMP TABLE IF NOT EXISTS swept_cover_releases(id INTEGER PRIMARY KEY);");
+    for ([_][:0]const u8{
+        release_front_images_sql,
+        track_release_front_images_sql,
+        refresh_folder_cover_sql,
+        refresh_swept_folder_covers_sql,
+    }) |sql| {
+        const explain = try std.mem.concatWithSentinel(std.testing.allocator, u8, &.{ "EXPLAIN QUERY PLAN ", sql }, 0);
+        defer std.testing.allocator.free(explain);
+        var statement = try library.database.prepare(explain);
+        defer statement.deinit();
+        var plan: std.ArrayList(u8) = .empty;
+        defer plan.deinit(std.testing.allocator);
+        while (try statement.step() == .row) {
+            try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+            try plan.append(std.testing.allocator, '\n');
+        }
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "folder_images_folder") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN folder_images") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN tracks") == null);
+    }
+}
+
+test "a file property backfill could not decode is listed as unreadable" {
+    var library = try openFolderTestLibrary("unreadable");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO files(id) VALUES (1), (2);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 2, 1, '/m/bad.flac', 'present'),
+        \\    (2, 2, 1, '/m/good.flac', 'present');
+    );
+    var statement = try library.database.prepare(
+        "INSERT INTO library_health_issues(file_id, kind, severity) VALUES (1, ?1, 2);",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, @intFromEnum(HealthIssueKind.unreadable_file));
+    _ = try statement.step();
+    const page = try library.locations.folderPage(std.testing.allocator, 1, "", 512, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(FolderEntryStatus.unreadable, page.items[0].status);
+    try std.testing.expectEqual(FolderEntryStatus.imported, page.items[1].status);
+}
+
+test "a folder names its Release only when every Track in it belongs to that one" {
+    var library = try openFolderTestLibrary("release");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO releases(id, title, album_artist) VALUES (1, 'One', 'Band'), (2, 'Two', 'Band');
+        \\INSERT INTO files(id) VALUES (1), (2), (3), (4), (5);
+        \\INSERT INTO tracks(id, title, preferred_file_id, release_id) VALUES
+        \\    (1, 'a', 1, 1), (2, 'b', 2, 1), (3, 'c', 3, 1), (4, 'd', 4, 2), (5, 'e', 5, 1);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 2, 1, '/m/One/1.flac', 'present'),
+        \\    (2, 2, 1, '/m/One/2.flac', 'present'),
+        \\    (3, 2, 1, '/m/One/Other/3.flac', 'present'),
+        \\    (4, 2, 1, '/m/One/Other/4.flac', 'present'),
+        \\    (5, 2, 1, '/m/One/Gone.flac', 'missing');
+    );
+    const one = try library.locations.folderPage(std.testing.allocator, 1, "One", 512, 0);
+    defer one.deinit();
+    try std.testing.expectEqual(@as(?i64, 1), one.release_id);
+    try std.testing.expectEqualStrings("One", one.release_title.?);
+    try std.testing.expectEqualStrings("Band", one.release_artist.?);
+
+    const mixed = try library.locations.folderPage(std.testing.allocator, 1, "One/Other", 512, 0);
+    defer mixed.deinit();
+    try std.testing.expectEqual(@as(?i64, null), mixed.release_id);
+    try std.testing.expectEqual(@as(?[]u8, null), mixed.release_title);
+
+    const root = try library.locations.folderPage(std.testing.allocator, 1, "", 512, 0);
+    defer root.deinit();
+    try std.testing.expectEqual(@as(?i64, null), root.release_id);
+}
+
+test "a folder with more children than a page names no Release" {
+    var library = try openFolderTestLibrary("release-bound");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO releases(id, title) VALUES (1, 'Big');
+        \\WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 513)
+        \\INSERT INTO files(id) SELECT i FROM n;
+        \\INSERT INTO tracks(id, title, preferred_file_id, release_id) SELECT id, 't', id, 1 FROM files;
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state)
+        \\    SELECT id, 2, 1, printf('/m/Big/%03d.flac', id), 'present' FROM files;
+    );
+    const big = try library.locations.folderPage(std.testing.allocator, 1, "Big", 512, 0);
+    defer big.deinit();
+    try std.testing.expectEqual(@as(?i64, null), big.release_id);
+    try library.database.exec("DELETE FROM locations WHERE file_id=513;");
+    const page = try library.locations.folderPage(std.testing.allocator, 1, "Big", 512, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(?i64, 1), page.release_id);
+}
+
+test "a folder's last scan is when a walk last finished it, and none before" {
+    var library = try openFolderTestLibrary("last-scan");
+    defer library.close();
+    const before = try library.locations.folderPage(std.testing.allocator, 1, "", 512, 0);
+    defer before.deinit();
+    try std.testing.expectEqual(@as(?i64, null), before.last_scanned_at);
+    try library.locations.recordFolderScanLocked(1, "");
+    try library.locations.recordFolderScanLocked(1, "");
+    const after = try library.locations.folderPage(std.testing.allocator, 1, "", 512, 0);
+    defer after.deinit();
+    try std.testing.expect(after.last_scanned_at.? > 1_700_000_000);
+    const other = try library.locations.folderPage(std.testing.allocator, 2, "", 512, 0);
+    defer other.deinit();
+    try std.testing.expectEqual(@as(?i64, null), other.last_scanned_at);
+}
+
+test "a sweep that forgets a front image or loses a Release's files clears the Release's folder cover, and only its" {
+    var library = try openFolderTestLibrary("folder-cover-sweep");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Here', 'here'), (2, 'Elsewhere', 'elsewhere');
+        \\INSERT INTO files(id) VALUES (1), (2), (3);
+        \\INSERT INTO tracks(id, title, release_id, preferred_file_id) VALUES (10, 'a', 1, 1), (11, 'b', 1, 2), (20, 'c', 2, 3);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state, last_seen_generation) VALUES
+        \\    (1, 2, 1, '/m/Here/1.flac', 'present', 2),
+        \\    (2, 2, 1, '/m/Here/2.flac', 'present', 2),
+        \\    (3, 2, 1, '/m/Elsewhere/3.flac', 'present', 3);
+        \\INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation) VALUES
+        \\    (2, 1, '/m/Here/cover.jpg', 'image/jpeg', 0, 10, 1, 1),
+        \\    (2, 1, '/m/Elsewhere/cover.jpg', 'image/jpeg', 0, 10, 1, 3);
+    );
+    for ([_]i64{ 1, 2 }) |release_id| try std.testing.expect(try refreshFolderCoverLocked(library.database, release_id));
+
+    try std.testing.expectEqual(@as(u64, 0), try library.files.markMissingBelowGeneration(1, 2));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 2;"));
+
+    try library.database.exec(
+        \\INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation) VALUES
+        \\    (2, 1, '/m/Here/cover.jpg', 'image/jpeg', 0, 10, 1, 3);
+        \\UPDATE locations SET last_seen_generation = 3 WHERE file_id = 3;
+    );
+    try std.testing.expect(try refreshFolderCoverLocked(library.database, 1));
+    try std.testing.expectEqual(@as(u64, 2), try library.files.markMissingBelowGenerationUnder(2, 1, 3, "/m/Here"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 2;"));
 }

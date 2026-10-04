@@ -810,6 +810,27 @@ test "opening a Library leaves another process's in-flight write alone" {
 
 fn rewindToVersion25(db: sqlite.Database) !void {
     try db.exec(
+        \\DROP INDEX job_history_finished;
+        \\DROP TABLE job_history;
+        \\ALTER TABLE releases DROP COLUMN has_folder_cover;
+        \\DROP TABLE folder_scans;
+        \\DROP INDEX folder_images_sweep;
+        \\DROP INDEX folder_images_folder;
+        \\DROP TABLE folder_images;
+        \\DROP TABLE release_group_covers;
+        \\DROP INDEX locations_held;
+        \\DROP TABLE artist_release_groups;
+        \\DROP INDEX files_without_bitrate;
+        \\DROP TRIGGER analysis_results_loudness_ai;
+        \\DROP TRIGGER analysis_results_loudness_au;
+        \\DROP TRIGGER analysis_results_loudness_ad;
+        \\DROP TABLE file_loudness;
+        \\DROP INDEX files_by_bitrate;
+        \\DROP INDEX tracks_sort_album_artist;
+        \\DROP INDEX genres_by_name;
+        \\DROP INDEX track_genres_first;
+        \\DROP INDEX releases_artist_order;
+        \\DROP INDEX releases_title_order;
         \\DROP INDEX analysis_results_created;
         \\DROP TRIGGER tracks_genre_totals_bd;
         \\DROP TRIGGER tracks_genre_duration_au;
@@ -881,6 +902,30 @@ fn rewindToVersion25(db: sqlite.Database) !void {
         \\CREATE INDEX tracks_rating ON tracks(rating);
         \\PRAGMA user_version=25;
     );
+}
+
+test "rewinding to version 25 drops the folder tables, and reopening creates them again" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    {
+        const db = try sqlite.Database.open(harness.database_path);
+        defer db.close();
+        try rewindToVersion25(db);
+        var statement = try db.prepare(
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('folder_images', 'folder_images_sweep', 'folder_images_folder', 'folder_scans');",
+        );
+        defer statement.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+        try std.testing.expectEqual(@as(i64, 0), statement.columnInt64(0));
+    }
+    var reopened = try harness.open();
+    defer reopened.close();
+    var statement = try reopened.database.prepare(
+        "SELECT count(*) FROM sqlite_master WHERE name IN ('folder_images', 'folder_images_sweep', 'folder_images_folder', 'folder_scans');",
+    );
+    defer statement.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+    try std.testing.expectEqual(@as(i64, 4), statement.columnInt64(0));
 }
 
 test "a Library that still needs a migration refuses to open while another process is mutating it" {

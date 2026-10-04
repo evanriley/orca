@@ -6,6 +6,8 @@ const text_key = @import("../text_key.zig");
 
 const max_page = columns.max_page;
 const WriteLane = @import("write_lane.zig").WriteLane;
+const track_play_file = @import("tracks.zig").track_play_file;
+const release_group_mbid_field = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Field.musicbrainz_release_group_id)});
 
 pub const PhotoSource = enum(u8) { local = 0, commons = 1 };
 pub const BiographySource = enum(u8) { wikipedia = 0 };
@@ -73,6 +75,51 @@ pub const ArtistInfoRecord = struct {
     listeners: ?u64 = null,
     /// Unix seconds of the last ListenBrainz refresh that fully succeeded.
     listeners_fetched_at: ?i64 = null,
+    origin: ?[]const u8 = null,
+};
+
+pub const max_release_groups = 200;
+
+/// A MusicBrainz release group credited to an Artist, for
+/// `storeReleaseGroups`. Strings are borrowed.
+pub const ReleaseGroupRecord = struct {
+    mbid: []const u8,
+    title: []const u8,
+    primary_type: ?[]const u8 = null,
+    first_release_year: ?i32 = null,
+    /// The credit's other artists as MusicBrainz shows them; null when the
+    /// Artist is credited alone.
+    credited_with: ?[]const u8 = null,
+};
+
+/// What `release_group_covers` holds for a release group.
+pub const ReleaseGroupCoverState = enum { not_fetched, none, kept };
+
+/// A release group's kept cover row, without the image.
+pub const ReleaseGroupCoverMark = struct {
+    has_image: bool,
+    /// Unix seconds.
+    fetched_at: i64,
+};
+
+/// A MusicBrainz release group of an Artist. Caller-owned.
+pub const ElsewhereRelease = struct {
+    mbid: []u8,
+    title: []u8,
+    primary_type: ?[]u8,
+    year: ?i32,
+    credited_with: ?[]u8,
+    /// A Release of the Artist in the Library from this release group;
+    /// always null from `elsewhere`, which leaves those groups out.
+    library_release_id: ?i64,
+    cover: ReleaseGroupCoverState = .not_fetched,
+
+    pub fn deinit(self: ElsewhereRelease, allocator: std.mem.Allocator) void {
+        allocator.free(self.mbid);
+        allocator.free(self.title);
+        if (self.primary_type) |text| allocator.free(text);
+        if (self.credited_with) |text| allocator.free(text);
+    }
 };
 
 /// At most this many related artists are kept per Artist.
@@ -215,7 +262,7 @@ pub const ArtistInfoRepository = struct {
             \\    biography, biography_source, biography_url, biography_licence, biography_language,
             \\    CASE WHEN photo IS NULL THEN NULL ELSE photo_source END,
             \\    photo_url, photo_licence, photo_licence_url, photo_credit, fetched_at, outcome, requested_language,
-            \\    listeners, listeners_fetched_at
+            \\    listeners, listeners_fetched_at, origin
             \\FROM artist_info WHERE artist_id=?1;
         );
         defer statement.deinit();
@@ -246,6 +293,7 @@ pub const ArtistInfoRepository = struct {
             .requested_language = try optionalText(arena, statement, 18),
             .listeners = if (statement.columnIsNull(19)) null else std.math.cast(u64, statement.columnInt64(19)),
             .listeners_fetched_at = if (statement.columnIsNull(20)) null else statement.columnInt64(20),
+            .origin = try optionalText(arena, statement, 21),
         };
         return info;
     }
@@ -267,8 +315,8 @@ pub const ArtistInfoRepository = struct {
             \\INSERT INTO artist_info(artist_id, musicbrainz_artist_id, wikidata_id, begin_year, end_year, ended,
             \\    artist_type, biography, biography_source, biography_url, biography_licence, biography_language,
             \\    photo, photo_mime, photo_source, photo_url, photo_licence, photo_licence_url, photo_credit,
-            \\    fetched_at, outcome, requested_language)
-            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?23)
+            \\    fetched_at, outcome, requested_language, origin)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?23, ?24)
             \\ON CONFLICT(artist_id) DO UPDATE SET
             \\    musicbrainz_artist_id=excluded.musicbrainz_artist_id, wikidata_id=excluded.wikidata_id,
             \\    begin_year=excluded.begin_year, end_year=excluded.end_year, ended=excluded.ended,
@@ -283,7 +331,7 @@ pub const ArtistInfoRepository = struct {
             \\    photo_licence_url=CASE WHEN ?22 THEN excluded.photo_licence_url ELSE artist_info.photo_licence_url END,
             \\    photo_credit=CASE WHEN ?22 THEN excluded.photo_credit ELSE artist_info.photo_credit END,
             \\    fetched_at=excluded.fetched_at, outcome=excluded.outcome,
-            \\    requested_language=excluded.requested_language;
+            \\    requested_language=excluded.requested_language, origin=excluded.origin;
         );
         defer statement.deinit();
         try statement.bindInt64(1, artist_id);
@@ -314,6 +362,7 @@ pub const ArtistInfoRepository = struct {
         try statement.bindInt64(21, record.outcome);
         try statement.bindInt64(22, @intFromBool(photo_change != .keep));
         try statement.bindOptionalText(23, record.requested_language);
+        try statement.bindOptionalText(24, record.origin);
         if (try statement.step() != .done) return error.SqlFailed;
 
         if (new_links) |replacement| {
@@ -384,6 +433,111 @@ pub const ArtistInfoRepository = struct {
         }
         try self.db.exec("COMMIT;");
         return true;
+    }
+
+    /// Replaces an Artist's release groups, in one transaction. Groups past
+    /// `max_release_groups` are dropped. A group no Artist keeps any more
+    /// loses its cover.
+    pub fn storeReleaseGroups(self: *ArtistInfoRepository, artist_id: i64, groups: []const ReleaseGroupRecord) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var mark = try self.db.prepare("UPDATE artist_release_groups SET position = -1 - position WHERE artist_id=?1;");
+        defer mark.deinit();
+        try mark.bindInt64(1, artist_id);
+        if (try mark.step() != .done) return error.SqlFailed;
+        var insert = try self.db.prepare(
+            \\INSERT INTO artist_release_groups(artist_id, mbid, title, primary_type, first_release_year, credited_with, position)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            \\ON CONFLICT(artist_id, mbid) DO UPDATE SET title=excluded.title, primary_type=excluded.primary_type,
+            \\    first_release_year=excluded.first_release_year, credited_with=excluded.credited_with,
+            \\    position=excluded.position
+            \\WHERE artist_release_groups.position < 0;
+        );
+        defer insert.deinit();
+        for (groups[0..@min(groups.len, max_release_groups)], 0..) |group, position| {
+            try insert.bindInt64(1, artist_id);
+            try insert.bindText(2, group.mbid);
+            try insert.bindText(3, group.title);
+            try insert.bindOptionalText(4, group.primary_type);
+            try insert.bindOptionalInt64(5, if (group.first_release_year) |year| year else null);
+            try insert.bindOptionalText(6, group.credited_with);
+            try insert.bindInt64(7, @intCast(position));
+            if (try insert.step() != .done) return error.SqlFailed;
+            try insert.reset();
+        }
+        var sweep = try self.db.prepare("DELETE FROM artist_release_groups WHERE artist_id=?1 AND position < 0;");
+        defer sweep.deinit();
+        try sweep.bindInt64(1, artist_id);
+        if (try sweep.step() != .done) return error.SqlFailed;
+        try self.db.exec("COMMIT;");
+    }
+
+    /// An Artist's kept release groups that none of its Releases or
+    /// appearances in the Library belongs to, newest first. A Release
+    /// belongs to a group its release info, a file's tags or an accepted
+    /// value names, compared without case.
+    pub fn elsewhere(self: *const ArtistInfoRepository, allocator: std.mem.Allocator, artist_id: i64) ![]ElsewhereRelease {
+        var statement = try self.db.prepare(
+            \\WITH artist_releases(id) AS (
+            \\    SELECT id FROM releases WHERE album_artist_id = ?1
+            \\    UNION SELECT release_id FROM tracks WHERE artist_id = ?1 AND release_id IS NOT NULL),
+            \\artist_files(release_id, file_id) AS (
+            \\    SELECT tracks.release_id,
+            \\
+        ++ track_play_file ++
+            \\
+            \\    FROM tracks WHERE tracks.release_id IN artist_releases),
+            \\library_groups(release_id, mbid) AS (
+            \\    SELECT release_id, musicbrainz_release_group_id FROM release_info
+            \\        WHERE release_id IN artist_releases AND musicbrainz_release_group_id IS NOT NULL
+            \\    UNION ALL
+            \\    SELECT artist_files.release_id, observed_file_tags.musicbrainz_release_group_id FROM artist_files
+            \\        JOIN observed_file_tags ON observed_file_tags.file_id = artist_files.file_id
+            \\        WHERE observed_file_tags.musicbrainz_release_group_id IS NOT NULL
+            \\    UNION ALL
+            \\    SELECT artist_files.release_id, orca_metadata_values.value FROM artist_files
+            \\        JOIN orca_metadata_values ON orca_metadata_values.file_id = artist_files.file_id
+            \\            AND orca_metadata_values.field =
+        ++ release_group_mbid_field ++
+            \\)
+            \\SELECT groups.mbid, title, primary_type, first_release_year, credited_with,
+            \\    CASE WHEN covers.mbid IS NULL THEN 0 WHEN covers.image IS NULL THEN 1 ELSE 2 END
+            \\FROM artist_release_groups AS groups LEFT JOIN release_group_covers AS covers ON covers.mbid = groups.mbid
+            \\WHERE artist_id = ?1 AND NOT EXISTS (
+            \\    SELECT 1 FROM library_groups WHERE library_groups.mbid = groups.mbid COLLATE NOCASE)
+            \\ORDER BY first_release_year IS NULL, first_release_year DESC, position
+            \\LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, artist_id);
+        try statement.bindInt64(2, max_release_groups);
+        var items: std.ArrayList(ElsewhereRelease) = .empty;
+        errdefer {
+            for (items.items) |item| item.deinit(allocator);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            try items.ensureUnusedCapacity(allocator, 1);
+            const mbid = try allocator.dupe(u8, statement.columnText(0));
+            errdefer allocator.free(mbid);
+            const title = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(title);
+            const primary_type = try optionalOwnedText(allocator, statement, 2);
+            errdefer if (primary_type) |text| allocator.free(text);
+            const credited_with = try optionalOwnedText(allocator, statement, 4);
+            items.appendAssumeCapacity(.{
+                .mbid = mbid,
+                .title = title,
+                .primary_type = primary_type,
+                .year = optionalYear(statement, 3),
+                .credited_with = credited_with,
+                .library_release_id = null,
+                .cover = std.enums.fromInt(ReleaseGroupCoverState, statement.columnInt64(5)) orelse .not_fetched,
+            });
+        }
+        return items.toOwnedSlice(allocator);
     }
 
     /// An Artist's related artists, the highest scores first, each matched
@@ -542,6 +696,49 @@ pub const ArtistInfoRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
+    /// The cover kept for a release group by MusicBrainz release group ID;
+    /// null when none is kept or the archive had none.
+    pub fn releaseGroupCover(self: *const ArtistInfoRepository, allocator: std.mem.Allocator, mbid: []const u8) !?metadata.EmbeddedImage {
+        var statement = try self.db.prepare("SELECT image FROM release_group_covers WHERE mbid = ?1 AND image IS NOT NULL;");
+        defer statement.deinit();
+        try statement.bindText(1, mbid);
+        if (try statement.step() != .row) return null;
+        const bytes = try allocator.dupe(u8, statement.columnBlob(0));
+        return metadata.adoptImage(allocator, bytes, .front_cover) catch {
+            allocator.free(bytes);
+            return null;
+        };
+    }
+
+    /// Whether a release group's cover row holds an image and when it was
+    /// written; null when no row is kept.
+    pub fn releaseGroupCoverMark(self: *const ArtistInfoRepository, mbid: []const u8) !?ReleaseGroupCoverMark {
+        var statement = try self.db.prepare("SELECT image IS NOT NULL, fetched_at FROM release_group_covers WHERE mbid = ?1;");
+        defer statement.deinit();
+        try statement.bindText(1, mbid);
+        if (try statement.step() != .row) return null;
+        return .{ .has_image = statement.columnInt64(0) != 0, .fetched_at = statement.columnInt64(1) };
+    }
+
+    /// Keeps a release group's cover, or with null remembers that the
+    /// archive had none, replacing what was kept. Nothing is kept for a group
+    /// no Artist keeps.
+    pub fn storeReleaseGroupCover(self: *ArtistInfoRepository, mbid: []const u8, image: ?ArtistInfoPhoto, fetched_at: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO release_group_covers(mbid, image, mime, fetched_at)
+            \\SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM artist_release_groups WHERE mbid = ?1)
+            \\ON CONFLICT(mbid) DO UPDATE SET image=excluded.image, mime=excluded.mime, fetched_at=excluded.fetched_at;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, mbid);
+        try statement.bindOptionalBlob(2, if (image) |kept| kept.bytes else null);
+        try statement.bindOptionalText(3, if (image) |kept| kept.mime_type else null);
+        try statement.bindInt64(4, fetched_at);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
     /// An Artist's links, by kind and then URL.
     pub fn links(self: *const ArtistInfoRepository, allocator: std.mem.Allocator, artist_id: i64) !ArtistLinks {
         var result: ArtistLinks = .{ .arena = .init(allocator), .items = &.{} };
@@ -657,6 +854,11 @@ pub const ArtistInfoRepository = struct {
 fn optionalText(arena: std.mem.Allocator, statement: sqlite.Statement, index: c_int) !?[]const u8 {
     if (statement.columnIsNull(index)) return null;
     return try arena.dupe(u8, statement.columnText(index));
+}
+
+fn optionalOwnedText(allocator: std.mem.Allocator, statement: sqlite.Statement, index: c_int) !?[]u8 {
+    if (statement.columnIsNull(index)) return null;
+    return try allocator.dupe(u8, statement.columnText(index));
 }
 
 fn optionalYear(statement: sqlite.Statement, index: c_int) ?i32 {
@@ -820,4 +1022,146 @@ test "a related artist's photo is kept with its credit by MusicBrainz ID without
     try std.testing.expectEqual(@as(?metadata.EmbeddedImage, null), try library.artist_info.relatedPhoto(std.testing.allocator, "cccccccc-0000-4000-8000-000000000003"));
     try std.testing.expectEqual(@as(?RelatedArtistPhotoInfo, null), try library.artist_info.relatedPhotoInfo(std.testing.allocator, "cccccccc-0000-4000-8000-000000000003"));
     try std.testing.expectEqual(@as(?i64, 50), try library.artist_info.relatedPhotoFetchedAt("cccccccc-0000-4000-8000-000000000003"));
+}
+
+test "an artist's origin is stored and read back with the rest of its info" {
+    var library = try openTestLibrary("origin");
+    defer library.close();
+    const artist = (try library.artists.ensure(.{ .key = "amine", .name = "Aminé" })).?;
+    try library.artist_info.store(artist, &.{ .origin = "Portland", .fetched_at = 10, .outcome = 1 }, .keep, null);
+    var info = (try library.artist_info.get(std.testing.allocator, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqualStrings("Portland", info.record.origin.?);
+    try library.artist_info.store(artist, &.{ .fetched_at = 20, .outcome = 1 }, .keep, null);
+    var cleared = (try library.artist_info.get(std.testing.allocator, artist)).?;
+    defer cleared.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), cleared.record.origin);
+}
+
+test "elsewhere leaves out release groups a Release or appearance of the artist names in its release info, a file's tags or an accepted value, without case" {
+    var library = try openTestLibrary("elsewhere");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name) VALUES (1, 'Host', 'host'), (2, 'Other', 'other');
+        \\INSERT INTO releases(id, title, release_key, album_artist_id) VALUES
+        \\    (1, 'Own', 'r1', 1), (2, 'Feature', 'r2', 2), (3, 'Not theirs', 'r3', 2);
+        \\INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 100, x'01'), (2, 100, x'02'), (3, 100, x'03');
+        \\INSERT INTO tracks(id, release_id, title, artist_id, preferred_file_id) VALUES
+        \\    (1, 1, 'One', 1, 1), (2, 2, 'Guest spot', 1, 2), (3, 3, 'Theirs', 2, 3);
+        \\INSERT INTO release_info(release_id, musicbrainz_release_group_id, fetched_at, outcome) VALUES
+        \\    (1, '0C1F6A8E-3D5B-4C2A-9E7F-1A2B3C4D5E01', 10, 1);
+        \\INSERT INTO observed_file_tags(file_id, musicbrainz_release_group_id) VALUES
+        \\    (2, '0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02'), (3, '0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04');
+    );
+    try library.database.exec(std.fmt.comptimePrint(
+        "INSERT INTO orca_metadata_values(file_id, field, value, provenance) VALUES (1, {s}, '0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03', 0);",
+        .{release_group_mbid_field},
+    ));
+    try library.artist_info.storeReleaseGroups(1, &.{
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01", .title = "Own", .first_release_year = 2017 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02", .title = "Feature", .first_release_year = 2018 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03", .title = "Accepted", .first_release_year = 2019 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04", .title = "Someone else's copy", .first_release_year = 2020 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e05", .title = "Undated" },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e06", .title = "Collab", .primary_type = "Album", .first_release_year = 2023, .credited_with = "Kaytranada" },
+    });
+
+    const found = try library.artist_info.elsewhere(std.testing.allocator, 1);
+    defer {
+        for (found) |group| group.deinit(std.testing.allocator);
+        std.testing.allocator.free(found);
+    }
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+    try std.testing.expectEqualStrings("Collab", found[0].title);
+    try std.testing.expectEqualStrings("Album", found[0].primary_type.?);
+    try std.testing.expectEqual(@as(?i32, 2023), found[0].year);
+    try std.testing.expectEqualStrings("Kaytranada", found[0].credited_with.?);
+    try std.testing.expectEqual(@as(?i64, null), found[0].library_release_id);
+    try std.testing.expectEqualStrings("Someone else's copy", found[1].title);
+    try std.testing.expectEqualStrings("Undated", found[2].title);
+    try std.testing.expectEqual(@as(?i32, null), found[2].year);
+
+    const none = try library.artist_info.elsewhere(std.testing.allocator, 2);
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "replacing an Artist's release groups removes the covers of the groups it drops unless another Artist keeps them, and keeps the rest" {
+    var library = try openTestLibrary("release-group-covers");
+    defer library.close();
+    const host = (try library.artists.ensure(.{ .key = "host", .name = "Host" })).?;
+    const guest = (try library.artists.ensure(.{ .key = "guest", .name = "Guest" })).?;
+    const kept = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01";
+    const dropped = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02";
+    const shared = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03";
+    const missing = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04";
+    const jpeg: ArtistInfoPhoto = .{ .bytes = "\xff\xd8\xff\xe0JFIF", .mime_type = "image/jpeg" };
+    try library.artist_info.storeReleaseGroups(host, &.{
+        .{ .mbid = kept, .title = "Kept" },
+        .{ .mbid = dropped, .title = "Dropped" },
+        .{ .mbid = shared, .title = "Shared" },
+        .{ .mbid = missing, .title = "Missing" },
+    });
+    try library.artist_info.storeReleaseGroups(guest, &.{.{ .mbid = shared, .title = "Shared" }});
+    for ([_][]const u8{ kept, dropped, shared }) |mbid| try library.artist_info.storeReleaseGroupCover(mbid, jpeg, 10);
+    try library.artist_info.storeReleaseGroupCover(missing, null, 10);
+    try library.artist_info.storeReleaseGroupCover("0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5eff", jpeg, 10);
+    try std.testing.expectEqual(@as(i64, 4), try columns.scalar(library.database, "SELECT count(*) FROM release_group_covers;"));
+
+    const before = try library.artist_info.elsewhere(std.testing.allocator, host);
+    defer {
+        for (before) |group| group.deinit(std.testing.allocator);
+        std.testing.allocator.free(before);
+    }
+    try std.testing.expectEqual(ReleaseGroupCoverState.kept, before[0].cover);
+    try std.testing.expectEqual(ReleaseGroupCoverState.none, before[3].cover);
+    try std.testing.expectEqual(ReleaseGroupCoverMark{ .has_image = false, .fetched_at = 10 }, (try library.artist_info.releaseGroupCoverMark(missing)).?);
+
+    try library.artist_info.storeReleaseGroups(host, &.{.{ .mbid = kept, .title = "Kept again" }});
+    try std.testing.expectEqual(@as(i64, 2), try columns.scalar(library.database, "SELECT count(*) FROM release_group_covers;"));
+    const cover = (try library.artist_info.releaseGroupCover(std.testing.allocator, kept)).?;
+    defer cover.deinit();
+    try std.testing.expectEqualStrings(jpeg.bytes, cover.bytes);
+    try std.testing.expect(try library.artist_info.releaseGroupCover(std.testing.allocator, dropped) == null);
+    try std.testing.expect(try library.artist_info.releaseGroupCoverMark(missing) == null);
+    try std.testing.expect(try library.artist_info.releaseGroupCoverMark(shared) != null);
+
+    try library.database.exec("DELETE FROM artists;");
+    try std.testing.expectEqual(@as(i64, 0), try columns.scalar(library.database, "SELECT count(*) FROM release_group_covers;"));
+}
+
+test "storing release groups replaces the artist's, keeps at most the bound, and leaves other artists' alone" {
+    var library = try openTestLibrary("release-groups-bound");
+    defer library.close();
+    const host = (try library.artists.ensure(.{ .key = "host", .name = "Host" })).?;
+    const other = (try library.artists.ensure(.{ .key = "other", .name = "Other" })).?;
+    var mbids: [max_release_groups + 1][36]u8 = undefined;
+    var groups: [max_release_groups + 1]ReleaseGroupRecord = undefined;
+    for (&mbids, &groups, 0..) |*mbid, *group, index| {
+        _ = std.fmt.bufPrint(mbid, "00000000-0000-4000-8000-{x:0>12}", .{index}) catch unreachable;
+        group.* = .{ .mbid = mbid, .title = "Group" };
+    }
+    try library.artist_info.storeReleaseGroups(host, &groups);
+    try library.artist_info.storeReleaseGroups(other, groups[0..2]);
+    const stored = try library.artist_info.elsewhere(std.testing.allocator, host);
+    defer {
+        for (stored) |group| group.deinit(std.testing.allocator);
+        std.testing.allocator.free(stored);
+    }
+    try std.testing.expectEqual(@as(usize, max_release_groups), stored.len);
+
+    try library.artist_info.storeReleaseGroups(host, groups[5..6]);
+    const replaced = try library.artist_info.elsewhere(std.testing.allocator, host);
+    defer {
+        for (replaced) |group| group.deinit(std.testing.allocator);
+        std.testing.allocator.free(replaced);
+    }
+    try std.testing.expectEqual(@as(usize, 1), replaced.len);
+    try std.testing.expectEqualStrings(&mbids[5], replaced[0].mbid);
+    const others = try library.artist_info.elsewhere(std.testing.allocator, other);
+    defer {
+        for (others) |group| group.deinit(std.testing.allocator);
+        std.testing.allocator.free(others);
+    }
+    try std.testing.expectEqual(@as(usize, 2), others.len);
 }

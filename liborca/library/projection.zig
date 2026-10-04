@@ -504,14 +504,23 @@ pub const Projection = struct {
     }
 
     /// Runs after `pruneStale`, because a cover carried to a Release by a
-    /// regrouping counts for its files.
-    fn settleArtwork(self: *Projection, entries: []const Entry) !void {
-        var fetched = try self.library.database.prepare(
-            "SELECT 1 FROM release_artwork WHERE release_id = ?1 AND image IS NOT NULL;",
+    /// regrouping counts for its files. Refreshes `has_folder_cover` for the
+    /// Releases the folder's files now project to and those they left.
+    fn settleArtwork(self: *Projection, allocator: std.mem.Allocator, entries: []const Entry, vacated: []const i64) !void {
+        var refreshed: std.AutoHashMapUnmanaged(i64, void) = .empty;
+        defer refreshed.deinit(allocator);
+        for (entries) |entry| try refreshed.put(allocator, entry.release_id, {});
+        for (vacated) |release_id| try refreshed.put(allocator, release_id, {});
+        var release_ids = refreshed.keyIterator();
+        while (release_ids.next()) |release_id|
+            _ = try database.repository.refreshFolderCoverLocked(self.library.database, release_id.*);
+
+        var covered = try self.library.database.prepare(
+            "SELECT 1 FROM releases WHERE id = ?1 AND " ++ database.repository.releaseCoverSql("releases") ++ ";",
         );
-        defer fetched.deinit();
+        defer covered.deinit();
         for (entries) |entry| {
-            const release_has_cover = !entry.embedded_artwork and try exists(&fetched, entry.release_id);
+            const release_has_cover = !entry.embedded_artwork and try exists(&covered, entry.release_id);
             try self.library.health_issues.settleLocked(
                 entry.file_id,
                 .artwork_problem,
@@ -622,7 +631,7 @@ pub const Projection = struct {
             start = end;
         }
         try self.pruneStale(allocator, entries, written.items, &vacated, &genres, result);
-        try self.settleArtwork(entries);
+        try self.settleArtwork(allocator, entries, vacated.releases.items);
         try self.library.database.exec("COMMIT;");
     }
 
@@ -1531,6 +1540,33 @@ test "a fetched cover clears the release's artwork problem" {
     const after_reprojection = try filesWithIssue(&library, .artwork_problem);
     defer testing.allocator.free(after_reprojection);
     try testing.expectEqualSlices(i64, &.{}, after_reprojection);
+}
+
+test "a front image in the release's folder counts as its cover, and a back image does not" {
+    var library = try openTestLibrary("file:orca-projection-folder-cover?mode=memory&cache=shared");
+    defer library.close();
+    const bare = try observe(&library, "/m/Artist/bare.flac", .flac, .{
+        .title = "Bare",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    });
+    try library.database.exec(std.fmt.comptimePrint(
+        \\INSERT INTO folder_images(volume_id, uri, mime, role, size_bytes, modified_ns) VALUES
+        \\    ({d}, '/m/Artist/back.jpg', 'image/jpeg', 1, 10, 0);
+    , .{database.LibraryDatabase.null_volume}));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const before = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(before);
+    try testing.expectEqualSlices(i64, &.{bare}, before);
+
+    try library.database.exec("UPDATE folder_images SET role = 0, uri = '/m/Artist/cover.jpg';");
+    _ = try projection.run(.all);
+    const after = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(after);
+    try testing.expectEqualSlices(i64, &.{}, after);
 }
 
 test "an explicit album artist names the release and keeps it off the compilation list" {

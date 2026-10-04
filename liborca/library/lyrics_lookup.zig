@@ -64,7 +64,11 @@ fn readSidecar(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?Lyr
         else => return null,
     };
     defer allocator.free(text);
-    return metadata.lyrics.parse(allocator, text, .sidecar);
+    var found = (try metadata.lyrics.parse(allocator, text, .sidecar)) orelse return null;
+    errdefer found.deinit();
+    const name_start = if (std.mem.lastIndexOfScalar(u8, lrc_path, '/')) |slash| slash + 1 else 0;
+    try found.setSourceName(lrc_path[name_start..]);
+    return found;
 }
 
 fn readEmbedded(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?Lyrics {
@@ -131,6 +135,24 @@ test "a synced sidecar beside the file is read" {
     defer lyrics.deinit();
     try testing.expectEqual(metadata.lyrics.Source.sidecar, lyrics.source);
     try testing.expectEqualStrings("From the sidecar", lyrics.lines[0].text);
+}
+
+test "a sidecar's name and offset are reported with its lines" {
+    var folder = try Folder.init();
+    defer folder.deinit();
+    try folder.copyFixture("fixtures/audio/tagged-reference.flac", "Song.flac");
+    try folder.write("Song.lrc", "[offset:-200]\n[00:01.00]Later\n");
+    const sidecar = (try folder.lyricsFor("Song.flac")).?;
+    defer sidecar.deinit();
+    try testing.expectEqualStrings("Song.lrc", sidecar.source_name.?);
+    try testing.expectEqual(@as(i64, -200), sidecar.offset_ms);
+    try testing.expectEqual(@as(?u32, 1200), sidecar.lines[0].start_ms);
+
+    try folder.copyFixture("fixtures/audio/lyrics-synced.flac", "Tagged.flac");
+    const embedded = (try folder.lyricsFor("Tagged.flac")).?;
+    defer embedded.deinit();
+    try testing.expectEqualStrings("embedded", embedded.source_name.?);
+    try testing.expectEqual(@as(i64, 0), embedded.offset_ms);
 }
 
 test "a plain sidecar gives way to synced embedded lyrics" {

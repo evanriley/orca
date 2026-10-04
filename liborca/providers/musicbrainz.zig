@@ -86,6 +86,37 @@ pub const MusicBrainz = struct {
         return self.request(ReleaseGroupLookup, allocator, request_url, ReleaseGroupParser{});
     }
 
+    /// `GET {server}/ws/2/area/{mbid}?inc=area-rels&fmt=json`, cached like
+    /// every other lookup.
+    pub fn lookUpArea(self: *MusicBrainz, allocator: std.mem.Allocator, area_mbid: []const u8) !AreaLookup {
+        if (!metadata.isMusicBrainzId(area_mbid)) return error.InvalidMusicBrainzId;
+        const request_url = try std.fmt.allocPrint(
+            allocator,
+            "{s}/ws/2/area/{s}?inc=area-rels&fmt=json",
+            .{ std.mem.trimEnd(u8, self.server, "/"), area_mbid },
+        );
+        defer allocator.free(request_url);
+        return self.request(AreaLookup, allocator, request_url, AreaParser{});
+    }
+
+    /// `GET {server}/ws/2/release-group?artist={mbid}&inc=artist-credits&limit=100&fmt=json`:
+    /// the first `browse_limit` release groups credited to the artist, in
+    /// one request, cached like every other lookup.
+    pub fn browseReleaseGroups(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        artist_mbid: []const u8,
+    ) !ReleaseGroupBrowse {
+        if (!metadata.isMusicBrainzId(artist_mbid)) return error.InvalidMusicBrainzId;
+        const request_url = try std.fmt.allocPrint(
+            allocator,
+            "{s}/ws/2/release-group?artist={s}&inc=artist-credits&limit={d}&fmt=json",
+            .{ std.mem.trimEnd(u8, self.server, "/"), artist_mbid, browse_limit },
+        );
+        defer allocator.free(request_url);
+        return self.request(ReleaseGroupBrowse, allocator, request_url, ReleaseGroupBrowseParser{ .artist_mbid = artist_mbid });
+    }
+
     /// One cached GET: a fresh cached answer without a request, else the
     /// service, else an expired answer when the service cannot be reached.
     /// An answer is cached only once `parser` accepts it.
@@ -220,6 +251,14 @@ pub const ArtistLookup = struct {
     /// The genres MusicBrainz users voted for, at most `max_genres`, in the
     /// order MusicBrainz lists them. CC BY-NC-SA 3.0, unlike the CC0 rest.
     genres: []const Genre = &.{},
+    /// The name of the artist's begin area, else of its area.
+    origin: ?[]const u8 = null,
+    /// The MusicBrainz ID of the area `origin` names, when it has a
+    /// well-formed one.
+    origin_area_id: ?[]const u8 = null,
+    /// That area's MusicBrainz type, such as `City` or `Country`, when the
+    /// artist lookup gives it.
+    origin_area_type: ?[]const u8 = null,
 
     pub fn deinit(self: ArtistLookup) void {
         self.arena.deinit();
@@ -348,9 +387,93 @@ const ArtistRelation = struct {
     url: ?ArtistRelationUrl = null,
 };
 
+const AreaBody = struct {
+    id: []const u8 = "",
+    name: []const u8 = "",
+    type: ?[]const u8 = null,
+};
+
+const AreaRelation = struct {
+    type: []const u8 = "",
+    direction: []const u8 = "",
+    @"target-type": []const u8 = "",
+    ended: ?bool = null,
+    area: ?AreaBody = null,
+};
+
+const AreaLookupBody = struct {
+    id: []const u8 = "",
+    name: []const u8 = "",
+    type: ?[]const u8 = null,
+    relations: []const AreaRelation = &.{},
+};
+
+/// An area MusicBrainz names. Strings are borrowed from the lookup.
+pub const Area = struct {
+    id: []const u8,
+    name: []const u8,
+    /// MusicBrainz's area type: `Country`, `Subdivision`, `County`,
+    /// `Municipality`, `City`, `District` or `Island`; null when not given.
+    type: ?[]const u8 = null,
+};
+
+/// The most areas an area lookup keeps as containing it.
+pub const max_area_parents = 8;
+
+/// What Orca reads from a MusicBrainz area. Strings live in `arena`.
+pub const AreaLookup = struct {
+    arena: std.heap.ArenaAllocator,
+    area: Area,
+    /// The areas its current `part of` relationships say it lies in, in
+    /// MusicBrainz's order, at most `max_area_parents`.
+    parents: []const Area = &.{},
+
+    pub fn deinit(self: AreaLookup) void {
+        self.arena.deinit();
+    }
+};
+
+const AreaParser = struct {
+    fn parse(_: AreaParser, allocator: std.mem.Allocator, body: []const u8) !AreaLookup {
+        var result: AreaLookup = .{ .arena = .init(allocator), .area = undefined };
+        errdefer result.deinit();
+        const arena = result.arena.allocator();
+        const parsed = std.json.parseFromSliceLeaky(AreaLookupBody, arena, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidProviderResponse,
+        };
+        if (!metadata.isMusicBrainzId(parsed.id)) return error.InvalidProviderResponse;
+        const name = std.mem.trim(u8, parsed.name, " \t");
+        if (name.len == 0) return error.InvalidProviderResponse;
+        result.area = .{ .id = parsed.id, .name = name, .type = areaType(parsed.type) };
+        var parents: std.ArrayList(Area) = .empty;
+        for (parsed.relations) |relation| {
+            if (parents.items.len == max_area_parents) break;
+            if (!std.mem.eql(u8, relation.type, "part of") or !std.mem.eql(u8, relation.direction, "backward")) continue;
+            if (!std.mem.eql(u8, relation.@"target-type", "area") or (relation.ended orelse false)) continue;
+            const parent = relation.area orelse continue;
+            const parent_name = std.mem.trim(u8, parent.name, " \t");
+            if (!metadata.isMusicBrainzId(parent.id) or parent_name.len == 0) continue;
+            try parents.append(arena, .{ .id = parent.id, .name = parent_name, .type = areaType(parent.type) });
+        }
+        result.parents = parents.items;
+        return result;
+    }
+};
+
+fn areaType(kind: ?[]const u8) ?[]const u8 {
+    const text = kind orelse return null;
+    return if (text.len == 0) null else text;
+}
+
 const ArtistBody = struct {
     id: []const u8 = "",
     type: ?[]const u8 = null,
+    area: ?AreaBody = null,
+    @"begin-area": ?AreaBody = null,
     @"life-span": ?ArtistLifeSpan = null,
     relations: []const ArtistRelation = &.{},
     genres: []const GenreBody = &.{},
@@ -395,9 +518,113 @@ const ArtistParser = struct {
         }
         result.links = links.items;
         result.genres = try readGenres(arena, parsed.genres);
+        const origin_area = if (areaName(parsed.@"begin-area") != null) parsed.@"begin-area" else parsed.area;
+        result.origin = areaName(origin_area);
+        if (result.origin != null) if (origin_area) |area| {
+            if (metadata.isMusicBrainzId(area.id)) result.origin_area_id = area.id;
+            result.origin_area_type = areaType(area.type);
+        };
         return result;
     }
 };
+
+fn areaName(area: ?AreaBody) ?[]const u8 {
+    const name = std.mem.trim(u8, (area orelse return null).name, " \t");
+    return if (name.len == 0) null else name;
+}
+
+/// The most release groups one browse asks for, MusicBrainz's largest page.
+pub const browse_limit = 100;
+
+/// The release groups a browse found, in MusicBrainz's order. Strings live
+/// in `arena`.
+pub const ReleaseGroupBrowse = struct {
+    arena: std.heap.ArenaAllocator,
+    groups: []const database.ArtistReleaseGroupRecord = &.{},
+    /// How many groups MusicBrainz credits to the artist, beyond this page
+    /// too.
+    total: u32 = 0,
+
+    pub fn deinit(self: ReleaseGroupBrowse) void {
+        self.arena.deinit();
+    }
+};
+
+const BrowseCreditArtist = struct {
+    id: []const u8 = "",
+};
+
+const BrowseCredit = struct {
+    name: []const u8 = "",
+    joinphrase: []const u8 = "",
+    artist: ?BrowseCreditArtist = null,
+};
+
+const BrowsedReleaseGroup = struct {
+    id: []const u8 = "",
+    title: []const u8 = "",
+    @"primary-type": ?[]const u8 = null,
+    @"first-release-date": ?[]const u8 = null,
+    @"artist-credit": []const BrowseCredit = &.{},
+};
+
+const ReleaseGroupBrowseBody = struct {
+    @"release-group-count": ?i64 = null,
+    @"release-groups": ?[]const BrowsedReleaseGroup = null,
+};
+
+const ReleaseGroupBrowseParser = struct {
+    artist_mbid: []const u8,
+
+    fn parse(self: ReleaseGroupBrowseParser, allocator: std.mem.Allocator, body: []const u8) !ReleaseGroupBrowse {
+        var result: ReleaseGroupBrowse = .{ .arena = .init(allocator) };
+        errdefer result.deinit();
+        const arena = result.arena.allocator();
+        const parsed = std.json.parseFromSliceLeaky(ReleaseGroupBrowseBody, arena, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidProviderResponse,
+        };
+        const listed = parsed.@"release-groups" orelse return error.InvalidProviderResponse;
+        var groups: std.ArrayList(database.ArtistReleaseGroupRecord) = .empty;
+        for (listed) |group| {
+            if (groups.items.len == database.artist_release_groups_max) break;
+            if (!metadata.isMusicBrainzId(group.id)) continue;
+            const title = std.mem.trim(u8, group.title, " \t");
+            if (title.len == 0) continue;
+            try groups.append(arena, .{
+                .mbid = group.id,
+                .title = title,
+                .primary_type = if (group.@"primary-type") |kind| nonEmpty(kind) else null,
+                .first_release_year = yearOf(group.@"first-release-date"),
+                .credited_with = try creditedWith(arena, group.@"artist-credit", self.artist_mbid),
+            });
+        }
+        result.groups = groups.items;
+        result.total = std.math.cast(u32, parsed.@"release-group-count" orelse 0) orelse std.math.maxInt(u32);
+        return result;
+    }
+};
+
+/// The credit without the artist `artist_mbid`, as MusicBrainz shows it:
+/// each other name followed by its join phrase, the last one's dropped.
+/// Null when no other artist is credited.
+fn creditedWith(arena: std.mem.Allocator, credits: []const BrowseCredit, artist_mbid: []const u8) !?[]const u8 {
+    var text: std.Io.Writer.Allocating = .init(arena);
+    var pending_join: []const u8 = "";
+    for (credits) |credit| {
+        const id = if (credit.artist) |artist| artist.id else "";
+        if (std.ascii.eqlIgnoreCase(id, artist_mbid)) continue;
+        if (credit.name.len == 0) continue;
+        try text.writer.writeAll(pending_join);
+        try text.writer.writeAll(credit.name);
+        pending_join = credit.joinphrase;
+    }
+    if (text.written().len == 0) return null;
+    return text.written();
+}
 
 fn yearOf(date: ?[]const u8) ?i32 {
     const text = date orelse return null;
@@ -1125,6 +1352,120 @@ test "an artist lookup yields the life span, type, Wikidata item, Commons image 
     try testing.expectEqual(@as(usize, 5), artist.genres.len);
     try testing.expectEqualStrings("hip hop", artist.genres[0].name);
     try testing.expectEqual(@as(u32, 2), artist.genres[0].count);
+    try testing.expectEqualStrings("Portland", artist.origin.?);
+}
+
+test "an artist's origin is its begin area, else its area, and a blank or missing area is none" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-artist-origin?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.respond(200,
+        \\{"id":"12398bf3-1b99-47b7-930c-f3956773f35a","area":{"name":"United States"},"begin-area":null}
+    );
+    const area_only = try rig.adapter.lookUpArtist(testing.allocator, amine_mbid);
+    defer area_only.deinit();
+    try testing.expectEqualStrings("United States", area_only.origin.?);
+
+    rig.adapter.server = "http://127.0.0.1:5000";
+    rig.respond(200,
+        \\{"id":"12398bf3-1b99-47b7-930c-f3956773f35a","area":{"name":" "},"begin-area":{"name":""}}
+    );
+    const blank = try rig.adapter.lookUpArtist(testing.allocator, amine_mbid);
+    defer blank.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), blank.origin);
+}
+
+test "an area lookup asks for its area relationships and keeps only the current areas it is part of" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-area?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.respond(200,
+        \\{"id":"2b748d6e-bc1c-4434-9f7b-ecd6332bc557","name":"Portland","type":"City","relations":[
+        \\{"type":"part of","direction":"forward","target-type":"area","area":{"id":"11111111-1111-4111-8111-111111111111","name":"Pearl District","type":"District"}},
+        \\{"type":"part of","direction":"backward","target-type":"area","ended":true,"area":{"id":"22222222-2222-4222-8222-222222222222","name":"Oregon Territory","type":"Subdivision"}},
+        \\{"type":"part of","direction":"backward","target-type":"area","area":{"id":"33333333-3333-4333-8333-333333333333","name":"Multnomah County","type":"County"}},
+        \\{"type":"part of","direction":"backward","target-type":"area","area":{"id":"44444444-4444-4444-8444-444444444444","name":"Oregon","type":"Subdivision"}}]}
+    );
+    const area = try rig.adapter.lookUpArea(testing.allocator, "2b748d6e-bc1c-4434-9f7b-ecd6332bc557");
+    defer area.deinit();
+    try testing.expectEqualStrings(
+        "https://musicbrainz.org/ws/2/area/2b748d6e-bc1c-4434-9f7b-ecd6332bc557?inc=area-rels&fmt=json",
+        rig.net.transport.lastUrl(),
+    );
+    try testing.expectEqualStrings("Portland", area.area.name);
+    try testing.expectEqualStrings("City", area.area.type.?);
+    try testing.expectEqual(@as(usize, 2), area.parents.len);
+    try testing.expectEqualStrings("Multnomah County", area.parents[0].name);
+    try testing.expectEqualStrings("Oregon", area.parents[1].name);
+    try testing.expectEqualStrings("Subdivision", area.parents[1].type.?);
+    try testing.expectError(error.InvalidMusicBrainzId, rig.adapter.lookUpArea(testing.allocator, "../x"));
+
+    const artist_body = try readArtistFixture();
+    defer testing.allocator.free(artist_body);
+    rig.respond(200, artist_body);
+    const artist = try rig.adapter.lookUpArtist(testing.allocator, amine_mbid);
+    defer artist.deinit();
+    try testing.expectEqualStrings("2b748d6e-bc1c-4434-9f7b-ecd6332bc557", artist.origin_area_id.?);
+    try testing.expectEqual(@as(?[]const u8, null), artist.origin_area_type);
+}
+
+test "a release group browse asks once for the artist's credited groups and names the credit's other artists as MusicBrainz joins them" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-release-group-browse?mode=memory&cache=shared");
+    defer rig.deinit();
+    const body = try std.Io.Dir.cwd().readFileAlloc(testing.io, "fixtures/providers/musicbrainz-release-group-browse.json", testing.allocator, .limited(64 * 1024));
+    defer testing.allocator.free(body);
+    rig.respond(200, body);
+
+    const browse = try rig.adapter.browseReleaseGroups(testing.allocator, amine_mbid);
+    defer browse.deinit();
+    try testing.expectEqualStrings(
+        "https://musicbrainz.org/ws/2/release-group?artist=" ++ amine_mbid ++ "&inc=artist-credits&limit=100&fmt=json",
+        rig.net.transport.lastUrl(),
+    );
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
+    try testing.expectEqual(@as(u32, 7), browse.total);
+    try testing.expectEqual(@as(usize, 6), browse.groups.len);
+    const first = browse.groups[0];
+    try testing.expectEqualStrings("0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01", first.mbid);
+    try testing.expectEqualStrings("Good for You", first.title);
+    try testing.expectEqualStrings("Album", first.primary_type.?);
+    try testing.expectEqual(@as(?i32, 2017), first.first_release_year);
+    try testing.expectEqual(@as(?[]const u8, null), first.credited_with);
+    try testing.expectEqualStrings("Kaytranada", browse.groups[3].credited_with.?);
+    try testing.expectEqualStrings("Leon Thomas", browse.groups[4].credited_with.?);
+    try testing.expectEqual(@as(?[]const u8, null), browse.groups[5].primary_type);
+    try testing.expectEqual(@as(?i32, null), browse.groups[5].first_release_year);
+
+    const again = try rig.adapter.browseReleaseGroups(testing.allocator, amine_mbid);
+    defer again.deinit();
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
+    try testing.expectError(error.InvalidMusicBrainzId, rig.adapter.browseReleaseGroups(testing.allocator, "Aminé"));
+}
+
+test "a browse skips groups without an ID or a title, keeps the other artists between this one, and refuses an answer with no group list" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-release-group-browse-odd?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.respond(200,
+        \\{"release-group-count":3,"release-groups":[
+        \\ {"id":"not-an-id","title":"Bad"},
+        \\ {"id":"0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e09","title":"  "},
+        \\ {"id":"0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e0a","title":"Posse Cut","primary-type":"Single","first-release-date":"2021",
+        \\  "artist-credit":[
+        \\   {"name":"Kaytranada","joinphrase":", ","artist":{"id":"6f4e1b4c-6d5e-4ee6-8cc7-4b8c2dbd7a33"}},
+        \\   {"name":"Aminé","joinphrase":" & ","artist":{"id":"12398BF3-1B99-47B7-930C-F3956773F35A"}},
+        \\   {"name":"Leon Thomas","joinphrase":"","artist":{"id":"2b9b6a3e-7a1d-4a8e-9a43-6f0c5e1d2b77"}}]}]}
+    );
+    const browse = try rig.adapter.browseReleaseGroups(testing.allocator, amine_mbid);
+    defer browse.deinit();
+    try testing.expectEqual(@as(usize, 1), browse.groups.len);
+    try testing.expectEqualStrings("Kaytranada, Leon Thomas", browse.groups[0].credited_with.?);
+    try testing.expectEqual(@as(?i32, 2021), browse.groups[0].first_release_year);
+
+    rig.respond(200, "{\"id\":\"12398bf3-1b99-47b7-930c-f3956773f35a\"}");
+    rig.adapter.server = "http://127.0.0.1:5000";
+    try testing.expectError(error.InvalidProviderResponse, rig.adapter.browseReleaseGroups(testing.allocator, amine_mbid));
 }
 
 test "a release group lookup asks for URL relations and genres and yields the current Wikidata and Wikipedia links" {

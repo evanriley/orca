@@ -144,18 +144,18 @@ zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-af
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
-zig build run -- artists DATABASE [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`, then `photo` when its photo is stored
-zig build run -- releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--loved] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--letters | --totals] [--limit N] [--offset N]   # each line ends `format=FLAC 24/96`, `lossless`, `reviews=N`; --own needs --artist and leaves out appearances; --letters prints `letter count offset` (title or artist sort), --totals `count= artists= bytes=`
-zig build run -- tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--limit N] [--offset N]   # KEY includes rating, loved, play_count, last_played, year; a search ranks by relevance; --totals prints `count= duration_ms=`
+zig build run -- artists DATABASE [--album-artists] [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`, then `photo` when its photo is stored; --album-artists: only Artists a Release is filed under
+zig build run -- releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--loved] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--letters | --totals | --async] [--limit N] [--offset N]   # each line ends `format=FLAC 24/96`, `lossless`, `reviews=N`; --own needs --artist and leaves out appearances; --letters prints `letter count offset` (title or artist sort), --totals `count= artists= bytes=`; --async reads the page and count on the browse loader
+zig build run -- tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [--limit N] [--offset N]   # KEY includes rating, loved, play_count, last_played, year, loudness, bitrate, path, album_artist, genre; lines end `lufs= kbps= path=`; a search ranks by relevance; --totals prints `count= duration_ms=`, a search's with --filter; --async reads them on the browse loader
 zig build run -- track DATABASE ID
-zig build run -- search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]   # kind, id, title, subtitle; each word a word prefix, no syntax
+zig build run -- search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]   # kind, id, title, subtitle, releases= tracks= year= duration_ms= artist= reason=name|tracks_by|main_genre_of count=, then `top KIND ID TITLE`; each word a word prefix, no syntax
 zig build run -- genres DATABASE [--filter TEXT] [--sort name|tracks] [--limit N] [--offset N]
 zig build run -- genre DATABASE ID   # counts, top artists, most played releases
 zig build run -- genres DATABASE --fill-from-musicbrainz [--limit N] [--offline]   # provider genres on Tracks with none from a file or an edit
 zig build run -- genre-fill DATABASE [on|off]   # automatic MusicBrainz genre fill in artist-info and release-info; on by default
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
-zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; --fetch: see LRCLIB below
+zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--genre=A;B] [--clear=FIELD]…   # library only
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
@@ -164,7 +164,7 @@ zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups;
 # ratings and playlists -- kept per recording in the library; no file is written
 zig build run -- rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)
 zig build run -- playlists DATABASE [--smart|--manual] [--pinned] [--created-by-me|--imported] [--sort name|updated|created|entries] [--filter TEXT]   # kind, then imported/pinned/loved/tags= when they apply
-zig build run -- playlist DATABASE ID [--limit N] [--offset N]   # a `playlist` line (kind, description, tags, genres), then entries
+zig build run -- playlist DATABASE ID [--limit N] [--offset N]   # a `playlist` line (kind, description, tags, genres), a `formats:` line (CODEC=N, analyzed=, unanalyzed=), then entries
 zig build run -- playlist-create DATABASE NAME
 zig build run -- playlist-rename DATABASE ID NAME
 zig build run -- playlist-delete DATABASE ID
@@ -176,7 +176,7 @@ zig build run -- playlist-export DATABASE ID FILE [--relative] [--force]   # ato
 zig build run -- playlist-update DATABASE ID [--description=TEXT] [--pin|--unpin] [--love|--unlove] [--tags=A,B]   # at most 8 tags; replaces them
 zig build run -- smart-playlist-create DATABASE NAME RULES_FILE   # version 1 rules JSON, see docs/api.md
 zig build run -- smart-playlist-rules DATABASE ID [RULES_FILE]   # prints the rules, replacing them with RULES_FILE first
-zig build run -- smart-playlist-count DATABASE RULES_FILE   # Tracks the rules match now; stores nothing
+zig build run -- smart-playlist-count DATABASE RULES_FILE [--sample=N]   # count= and duration_ms= the rules match now, then the first N Tracks; stores nothing
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
@@ -218,21 +218,22 @@ zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-a
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
 # localhost); stores the cover in the library, never in a file
-zig build run -- cover-art DATABASE RELEASE_ID   # prints source=embedded|fetched|cached|cached-miss|not-found|no-release-id and bytes
+zig build run -- cover-art DATABASE RELEASE_ID   # prints source=embedded|folder|fetched|cached|cached-miss|not-found|no-release-id and bytes
 
 # LRCLIB -- server from ORCA_LRCLIB_URL (https, or http to localhost); caches in
 # the library, never writes a file
 zig build run -- lyrics DATABASE TRACK_ID --fetch   # local synced, LRCLIB synced, local plain, LRCLIB plain; prints outcome=
 
 # Artist and release info -- MusicBrainz, Wikidata, Wikimedia Commons, Wikipedia,
-# ListenBrainz and ListenBrainz Labs, servers from ORCA_MUSICBRAINZ_URL,
-# ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL, ORCA_LISTENBRAINZ_URL
-# and ORCA_LISTENBRAINZ_LABS_URL (https, or http to localhost); kept in the
-# library, never in a file
-zig build run -- artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx] [--include-releases]   # totals (own releases, appearances apart), photo=, biography=, years=, links:, listeners=, related:, outcome=
+# ListenBrainz, ListenBrainz Labs and the Cover Art Archive, servers from
+# ORCA_MUSICBRAINZ_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL,
+# ORCA_LISTENBRAINZ_URL, ORCA_LISTENBRAINZ_LABS_URL and ORCA_COVERARTARCHIVE_URL
+# (https, or http to localhost); kept in the library, never in a file
+zig build run -- artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx] [--include-releases]   # totals (own releases, appearances apart), origin=, photo=, biography=, years=, links:, listeners=, related:, elsewhere: (release groups the library lacks, cover=yes|no|-, with --include-releases), outcome=
 zig build run -- artist-photo DATABASE ARTIST_ID --out=PATH
 zig build run -- related DATABASE ARTIST_ID   # score, name, mbid, library=ID, photo=yes|no
 zig build run -- related-photo DATABASE MBID --out=PATH   # a related artist's photo, kept by the artist-info fetch; prints source=, licence=, credit=
+zig build run -- release-group-cover DATABASE MBID --out=PATH   # a release group's Cover Art Archive cover, kept by the artist-info fetch; prints source= and bytes
 zig build run -- release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline] [--lang=xx]   # description=, release-group=, outcome=
 
 # AcoustID submission of recording IDs from accepted matches or edits -- user key

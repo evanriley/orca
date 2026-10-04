@@ -212,15 +212,7 @@ pub const ReleaseSort = enum {
 
     pub fn terms(comptime self: ReleaseSort, comptime name_order: NameOrder) []const u8 {
         return switch (self) {
-            .title, .artist => {
-                const key = comptime self.nameKey(name_order).?;
-                const by_name = startsWithLetter(key) ++ ", " ++ key ++ " COLLATE NOCASE, ";
-                return by_name ++ switch (self) {
-                    .title => "releases.id",
-                    else => "releases.release_date IS NULL, releases.release_date, " ++
-                        "releases.title COLLATE NOCASE, releases.id",
-                };
-            },
+            .title, .artist => self.nameTerms(name_order, "releases."),
             .year => "releases.release_date IS NULL, releases.release_date DESC, " ++
                 "releases.title COLLATE NOCASE, releases.id",
             .recently_added => "releases.id DESC",
@@ -231,14 +223,29 @@ pub const ReleaseSort = enum {
         };
     }
 
+    fn nameTerms(comptime self: ReleaseSort, comptime name_order: NameOrder, comptime table: []const u8) []const u8 {
+        const key = comptime self.nameKeyOf(name_order, table).?;
+        const by_name = startsWithLetter(key) ++ ", " ++ key ++ " COLLATE NOCASE, ";
+        return by_name ++ switch (self) {
+            .title => table ++ "id",
+            .artist => table ++ "release_date IS NULL, " ++ table ++ "release_date, " ++
+                table ++ "title COLLATE NOCASE, " ++ table ++ "id",
+            else => @compileError("only the name sorts order by a name"),
+        };
+    }
+
     /// The name a sort files Releases under by letter; null when it orders
     /// them by something else.
     pub fn nameKey(comptime self: ReleaseSort, comptime name_order: NameOrder) ?[]const u8 {
+        return self.nameKeyOf(name_order, "releases.");
+    }
+
+    fn nameKeyOf(comptime self: ReleaseSort, comptime name_order: NameOrder, comptime table: []const u8) ?[]const u8 {
         return switch (self) {
-            .title => "releases.title",
+            .title => table ++ "title",
             .artist => switch (name_order) {
-                .ignore_articles => withoutArticle("releases.album_artist"),
-                .as_written => "releases.album_artist",
+                .ignore_articles => withoutArticle(table ++ "album_artist"),
+                .as_written => table ++ "album_artist",
             },
             .year, .recently_added, .loved, .most_played => null,
         };
@@ -281,15 +288,22 @@ const is_high_resolution = std.fmt.comptimePrint(
 
 const is_lossless = "COALESCE(play.codec IN (" ++ lossless_codecs ++ "), 0)";
 
-const release_year =
+pub const release_year =
     "CASE WHEN substr(releases.release_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]' " ++
     "THEN CAST(substr(releases.release_date, 1, 4) AS INTEGER) END";
 
 const release_track_files = "tracks LEFT JOIN files AS play ON play.id = " ++ track_play_file ++ "\n" ++
     "    WHERE tracks.release_id = releases.id";
 
-pub const has_cover = "(EXISTS (SELECT 1 FROM release_artwork WHERE release_artwork.release_id = releases.id " ++
-    "AND release_artwork.image IS NOT NULL) OR EXISTS (SELECT 1 FROM " ++ release_track_files ++ "\n" ++
+/// True when the Release row `release` has a cover of its own: a fetched
+/// Cover Art Archive image or a front image in its folder. Every artwork
+/// check adds a file's embedded picture to this one definition.
+pub inline fn releaseCoverSql(comptime release: []const u8) []const u8 {
+    return "(" ++ release ++ ".has_folder_cover IS 1 OR EXISTS (SELECT 1 FROM release_artwork\n" ++
+        "    WHERE release_artwork.release_id = " ++ release ++ ".id AND release_artwork.image IS NOT NULL))";
+}
+
+pub const has_cover = "(" ++ releaseCoverSql("releases") ++ " OR EXISTS (SELECT 1 FROM " ++ release_track_files ++ "\n" ++
     "    AND EXISTS (SELECT 1 FROM observed_file_tags WHERE observed_file_tags.file_id = play.id\n" ++
     "        AND observed_file_tags.artwork_mime_type IS NOT NULL AND observed_file_tags.artwork_byte_size > 0)))";
 
@@ -948,6 +962,73 @@ test "each letter bucket starts at the offset where paging the same query reache
     });
     try expectLetterIndex(&library, .{ .sort = .artist, .text = "zz" }, &.{});
     try std.testing.expectError(error.SortHasNoLetters, library.releases.letterIndex(std.testing.allocator, .{ .sort = .year }));
+}
+
+test "a release whose cover folder holds a front image has artwork, and a back cover or another folder's front does not count" {
+    var library = try openFormatLibrary("folder-cover");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO locations(file_id, volume_id, uri, state) VALUES
+        \\    (1, 1, '/m/High/1.flac', 'present'), (2, 1, '/m/High/2.flac', 'present'),
+        \\    (7, 1, '/m/Grouped/CD1/1.flac', 'present'), (8, 1, '/m/Grouped/CD2/1.flac', 'present');
+        \\INSERT INTO folder_images(volume_id, uri, mime, role, size_bytes, modified_ns) VALUES
+        \\    (1, '/m/High/cover.jpg', 'image/jpeg', 0, 10, 0),
+        \\    (1, '/m/Grouped/CD1/back.jpg', 'image/jpeg', 1, 10, 0),
+        \\    (1, '/m/Grouped/CD2/cover.jpg', 'image/jpeg', 0, 10, 0);
+    );
+    try refreshFolderCovers(&library);
+    try expectReleaseIds(&library, .{ .has_artwork = true }, &.{ 1, 3, 4 });
+    try expectReleaseIds(&library, .{ .has_artwork = false }, &.{ 5, 6, 2 });
+
+    try library.database.exec("UPDATE folder_images SET role = 0 WHERE uri = '/m/Grouped/CD1/back.jpg';");
+    try refreshFolderCovers(&library);
+    try expectReleaseIds(&library, .{ .has_artwork = true }, &.{ 6, 1, 3, 4 });
+    try library.database.exec("UPDATE locations SET state = 'missing' WHERE uri LIKE '/m/High/%';");
+    try refreshFolderCovers(&library);
+    try expectReleaseIds(&library, .{ .has_artwork = false }, &.{ 5, 1, 2 });
+}
+
+fn refreshFolderCovers(library: anytype) !void {
+    for (1..7) |release_id|
+        _ = try @import("locations.zig").refreshFolderCoverLocked(library.database, @intCast(release_id));
+}
+
+test "the artwork filter reads the stored folder cover flag and never the folder images" {
+    var library = try openFormatLibrary("folder-cover-plan");
+    defer library.close();
+    var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++
+        comptime releaseQueryText(.title, .ignore_articles, false, false, false));
+    defer statement.deinit();
+    var plan: std.ArrayList(u8) = .empty;
+    defer plan.deinit(std.testing.allocator);
+    while (try statement.step() == .row) {
+        try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+        try plan.append(std.testing.allocator, '\n');
+    }
+    try std.testing.expect(std.mem.indexOf(u8, plan.items, "folder_images") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.items, "locations") == null);
+}
+
+test "a page sorted by artist or title walks its order index instead of sorting every release" {
+    var library = try openFormatLibrary("order-plan");
+    defer library.close();
+    inline for (.{
+        .{ ReleaseSort.artist, "releases_artist_order" },
+        .{ ReleaseSort.title, "releases_title_order" },
+    }) |case| {
+        var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++
+            comptime releaseQueryText(case[0], .ignore_articles, false, false, false));
+        defer statement.deinit();
+        var plan: std.ArrayList(u8) = .empty;
+        defer plan.deinit(std.testing.allocator);
+        while (try statement.step() == .row) {
+            try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+            try plan.append(std.testing.allocator, '\n');
+        }
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN releases USING INDEX " ++ case[1] ++ "\n") != null);
+        const page_plan = plan.items[0..std.mem.indexOf(u8, plan.items, "MATERIALIZE release_facts").?];
+        try std.testing.expect(std.mem.indexOf(u8, page_plan, "USE TEMP B-TREE FOR ORDER BY") == null);
+    }
 }
 
 test "the artist sort files names under the word after a leading article unless they sort as written" {

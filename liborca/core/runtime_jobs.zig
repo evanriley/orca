@@ -227,6 +227,7 @@ fn infoSetup(self: *OrcaRuntime) !job_worker.ArtistInfoSetup {
         .wikipedia_server = self.wikipedia_server,
         .listenbrainz_server = self.listenbrainz_server,
         .listenbrainz_labs_server = self.listenbrainz_labs_server,
+        .coverartarchive_server = self.coverartarchive_server,
     };
 }
 

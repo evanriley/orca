@@ -1792,6 +1792,7 @@ static int playlist_metadata_smoke(orca_runtime *runtime, orca_handle library, i
 struct folder_capture {
     uint32_t count;
     uint32_t folders;
+    uint32_t images;
     uint32_t tracks;
     int64_t track_ids[512];
     char first_name[64];
@@ -1806,6 +1807,7 @@ static void capture_folder_entry(void *context, const orca_folder_entry_view *en
     }
     capture->count += 1;
     if (entry->kind == ORCA_FOLDER_ENTRY_KIND_FOLDER) capture->folders += 1;
+    if (entry->kind == ORCA_FOLDER_ENTRY_KIND_IMAGE) capture->images += 1;
     if (entry->kind != ORCA_FOLDER_ENTRY_KIND_FILE || !entry->has_file_id || entry->file_count != 1)
         return;
     if (!entry->has_track_id) return;
@@ -1820,7 +1822,7 @@ static int folder_smoke(orca_runtime *runtime, orca_handle library, orca_handle 
     memset(&root, 0, sizeof root);
     SMOKE_CHECK(orca_library_query_folder(runtime, library, root_id, "", 0, 512, 0, &root,
                                           capture_folder_entry) == ORCA_STATUS_OK);
-    SMOKE_CHECK(root.count > 2 && root.folders == 0 && root.tracks > 2);
+    SMOKE_CHECK(root.count > 2 && root.folders == 0 && root.images == 0 && root.tracks > 2);
     SMOKE_CHECK(strcmp(root.first_name, "cbr-noxing-reference.mp3") == 0);
 
     static struct folder_capture paged;

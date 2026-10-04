@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 38;
+pub const current_version = 47;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1297,6 +1297,190 @@ const migration_38 =
     \\
 ++ genre_totals_schema;
 
+const migration_39 =
+    \\CREATE INDEX releases_artist_order ON releases((upper(substr((CASE WHEN album_artist LIKE 'the _%' THEN substr(album_artist, 5)
+    \\      WHEN album_artist LIKE 'an _%' THEN substr(album_artist, 4)
+    \\      WHEN album_artist LIKE 'a _%' THEN substr(album_artist, 3) ELSE album_artist END), 1, 1)) BETWEEN 'A' AND 'Z'), (CASE WHEN album_artist LIKE 'the _%' THEN substr(album_artist, 5)
+    \\      WHEN album_artist LIKE 'an _%' THEN substr(album_artist, 4)
+    \\      WHEN album_artist LIKE 'a _%' THEN substr(album_artist, 3) ELSE album_artist END) COLLATE NOCASE, release_date IS NULL, release_date, title COLLATE NOCASE, id);
+    \\CREATE INDEX releases_title_order ON releases((upper(substr(title, 1, 1)) BETWEEN 'A' AND 'Z'), title COLLATE NOCASE, id);
+    \\
+;
+
+const migration_40 =
+    \\CREATE TABLE file_loudness (
+    \\    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    \\    source_identity BLOB NOT NULL,
+    \\    integrated_lufs REAL NOT NULL
+    \\);
+    \\CREATE INDEX file_loudness_by_lufs ON file_loudness(integrated_lufs);
+    \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+    \\
+++ loudnessRows(
+    \\(SELECT analysis_results.file_id, analysis_results.source_identity, analysis_results.result
+    \\     FROM analysis_results
+    \\     JOIN files ON files.id = analysis_results.file_id AND files.quick_hash = analysis_results.source_identity
+    \\
+++ diagnosticsKey("WHERE", "analysis_results") ++ ")") ++
+    \\;
+    \\CREATE TRIGGER analysis_results_loudness_ai AFTER INSERT ON analysis_results
+    \\
+++ diagnosticsKey("WHEN", "new") ++ loudness_replace ++
+    \\CREATE TRIGGER analysis_results_loudness_au AFTER UPDATE OF result ON analysis_results
+    \\
+++ diagnosticsKey("WHEN", "new") ++ loudness_replace ++
+    \\CREATE TRIGGER analysis_results_loudness_ad AFTER DELETE ON analysis_results
+    \\
+++ diagnosticsKey("WHEN", "old") ++
+    \\BEGIN
+    \\    DELETE FROM file_loudness WHERE file_id = old.file_id AND source_identity = old.source_identity;
+    \\END;
+    \\CREATE INDEX files_by_bitrate ON files((size_bytes * 8 + duration_ms / 2) / duration_ms)
+    \\    WHERE size_bytes > 0 AND duration_ms > 0;
+    \\CREATE INDEX tracks_sort_album_artist ON tracks(
+    \\    album_artist COLLATE NOCASE, album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX genres_by_name ON genres(name COLLATE NOCASE);
+    \\CREATE INDEX track_genres_first ON track_genres(genre_id, track_id) WHERE ordinal = 0;
+    \\
+;
+
+const migration_41 =
+    \\CREATE INDEX files_without_bitrate ON files(id) WHERE (size_bytes > 0 AND duration_ms > 0) IS NOT 1;
+    \\
+;
+
+const migration_42 =
+    \\ALTER TABLE artist_info ADD COLUMN origin TEXT;
+    \\CREATE TABLE artist_release_groups (
+    \\    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    \\    mbid TEXT NOT NULL,
+    \\    title TEXT NOT NULL,
+    \\    primary_type TEXT,
+    \\    first_release_year INTEGER,
+    \\    credited_with TEXT,
+    \\    position INTEGER NOT NULL,
+    \\    PRIMARY KEY (artist_id, mbid)
+    \\);
+    \\
+;
+
+const migration_43 =
+    \\CREATE INDEX locations_held ON locations(file_id, state) WHERE state <> 'missing';
+    \\
+;
+
+const migration_44 =
+    \\CREATE TABLE release_group_covers (
+    \\    mbid TEXT PRIMARY KEY,
+    \\    image BLOB,
+    \\    mime TEXT,
+    \\    fetched_at INTEGER NOT NULL,
+    \\    CHECK ((image IS NULL) = (mime IS NULL))
+    \\);
+    \\CREATE INDEX artist_release_groups_mbid ON artist_release_groups(mbid);
+    \\CREATE TRIGGER artist_release_groups_cover_ad AFTER DELETE ON artist_release_groups
+    \\WHEN NOT EXISTS (SELECT 1 FROM artist_release_groups WHERE mbid = old.mbid)
+    \\BEGIN
+    \\    DELETE FROM release_group_covers WHERE mbid = old.mbid;
+    \\END;
+    \\
+;
+
+const migration_45 =
+    \\CREATE TABLE folder_images (
+    \\    id INTEGER PRIMARY KEY,
+    \\    volume_id INTEGER NOT NULL REFERENCES volumes(id),
+    \\    root_id INTEGER REFERENCES library_roots(id) ON DELETE CASCADE,
+    \\    uri TEXT NOT NULL,
+    \\    mime TEXT NOT NULL,
+    \\    role INTEGER NOT NULL CHECK (role BETWEEN 0 AND 3),
+    \\    size_bytes INTEGER NOT NULL,
+    \\    modified_ns INTEGER NOT NULL,
+    \\    last_seen_generation INTEGER NOT NULL DEFAULT 0,
+    \\    UNIQUE(volume_id, uri)
+    \\);
+    \\CREATE INDEX folder_images_sweep ON folder_images(root_id, last_seen_generation);
+    \\CREATE INDEX folder_images_folder ON folder_images(volume_id, rtrim(uri, replace(uri, '/', '')), uri);
+    \\CREATE TABLE folder_scans (
+    \\    root_id INTEGER NOT NULL REFERENCES library_roots(id) ON DELETE CASCADE,
+    \\    relative_path TEXT NOT NULL,
+    \\    scanned_at INTEGER NOT NULL,
+    \\    PRIMARY KEY (root_id, relative_path)
+    \\) WITHOUT ROWID;
+    \\
+;
+
+const migration_46 =
+    \\ALTER TABLE releases ADD COLUMN has_folder_cover INTEGER NOT NULL DEFAULT 0;
+    \\UPDATE releases SET has_folder_cover = 1 WHERE EXISTS (
+    \\    SELECT 1 FROM folder_images AS cover_image WHERE cover_image.role = 0
+    \\      AND (cover_image.volume_id, rtrim(cover_image.uri, replace(cover_image.uri, '/', ''))) = (
+    \\        SELECT cover_location.volume_id, rtrim(cover_location.uri, replace(cover_location.uri, '/', ''))
+    \\        FROM tracks AS cover_track
+    \\        JOIN locations AS cover_location ON cover_location.file_id = cover_track.preferred_file_id
+    \\        WHERE cover_track.release_id = releases.id AND cover_location.state <> 'missing'
+    \\        GROUP BY 1, 2 ORDER BY count(DISTINCT cover_track.id) DESC, 2 LIMIT 1));
+    \\
+;
+
+const migration_47 =
+    \\CREATE TABLE job_history (
+    \\    id INTEGER PRIMARY KEY,
+    \\    kind TEXT NOT NULL,
+    \\    request TEXT,
+    \\    started_at INTEGER NOT NULL,
+    \\    finished_at INTEGER NOT NULL,
+    \\    state TEXT NOT NULL,
+    \\    completed_units INTEGER NOT NULL,
+    \\    total_units INTEGER,
+    \\    error TEXT,
+    \\    undo_group_id INTEGER,
+    \\    retryable INTEGER NOT NULL DEFAULT 0,
+    \\    summary TEXT NOT NULL DEFAULT ''
+    \\);
+    \\CREATE INDEX job_history_finished ON job_history(finished_at, id);
+    \\
+;
+
+fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
+    return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
+        "  AND " ++ row ++ ".algorithm_version = 4\n" ++
+        "  AND " ++ row ++ ".parameter_hash = X'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE'\n";
+}
+
+const loudness_replace =
+    \\BEGIN
+    \\    DELETE FROM file_loudness WHERE file_id = new.file_id;
+    \\    INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+    \\
+++ loudnessRows("(SELECT new.file_id AS file_id, new.source_identity AS source_identity, new.result AS result)") ++
+    \\;
+    \\END;
+    \\
+;
+
+fn loudnessRows(comptime source: []const u8) []const u8 {
+    return "SELECT file_id, source_identity,\n" ++
+        "       CASE WHEN (bits & 2147483647) = 0 THEN 0.0\n" ++
+        "            ELSE (CASE WHEN (bits >> 31) = 1 THEN -1.0 ELSE 1.0 END)\n" ++
+        "                 * (1.0 + (bits & 8388607) / 8388608.0)\n" ++
+        "                 * (CASE WHEN ((bits >> 23) & 255) >= 127 THEN (1 << (((bits >> 23) & 255) - 127))\n" ++
+        "                         ELSE 1.0 / (1 << (127 - ((bits >> 23) & 255))) END)\n" ++
+        "       END\n" ++
+        "FROM (SELECT file_id, source_identity,\n" ++
+        "           ((instr('0123456789ABCDEF', substr(digits, 1, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 2, 1)) - 1) +\n" ++
+        "           ((instr('0123456789ABCDEF', substr(digits, 3, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 4, 1)) - 1) << 8) +\n" ++
+        "           ((instr('0123456789ABCDEF', substr(digits, 5, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 6, 1)) - 1) << 16) +\n" ++
+        "           ((instr('0123456789ABCDEF', substr(digits, 7, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 8, 1)) - 1) << 24) AS bits\n" ++
+        "      FROM (SELECT file_id, source_identity, hex(substr(result, 9, 4)) AS digits\n" ++
+        "            FROM " ++ source ++ "\n" ++
+        "            WHERE length(result) >= 72 AND substr(result, 1, 6) = X'4F5241440200'\n" ++
+        "              AND instr('13579BDF', substr(hex(substr(result, 7, 1)), 2, 1)) > 0))\n" ++
+        "WHERE (bits & 2147483647) = 0 OR ((bits >> 23) & 255) BETWEEN 65 AND 189";
+}
+
 const genre_totals_schema =
     \\CREATE TABLE genre_totals (
     \\    genre_id INTEGER PRIMARY KEY,
@@ -1782,6 +1966,15 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 36 and target_version >= 36) try db.exec(migration_36);
     if (version < 37 and target_version >= 37) try db.exec(migration_37);
     if (version < 38 and target_version >= 38) try db.exec(migration_38);
+    if (version < 39 and target_version >= 39) try db.exec(migration_39);
+    if (version < 40 and target_version >= 40) try db.exec(migration_40);
+    if (version < 41 and target_version >= 41) try db.exec(migration_41);
+    if (version < 42 and target_version >= 42) try db.exec(migration_42);
+    if (version < 43 and target_version >= 43) try db.exec(migration_43);
+    if (version < 44 and target_version >= 44) try db.exec(migration_44);
+    if (version < 45 and target_version >= 45) try db.exec(migration_45);
+    if (version < 46 and target_version >= 46) try db.exec(migration_46);
+    if (version < 47 and target_version >= 47) try db.exec(migration_47);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -3302,6 +3495,89 @@ test "a version-37 library keeps its analysis results and gains an index that fi
     try checkForeignKeys(db);
 }
 
+test "a version-39 library gains the loudness of each file's current default diagnostics, read from the stored result" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v39.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 39);
+    try db.exec(
+        \\INSERT INTO files(id, size_bytes, quick_hash) VALUES
+        \\    (1, 100, x'01'), (2, 100, x'02'), (3, 100, x'03'), (4, 100, x'04'), (5, 100, x'05'), (6, 100, x'06');
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (1, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'01',
+        \\        CAST(x'4F5241440200' || x'0100' || x'D7A334C1' || zeroblob(60) AS BLOB)),
+        \\    (2, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'02',
+        \\        CAST(x'4F5241440200' || x'0000' || x'D7A334C1' || zeroblob(60) AS BLOB)),
+        \\    (3, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'ff',
+        \\        CAST(x'4F5241440200' || x'0100' || x'D7A334C1' || zeroblob(60) AS BLOB)),
+        \\    (4, 1, 'orca.audio-diagnostics', 4, x'00', x'04',
+        \\        CAST(x'4F5241440200' || x'0100' || x'D7A334C1' || zeroblob(60) AS BLOB)),
+        \\    (5, 1, 'orca.audio-diagnostics', 3, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'05',
+        \\        CAST(x'4F5241440200' || x'0100' || x'D7A334C1' || zeroblob(60) AS BLOB)),
+        \\    (6, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'06',
+        \\        CAST(x'4F5241440200' || x'0100' || x'00008CC2' || zeroblob(60) AS BLOB));
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM file_loudness;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM file_loudness
+        \\WHERE file_id = 1 AND source_identity = x'01' AND abs(integrated_lufs - -11.29) < 0.000001;
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_loudness WHERE file_id = 6 AND integrated_lufs = -70.0;"));
+    try checkForeignKeys(db);
+}
+
+test "a diagnostics result written, rewritten or removed keeps the file's loudness equal to its float, sign and exponent included" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "loudness.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try apply(db);
+    try db.exec(
+        \\INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 100, x'01'), (2, 100, x'02'), (3, 100, x'03'), (4, 100, x'04');
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (1, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'01',
+        \\        CAST(x'4F5241440200' || x'0100' || x'000080BE' || zeroblob(60) AS BLOB)),
+        \\    (2, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'02',
+        \\        CAST(x'4F5241440200' || x'0100' || x'00006040' || zeroblob(60) AS BLOB)),
+        \\    (3, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'03',
+        \\        CAST(x'4F5241440200' || x'0100' || x'00000000' || zeroblob(60) AS BLOB)),
+        \\    (4, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'04',
+        \\        CAST(x'4F5241440200' || x'0100' || x'0000B8C1' || zeroblob(60) AS BLOB));
+    );
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db,
+        \\SELECT count(*) FROM file_loudness WHERE (file_id, integrated_lufs) IN
+        \\    (VALUES (1, -0.25), (2, 3.5), (3, 0.0), (4, -23.0));
+    ));
+
+    try db.exec(
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (1, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'01',
+        \\        CAST(x'4F5241440200' || x'0100' || x'00008CC2' || zeroblob(60) AS BLOB))
+        \\ON CONFLICT DO UPDATE SET result = excluded.result;
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (2, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'2b',
+        \\        CAST(x'4F5241440200' || x'0000' || x'00006040' || zeroblob(60) AS BLOB));
+        \\DELETE FROM analysis_results WHERE file_id = 3;
+        \\DELETE FROM analysis_results WHERE file_id = 4 AND source_identity = x'ff';
+    );
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_loudness WHERE file_id = 1 AND integrated_lufs = -70.0;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_loudness WHERE file_id IN (2, 3);"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_loudness WHERE file_id = 4 AND integrated_lufs = -23.0;"));
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 4; DELETE FROM files WHERE id = 4;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_loudness;"));
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 1; DELETE FROM files WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_loudness;"));
+}
+
 const search_index_drift_sql =
     \\WITH source(rowid, kind, entity_id, title, subtitle) AS (
     \\    SELECT id * 8 + 0, 0, id, name, '' FROM artists
@@ -3425,4 +3701,93 @@ test "a version-37 library gains genre totals equal to a count over its Tracks, 
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genre_release_tracks;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genre_artist_refs;"));
     try checkForeignKeys(db);
+}
+
+test "a version-43 library gains release group covers, which go when the last Artist credited with their group lets it go" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v43-covers.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 43);
+    try db.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Host', 'Host', 'host'), (2, 'Guest', 'Guest', 'guest');
+        \\INSERT INTO artist_release_groups(artist_id, mbid, title, position) VALUES
+        \\    (1, 'shared', 'Together', 0), (2, 'shared', 'Together', 0), (1, 'own', 'Alone', 1);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try db.exec(
+        \\INSERT INTO release_group_covers(mbid, image, mime, fetched_at) VALUES
+        \\    ('shared', X'FFD8FF', 'image/jpeg', 1), ('own', NULL, NULL, 1);
+    );
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO release_group_covers(mbid, image, fetched_at) VALUES ('x', X'00', 1);"));
+    try db.exec("DELETE FROM artist_release_groups WHERE artist_id = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM release_group_covers WHERE mbid = 'shared';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM release_group_covers WHERE mbid = 'own';"));
+    try db.exec("DELETE FROM artist_release_groups WHERE artist_id = 2;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM release_group_covers;"));
+}
+
+test "a version-44 library gains empty folder image and folder scan tables, which go with their root" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v44-folders.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 44);
+    try db.exec(
+        \\INSERT INTO volumes(id, stable_key) VALUES (2, 'music');
+        \\INSERT INTO library_roots(id, volume_id, path) VALUES (1, 2, '/m');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM folder_images;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM folder_scans;"));
+    try db.exec(
+        \\INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns) VALUES
+        \\    (2, 1, '/m/A/cover.jpg', 'image/jpeg', 0, 10, 1);
+        \\INSERT INTO folder_scans(root_id, relative_path, scanned_at) VALUES (1, 'A', 5), (1, '', 5);
+    );
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns) VALUES (2, 1, '/m/x.png', 'image/png', 4, 1, 1);",
+    ));
+    try db.exec("DELETE FROM library_roots WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM folder_images;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM folder_scans;"));
+}
+
+test "a version-45 library records which Releases have a front image in the folder holding most of their Tracks" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v45-folder-covers.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 45);
+    try db.exec(
+        \\INSERT INTO volumes(id, stable_key) VALUES (2, 'music');
+        \\INSERT INTO library_roots(id, volume_id, path) VALUES (1, 2, '/m');
+        \\INSERT INTO releases(id, title) VALUES (1, 'Covered'), (2, 'Back only'), (3, 'Gone');
+        \\INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 1, x'01'), (2, 1, x'02'), (3, 1, x'03');
+        \\INSERT INTO tracks(id, release_id, title, preferred_file_id) VALUES (1, 1, 'a', 1), (2, 2, 'b', 2), (3, 3, 'c', 3);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 2, 1, '/m/A/1.flac', 'present'), (2, 2, 1, '/m/B/1.flac', 'present'), (3, 2, 1, '/m/C/1.flac', 'missing');
+        \\INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns) VALUES
+        \\    (2, 1, '/m/A/cover.jpg', 'image/jpeg', 0, 10, 1),
+        \\    (2, 1, '/m/B/back.jpg', 'image/jpeg', 1, 10, 1),
+        \\    (2, 1, '/m/C/cover.jpg', 'image/jpeg', 0, 10, 1);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM releases WHERE has_folder_cover = 1;"));
 }

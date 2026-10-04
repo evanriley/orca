@@ -96,6 +96,14 @@ artists, one of them Aminé, out of score order), and MusicBrainz's
 for Hot Space (Wikidata, AllMusic and two Wikipedia relations, and six genres, two tied
 for third). The counts and scores are invented for the tests.
 
+`providers/musicbrainz-release-group-browse.json` is written by hand in the
+shape of MusicBrainz's
+`/ws/2/release-group?artist=12398bf3-1b99-47b7-930c-f3956773f35a&inc=artist-credits&limit=100&fmt=json`
+answer for Aminé: a `release-group-count` of 7 and six groups, among them one
+credited with another artist joined by ` & `, a single with a `feat.` guest,
+and one with no primary type and an empty first release date. The IDs and
+the counts are invented for the tests.
+
 `audio/chromaprint-test.mp3` and `audio/chromaprint-test.fpcalc.txt` are
 `tests/data/test.mp3` and `tests/data/test.mp3.fpcalc.out` from Chromaprint
 1.6.1, copied unchanged: 10 s of audio and `fpcalc -raw`'s fingerprint of it.
