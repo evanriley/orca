@@ -119,6 +119,19 @@ pub fn shutdown(self: *App) void {
     self.offline.check = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    const offline = &self.offline;
+    if (offline.availability) |availability| availability.deinit();
+    offline.availability = null;
+    offline.releases.clearRetainingCapacity();
+    offline.check_again = false;
+    offline.relocating_root = null;
+    finishRetry(self);
+    showBanner(self);
+    showCount(self);
+}
+
 fn finishRetry(self: *App) void {
     const offline = &self.offline;
     offline.retrying = false;

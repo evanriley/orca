@@ -1329,3 +1329,10 @@ pub fn shutdown(self: *App) void {
     for (info.pending[0..info.pending_count]) |pending| self.runtime.cancelJob(pending.job) catch {};
     info.pending_count = 0;
 }
+
+pub fn forgetLibrary(self: *App) void {
+    const info = &self.artist_info;
+    for (info.pending[0..info.pending_count]) |pending| self.runtime.cancelJob(pending.job) catch {};
+    info.pending_count = 0;
+    info.requested.clearRetainingCapacity();
+}

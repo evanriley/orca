@@ -566,6 +566,24 @@ pub fn shutdown(self: *App) void {
     review.image_read = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    const review = &self.artwork_review;
+    for (review.albums.items) |album| album.deinit(self.allocator);
+    review.albums.clearRetainingCapacity();
+    review.total = 0;
+    review.selected = null;
+    review.detail_release = null;
+    review.list_again = false;
+    review.find_job = null;
+    review.find_outcome = null;
+    review.apply = null;
+    if (review.choice) |choice| self.allocator.free(choice.releases);
+    review.choice = null;
+    review.stale = true;
+    showList(self);
+}
+
 fn tickList(self: *App) void {
     const review = &self.artwork_review;
     const loader = review.list_loader orelse return;

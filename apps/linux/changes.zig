@@ -581,6 +581,14 @@ pub fn shutdown(self: *App) void {
     self.changes.loader = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    self.changes.deinit();
+    self.changes.selected = 0;
+    self.changes.wanted = 0;
+    self.changes.stale = true;
+}
+
 const UndoRequest = struct {
     self: *App,
     group_id: u64,

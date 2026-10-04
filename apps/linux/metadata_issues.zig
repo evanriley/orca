@@ -506,6 +506,24 @@ pub fn shutdown(self: *App) void {
     issues.action = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    const issues = &self.metadata_issues;
+    clearCards(self);
+    for (issues.pages.items) |page| page.deinit();
+    issues.pages.clearRetainingCapacity();
+    issues.groups.clearRetainingCapacity();
+    issues.releases.clearRetainingCapacity();
+    issues.status = null;
+    issues.selected = null;
+    issues.selected_index = 0;
+    issues.out_of_date = false;
+    issues.list_again = false;
+    issues.status_again = false;
+    issues.stale = true;
+    showList(self);
+}
+
 fn setStatus(self: *App, status: liborca.MetadataIssueStatus) void {
     const before = self.metadata_issues.status;
     self.metadata_issues.status = status;

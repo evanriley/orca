@@ -36,6 +36,7 @@ const autostart = @import("autostart.zig");
 const activity = @import("activity.zig");
 const details = @import("details.zig");
 const logging = @import("logging.zig");
+const libraries = @import("libraries.zig");
 
 const App = app.App;
 
@@ -2296,7 +2297,7 @@ fn writeHomePath(writer: *std.Io.Writer, path: []const u8, redact: bool) std.Io.
     try writer.writeAll(trimmed[slash + 1 ..]);
 }
 
-fn homePath(buffer: []u8, path: []const u8) [:0]const u8 {
+pub fn homePath(buffer: []u8, path: []const u8) [:0]const u8 {
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
     writeHomePath(&writer, path, false) catch {};
     buffer[writer.end] = 0;
@@ -2456,7 +2457,44 @@ fn resetClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     );
 }
 
-fn manageLibrariesClicked(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {}
+fn manageLibrariesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    libraries.manage(state(data));
+}
+
+fn libraryPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (selected == gtk.INVALID_LIST_POSITION) return;
+    libraries.requestSwitch(state(data), selected);
+}
+
+fn activeLibraryRow(self: *App) *gtk.Widget {
+    const entries = self.libraries.entries.items;
+    if (entries.len < 2) return valueRow("Active library", "", libraries.activeName(self).ptr);
+    var labels: [libraries.max_entries + 1]?[*:0]const u8 = undefined;
+    for (entries, 0..) |entry, index| labels[index] = entry.name.ptr;
+    labels[entries.len] = null;
+    const selected: c_uint = if (self.libraries.active) |active| @intCast(active) else gtk.INVALID_LIST_POSITION;
+    return selectRow("Active library", "", labels[0 .. entries.len + 1], selected, gtk.callback(libraryPicked), self);
+}
+
+fn libraryProblemRow(problem: libraries.Problem) *gtk.Widget {
+    const row = adw.adw_action_row_new();
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), problem.title.ptr);
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), problem.detail.ptr);
+    const icon = gtk.gtk_image_new_from_icon_name("orca-alert-symbolic");
+    adw.adw_action_row_add_prefix(gtk.cast(adw.ActionRow, row), icon);
+    gtk.gtk_widget_add_css_class(row, "settings-problem");
+    return row;
+}
+
+pub fn rebuildPage(self: *App) void {
+    if (self.settings_page.tabs == null) return;
+    const which = self.settings_page.tab;
+    leave(self);
+    show(self);
+    selectTab(self, which);
+}
 
 fn signalPath(self: *App) ?liborca.SignalPath {
     return self.runtime.playerSignalPath(self.player) catch null;
@@ -2474,16 +2512,17 @@ fn advancedTab(self: *App) *gtk.Widget {
     engine.add(valueRow("Buffer size", "Larger is safer, smaller responds faster", bufferText(&buffer_text, signalPath(self)).ptr));
     engine.add(valueRow("Internal format", "", "32-bit float"));
 
-    const libraries = flatCard("orca-folders-symbolic", "Libraries", "Keep separate collections, each with its own database.");
-    libraries.add(valueRow("Active library", "", "Main"));
+    const collections = flatCard("orca-folders-symbolic", "Libraries", "Keep separate collections, each with its own database.");
+    collections.add(activeLibraryRow(self));
+    if (libraries.problem(self)) |problem| collections.add(libraryProblemRow(problem));
     const manage = actionRow("Libraries", "Add, rename or switch libraries");
-    const manage_button = suffixButton(manage, "Manage…", null, gtk.callback(manageLibrariesClicked), self);
-    gtk.gtk_widget_set_sensitive(manage_button, gtk.false_);
-    libraries.add(manage);
+    _ = suffixButton(manage, "Manage…", null, gtk.callback(manageLibrariesClicked), self);
+    collections.add(manage);
 
     const storage = flatCard("orca-file-symbolic", "Storage & Logs", "");
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const database = actionRow("Database", if (self.library_path) |path| homePath(&path_buffer, path).ptr else "No library open");
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, database), gtk.false_);
     const reveal = suffixButton(database, "Reveal", null, gtk.callback(revealDatabaseClicked), self);
     gtk.gtk_widget_set_sensitive(reveal, @intFromBool(self.library_path != null));
     storage.add(database);
@@ -2513,7 +2552,7 @@ fn advancedTab(self: *App) *gtk.Widget {
     _ = suffixButton(reset_all, "Reset…", null, gtk.callback(resetClicked), self);
     reset.add(reset_all);
 
-    return tab(self, .advanced, null, &.{ engine.widget, libraries.widget, sourcesCard(self) }, &.{ storage.widget, reset.widget });
+    return tab(self, .advanced, null, &.{ engine.widget, collections.widget, sourcesCard(self) }, &.{ storage.widget, reset.widget });
 }
 
 fn osName(buffer: []u8, self: *App) []const u8 {
@@ -2758,7 +2797,7 @@ fn aboutTab(self: *App) *gtk.Widget {
     audio.add("Engine", "32-bit float · no resampling");
 
     var library = Facts.init("orca-folders-symbolic", "Library");
-    library.add("Library", "Main");
+    library.add("Library", libraries.activeName(self).ptr);
     var count_buffer: [32]u8 = undefined;
     var scan_buffer: [64]u8 = undefined;
     const stats = if (self.library) |handle| self.runtime.libraryStats(handle) catch null else null;

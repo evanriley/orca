@@ -219,6 +219,12 @@ pub fn shutdown(self: *App) void {
     discard(self);
 }
 
+pub fn forgetLibrary(self: *App) void {
+    discard(self);
+    self.lyrics.track_id = null;
+    self.lyrics.stale = true;
+}
+
 pub fn sync(self: *App) void {
     const state = &self.lyrics;
     if (state.closed) return;

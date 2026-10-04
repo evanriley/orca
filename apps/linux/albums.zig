@@ -3160,6 +3160,16 @@ pub fn shutdown(self: *App) void {
     info.pending_count = 0;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    const info = &self.album_info;
+    for (info.pending[0..info.pending_count]) |pending| self.runtime.cancelJob(pending.job) catch {};
+    info.pending_count = 0;
+    info.requested.clearRetainingCapacity();
+    self.album_artist_filter = null;
+    self.album_artist_name.clear(self.allocator);
+    showArtistChip(self);
+}
+
 pub fn pill(label: [*:0]const u8, icon: [*:0]const u8, suggested: bool) *gtk.Widget {
     const button = gtk.gtk_button_new();
     const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);

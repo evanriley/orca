@@ -4,6 +4,24 @@
 
 ### Added
 
+- **Multiple libraries.** `orca-gtk` keeps a list of libraries, each a
+  name and a database, in the `[libraries]` group of `settings.ini`
+  (`paths`, `names`, `tracks`, `active`); the library a single-library
+  install used becomes Main on the first launch. Settings › Advanced ›
+  Libraries shows the active library, as a drop-down once there are two,
+  and Manage…, a dialog listing each library's name, path, size and track
+  count with Add Library… (open an existing database or create a new one),
+  Rename, Remove from List, which never deletes the file, and Switch.
+  Switching opens the other database first, so a missing or unreadable one
+  leaves the current library open and says why in the card. It then stops
+  the pages' loaders, saves the queue and position, closes the library
+  through `destroyLibrary`, re-applies the watch, maintenance, scrobbling
+  and long-track settings to the new one, restores its queue paused or
+  not at all as On launch says, and resets every page. A relaunch opens
+  the last active library; `ORCA_LIBRARY` still picks the library for one
+  run without changing that choice. `scripts/headless-gui.sh` takes
+  `ORCA_HEADLESS_LIBRARY=settings`, which opens the library the settings
+  choose instead of a copy.
 - **Metadata consistency.** A `consistency` Job finds, per Release, album
   artist spellings that disagree, mixed or invalid dates, repeated or
   missing track numbers, genre spelling variants and values that differ

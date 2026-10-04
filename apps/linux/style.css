@@ -5484,6 +5484,32 @@ dropdown.settings-select > button {
   color: @orca_text_2;
 }
 
+row.settings-problem image,
+row.settings-problem .title {
+  color: @orca_warn;
+}
+
+list.libraries-list > row .subtitle {
+  font-family: "Geist Mono", monospace;
+  font-size: 12px;
+  font-feature-settings: "tnum";
+}
+
+.library-meta {
+  font-size: 12.5px;
+  font-feature-settings: "tnum";
+  color: @orca_text_3;
+}
+
+.library-meta.missing {
+  color: @orca_warn;
+}
+
+.library-active {
+  font-size: 13px;
+  color: @orca_accent_text;
+}
+
 switch.settings-fixed:disabled {
   opacity: 1;
   filter: none;

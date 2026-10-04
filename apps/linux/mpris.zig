@@ -329,6 +329,10 @@ pub const Mpris = struct {
         return url;
     }
 
+    pub fn forgetLibrary(self: *Mpris) void {
+        self.releaseArt();
+    }
+
     fn releaseArt(self: *Mpris) void {
         const runtime = self.runtime orelse return;
         if (self.art_path) |path| {

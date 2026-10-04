@@ -148,6 +148,12 @@ pub fn showActive(self: *App) void {
         gtk.gtk_widget_remove_css_class(button, "filters-active");
 }
 
+pub fn forgetLibrary(self: *App) void {
+    self.album_filters.genre_id = null;
+    showActive(self);
+    showFacets(self);
+}
+
 fn apply(self: *App, filters: Filters) void {
     if (self.album_filters_ui.popover) |popover| gtk.gtk_popover_popdown(gtk.cast(gtk.Popover, popover));
     if (std.meta.eql(filters, self.album_filters)) return;

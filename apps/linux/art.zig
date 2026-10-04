@@ -236,12 +236,14 @@ const Blur = struct {
     sources: [max_backdrop_sources]*gtk.GdkTexture = undefined,
     source_count: usize,
     texture: ?*gtk.GdkTexture = null,
+    generation: u32 = 0,
 };
 
 const Decode = struct {
     key: Key,
     image: liborca.EmbeddedImage,
     texture: ?*gtk.GdkTexture = null,
+    generation: u32 = 0,
 };
 
 pub const Cache = struct {
@@ -262,6 +264,7 @@ pub const Cache = struct {
     bytes: usize = 0,
     debug: bool = false,
     clock: u64 = 0,
+    generation: u32 = 0,
 
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {
         var entries = self.entries.valueIterator();
@@ -675,7 +678,7 @@ fn updateBackdrop(self: *App, record: Backdrop) void {
 
 fn startBlur(self: *App, key: Key, textures: []const *gtk.GdkTexture) void {
     const job = self.allocator.create(Blur) catch return;
-    job.* = .{ .key = key, .source_count = textures.len };
+    job.* = .{ .key = key, .source_count = textures.len, .generation = self.art.generation };
     for (textures, job.sources[0..textures.len]) |texture, *source| source.* = gtk.cast(gtk.GdkTexture, gtk.g_object_ref(texture));
     self.art.blurring.put(self.allocator, key, {}) catch {};
     const task = gtk.g_task_new(null, null, blurred, self);
@@ -701,6 +704,10 @@ fn blurred(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callc
     defer self.allocator.destroy(job);
     for (job.sources[0..job.source_count]) |source| gtk.g_object_unref(source);
     const cache = &self.art;
+    if (job.generation != cache.generation) {
+        if (job.texture) |texture| gtk.g_object_unref(texture);
+        return;
+    }
     _ = cache.blurring.remove(job.key);
     cache.blur_count += 1;
     if (cache.debug) std.debug.print("orca-gtk art: backdrop {x} blurred, blurs={d}\n", .{ @as(u64, @bitCast(job.key.id)), cache.blur_count });
@@ -805,6 +812,26 @@ fn entryBytes(texture: ?*gtk.GdkTexture) usize {
     return overhead + width * height * 4;
 }
 
+/// Forgets every cover of the library just closed. Its ids name other
+/// subjects in the next one, so nothing cached or in flight may be shown.
+pub fn reset(self: *App) void {
+    const cache = &self.art;
+    for (cache.bindings.items) |binding| paintStack(binding.stack, null);
+    cache.bindings.clearRetainingCapacity();
+    var entries = cache.entries.valueIterator();
+    while (entries.next()) |entry| if (entry.texture) |texture| gtk.g_object_unref(texture);
+    cache.entries.clearRetainingCapacity();
+    cache.bytes = 0;
+    cache.requests.clearRetainingCapacity();
+    cache.pending.clearRetainingCapacity();
+    cache.backlog.clearRetainingCapacity();
+    for (cache.waiting.items) |job| job.image.deinit();
+    cache.waiting.clearRetainingCapacity();
+    cache.decoding.clearRetainingCapacity();
+    cache.blurring.clearRetainingCapacity();
+    cache.generation +%= 1;
+}
+
 /// Drains finished requests and retries the backlog. Called on the app tick.
 pub fn tick(self: *App) void {
     const library = self.library orelse return;
@@ -848,6 +875,7 @@ fn startDecodes(self: *App) void {
             continue;
         };
         job.* = next;
+        job.generation = cache.generation;
         cache.decoding.put(self.allocator, job.key, {}) catch {};
         const task = gtk.g_task_new(null, null, decoded, self);
         gtk.g_task_set_task_data(task, job, null);
@@ -902,6 +930,10 @@ fn decoded(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callc
     const job: *Decode = @ptrCast(@alignCast(pointer));
     defer self.allocator.destroy(job);
     job.image.deinit();
+    if (job.generation != self.art.generation) {
+        if (job.texture) |texture| gtk.g_object_unref(texture);
+        return;
+    }
     _ = self.art.decoding.remove(job.key);
     remember(self, job.key, job.texture);
     startDecodes(self);

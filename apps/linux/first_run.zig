@@ -1092,3 +1092,14 @@ pub fn shutdown(self: *App) void {
     }
     first.retiring.clearAndFree(self.allocator);
 }
+
+pub fn forgetLibrary(self: *App) void {
+    const first = &self.first_run;
+    finish(self);
+    for (first.retiring.items) |estimate| estimate.destroy(self.allocator);
+    first.retiring.clearRetainingCapacity();
+    first.hidden = false;
+    first.shown_albums = std.math.maxInt(u64);
+    resetScanPage(self);
+    showShell(self, "main");
+}

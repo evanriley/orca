@@ -491,6 +491,12 @@ fn tokenWidget(self: *App, token: Token) *gtk.Widget {
     return box;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    self.track_filters.genre_id = null;
+    syncControls(self);
+    showActive(self);
+}
+
 fn showTokens(self: *App) void {
     const ui = &self.track_filters_ui;
     const tokens = ui.tokens orelse return;

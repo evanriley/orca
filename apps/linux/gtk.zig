@@ -365,6 +365,7 @@ pub extern fn g_strndup(str: [*]const u8, n: usize) ?[*:0]u8;
 pub extern fn g_markup_escape_text(text: [*]const u8, length: isize) [*:0]u8;
 pub extern fn g_get_user_data_dir() [*:0]const u8;
 pub extern fn g_mkdir_with_parents(pathname: [*:0]const u8, mode: c_int) c_int;
+pub extern fn g_canonicalize_filename(filename: [*:0]const u8, relative_to: ?[*:0]const u8) [*:0]u8;
 pub extern fn g_get_user_cache_dir() [*:0]const u8;
 pub extern fn g_get_user_state_dir() [*:0]const u8;
 pub extern fn g_log_set_debug_enabled(enabled: gboolean) void;
@@ -1158,6 +1159,7 @@ pub extern fn gtk_file_filter_add_suffix(filter: *FileFilter, suffix: [*:0]const
 pub extern fn gtk_entry_new() *Widget;
 pub extern fn gtk_entry_set_activates_default(entry: *Entry, setting: gboolean) void;
 pub extern fn gtk_entry_set_placeholder_text(entry: *Entry, text: ?[*:0]const u8) void;
+pub extern fn gtk_entry_set_max_length(entry: *Entry, max: c_int) void;
 pub extern fn gtk_entry_set_visibility(entry: *Entry, visible: gboolean) void;
 
 pub extern fn gtk_switch_new() *Widget;

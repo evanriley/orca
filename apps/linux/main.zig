@@ -48,6 +48,7 @@ const artwork_review = @import("artwork_review.zig");
 const metadata_issues = @import("metadata_issues.zig");
 const match_review = @import("match_review.zig");
 const offline = @import("offline.zig");
+const libraries = @import("libraries.zig");
 
 const App = app.App;
 
@@ -515,23 +516,6 @@ fn addIntegerAction(
     gtk.g_object_unref(action);
 }
 
-/// The library lives in the platform data directory unless `ORCA_LIBRARY` names
-/// one, so "open the app and add my music" needs no file-dialog ceremony and no
-/// environment variable. `ORCA_LIBRARY` still wins, for development.
-fn resolveLibraryPath(
-    allocator: std.mem.Allocator,
-    environ: *std.process.Environ.Map,
-) ?[:0]u8 {
-    if (environ.get("ORCA_LIBRARY")) |configured| {
-        if (configured.len != 0) return allocator.dupeSentinel(u8, configured, 0) catch null;
-    }
-    const data_dir = std.mem.span(gtk.g_get_user_data_dir());
-    const directory = std.fmt.allocPrintSentinel(allocator, "{s}/orca", .{data_dir}, 0) catch return null;
-    defer allocator.free(directory);
-    if (gtk.g_mkdir_with_parents(directory.ptr, 0o700) != 0) return null;
-    return std.fmt.allocPrintSentinel(allocator, "{s}/library.db", .{directory}, 0) catch null;
-}
-
 /// `ORCA_OUTPUT_DEVICE` names an orca device id from `orca-cli devices`, and
 /// overrides the device dropdown when set.
 ///
@@ -604,7 +588,8 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     };
 
-    self.library_path = resolveLibraryPath(allocator, init.environ_map);
+    settings.loadLibraries(&self);
+    self.library_path = libraries.resolve(&self, init.environ_map);
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
     self.art.debug = debugRequested(init.environ_map, "art");
     self.debug_frames = debugRequested(init.environ_map, "frames");
@@ -630,7 +615,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
             runtime.playerBindLibrary(self.player, library, init.io) catch {};
-        } else |_| {}
+        } else |err| libraries.openFailed(&self, err);
     }
     settings.load(&self);
     transport.applyLongTrackMemory(&self);

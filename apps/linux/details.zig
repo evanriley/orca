@@ -391,6 +391,16 @@ pub fn tick(self: *App) void {
     invalidate(self);
 }
 
+pub fn forgetLibrary(self: *App) void {
+    const panel = self.inspector orelse return;
+    panel.remembered_count = 0;
+    panel.chosen = null;
+    panel.artist_pinned = false;
+    panel.source = .playing;
+    panel.stale = true;
+    update(panel);
+}
+
 /// The playing Track changed.
 pub fn trackChanged(self: *App) void {
     update(self.inspector orelse return);

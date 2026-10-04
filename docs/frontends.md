@@ -579,9 +579,49 @@ calls. An idle window makes no wakeups; a playing one ticks on each position
 hint, about ten times a second, and a running job every 100 ms.
 
 ```sh
-zig build run-linux                                   # library in $XDG_DATA_HOME/orca
-ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library
+zig build run-linux                                   # the active library in settings.ini
+ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library, for this run only
 ```
+
+`orca-gtk` lists the libraries it can open in the `[libraries]` group of
+`settings.ini`: `paths` and `names` are parallel string lists, `tracks` the
+last known track count of each (`-` when not yet known), and `active` the
+index of the one to open at launch. liborca knows only the database that is
+open; a library's name lives in this list. With no list yet, the first
+launch lists `$XDG_DATA_HOME/orca/library.db` as Main, creating its folder.
+When the active library's file is gone, the launch opens the first listed
+library that still exists and Settings says which it could not open.
+`ORCA_LIBRARY` overrides the list for one run: its library is active and
+shown in the list as from `ORCA_LIBRARY`, but it is never saved and the
+saved `active` is left as it was, unless the user switches to a listed
+library during the run.
+
+Switching to another library (`apps/linux/libraries.zig`) runs on idle,
+since the control that asked is rebuilt by it:
+
+1. Open the other database with `openLibrary`. When the file is missing or
+   the open fails, the current library stays open and playing, Settings
+   shows the reason under the active library, and the drop-down keeps the
+   current one.
+2. Pop every pushed page and forget the navigation history, then stop the
+   frontend's own threads: each page with a worker thread cancels it where
+   it can and joins it, and its late results are dropped by a generation
+   check. Pending timers and the palette's, album page's and artist page's
+   requests are dropped with them.
+3. Pause the Player and `playerSaveState` it into the old library, destroy
+   the Zone, then `destroyLibrary`, which ends listens, cancels and joins the
+   library's Jobs, drains the browse and artwork loaders, stops the watcher
+   and the listen workers, and closes the database.
+4. Stop the Player and clear its queue and queue history. This waits for
+   step 3: while the old library is bound, `leaveLibrary` would save the
+   cleared queue over the one just kept for it.
+5. `playerBindLibrary` the new library; apply long-track memory, folder
+   watching, maintenance and scrobbling to it; then `playerRestoreState`
+   paused, or not at all when On launch is Start empty. A switch never
+   resumes playing.
+6. Reset filters, search, selections and the review pages, reload the
+   sidebar and the browse pages, rebuild Settings, save `settings.ini`, and
+   show `Switched to NAME`.
 
 The window is an `AdwNavigationSplitView`:
 
@@ -1665,8 +1705,17 @@ again at launch.
   - Audio Engine: the backend, Buffer size (the device quantum from
     `playerSignalPath`, or Set by PipeWire) and the 32-bit float internal
     format.
-  - Libraries: Active library Main; Manage… is insensitive until a frontend
-    can hold more than one library.
+  - Libraries: Active library, a value with one library and a drop-down
+    with more, which switches at once; under it, when a library could not
+    be opened, a warning row with the path; and Libraries with Manage…,
+    which opens a dialog listing each library's name, path, size and track
+    count, with Switch, Rename (at most 40 characters, unique), Remove from
+    List (never the active one; the database stays on disk) and Add Library….
+    Add asks to Open Existing…, which takes an SQLite database that has an
+    Orca schema version or a `-wal` beside it and adds it without switching,
+    or Create New…, which adds the chosen path and switches to it, creating
+    the database. An added library is named after its file, with a number
+    when another library has that name. The list holds at most 16 libraries.
   - Data sources: Fill missing genres from MusicBrainz (`setGenreFill`, kept
     in the Library), then one row per `Runtime.providerSources()` entry (what
     it supplies, its licence as a link when it has a licence page, and a link
@@ -1686,7 +1735,8 @@ again at launch.
 - About: the wordmark, version, liborca version and architecture, with Open
   Logs, Licenses (`share/doc/orca/licenses` beside the binary) and Copy
   Diagnostics; key and value cards for Audio (backend, output device, the
-  device's formats and the engine), Library (tracks, database and last scan)
+  device's formats and the engine), Library (the active library's name,
+  tracks, database and last scan)
   and System (the `PRETTY_NAME` of `os-release`, the desktop portal, not used,
   and the logs folder); chips of `supported_formats`; and a preview of what
   Copy Diagnostics puts on the clipboard: version, OS, backend, device and
@@ -2017,7 +2067,11 @@ The script waits until two consecutive frames match before writing the PNG.
 
 The library is `ORCA_LIBRARY` when set, else `fixtures/library/design.db`,
 which `scripts/design-fixture.sh` builds when it is missing; the app opens a
-copy, so a run never changes it. Run `scripts/design-fixture.sh` inside the dev
+copy named `Main.db`, so a run never changes it and Settings calls it Main.
+With `ORCA_HEADLESS_LIBRARY=settings`, which needs `ORCA_HEADLESS_CONFIG`,
+the app gets no `ORCA_LIBRARY` and opens, in place, the library the
+`[libraries]` group of that directory's `orca/settings.ini` chooses; the
+`db:` step is refused then. Run `scripts/design-fixture.sh` inside the dev
 shell to rebuild it after a schema change. It scans `fixtures/audio`, regroups
 the Tracks into 26 albums by eight artists with `orca-cli edit`, and adds
 genres, loves, ratings and ten playlists, seven of them smart, through

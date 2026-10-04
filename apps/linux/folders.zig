@@ -140,6 +140,13 @@ pub fn invalidate(self: *App) void {
     if (self.current_page == .folders) refresh(self);
 }
 
+pub fn forgetLibrary(self: *App) void {
+    const folders = &self.folders;
+    folders.root_id = null;
+    folders.path.clear(self.allocator);
+    folders.release_id = null;
+}
+
 pub fn setFilter(self: *App, text: []const u8) void {
     const folders = &self.folders;
     if (std.mem.eql(u8, text, folders.filter.value)) return;

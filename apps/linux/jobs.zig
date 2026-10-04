@@ -692,6 +692,12 @@ fn tagWriteFailedText(failure: ?liborca.TagWriteFailure) [:0]const u8 {
     };
 }
 
+pub fn forgetLibrary(self: *App) void {
+    self.task_count = 0;
+    self.backfill_checked = false;
+    self.health.then_duplicates = false;
+}
+
 fn untrack(self: *App, index: usize) app.TrackedTask {
     const tracked = self.tasks[index];
     std.mem.copyForwards(app.TrackedTask, self.tasks[index .. self.task_count - 1], self.tasks[index + 1 .. self.task_count]);

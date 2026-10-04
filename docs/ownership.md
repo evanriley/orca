@@ -57,6 +57,18 @@ SIGPIPE; deinitializing it restores the dispositions it found. A host sets its
 own dispositions for those signals before creating the runtime and leaves them
 unchanged while the runtime exists.
 
+A host that replaces its open Library while the runtime lives, as
+`orca-gtk` does when it switches libraries
+([frontends.md](frontends.md#linux-gtk4)), opens the next Library before
+it destroys the current one, so a failed open leaves the current Library
+open and playing. Before `destroyLibrary` it joins its own threads that
+hold the current Library's handle, because `destroyLibrary` drains only
+liborca's workers, and it pauses the Player and saves its state into the
+current Library. It clears the Player's queue only after `destroyLibrary`:
+until then the Player is bound, and unbinding it saves the queue into the
+Library again, so a queue cleared earlier would overwrite the one just
+saved.
+
 Shutdown (`Runtime.shutdown` in `core/runtime.zig`) follows dependency order,
 work → Zones → Players → Libraries:
 

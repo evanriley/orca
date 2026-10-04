@@ -25,7 +25,10 @@
 #                orca-gtk to exit
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
-# scripts/design-fixture.sh when missing; the app gets a copy. Settings
+# scripts/design-fixture.sh when missing; the app gets a copy named Main.db,
+# so Settings names it Main as the design does. With
+# ORCA_HEADLESS_LIBRARY=settings the app gets no ORCA_LIBRARY and opens the
+# library its settings choose, in place, and db: is unavailable. Settings
 # start empty and are discarded, unless ORCA_HEADLESS_CONFIG names a
 # directory to keep them in as XDG_CONFIG_HOME across runs. Output is
 # pinned to scripts/silent-sink.sh 1. Providers point at a closed port; the
@@ -64,10 +67,18 @@ case "$page" in
     albums | artists | tracks | genres | folders | loved | playlists | now-playing | queue | health | matches | settings) ;;
     *) fail "unknown page '$page'; expected albums, artists, tracks, genres, folders, loved, playlists, now-playing, queue, health, matches or settings" ;;
 esac
+library_mode=${ORCA_HEADLESS_LIBRARY:-copy}
+case "$library_mode" in
+    copy | settings) ;;
+    *) fail "unknown ORCA_HEADLESS_LIBRARY '$library_mode'; expected copy or settings" ;;
+esac
 for step in "${steps[@]}"; do
     case "$step" in
         key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | dclick:*,* | rclick:*,* | drag:*,*,*,* | shot:?*.png | tree:?* | log:?* | db:?* | close) ;;
         *) fail "unknown step '$step'; see the usage in $0" ;;
+    esac
+    case "$library_mode:$step" in
+        settings:db:*) fail "db: needs the copied library; ORCA_HEADLESS_LIBRARY=settings opens the one the settings choose" ;;
     esac
 done
 case "$output" in
@@ -79,10 +90,15 @@ output=$(cd "$(dirname "$output")" && pwd)/$(basename "$output")
 
 [ -x "$orca_gtk" ] && [ -x "$orca_cli" ] || fail "orca-gtk or orca-cli not built; run 'zig build' first"
 
-library=${ORCA_LIBRARY:-$repository/fixtures/library/design.db}
-if [ ! -f "$library" ]; then
-    [ -z "${ORCA_LIBRARY:-}" ] || fail "ORCA_LIBRARY names $library, which does not exist"
-    "$repository/scripts/design-fixture.sh" "$library" >/dev/null
+if [ "$library_mode" = copy ]; then
+    library=${ORCA_LIBRARY:-$repository/fixtures/library/design.db}
+    if [ ! -f "$library" ]; then
+        [ -z "${ORCA_LIBRARY:-}" ] || fail "ORCA_LIBRARY names $library, which does not exist"
+        "$repository/scripts/design-fixture.sh" "$library" >/dev/null
+    fi
+else
+    [ -n "${ORCA_HEADLESS_CONFIG:-}" ] || fail "ORCA_HEADLESS_LIBRARY=settings needs ORCA_HEADLESS_CONFIG to name the settings"
+    unset ORCA_LIBRARY
 fi
 
 user_runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
@@ -209,10 +225,14 @@ export HOME=$runtime/home XDG_CONFIG_HOME=${ORCA_HEADLESS_CONFIG:-$runtime/confi
 export PATH="$tools/bin:$PATH"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$runtime/library" "$runtime/no-services"
 
-cp "$library" "$runtime/library/library.db"
-for suffix in -wal -shm; do
-    if [ -f "$library$suffix" ]; then cp "$library$suffix" "$runtime/library/library.db$suffix"; fi
-done
+app_library=()
+if [ "$library_mode" = copy ]; then
+    cp "$library" "$runtime/library/Main.db"
+    for suffix in -wal -shm; do
+        if [ -f "$library$suffix" ]; then cp "$library$suffix" "$runtime/library/Main.db$suffix"; fi
+    done
+    app_library=("ORCA_LIBRARY=$runtime/library/Main.db")
+fi
 
 cat >"$runtime/sway.conf" <<EOF
 output HEADLESS-1 resolution ${width}x${height} position 0 0
@@ -363,14 +383,14 @@ wait_for "the virtual pointer" 100 pointer_ready
 exec 4>"$runtime/pointer"
 echo "move $((width - 1)) 0" >&4
 
-ORCA_LIBRARY="$runtime/library/library.db" ORCA_OUTPUT_DEVICE=$device PIPEWIRE_REMOTE=$pipewire_remote \
+ORCA_OUTPUT_DEVICE=$device PIPEWIRE_REMOTE=$pipewire_remote \
     ORCA_LISTENBRAINZ_URL=http://127.0.0.1:9 ORCA_MUSICBRAINZ_URL=http://127.0.0.1:9 \
     ORCA_ACOUSTID_URL=http://127.0.0.1:9 ORCA_COVERARTARCHIVE_URL=${ORCA_HEADLESS_COVERARTARCHIVE_URL:-http://127.0.0.1:9} \
     ORCA_LRCLIB_URL=http://127.0.0.1:9 ORCA_WIKIDATA_URL=http://127.0.0.1:9 \
     ORCA_WIKIMEDIA_URL=http://127.0.0.1:9 ORCA_WIKIPEDIA_URL=http://127.0.0.1:9 \
     ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:9 \
     ORCA_GTK_DEBUG=${ORCA_GTK_DEBUG:-} GSK_RENDERER=cairo GDK_BACKEND=wayland GDK_DEBUG=no-portals GTK_A11Y=none NO_AT_BRIDGE=1 \
-    launch orca-gtk "$orca_gtk"
+    launch orca-gtk env "${app_library[@]}" "$orca_gtk"
 orca_pid=${started_pids[-1]}
 
 window_ready() {
@@ -430,10 +450,10 @@ drag() {
 
 copy_library() {
     local suffix
-    cp "$runtime/library/library.db" "$1"
+    cp "$runtime/library/Main.db" "$1"
     for suffix in -wal -shm; do
         rm -f "$1$suffix"
-        if [ -f "$runtime/library/library.db$suffix" ]; then cp "$runtime/library/library.db$suffix" "$1$suffix"; fi
+        if [ -f "$runtime/library/Main.db$suffix" ]; then cp "$runtime/library/Main.db$suffix" "$1$suffix"; fi
     done
 }
 

@@ -204,6 +204,11 @@ pub fn shutdown(self: *App) void {
     self.audio_problems.reanalysis = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    self.audio_problems.stale = true;
+}
+
 fn writeFormat(writer: *std.Io.Writer, summary: liborca.TrackSummary) std.Io.Writer.Error!void {
     if (summary.codec.len == 0) return;
     try signal_path.writeCodecName(writer, summary.codec);

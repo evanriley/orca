@@ -383,6 +383,15 @@ pub fn active(self: *const App) bool {
     return self.palette.palette.open or self.palette.search.open;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    dismiss(self);
+    const palette = &self.palette;
+    palette.search.cancelTimer();
+    palette.search.forgetResults();
+    for (palette.recents.items) |recent| recent.free(self.allocator);
+    palette.recents.clearRetainingCapacity();
+}
+
 pub fn wrapWindow(self: *App, content: *gtk.Widget) *gtk.Widget {
     const overlay = gtk.gtk_overlay_new();
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, overlay), content);

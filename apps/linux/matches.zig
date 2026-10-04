@@ -1048,6 +1048,21 @@ pub fn shutdown(self: *App) void {
     self.matches.loader = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    const matches = &self.matches;
+    matches.deinit();
+    matches.counts = null;
+    matches.filtered_counts = null;
+    matches.group_count = 0;
+    matches.expanded = null;
+    matches.wanted = .none;
+    matches.stale = true;
+    matches.counts_stale = true;
+    showList(self);
+    showCorrections(self, null);
+}
+
 pub fn reveal(self: *App, track_id: i64) void {
     _ = track_id;
     window.goTo(self, .matches);

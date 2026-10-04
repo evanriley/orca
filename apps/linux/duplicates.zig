@@ -218,6 +218,14 @@ pub fn invalidate(self: *App) void {
     if (self.current_page == .duplicates) reload(self);
 }
 
+pub fn forgetLibrary(self: *App) void {
+    self.duplicates.deinit();
+    self.duplicates.totals = .{ .groups = 0, .bytes = 0 };
+    self.duplicates.selected = 0;
+    self.duplicates.keep = 0;
+    self.duplicates.stale = true;
+}
+
 pub fn showFile(self: *App, file_id: i64) void {
     window.goTo(self, .duplicates);
     const library = self.library orelse return;

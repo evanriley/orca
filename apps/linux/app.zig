@@ -45,6 +45,7 @@ const queue = @import("queue.zig");
 const palette = @import("palette.zig");
 const page_ui = @import("page.zig");
 const parametric = @import("parametric.zig");
+const libraries = @import("libraries.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
@@ -324,6 +325,7 @@ pub const App = struct {
     /// survives device ids being renumbered between runs.
     preferred_output: OwnedText = .{},
     library_path: ?[:0]u8 = null,
+    libraries: libraries.State = .{},
     /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
     /// Development affordance only: it exists so an automated run can be held to a
     /// silent sink instead of device 0, which is the system default and therefore
@@ -1014,6 +1016,7 @@ pub const App = struct {
         self.metadata_issues.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
+        self.libraries.deinit(self.allocator);
     }
 };
 

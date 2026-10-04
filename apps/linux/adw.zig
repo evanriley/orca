@@ -98,6 +98,8 @@ pub extern fn adw_alert_dialog_set_response_appearance(dialog: *AlertDialog, res
 pub extern fn adw_alert_dialog_set_default_response(dialog: *AlertDialog, response: ?[*:0]const u8) void;
 pub extern fn adw_alert_dialog_set_close_response(dialog: *AlertDialog, response: [*:0]const u8) void;
 pub extern fn adw_alert_dialog_set_extra_child(dialog: *AlertDialog, child: ?*gtk.Widget) void;
+pub extern fn adw_alert_dialog_set_body(dialog: *AlertDialog, body: [*:0]const u8) void;
+pub extern fn adw_alert_dialog_set_prefer_wide_layout(dialog: *AlertDialog, prefer_wide_layout: gtk.gboolean) void;
 pub extern fn adw_dialog_new() *Dialog;
 pub extern fn adw_header_bar_set_show_end_title_buttons(bar: *HeaderBar, show: gtk.gboolean) void;
 pub extern fn adw_header_bar_set_show_start_title_buttons(bar: *HeaderBar, show: gtk.gboolean) void;
@@ -162,6 +164,7 @@ pub extern fn adw_navigation_view_get_visible_page_tag(view: *NavigationView) ?[
 pub extern fn adw_navigation_view_get_visible_page(view: *NavigationView) ?*NavigationPage;
 pub extern fn adw_navigation_view_get_previous_page(view: *NavigationView, page: *NavigationPage) ?*NavigationPage;
 pub extern fn adw_navigation_view_pop_to_page(view: *NavigationView, page: *NavigationPage) gtk.gboolean;
+pub extern fn adw_navigation_view_set_animate_transitions(view: *NavigationView, animate_transitions: gtk.gboolean) void;
 
 pub const VIEW_SWITCHER_POLICY_WIDE: c_int = 1;
 

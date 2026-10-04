@@ -13,9 +13,11 @@
 //! LRCLIB, whether artist info is fetched, whether the queue shows what it
 //! played, what the inspector shows, how albums and artists are sorted and
 //! laid out, which artists the Artists page lists, which columns an album's
-//! tracks show, the volume, the log level, and the Appearance tab's choices.
-//! Nothing about the library does, and never the ListenBrainz token
-//! or the AcoustID key, which live in the Secret Service.
+//! tracks show, the volume, the log level, the Appearance tab's choices, and
+//! the libraries Orca can open: their names, paths, last known track counts
+//! and which one opens at launch. Nothing inside a library lives here, and
+//! never the ListenBrainz token or the AcoustID key, which live in the Secret
+//! Service.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -27,6 +29,7 @@ const albums = @import("albums.zig");
 const playlists = @import("playlists.zig");
 const parametric = @import("parametric.zig");
 const logging = @import("logging.zig");
+const libraries = @import("libraries.zig");
 
 const App = app.App;
 
@@ -256,6 +259,83 @@ fn enableScrobbling(self: *App) void {
     const library = self.library orelse return;
     self.runtime.librarySetScrobbling(library, true, false, self.announce_now_playing) catch return;
     self.scrobbling = true;
+}
+
+pub fn reapplyScrobbling(self: *App) void {
+    if (!self.scrobbling) return;
+    self.scrobbling = false;
+    enableScrobbling(self);
+}
+
+fn stringList(keys: *gtk.GKeyFile, group: [:0]const u8, key: [:0]const u8) ?[]?[*:0]u8 {
+    var count: usize = 0;
+    var err: ?*gtk.GError = null;
+    const list = gtk.g_key_file_get_string_list(keys, group.ptr, key.ptr, &count, &err) orelse {
+        gtk.g_clear_error(&err);
+        return null;
+    };
+    return list[0..count];
+}
+
+fn listItem(list: ?[]?[*:0]u8, index: usize) []const u8 {
+    const items = list orelse return "";
+    if (index >= items.len) return "";
+    return std.mem.span(items[index] orelse return "");
+}
+
+pub fn loadLibraries(self: *App) void {
+    var buffer: [1024]u8 = undefined;
+    const file = path(&buffer) orelse return;
+    const keys = gtk.g_key_file_new();
+    defer gtk.g_key_file_free(keys);
+    var err: ?*gtk.GError = null;
+    if (gtk.g_key_file_load_from_file(keys, file.ptr, 0, &err) == 0) {
+        gtk.g_clear_error(&err);
+        return;
+    }
+    const paths = stringList(keys, "libraries", "paths") orelse return;
+    defer gtk.g_strfreev(paths.ptr);
+    const names = stringList(keys, "libraries", "names");
+    defer if (names) |list| gtk.g_strfreev(list.ptr);
+    const tracks = stringList(keys, "libraries", "tracks");
+    defer if (tracks) |list| gtk.g_strfreev(list.ptr);
+    var active: usize = 0;
+    if (getString(keys, "libraries", "active")) |value| {
+        defer gtk.g_free(value);
+        active = std.fmt.parseUnsigned(usize, std.mem.trim(u8, std.mem.span(value), " "), 10) catch 0;
+    }
+    for (0..paths.len) |index| {
+        const library_path = listItem(paths, index);
+        if (!std.fs.path.isAbsolute(library_path)) continue;
+        const count = std.fmt.parseUnsigned(u64, listItem(tracks, index), 10) catch null;
+        const at = libraries.append(self, listItem(names, index), library_path, count) catch break;
+        if (index == active) self.libraries.chosen = at;
+    }
+    if (self.libraries.chosen == null and self.libraries.entries.items.len != 0) self.libraries.chosen = 0;
+}
+
+fn saveLibraries(self: *App, keys: *gtk.GKeyFile) void {
+    const list = &self.libraries;
+    var paths: [libraries.max_entries][*:0]const u8 = undefined;
+    var names: [libraries.max_entries][*:0]const u8 = undefined;
+    var tracks: [libraries.max_entries][*:0]const u8 = undefined;
+    var tracks_storage: [libraries.max_entries][24]u8 = undefined;
+    var count: usize = 0;
+    var active: usize = 0;
+    for (list.entries.items, 0..) |entry, index| {
+        if (entry.transient) continue;
+        if (list.chosen == index) active = count;
+        paths[count] = entry.path.ptr;
+        names[count] = entry.name.ptr;
+        tracks[count] = if (entry.tracks) |known| strings.format(&tracks_storage[count], "{d}", .{known}).ptr else "-";
+        count += 1;
+    }
+    if (count == 0) return;
+    gtk.g_key_file_set_string_list(keys, "libraries", "paths", &paths, count);
+    gtk.g_key_file_set_string_list(keys, "libraries", "names", &names, count);
+    gtk.g_key_file_set_string_list(keys, "libraries", "tracks", &tracks, count);
+    var active_buffer: [24]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "libraries", "active", strings.format(&active_buffer, "{d}", .{active}).ptr);
 }
 
 /// Applies saved choices to a newly started app.
@@ -565,6 +645,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "view", "track_column_widths", track_table.formatWidths(&widths_buffer, &self.track_columns.widths).ptr);
     gtk.g_key_file_set_string(keys, "view", "track_columns_large", track_table.formatColumns(&columns_buffer, &self.track_columns_large).ptr);
     gtk.g_key_file_set_string(keys, "view", "track_column_widths_large", track_table.formatWidths(&widths_buffer, &self.track_columns_large.widths).ptr);
+    saveLibraries(self, keys);
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);

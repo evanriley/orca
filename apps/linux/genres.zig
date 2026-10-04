@@ -127,6 +127,10 @@ pub fn invalidate(self: *App) void {
     if (self.current_page == .genres) shown(self);
 }
 
+pub fn forgetLibrary(self: *App) void {
+    self.genres.selected = null;
+}
+
 fn bodyDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const genres = &state(data).genres;
     if (genres.idle != 0) _ = gtk.g_source_remove(genres.idle);

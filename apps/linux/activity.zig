@@ -1199,6 +1199,14 @@ pub fn build(self: *App) *gtk.Widget {
     return scroller;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    self.activity.history_limit = history_page;
+    self.activity.built = false;
+    refresh(self);
+    reloadHistory(self);
+    reloadRecent(self);
+}
+
 /// The page came into view: its history may have grown since it was built.
 pub fn shown(self: *App) void {
     self.activity.built = false;

@@ -493,6 +493,21 @@ pub fn shutdown(self: *App) void {
     review.loader = null;
 }
 
+pub fn forgetLibrary(self: *App) void {
+    shutdown(self);
+    const review = &self.match_review;
+    if (review.diff) |*diff| diff.deinit();
+    review.diff = null;
+    review.entries.clearRetainingCapacity();
+    review.window_offset = 0;
+    review.total = 0;
+    review.index = 0;
+    review.skip_release = null;
+    review.stale = true;
+    review.window_stale = false;
+    review.generation +%= 1;
+}
+
 pub fn open(self: *App, scope: Scope, entries: []const Entry, total: u64, at: usize) void {
     const review = &self.match_review;
     review.entries.clearRetainingCapacity();

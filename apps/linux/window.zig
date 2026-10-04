@@ -486,6 +486,21 @@ pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
     }
 }
 
+/// Pops every pushed page and forgets the history: both name ids of the
+/// library being closed.
+pub fn forgetLibrary(self: *App) void {
+    for ([_]Page{ .albums, .artists, .genres, .loved, .playlists }) |page| {
+        const navigation = pageNavigation(self, page) orelse continue;
+        adw.adw_navigation_view_set_animate_transitions(navigation, gtk.false_);
+        popToTag(self, navigation, page.name());
+        adw.adw_navigation_view_set_animate_transitions(navigation, gtk.true_);
+    }
+    self.playlists.open_id = null;
+    self.history.deinit();
+    record(self);
+    page_ui.refresh(self);
+}
+
 pub fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
     return switch (page) {
         .albums => self.albums_navigation,
