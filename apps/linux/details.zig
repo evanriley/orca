@@ -120,11 +120,6 @@ pub const Panel = struct {
     laid_out: app.Sidebar = .hidden,
     split: *gtk.Widget,
     root: *gtk.Widget,
-    toggles: *gtk.Widget,
-    overflow: *gtk.Widget,
-    details_toggle: *gtk.Widget,
-    lyrics_toggle: *gtk.Widget,
-    signal_path_toggle: *gtk.Widget,
     lyrics: lyrics.View = undefined,
     placeholder: *gtk.Widget,
     content: *gtk.Widget,
@@ -359,29 +354,6 @@ fn showMode(panel: *Panel, mode: app.Sidebar) void {
     if (mode != .hidden) gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, panel.root), pageName(mode));
     adw.adw_overlay_split_view_set_collapsed(split, boolean(overlays(panel.self)));
     adw.adw_overlay_split_view_set_show_sidebar(split, boolean(mode != .hidden));
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.details_toggle), boolean(mode == .details));
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.lyrics_toggle), boolean(mode == .lyrics));
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.signal_path_toggle), boolean(mode == .signal_path));
-    gtk.gtk_widget_set_visible(panel.toggles, boolean(!panel.self.window_narrow));
-    gtk.gtk_widget_set_visible(panel.overflow, boolean(panel.self.window_narrow));
-}
-
-fn detailsToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    sidebarToggled(state(data), button, .details);
-}
-
-fn lyricsToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    sidebarToggled(state(data), button, .lyrics);
-}
-
-fn signalPathToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    sidebarToggled(state(data), button, .signal_path);
-}
-
-fn sidebarToggled(self: *App, button: ?*anyopaque, sidebar: app.Sidebar) void {
-    const active = gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)) != 0;
-    if (active == (shownMode(self) == sidebar)) return;
-    showSidebar(self, if (active) sidebar else .hidden);
 }
 
 fn sidebarShownChanged(split: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1615,30 +1587,6 @@ fn actionButton(label: [*:0]const u8) *gtk.Widget {
     return button;
 }
 
-fn modeToggle(icon: [*:0]const u8, tooltip: [*:0]const u8, handler: gtk.GCallback, self: *App) *gtk.Widget {
-    const button = gtk.gtk_toggle_button_new();
-    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, button), icon);
-    gtk.gtk_widget_set_tooltip_text(button, tooltip);
-    gtk.gtk_widget_add_css_class(button, "flat");
-    _ = gtk.signalConnect(button, "toggled", handler, self);
-    return button;
-}
-
-fn overflowMenu() *gtk.Widget {
-    const model = gtk.g_menu_new();
-    gtk.g_menu_append(model, "Track Inspector", "app.details");
-    gtk.g_menu_append(model, "Lyrics", "app.lyrics");
-    gtk.g_menu_append(model, "Signal Path", "app.signal-path");
-    const button = gtk.gtk_menu_button_new();
-    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), "view-more-symbolic");
-    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, model));
-    gtk.gtk_widget_set_tooltip_text(button, "Panels");
-    gtk.gtk_widget_add_css_class(button, "flat");
-    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    gtk.g_object_unref(model);
-    return button;
-}
-
 fn scrolled(child: *gtk.Widget) *gtk.Widget {
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
@@ -1828,20 +1776,9 @@ fn newArtistView() Artist {
     };
 }
 
-/// Makes `split`'s sidebar the inspector and puts its mode toggles in the top
-/// bar.
+/// Makes `split`'s sidebar the inspector.
 pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const panel = self.allocator.create(Panel) catch return;
-
-    const details_toggle = modeToggle("sidebar-show-right-symbolic", "Inspector", gtk.callback(detailsToggled), self);
-    const lyrics_toggle = modeToggle("media-view-subtitles-symbolic", "Lyrics", gtk.callback(lyricsToggled), self);
-    const signal_path_toggle = modeToggle("network-cellular-signal-excellent-symbolic", "Signal Path", gtk.callback(signalPathToggled), self);
-    const toggles = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(toggles, "linked");
-    gtk.gtk_widget_add_css_class(toggles, "inspector-toggles");
-    for ([_]*gtk.Widget{ details_toggle, lyrics_toggle, signal_path_toggle }) |button|
-        gtk.gtk_box_append(gtk.cast(gtk.Box, toggles), button);
-    const overflow = overflowMenu();
 
     const title = newLabel("inspector-title");
     const artist = newLabel("inspector-subtitle");
@@ -2056,11 +1993,6 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         .self = self,
         .split = gtk.cast(gtk.Widget, split),
         .root = root,
-        .toggles = toggles,
-        .overflow = overflow,
-        .details_toggle = details_toggle,
-        .lyrics_toggle = lyrics_toggle,
-        .signal_path_toggle = signal_path_toggle,
         .placeholder = placeholder,
         .content = content,
         .title = title,
@@ -2138,10 +2070,5 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     _ = gtk.signalConnect(split, "notify::show-sidebar", gtk.callback(sidebarShownChanged), panel);
     self.inspector = panel;
 
-    gtk.gtk_widget_set_valign(toggles, gtk.ALIGN_CENTER);
-    if (self.top_bar.panels) |controls| {
-        gtk.gtk_box_append(controls, toggles);
-        gtk.gtk_box_append(controls, overflow);
-    }
     applyVisibility(self);
 }

@@ -282,9 +282,9 @@ fn showRepeat(self: *App, mode: liborca.RepeatMode) void {
     for (&self.transport_controls.values) |*controls| {
         const button = controls.repeat orelse continue;
         gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, button), if (mode == .one)
-            "media-playlist-repeat-song-symbolic"
+            "orca-repeat-one-symbolic"
         else
-            "media-playlist-repeat-symbolic");
+            "orca-repeat-symbolic");
         if (mode == .off)
             gtk.gtk_widget_remove_css_class(button, "engaged")
         else
@@ -314,13 +314,11 @@ fn volumeSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
 
 fn showVolumeIcon(self: *App, level: f64) void {
     const icon: [*:0]const u8 = if (level <= 0)
-        "audio-volume-muted-symbolic"
-    else if (level < 1.0 / 3.0)
-        "audio-volume-low-symbolic"
-    else if (level < 2.0 / 3.0)
-        "audio-volume-medium-symbolic"
+        "orca-volume-muted-symbolic"
+    else if (level < 0.5)
+        "orca-volume-low-symbolic"
     else
-        "audio-volume-high-symbolic";
+        "orca-volume-high-symbolic";
     if (self.volume_icon) |image| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), icon);
     if (self.volume_menu) |button| gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), icon);
 }
@@ -365,7 +363,8 @@ fn seekSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
-const cover_display_pixels: c_int = 56;
+const cover_display_pixels: c_int = 54;
+const bar_icon_pixels: c_int = 17;
 
 /// Put the audible track's cover in the bar, or the placeholder. Called only
 /// when the audible Track changes, never on every tick.
@@ -387,9 +386,14 @@ fn coverClicked(_: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) cal
     window.showPage(state(data), .now_playing);
 }
 
+fn nameButton(button: *gtk.Widget, name: [*:0]const u8) void {
+    gtk.gtk_widget_set_tooltip_text(button, name);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, name, @as(c_int, -1));
+}
+
 fn iconButton(icon: [*:0]const u8, tooltip: [*:0]const u8) *gtk.Widget {
     const button = gtk.gtk_button_new_from_icon_name(icon);
-    gtk.gtk_widget_set_tooltip_text(button, tooltip);
+    nameButton(button, tooltip);
     gtk.gtk_widget_add_css_class(button, "flat");
     gtk.gtk_widget_add_css_class(button, "circular");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
@@ -411,9 +415,8 @@ fn buildNowPlaying(self: *App) *gtk.Widget {
     menu.onSecondaryClick(cover, menu.playingMenu, self);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), cover);
 
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 3);
     gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
     const now_title = gtk.gtk_label_new("Nothing playing");
     const now_detail = gtk.gtk_label_new("");
     self.now_playing_title = gtk.cast(gtk.Label, now_title);
@@ -424,13 +427,15 @@ fn buildNowPlaying(self: *App) *gtk.Widget {
     gtk.gtk_label_set_ellipsize(self.now_playing_detail.?, gtk.ELLIPSIZE_END);
     gtk.gtk_widget_add_css_class(now_title, "now-title");
     gtk.gtk_widget_add_css_class(now_detail, "now-detail");
-    const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
-    gtk.gtk_widget_set_hexpand(now_title, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), now_title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), feedback.newButton(self, gtk.callback(loveClicked)));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), now_title);
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), now_detail);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
+    const love = feedback.newButton(self, gtk.callback(loveClicked));
+    gtk.gtk_widget_add_css_class(love, "bar-button");
+    gtk.gtk_widget_set_valign(love, gtk.ALIGN_CENTER);
+    if (gtk.gtk_button_get_child(gtk.cast(gtk.Button, love))) |image|
+        gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), bar_icon_pixels);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), love);
     return box;
 }
 
@@ -439,20 +444,20 @@ pub fn newButtons(self: *App, surface: app.TransportSurface) *gtk.Widget {
     const buttons = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_set_halign(buttons, gtk.ALIGN_CENTER);
     const shuffle = gtk.gtk_toggle_button_new();
-    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, shuffle), "media-playlist-shuffle-symbolic");
-    gtk.gtk_widget_set_tooltip_text(shuffle, "Shuffle");
+    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, shuffle), "orca-shuffle-symbolic");
+    nameButton(shuffle, "Shuffle");
     gtk.gtk_widget_add_css_class(shuffle, "flat");
     gtk.gtk_widget_add_css_class(shuffle, "circular");
     gtk.gtk_widget_set_valign(shuffle, gtk.ALIGN_CENTER);
     _ = gtk.signalConnect(shuffle, "toggled", gtk.callback(shuffleToggled), self);
-    const previous_button = iconButton("media-skip-backward-symbolic", "Previous");
-    const play = gtk.gtk_button_new_from_icon_name("media-playback-start-symbolic");
-    gtk.gtk_widget_set_tooltip_text(play, "Play / Pause");
+    const previous_button = iconButton("orca-previous-symbolic", "Previous");
+    const play = gtk.gtk_button_new_from_icon_name("orca-play-symbolic");
+    nameButton(play, "Play / Pause");
     gtk.gtk_widget_add_css_class(play, "circular");
     gtk.gtk_widget_add_css_class(play, "play-button");
     gtk.gtk_widget_set_valign(play, gtk.ALIGN_CENTER);
-    const next_button = iconButton("media-skip-forward-symbolic", "Next");
-    const repeat = iconButton("media-playlist-repeat-symbolic", "Repeat off / all / one");
+    const next_button = iconButton("orca-next-symbolic", "Next");
+    const repeat = iconButton("orca-repeat-symbolic", "Repeat off / all / one");
     controls.shuffle = shuffle;
     controls.previous = previous_button;
     controls.play = play;
@@ -500,15 +505,22 @@ pub fn newSeek(self: *App, surface: app.TransportSurface) *gtk.Widget {
 }
 
 fn buildControls(self: *App) *gtk.Widget {
-    const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     const buttons = newButtons(self, .bar);
-    gtk.gtk_widget_set_vexpand(buttons, gtk.true_);
-    gtk.gtk_widget_set_valign(buttons, gtk.ALIGN_END);
+    gtk.gtk_box_set_spacing(gtk.cast(gtk.Box, buttons), 14);
+    const controls = self.transport_controls.getPtr(.bar);
+    for ([_]?*gtk.Widget{ controls.shuffle, controls.previous, controls.next, controls.repeat }) |button|
+        gtk.gtk_widget_add_css_class(button.?, "bar-button");
     const seek = newSeek(self, .bar);
-    gtk.gtk_widget_set_vexpand(seek, gtk.true_);
-    gtk.gtk_widget_set_valign(seek, gtk.ALIGN_START);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buttons);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), seek);
+    gtk.gtk_box_set_spacing(gtk.cast(gtk.Box, seek), 10);
+    for ([_]?*gtk.Label{ controls.elapsed, controls.total }) |label|
+        gtk.gtk_widget_set_size_request(gtk.cast(gtk.Widget, label.?), 26, -1);
+    const stack = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 4);
+    gtk.gtk_widget_set_valign(stack, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_vexpand(stack, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, stack), buttons);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, stack), seek);
+    const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), stack);
     return column;
 }
 
@@ -547,26 +559,18 @@ fn buildFormat(self: *App) *gtk.Widget {
     gtk.gtk_label_set_xalign(self.format_label.?, 0.0);
     gtk.gtk_label_set_ellipsize(self.format_label.?, gtk.ELLIPSIZE_END);
     gtk.gtk_widget_add_css_class(label, "numeric");
-    const icon = gtk.gtk_image_new_from_icon_name("network-cellular-signal-excellent-symbolic");
-    gtk.gtk_widget_add_css_class(icon, "bar-format-icon");
-    const child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, child), icon);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, child), label);
     const button = gtk.gtk_button_new();
     self.format_button = button;
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), child);
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), label);
     gtk.gtk_widget_set_parent(popover, button);
     _ = gtk.signalConnect(button, "clicked", gtk.callback(formatClicked), self);
     _ = gtk.signalConnect(button, "destroy", gtk.callback(formatDestroyed), self);
-    gtk.gtk_widget_set_tooltip_text(button, "Signal Path");
+    gtk.gtk_widget_set_tooltip_text(button, "Open Signal Path");
     gtk.gtk_widget_add_css_class(button, "flat");
     gtk.gtk_widget_add_css_class(button, "bar-format");
+    gtk.gtk_widget_set_halign(button, gtk.ALIGN_START);
     gtk.gtk_widget_set_visible(button, gtk.false_);
-
-    const slot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    self.format_slot = slot;
-    gtk.gtk_box_append(gtk.cast(gtk.Box, slot), button);
-    return slot;
+    return button;
 }
 
 fn formatClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -605,27 +609,20 @@ fn buildDevice(self: *App) *gtk.Widget {
     gtk.gtk_label_set_xalign(self.device_label.?, 0.0);
     gtk.gtk_label_set_ellipsize(self.device_label.?, gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_max_width_chars(self.device_label.?, 18);
-    const child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    const chevron = gtk.gtk_image_new_from_icon_name("orca-chevron-down-symbolic");
+    gtk.gtk_widget_add_css_class(chevron, "bar-device-chevron");
+    const child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 3);
     gtk.gtk_box_append(gtk.cast(gtk.Box, child), icon);
     gtk.gtk_box_append(gtk.cast(gtk.Box, child), label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, child), chevron);
     const button = gtk.gtk_menu_button_new();
     gtk.gtk_menu_button_set_child(gtk.cast(gtk.MenuButton, button), child);
-    gtk.gtk_menu_button_set_always_show_arrow(gtk.cast(gtk.MenuButton, button), gtk.true_);
     gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, button), popover);
+    gtk.gtk_widget_set_tooltip_text(button, "Output device");
     gtk.gtk_widget_add_css_class(button, "flat");
     gtk.gtk_widget_add_css_class(button, "bar-device");
+    gtk.gtk_widget_set_halign(button, gtk.ALIGN_START);
     return button;
-}
-
-fn buildDeviceLine(self: *App) *gtk.Widget {
-    const label = gtk.gtk_label_new("");
-    self.adjustments_label = gtk.cast(gtk.Label, label);
-    gtk.gtk_widget_add_css_class(label, "bar-adjustments");
-    gtk.gtk_widget_add_css_class(label, "numeric");
-    const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), buildDevice(self));
-    return line;
 }
 
 fn volumeSlider(adjustment: *gtk.Adjustment, orientation: c_int) *gtk.Widget {
@@ -642,12 +639,12 @@ fn buildVolume(self: *App) *gtk.Widget {
     self.volume_adjustment = adjustment;
     _ = gtk.signalConnect(adjustment, "value-changed", gtk.callback(volumeChanged), self);
 
-    const icon = gtk.gtk_image_new_from_icon_name("audio-volume-high-symbolic");
+    const icon = gtk.gtk_image_new_from_icon_name("orca-volume-high-symbolic");
     self.volume_icon = icon;
     gtk.gtk_widget_add_css_class(icon, "bar-volume-icon");
     const inline_scale = volumeSlider(adjustment, gtk.ORIENTATION_HORIZONTAL);
     self.volume_scale = inline_scale;
-    gtk.gtk_widget_set_size_request(inline_scale, 100, -1);
+    gtk.gtk_widget_set_size_request(inline_scale, 76, -1);
     gtk.gtk_widget_set_valign(inline_scale, gtk.ALIGN_CENTER);
 
     const popover_scale = volumeSlider(adjustment, gtk.ORIENTATION_VERTICAL);
@@ -657,13 +654,13 @@ fn buildVolume(self: *App) *gtk.Widget {
     gtk.gtk_popover_set_child(gtk.cast(gtk.Popover, popover), popover_scale);
     const menu_button = gtk.gtk_menu_button_new();
     self.volume_menu = menu_button;
-    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, menu_button), "audio-volume-high-symbolic");
+    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, menu_button), "orca-volume-high-symbolic");
     gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, menu_button), popover);
-    gtk.gtk_widget_set_tooltip_text(menu_button, "Volume");
+    nameButton(menu_button, "Volume");
     gtk.gtk_widget_add_css_class(menu_button, "flat");
     gtk.gtk_widget_set_visible(menu_button, gtk.false_);
 
-    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
     gtk.gtk_widget_set_valign(box, gtk.ALIGN_CENTER);
     for ([_]*gtk.Widget{ icon, inline_scale, menu_button }) |widget|
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), widget);
@@ -674,13 +671,21 @@ fn buildOutputs(self: *App) *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_set_halign(box, gtk.ALIGN_END);
 
-    const output = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const signal = gtk.gtk_image_new_from_icon_name("orca-signal-symbolic");
+    gtk.gtk_widget_add_css_class(signal, "bar-signal-icon");
+    self.format_slot = signal;
+    const lines = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_valign(lines, gtk.ALIGN_CENTER);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), buildFormat(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lines), buildDevice(self));
+    const output = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_set_valign(output, gtk.ALIGN_CENTER);
     gtk.gtk_widget_add_css_class(output, "bar-output");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, output), buildFormat(self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, output), buildDeviceLine(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, output), signal);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, output), lines);
 
-    const queue = iconButton("view-list-symbolic", "Queue");
+    const queue = iconButton("orca-queue-symbolic", "Queue");
+    gtk.gtk_widget_add_css_class(queue, "bar-button");
     gtk.gtk_actionable_set_action_name(gtk.cast(gtk.Actionable, queue), "app.show-queue");
 
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), output);
@@ -704,13 +709,9 @@ pub fn refreshSignalPath(self: *App) void {
         gtk.gtk_label_set_text(label, text.ptr);
     }
     if (self.format_label) |label| {
-        const text = if (path) |value| signal_path.renderCompact(&buffer, value) else "";
+        const text = if (path) |value| signal_path.renderTechnology(&buffer, value) else "";
         gtk.gtk_label_set_text(label, text.ptr);
         if (self.format_button) |button| gtk.gtk_widget_set_visible(button, boolean(text.len != 0));
-    }
-    if (self.adjustments_label) |label| {
-        const text = if (path) |value| signal_path.renderAdjustments(&buffer, value) else "";
-        gtk.gtk_label_set_text(label, text.ptr);
     }
     details.showSignalPath(self, path);
     preferences.showAudioInformation(self, path);
@@ -761,16 +762,82 @@ fn outputsShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     showSelectedDevice(self);
 }
 
+const bar_gap: c_int = 24;
+
+fn barColumns(bar: *gtk.Widget) [3]*gtk.Widget {
+    const start = gtk.gtk_widget_get_first_child(bar).?;
+    const center = gtk.gtk_widget_get_next_sibling(start).?;
+    return .{ start, center, gtk.gtk_widget_get_next_sibling(center).? };
+}
+
+fn measureBar(
+    bar: *gtk.Widget,
+    orientation: c_int,
+    _: c_int,
+    minimum: *c_int,
+    natural: *c_int,
+    minimum_baseline: *c_int,
+    natural_baseline: *c_int,
+) callconv(.c) void {
+    const horizontal = orientation == gtk.ORIENTATION_HORIZONTAL;
+    minimum.* = if (horizontal) 2 * bar_gap else 0;
+    natural.* = minimum.*;
+    minimum_baseline.* = -1;
+    natural_baseline.* = -1;
+    for (barColumns(bar)) |column| {
+        var column_minimum: c_int = 0;
+        var column_natural: c_int = 0;
+        gtk.gtk_widget_measure(column, orientation, -1, &column_minimum, &column_natural, null, null);
+        if (horizontal) {
+            minimum.* += column_minimum;
+            natural.* += column_natural;
+        } else {
+            minimum.* = @max(minimum.*, column_minimum);
+            natural.* = @max(natural.*, column_natural);
+        }
+    }
+}
+
+fn allocateBar(bar: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
+    const columns = barColumns(bar);
+    var minimums: [3]c_int = undefined;
+    for (columns, &minimums) |column, *column_minimum|
+        gtk.gtk_widget_measure(column, gtk.ORIENTATION_HORIZONTAL, height, column_minimum, null, null, null);
+    const space: c_int = @max(0, width - 2 * bar_gap);
+    const side = @divTrunc(space * 2, 7);
+    var start: c_int = @max(minimums[0], side);
+    var end: c_int = @max(minimums[2], side);
+    var excess: c_int = start + end + minimums[1] - space;
+    if (excess > 0) {
+        const cut = @min(@divTrunc(excess + 1, 2), start - minimums[0]);
+        start -= cut;
+        excess -= cut;
+    }
+    if (excess > 0) {
+        const cut = @min(excess, end - minimums[2]);
+        end -= cut;
+        excess -= cut;
+    }
+    if (excess > 0) start -= @min(excess, start - minimums[0]);
+    const widths = [3]c_int{ start, @max(minimums[1], space - start - end), end };
+    var x: c_int = 0;
+    for (columns, widths) |column, column_width| {
+        gtk.gtk_widget_size_allocate(column, &.{ .x = x, .y = 0, .width = column_width, .height = height }, -1);
+        x += column_width + bar_gap;
+    }
+}
+
 /// GTK orders Tab focus by each child's vertical centre before its x, so the
 /// three groups fill the bar's height and centre their own contents: centred
 /// groups of different heights differ by half a pixel, which put the outputs
 /// before the transport whenever the format line was hidden.
 pub fn build(self: *App) *gtk.Widget {
-    const bar = gtk.gtk_center_box_new();
+    const bar = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(bar, "player-bar");
-    gtk.gtk_center_box_set_start_widget(gtk.cast(gtk.CenterBox, bar), buildNowPlaying(self));
-    gtk.gtk_center_box_set_center_widget(gtk.cast(gtk.CenterBox, bar), buildControls(self));
-    gtk.gtk_center_box_set_end_widget(gtk.cast(gtk.CenterBox, bar), buildOutputs(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), buildNowPlaying(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), buildControls(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), buildOutputs(self));
+    gtk.gtk_widget_set_layout_manager(bar, gtk.gtk_custom_layout_new(null, measureBar, allocateBar));
     return bar;
 }
 
@@ -898,9 +965,9 @@ fn showTransport(
     if (controls.play) |play| {
         const button = gtk.cast(gtk.Button, play);
         const icon: [:0]const u8 = if (status.transport == .playing)
-            "media-playback-pause-symbolic"
+            "orca-pause-symbolic"
         else
-            "media-playback-start-symbolic";
+            "orca-play-symbolic";
         const shown = std.mem.span(gtk.gtk_button_get_icon_name(button) orelse "");
         if (!std.mem.eql(u8, shown, icon))
             gtk.gtk_button_set_icon_name(button, icon.ptr);

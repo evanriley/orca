@@ -521,12 +521,16 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library
 
 The window is an `AdwNavigationSplitView`:
 
-- The sidebar (`AdwSidebar`) opens with the Orca wordmark and the main menu,
-  then lists the pages in sections: Library (Albums, Artists, Tracks, Genres, Folders, Loved),
-  Collection (Playlists), Playback
-  (Now Playing, and Queue with its length) and Library Tools (Health and
-  Matches, each with its count). Settings is pinned at its foot, above the
-  scan progress shown while a scan runs.
+- The sidebar is 216 px of buttons, one per page, under the Orca wordmark,
+  in groups: Library (Albums, Artists, Tracks, Genres, Folders, Loved),
+  Collection (Playlists), Playback (Now Playing, and Queue with its
+  length), Library Tools (Health, and Matches with its count) and
+  Settings. With Show counts in sidebar on, Albums, Artists and Tracks show
+  the library's totals from `Runtime.libraryStats`. While a job runs or
+  waits, an activity card at the foot reads `1 task running` or
+  `1 task waiting`, with the percent and a 3 px bar when the job has a
+  total and a pulsing bar when it has none, such as a scan; pressing it
+  opens the job's progress and Stop in a popover.
 - **Albums** is a grid of covers with each album's title, artist and year,
   paged 512 Releases at a time. Its title row shows `N albums`, a Sort by
   menu (artist, title, year or recently added, saved as `[view] album_sort`),
@@ -824,9 +828,9 @@ The window is an `AdwNavigationSplitView`:
   `playerSaveQueueAsPlaylist` (the audible entry and everything after it)
   and opens the new playlist.
 
-- **Health** lists what liborca found wrong with the library, with a count in
-  the sidebar. The page, titled Library Health, opens with the issue count,
-  the same `libraryHealthIssueCount` as the sidebar badge,
+- **Health** lists what liborca found wrong with the library. The page,
+  titled Library Health, opens with the issue count
+  (`libraryHealthIssueCount`),
   a Find Duplicates button and the library's album, track and artist counts
   (`libraryReleaseCount`, `libraryTrackCount`, `libraryArtistCount`), then a
   card per kind of issue in `libraryHealthSummary`'s order: a symbolic icon
@@ -913,24 +917,26 @@ album, Now Playing, then Back returns to that album. On a selected row in the tr
 whole selection. Play Next and Remove go through `Runtime.playerQueueInsertNext`
 and `playerQueueRemove`, so an entry the engine has already lined up is never
 pulled out from under the output.
-- The player bar spans the window in three parts. On the left: the cover, the
-  title, and the artist and album on one line. In the centre: shuffle,
-  previous, play, next and repeat over the seek bar, with elapsed and total
-  time in tabular figures. On the right: a button with the codec, the source
-  rate and whether the output runs at that rate (such as
-  `FLAC • 44.1 kHz • Native`, or `Resampled`; hidden while nothing plays),
-  which opens the signal path; under it, what changes the samples, read from
-  the same signal path (`RG −3.1 dB •` while ReplayGain is applied, `DSP •`
-  while the equalizer or crossfeed changes the signal), then the output
-  device's name, which opens the device list; a
-  volume slider, whose level is saved as `[playback] volume` once it settles;
+- The player bar spans the window in three parts, 1 : 1.5 : 1 with 24 px
+  gaps, so the transport stays centred. On the left: the cover, the
+  title, and the artist and album on one line. In the
+  centre: shuffle, previous, a 40 px play button, next and repeat over the
+  seek bar, with elapsed and total time in tabular figures. Its glyphs are
+  Orca's own 1.6 px stroke icons, as are the volume and queue buttons'. On the right: a signal icon, then a button with
+  the codec, the source rate and one verdict, read from the signal path
+  (such as `FLAC · 44.1 kHz · Native`; `DSP` while the equalizer or
+  crossfeed changes the signal, else `Resampled` when the output runs at
+  another rate, `Native` on a bit-perfect path; hidden while nothing
+  plays), which opens the signal path; under it the output device's name
+  and a chevron, which opens the device list; a 76 px
+  volume slider, whose knob shows on hover or focus and whose level is saved as `[playback] volume` once it settles;
   and the queue. Each control is built once and only made insensitive or
   hidden as the state changes, and the three groups fill the bar's height,
   so Tab visits the left group, then the centre, then the right, whether or
   not anything plays. A heart beside the title loves the audible
   track and, pressed again, removes the love; it is read when the audible track
-  changes and after any change. Below the 900sp breakpoint the format line
-  and what changes the samples are hidden, the device name becomes an icon
+  changes and after any change. Below the 900sp breakpoint the signal icon
+  is hidden, the device name becomes an icon
   that opens the same device list,
   and the volume slider moves into a popover behind the speaker button.
 
@@ -967,9 +973,14 @@ Each page's header bar is flat and carries no title. A page pushed onto
 another, such as an album or artist page, shows a breadcrumb at its start
 whose first part returns to the page it was opened from (Albums › ABBA); a
 playlist's reads Playlists › its name. The breadcrumb is the only back
-control; Alt+← and the mouse back button also return. At the end of every
-header sits the library search, `Search your library…` with a Ctrl K hint,
-followed by the page's inspector toggles. Below the 900sp breakpoint the
+control; Alt+← and the mouse back button also return. The header has no
+window controls: Ctrl+Q quits and the compositor closes the window. At its
+end sits only the library search, a 300 px field with a magnifier and a
+Ctrl K hint. Its placeholder names what the page's own search covers
+(`Search albums, artists or genres…`, `Search artists…`,
+`Search tracks, artists, albums…`, `Search playlists…`,
+`Search settings…`) and reads `Search your library…` everywhere else.
+Below the 900sp breakpoint the
 entry becomes a search button that does the same as Ctrl+K. Ctrl+F focuses
 the current page's own search (Albums, Artists, Playlists), and on any other
 page opens Tracks and focuses its search.
@@ -985,12 +996,12 @@ nothing itself. Text starting with `>` lists only commands; other text also
 lists, under Commands, every command whose words each query word begins: Go
 to each sidebar page, Open Settings › each tab, Scan library, Analyze
 library, Find duplicates, the three inspector toggles, Play/Pause, Next,
-Previous, Shuffle on/off, Repeat mode and Save queue as playlist, each with its
-shortcut. Each command calls the handler its button or menu item uses. Empty
+Previous, Shuffle on/off, Repeat mode, Save queue as playlist, Add music
+folder…, Keyboard shortcuts and About Orca, each with its shortcut. Each command calls the handler its button or menu item uses. Empty
 text shows the last five opened results, kept in memory only. The first row
 is selected; Up and Down move, Enter opens (a track plays; an album, artist
-or playlist opens its page; a genre opens on Genres), Shift+Enter plays
-instead of opening (an artist still opens), and Escape closes. Below
+or playlist opens its page; a genre opens on Genres), Shift+Enter or
+Ctrl+Enter plays instead of opening (an artist still opens), and Escape closes. Below
 the header, the sidebar's pages open with a title block: the page name in
 Newsreader, its count beneath it, and the page's own actions at the end
 of that row. Album, artist and playlist pages have their own heading instead.
@@ -1000,9 +1011,12 @@ stack vertically, the player bar tightens, and a header's actions wrap onto a
 second line when they do not fit. Below 760sp the sidebar collapses behind a
 back button, the browse panes hide, page titles shrink, and the player bar
 stays tightened. Every page fits a 560 px window. Messages are toasts. Shortcuts are listed in the
-shortcuts dialog (Ctrl+?); Space and Ctrl+←/→ are handled by a bubble-phase key
-controller rather than application accelerators, so a focused search box keeps
-them.
+shortcuts dialog (Ctrl+?). Space, Ctrl+←/→, L (love the playing track) and
+1 to 5 (rate it) are handled by window key controllers rather than
+application accelerators, and the plain keys do nothing while a dialog is
+open or a text field or popover has focus, so a focused search box keeps
+them. Ctrl+Shift+R scans the library. The window title names the page:
+`Orca — Albums`, a pushed page's own title, or `Orca — Settings · Advanced`.
 
 **Edit Tags** edits one track or many; a field the selection disagrees on is
 marked mixed and left alone unless filled in, and clearing a field returns it
@@ -1013,7 +1027,7 @@ offers Undo (`undoTagWrite`). `libraryEditTracks` returns the Tracks the edited
 files back afterwards, because an edit that moves a track to another album
 gives it a new id.
 
-**Settings** is a page, opened from the sidebar's foot, the main menu or
+**Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title a pill tab bar switches between seven tabs; it is one
 Tab stop, Left and Right move between tabs, and it shows icons only when the
 page is narrower than 1040sp or the window narrower than 900sp. Each tab is a
@@ -1041,8 +1055,9 @@ narrower than 1260sp or the window narrower than 900sp:
   grid size (`album_tile`, 112 to 220 px, saved 400 ms after the slider
   stops, on leaving Settings, or on quitting, whichever comes first), Density (`density=comfortable|compact`; compact shortens queue and
   album list rows), Inspector open by default (`inspector_open`, opens the
-  details panel at launch) and Reduce animation (`reduce_animation`, which
-  turns off `gtk-enable-animations`).
+  details panel at launch), Reduce animation (`reduce_animation`, which
+  turns off `gtk-enable-animations`) and Show counts in sidebar
+  (`sidebar_counts`, off by default).
 - Advanced: a full-width Data sources card, one row per
   `Runtime.providerSources()` entry (what it supplies, its licence as a link
   when it has a licence page, and a link to the site); the MusicBrainz genres
@@ -1209,14 +1224,13 @@ never on the tick.
 The **inspector** sits at the end of the Tracks list, the Loved page, each
 album page and playlist, and Now Playing, where it takes the place of the
 Up Next column and shows the playing track.
-Three linked toggles at the end of the header show it in one of three modes,
+Three shortcuts, also palette commands, show it in one of three modes,
 or hide it: the track inspector (`Ctrl+I`), lyrics (`Ctrl+Shift+L`) and the
 signal path (`Ctrl+Shift+S`). The mode is shared by every page and saved as `[view] details`,
 `lyrics` or `signal_path`; it starts hidden. Below the 1100sp breakpoint the
 inspector is laid over the page instead of beside it and starts closed; a
 mode opens it, and clicking beside it or Escape closes it without changing
-the saved mode. Below 760sp the toggles also become one Panels menu with the
-same three modes. The inspector's scrolling area is not a Tab stop. The Tracks inspector shows the first selected track, otherwise
+the saved mode. The inspector's scrolling area is not a Tab stop. The Tracks inspector shows the first selected track, otherwise
 the playing one, and the Loved inspector the selected loved track, otherwise
 the playing one; an album page's inspector shows its selected track, otherwise
 the playing track when it belongs to the album, otherwise the album: its

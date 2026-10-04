@@ -422,6 +422,31 @@
   before this release keeps its column choice: `[view] song_columns` and
   `song_column_widths` are still read when the `track_` keys are absent,
   and saving writes the `track_` keys.
+- **A new orca-gtk shell.** The sidebar is the design's: the Orca
+  wordmark over grouped page buttons with stroke icons, the queue length
+  and match count beside their pages, and an activity card at its foot
+  while a job runs, with the percent or a pulsing bar, that opens the
+  job's progress. Show counts in sidebar (Settings › Appearance) adds the
+  library's album, artist and track totals. The main menu is gone: Add
+  music folder…, Keyboard shortcuts and About Orca are palette commands.
+  The player bar is 84 px, with a 3 px seek bar, a signal icon over one
+  technology line (`FLAC · 44.1 kHz · Native`, `Resampled` or `DSP`) and
+  the output under it. L loves and 1 to 5 rate the playing track,
+  Ctrl+Shift+R scans the library, Ctrl+Enter plays from the palette, and
+  the window title names the page, as `Orca — Albums` or
+  `Orca — Settings · Advanced`. `scripts/headless-gui.sh` adds `shot:` and
+  `tree:` steps for screenshots and window titles mid-run.
+- **A quieter orca-gtk top bar.** The header holds back, forward and the
+  library search alone: the inspector toggles and window controls are
+  gone (Ctrl+I, Ctrl+Shift+L and Ctrl+Shift+S still switch the inspector,
+  and Ctrl+Q quits). The search is a 300 px field whose placeholder names
+  what the page searches, such as `Search albums, artists or genres…` or
+  `Search settings…`, and `Search your library…` elsewhere.
+- **A balanced orca-gtk player bar.** Its parts take 1 : 1.5 : 1 of the
+  width, so the seek bar is about 508 px at 1440 px and sits under the
+  transport. The transport, volume and queue use thin stroke icons, the
+  play button is 40 px, the heart follows the title, and the volume
+  slider's knob shows only on hover or focus.
 - **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
   panel is one window-wide sidebar, 420 px in every mode, on every page,
   so opening it, changing its mode or changing page never moves the

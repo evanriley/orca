@@ -263,7 +263,7 @@ pub fn reload(self: *App) void {
     if (self.artists_empty) |empty| {
         const searching = self.artist_list_filter.value.len != 0 or self.artist_list_genre != null;
         adw.adw_status_page_set_title(empty, if (searching) "No matching artists" else "No artists yet");
-        adw.adw_status_page_set_description(empty, if (searching) "Try another search." else "Add a music folder from the main menu.");
+        adw.adw_status_page_set_description(empty, if (searching) "Try another search." else "Add a music folder in Settings › Library.");
     }
     if (self.artists_body) |body|
         gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else @tagName(self.artist_layout));

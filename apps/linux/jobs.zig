@@ -1,7 +1,8 @@
 //! Background jobs — scans, loudness analysis, duplicate finding, tag writes,
-//! matching and AcoustID submission — and their status card at the foot of
-//! the sidebar. One runs at a time from this frontend, so the card always
-//! describes the job there is.
+//! matching and AcoustID submission — and the activity widget at the foot of
+//! the sidebar, whose popover holds the task's detail and its Stop button.
+//! One runs at a time from this frontend, so the widget always describes the
+//! job there is.
 //!
 //! A filesystem walk has no honest denominator until it has finished walking,
 //! so a scan shows its counts rather than a fabricated percentage.
@@ -61,6 +62,7 @@ fn begin(self: *App, task: app.Task, job: liborca.JobHandle, title: [*:0]const u
     showScanning(self, true);
     if (self.scan_label) |label| gtk.gtk_label_set_text(label, title);
     if (self.scan_detail) |label| gtk.gtk_label_set_text(label, "Starting…");
+    showActivity(self, .{ .kind = .scan, .state = .queued, .completed_units = 0, .total_units = null });
     health.updateBanner(self);
     self.updateTracksBody();
     self.requestTick();
@@ -81,6 +83,7 @@ pub fn reloadLibraryViews(self: *App) void {
     genres.invalidate(self);
     folders.invalidate(self);
     preferences.refreshLibrary(self);
+    window.refreshCounts(self);
 }
 
 pub fn build(self: *App) *gtk.Widget {
@@ -115,14 +118,64 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, card), labels);
     gtk.gtk_box_append(gtk.cast(gtk.Box, card), cancel);
 
+    const popover = gtk.gtk_popover_new();
+    self.activity_popover = gtk.cast(gtk.Popover, popover);
+    gtk.gtk_popover_set_child(self.activity_popover.?, card);
+    gtk.gtk_popover_set_position(self.activity_popover.?, gtk.POS_TOP);
+
+    const summary = gtk.gtk_label_new("1 task running");
+    self.activity_label = gtk.cast(gtk.Label, summary);
+    gtk.gtk_label_set_xalign(self.activity_label.?, 0.0);
+    gtk.gtk_label_set_ellipsize(self.activity_label.?, gtk.ELLIPSIZE_END);
+    gtk.gtk_widget_set_hexpand(summary, gtk.true_);
+    const percent = gtk.gtk_label_new("");
+    self.activity_percent = gtk.cast(gtk.Label, percent);
+    gtk.gtk_widget_add_css_class(percent, "numeric");
+    const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, line), summary);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, line), percent);
+    const bar = gtk.gtk_progress_bar_new();
+    self.activity_bar = gtk.cast(gtk.ProgressBar, bar);
+    gtk.gtk_progress_bar_set_pulse_step(self.activity_bar.?, 0.08);
+    gtk.gtk_widget_add_css_class(bar, "activity-bar");
+    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 7);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), line);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), bar);
+    const button = gtk.gtk_menu_button_new();
+    gtk.gtk_menu_button_set_child(gtk.cast(gtk.MenuButton, button), body);
+    gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, button), popover);
+    gtk.gtk_widget_set_tooltip_text(button, "Show the running task");
+    gtk.gtk_widget_add_css_class(button, "activity");
+
     const revealer = gtk.gtk_revealer_new();
     self.scan_revealer = gtk.cast(gtk.Revealer, revealer);
     gtk.gtk_revealer_set_transition_type(self.scan_revealer.?, gtk.REVEALER_TRANSITION_SLIDE_UP);
-    gtk.gtk_revealer_set_child(self.scan_revealer.?, card);
+    gtk.gtk_revealer_set_child(self.scan_revealer.?, button);
     return revealer;
 }
 
+fn showActivity(self: *App, snapshot: liborca.JobSnapshot) void {
+    const waiting = snapshot.state == .queued;
+    if (self.activity_label) |label|
+        gtk.gtk_label_set_text(label, if (waiting) "1 task waiting" else "1 task running");
+    const total = snapshot.total_units orelse 0;
+    var buffer: [8]u8 = undefined;
+    if (!waiting and total != 0) {
+        const done = @min(snapshot.completed_units, total);
+        const text: [:0]const u8 = strings.printZ(&buffer, "{d}%", .{done * 100 / total}) catch "";
+        if (self.activity_percent) |label| gtk.gtk_label_set_text(label, text.ptr);
+        if (self.activity_bar) |bar|
+            gtk.gtk_progress_bar_set_fraction(bar, @as(f64, @floatFromInt(done)) / @as(f64, @floatFromInt(total)));
+        return;
+    }
+    if (self.activity_percent) |label| gtk.gtk_label_set_text(label, "");
+    if (self.activity_bar) |bar| {
+        if (waiting) gtk.gtk_progress_bar_set_fraction(bar, 0) else gtk.gtk_progress_bar_pulse(bar);
+    }
+}
+
 fn showScanning(self: *App, visible: bool) void {
+    if (!visible) if (self.activity_popover) |popover| gtk.gtk_popover_popdown(popover);
     if (self.scan_revealer) |revealer|
         gtk.gtk_revealer_set_reveal_child(revealer, if (visible) gtk.true_ else gtk.false_);
 }
@@ -648,6 +701,7 @@ pub fn tick(self: *App) void {
         health.updateBanner(self);
         return;
     };
+    showActivity(self, snapshot);
     if (snapshot.state == .queued) return;
     const stats: ?liborca.ScanStats = switch (task) {
         .matching, .submission => null,

@@ -148,7 +148,7 @@ window {
 .title-page,
 .display-page {
   font-size: 42px;
-  line-height: 1.1;
+  line-height: 1.05;
   letter-spacing: -0.01em;
 }
 
@@ -394,11 +394,98 @@ gridview > child:selected {
 
 /* Sidebar */
 
+.nav {
+  padding: 18px 12px 16px;
+  background-color: @orca_bg_sidebar;
+  box-shadow: inset -1px 0 @orca_border;
+}
+
 .wordmark {
+  padding: 2px 10px 18px;
   font-family: Newsreader, serif;
-  font-size: 20px;
-  font-weight: 600;
-  margin-left: 6px;
+  font-size: 23px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.nav-group {
+  padding-top: 12px;
+  margin-bottom: 14px;
+}
+
+.nav-group + .nav-group {
+  border-top: 1px solid @orca_border;
+}
+
+.nav-group-label {
+  padding: 0 10px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: @orca_text_3;
+}
+
+button.nav-item {
+  min-height: 0;
+  margin-bottom: 2px;
+  padding: 7px 10px 6px;
+  border-radius: 7px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: @orca_text_2;
+}
+
+button.nav-item:hover {
+  background-color: @orca_bg_raised_2;
+  color: @orca_text;
+}
+
+button.nav-item.selected {
+  background-color: @orca_bg_selected;
+  color: @orca_text;
+}
+
+.nav-icon {
+  -gtk-icon-size: 17px;
+}
+
+.nav-count {
+  font-size: 11.5px;
+  color: @orca_text_3;
+}
+
+menubutton.activity {
+  margin-top: 14px;
+}
+
+menubutton.activity > button {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: @orca_bg_popover;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text;
+}
+
+menubutton.activity > button:hover {
+  background-color: @orca_bg_hover;
+}
+
+.activity .numeric {
+  color: @orca_text_2;
+}
+
+progressbar.activity-bar > trough {
+  min-height: 3px;
+  border-radius: 2px;
+  background-color: @orca_track;
+}
+
+progressbar.activity-bar > trough > progress {
+  min-height: 3px;
+  border-radius: 2px;
+  background-color: @orca_accent;
 }
 
 .navigation-sidebar > row > box {
@@ -407,27 +494,8 @@ gridview > child:selected {
   padding-bottom: 3px;
 }
 
-.navigation-sidebar > .header > .heading {
-  margin-top: 12px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: @orca_text_3;
-}
-
 .navigation-sidebar > row:selected {
   color: @orca_text;
-}
-
-.sidebar-count {
-  font-size: 12px;
-  color: @orca_text_3;
-}
-
-.sidebar-settings {
-  box-shadow: inset 0 1px @orca_border;
-  padding-top: 4px;
 }
 
 /* Page header and title */
@@ -436,22 +504,60 @@ headerbar.page-header {
   box-shadow: none;
 }
 
+headerbar.page-header {
+  min-height: 0;
+}
+
 headerbar.page-header > windowhandle > box {
-  min-height: 56px;
+  min-height: 0;
+  padding: 14px 32px 0;
+}
+
+headerbar.page-header box.start,
+headerbar.page-header box.end {
+  border-spacing: 4px;
+}
+
+headerbar.page-header button.history-button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+}
+
+headerbar.page-header button.history-button:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+headerbar.page-header button.history-button:disabled {
+  color: @orca_text_dim;
+}
+
+.library-search > entry > image:first-child {
+  -gtk-icon-size: 15px;
+  color: @orca_text_3;
 }
 
 .library-search > entry {
-  min-width: 260px;
+  min-width: 237px;
+  min-height: 34px;
+  padding-left: 11px;
   padding-right: 52px;
+  border-radius: 9px;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 13px;
 }
 
 .keycap-hint {
   margin-right: 8px;
-  padding: 1px 6px;
-  border: 1px solid @orca_border;
+  padding: 2px 6px;
   border-radius: 5px;
+  background-color: @orca_border_strong;
   font-size: 11px;
-  color: @orca_text_3;
+  color: @orca_text_2;
 }
 
 /* Command palette */
@@ -564,11 +670,15 @@ label.breadcrumb-parent {
 }
 
 .page-title {
-  padding: 4px 28px 14px 28px;
+  padding: 18px 32px 18px 32px;
+}
+
+.page-title .display-page {
+  margin-top: 4px;
 }
 
 .page-title .meta {
-  margin-top: 2px;
+  margin-top: -3px;
 }
 
 .narrow .page-title {
@@ -582,7 +692,8 @@ label.breadcrumb-parent {
 /* Player bar */
 
 .player-bar {
-  padding: 10px 14px 10px 14px;
+  min-height: 84px;
+  padding: 0 20px;
   background-color: @orca_bg_sidebar;
   box-shadow: inset 0 1px @orca_border;
 }
@@ -597,18 +708,20 @@ label.breadcrumb-parent {
 }
 
 .now-title {
-  font-weight: 600;
+  font-size: 13.5px;
+  font-weight: 500;
 }
 
 .now-detail {
-  font-size: 13px;
+  font-size: 12.5px;
   color: @orca_text_2;
 }
 
 .play-button {
-  min-width: 42px;
-  min-height: 42px;
+  min-width: 40px;
+  min-height: 40px;
   padding: 0;
+  -gtk-icon-size: 15px;
   background-color: @orca_accent;
   color: @orca_on_accent;
 }
@@ -630,8 +743,27 @@ togglebutton.flat:checked {
   background-color: transparent;
 }
 
+.player-bar button.bar-button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+  -gtk-icon-size: 17px;
+}
+
+.player-bar button.bar-button:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+.player-bar button.bar-button.engaged,
+.player-bar button.bar-button:checked {
+  color: @orca_accent_text;
+}
+
 .seek-time {
-  font-size: 12px;
+  font-size: 11.5px;
   color: @orca_text_3;
 }
 
@@ -640,67 +772,71 @@ scale.seek {
   padding-bottom: 0;
 }
 
+.player-bar scale.seek {
+  padding: 0;
+}
+
 scale.seek trough {
-  min-height: 4px;
-  background-color: @orca_bg_hover;
+  min-height: 3px;
+  border-radius: 2px;
+  background-color: @orca_track;
 }
 
 scale.seek highlight {
+  border-radius: 2px;
   background-color: @orca_accent;
 }
 
 scale.seek slider {
-  min-width: 12px;
-  min-height: 12px;
-  margin: -5px;
-  opacity: 0;
-  transition: opacity var(--orca-transition);
-}
-
-scale.seek:hover slider,
-scale.seek:focus-visible slider {
-  opacity: 1;
+  min-width: 11px;
+  min-height: 11px;
+  margin: -4px;
+  background-color: @orca_text;
+  box-shadow: none;
 }
 
 .bar-output button {
   min-height: 0;
-  padding: 1px 6px;
+  padding: 0;
+  font-weight: 400;
+}
+
+.bar-output button:hover {
+  background-color: transparent;
+  color: @orca_text;
 }
 
 .bar-format {
-  font-size: 13px;
+  font-size: 12px;
   color: @orca_text_2;
 }
 
-.bar-format-icon {
-  color: @orca_accent_text;
+.bar-signal-icon {
+  -gtk-icon-size: 20px;
+  color: @orca_accent;
 }
 
 .bar-device {
-  font-size: 12px;
-  color: @orca_text_2;
-}
-
-.bar-adjustments {
-  font-size: 12px;
-  font-weight: bold;
-  color: @orca_text_2;
-  margin-left: 6px;
-}
-
-.bar-device arrow {
-  -gtk-icon-size: 12px;
+  font-size: 11.5px;
   color: @orca_text_3;
 }
 
+.bar-device-chevron {
+  -gtk-icon-size: 12px;
+}
+
 .bar-volume-icon {
+  min-width: 34px;
+  min-height: 34px;
+  -gtk-icon-size: 17px;
   color: @orca_text_2;
 }
 
 scale.volume trough {
-  min-height: 4px;
-  min-width: 4px;
-  background-color: @orca_bg_hover;
+  min-height: 3px;
+  min-width: 3px;
+  border-radius: 2px;
+  background-color: @orca_track;
 }
 
 scale.volume highlight {
@@ -717,11 +853,21 @@ scale.volume slider {
   margin: -5px;
 }
 
+scale.volume.horizontal {
+  padding: 0;
+}
+
+scale.volume.horizontal slider {
+  opacity: 0;
+}
+
+scale.volume.horizontal:hover slider,
+scale.volume.horizontal:focus-visible slider {
+  opacity: 1;
+}
+
 .scan-status {
-  margin: 8px;
-  padding: 10px 8px 10px 12px;
-  border-radius: var(--orca-radius-control);
-  background-color: @orca_bg_raised_2;
+  padding: 4px 2px 4px 6px;
 }
 
 /* Tracks */
@@ -1950,12 +2096,6 @@ button.inspector-action {
 
 .inspector-actions > button.inspector-action:first-child {
   margin-left: -8px;
-}
-
-.inspector-toggles > button {
-  min-width: 32px;
-  padding-left: 6px;
-  padding-right: 6px;
 }
 
 /* Signal Path */

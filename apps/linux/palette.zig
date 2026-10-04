@@ -146,7 +146,8 @@ const commands = [_]Command{
     .{ .name = "Open Settings › Listening", .run = openSettings(.listening) },
     .{ .name = "Open Settings › Appearance", .run = openSettings(.appearance) },
     .{ .name = "Open Settings › Advanced", .run = openSettings(.advanced) },
-    .{ .name = "Scan library", .run = jobs.rescan },
+    .{ .name = "Scan library", .shortcut = "Ctrl Shift R", .run = jobs.rescan },
+    .{ .name = "Add music folder…", .shortcut = "Ctrl O", .run = jobs.chooseFolder },
     .{ .name = "Analyze library", .run = jobs.startAnalysis },
     .{ .name = "Find duplicates", .run = jobs.startDuplicates },
     .{ .name = "Toggle Inspector", .shortcut = "Ctrl I", .run = details.toggle },
@@ -158,7 +159,18 @@ const commands = [_]Command{
     .{ .name = "Shuffle on/off", .run = transport.toggleShuffle },
     .{ .name = "Repeat mode", .run = transport.cycleRepeat },
     .{ .name = "Save queue as playlist", .run = queue.askSaveName },
+    .{ .name = "Keyboard shortcuts", .shortcut = "Ctrl ?", .run = activateAction("app.shortcuts") },
+    .{ .name = "About Orca", .run = activateAction("app.about") },
 };
+
+fn activateAction(comptime name: [*:0]const u8) *const fn (*App) void {
+    return struct {
+        fn run(self: *App) void {
+            const root = self.window orelse return;
+            _ = gtk.gtk_widget_activate_action_variant(gtk.cast(gtk.Widget, root), name, null);
+        }
+    }.run;
+}
 
 const Group = struct {
     kind: SearchKind,
@@ -432,7 +444,7 @@ fn keyPressed(
                 palette.timer = 0;
                 refresh(self);
             }
-            activate(self, palette.selected, modifiers & gtk.MODIFIER_SHIFT != 0);
+            activate(self, palette.selected, modifiers & (gtk.MODIFIER_SHIFT | gtk.MODIFIER_CONTROL) != 0);
         },
         gtk.KEY_Escape => close(self, true),
         else => return gtk.false_,

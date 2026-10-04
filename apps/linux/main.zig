@@ -150,7 +150,8 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     health.reload(self);
     matches.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
-    if (self.sidebar) |sidebar| _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, sidebar));
+    window.refreshCounts(self);
+    window.focusSidebar(self);
     gtk.gtk_window_present(self.window.?);
     self.requestTick();
 }
@@ -396,6 +397,8 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
             .{ "Play / Pause", "space" },
             .{ "Next Track", "<Control>Right" },
             .{ "Previous Track", "<Control>Left" },
+            .{ "Love Playing Track", "l" },
+            .{ "Rate Playing Track", "1...5" },
         } },
         .{ .title = "Library", .items = &.{
             .{ "Search and Commands", "<Control>k" },
@@ -405,7 +408,9 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
             .{ "Inspector", "<Control>i" },
             .{ "Signal Path", "<Control><Shift>s" },
             .{ "Back", "<Alt>Left" },
+            .{ "Forward", "<Alt>Right" },
             .{ "Add Music Folder", "<Control>o" },
+            .{ "Scan Library", "<Control><Shift>r" },
         } },
         .{ .title = "General", .items = &.{
             .{ "Settings", "<Control>comma" },
@@ -572,7 +577,7 @@ pub fn main(init: std.process.Init) !u8 {
     // window's bubble-phase key controller handles them instead.
     addAction(application, "play-pause", activatePlayPause, null, &self);
     addAction(application, "add-folder", activateAddFolder, "<Control>o", &self);
-    addAction(application, "rescan", activateRescan, null, &self);
+    addAction(application, "rescan", activateRescan, "<Control><Shift>r", &self);
     addAction(application, "search", activateSearch, "<Control>k", &self);
     addAction(application, "find", activateFind, "<Control>f", &self);
     addAction(application, "show-queue", activateShowQueue, "<Control>l", &self);

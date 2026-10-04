@@ -282,7 +282,18 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(signal_path_tests).step);
         b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
         b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
-        for ([_][]const u8{ "orca-heart-filled-symbolic", "orca-heart-outline-symbolic", "orca-pulse-symbolic" }) |icon| {
+        for ([_][]const u8{
+            "orca-heart-filled-symbolic", "orca-heart-outline-symbolic", "orca-pulse-symbolic",
+            "orca-albums-symbolic",       "orca-artists-symbolic",       "orca-tracks-symbolic",
+            "orca-genres-symbolic",       "orca-folders-symbolic",       "orca-loved-symbolic",
+            "orca-playlists-symbolic",    "orca-now-playing-symbolic",   "orca-queue-symbolic",
+            "orca-health-symbolic",       "orca-matches-symbolic",       "orca-settings-symbolic",
+            "orca-signal-symbolic",       "orca-search-symbolic",        "orca-back-symbolic",
+            "orca-forward-symbolic",      "orca-chevron-down-symbolic",  "orca-shuffle-symbolic",
+            "orca-repeat-symbolic",       "orca-repeat-one-symbolic",    "orca-previous-symbolic",
+            "orca-next-symbolic",         "orca-play-symbolic",          "orca-pause-symbolic",
+            "orca-volume-high-symbolic",  "orca-volume-low-symbolic",    "orca-volume-muted-symbolic",
+        }) |icon| {
             b.installFile(
                 b.fmt("apps/linux/data/{s}.svg", .{icon}),
                 b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),

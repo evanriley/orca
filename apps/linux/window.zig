@@ -18,6 +18,7 @@ const nowplaying = @import("nowplaying.zig");
 const artists = @import("artists.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
@@ -236,7 +237,25 @@ fn windowKeyPressed(
         transport.previous(self);
         return gtk.true_;
     }
+    if (held != 0 or !plainKeysApply(self)) return gtk.false_;
+    if (keyval == gtk.KEY_l or keyval == gtk.KEY_L) {
+        feedback.toggleLoveOfPlaying(self);
+        return gtk.true_;
+    }
+    if (keyval >= gtk.KEY_1 and keyval <= gtk.KEY_5) {
+        const target = feedback.playingTarget(self) orelse return gtk.false_;
+        ratings.change(self, &.{target}, ratings.menuRating(keyval - gtk.KEY_1 + 1));
+        return gtk.true_;
+    }
     return gtk.false_;
+}
+
+fn plainKeysApply(self: *App) bool {
+    const window = self.window orelse return false;
+    if (adw.adw_application_window_get_visible_dialog(gtk.cast(adw.ApplicationWindow, window)) != null) return false;
+    const focus = gtk.gtk_window_get_focus(window) orelse return true;
+    if (gtk.g_type_check_instance_is_a(focus, gtk.gtk_editable_get_type()) != 0) return false;
+    return gtk.gtk_widget_get_ancestor(focus, gtk.gtk_popover_get_type()) == null;
 }
 
 /// Runs in the capture phase so that focused buttons, rows and tiles cannot
@@ -251,12 +270,7 @@ fn windowSpaceKeyPressed(
     const self = state(data);
     const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
     if (keyval != gtk.KEY_space or held != 0) return gtk.false_;
-    const window = self.window orelse return gtk.false_;
-    if (adw.adw_application_window_get_visible_dialog(gtk.cast(adw.ApplicationWindow, window)) != null) return gtk.false_;
-    if (gtk.gtk_window_get_focus(window)) |focus| {
-        if (gtk.g_type_check_instance_is_a(focus, gtk.gtk_editable_get_type()) != 0) return gtk.false_;
-        if (gtk.gtk_widget_get_ancestor(focus, gtk.gtk_popover_get_type()) != null) return gtk.false_;
-    }
+    if (!plainKeysApply(self)) return gtk.false_;
     transport.toggle(self);
     return gtk.true_;
 }
@@ -330,6 +344,10 @@ pub const Page = enum(c_uint) {
             .playlists => "Playlists",
             .settings => "Settings",
         };
+    }
+
+    pub fn windowTitle(self: Page) [*:0]const u8 {
+        return if (self == .health) "Library Health" else self.title();
     }
 };
 
@@ -727,27 +745,71 @@ fn settleFocus(self: *App) void {
     focusPage(self, content);
 }
 
-/// `AdwSidebar` numbers items across sections, in the order `buildSidebar`
-/// appends them.
-const sidebar_pages = [_]Page{ .albums, .artists, .tracks, .genres, .folders, .loved, .playlists, .now_playing, .queue, .health, .matches };
+pub const LibraryCount = enum { albums, artists, tracks };
 
-fn sidebarIndex(page: Page) c_uint {
-    const position = std.mem.indexOfScalar(Page, &sidebar_pages, page) orelse return gtk.INVALID_LIST_POSITION;
-    return @intCast(position);
-}
+const NavItem = struct { page: Page, icon: [*:0]const u8 };
+const NavGroup = struct { title: [*:0]const u8, items: []const NavItem };
 
-fn sidebarPage(index: c_uint) ?Page {
-    return if (index < sidebar_pages.len) sidebar_pages[index] else null;
-}
+const nav_groups = [_]NavGroup{
+    .{ .title = "Library", .items = &.{
+        .{ .page = .albums, .icon = "orca-albums-symbolic" },
+        .{ .page = .artists, .icon = "orca-artists-symbolic" },
+        .{ .page = .tracks, .icon = "orca-tracks-symbolic" },
+        .{ .page = .genres, .icon = "orca-genres-symbolic" },
+        .{ .page = .folders, .icon = "orca-folders-symbolic" },
+        .{ .page = .loved, .icon = "orca-loved-symbolic" },
+    } },
+    .{ .title = "Collection", .items = &.{
+        .{ .page = .playlists, .icon = "orca-playlists-symbolic" },
+    } },
+    .{ .title = "Playback", .items = &.{
+        .{ .page = .now_playing, .icon = "orca-now-playing-symbolic" },
+        .{ .page = .queue, .icon = "orca-queue-symbolic" },
+    } },
+    .{ .title = "Library Tools", .items = &.{
+        .{ .page = .health, .icon = "orca-health-symbolic" },
+        .{ .page = .matches, .icon = "orca-matches-symbolic" },
+    } },
+    .{ .title = "Settings", .items = &.{
+        .{ .page = .settings, .icon = "orca-settings-symbolic" },
+    } },
+};
 
-/// Puts the sidebar's highlight back on the page that is showing.
 pub fn syncSidebarSelection(self: *App) void {
-    const sidebar = self.sidebar orelse return;
-    const wanted = sidebarIndex(self.current_page);
-    if (adw.adw_sidebar_get_selected(sidebar) != wanted) adw.adw_sidebar_set_selected(sidebar, wanted);
-    const settings = self.settings_sidebar orelse return;
-    const settings_wanted: c_uint = if (self.current_page == .settings) 0 else gtk.INVALID_LIST_POSITION;
-    if (adw.adw_sidebar_get_selected(settings) != settings_wanted) adw.adw_sidebar_set_selected(settings, settings_wanted);
+    for (std.enums.values(Page)) |page| {
+        const item = self.nav_items.get(page) orelse continue;
+        if (page == self.current_page)
+            gtk.gtk_widget_add_css_class(item, "selected")
+        else
+            gtk.gtk_widget_remove_css_class(item, "selected");
+    }
+}
+
+pub fn focusSidebar(self: *App) void {
+    const item = self.nav_items.get(self.current_page) orelse self.nav_items.get(.albums) orelse return;
+    _ = gtk.gtk_widget_grab_focus(item);
+}
+
+pub fn refreshCounts(self: *App) void {
+    const stats: ?liborca.LibraryStats = if (self.appearance.sidebar_counts)
+        if (self.library) |library| self.runtime.libraryStats(library) catch null else null
+    else
+        null;
+    for (std.enums.values(LibraryCount)) |kind| {
+        const label = self.library_counts.get(kind) orelse continue;
+        const value = stats orelse {
+            gtk.gtk_label_set_text(label, "");
+            continue;
+        };
+        var buffer: [32]u8 = undefined;
+        const total = switch (kind) {
+            .albums => value.releases,
+            .artists => value.artists,
+            .tracks => value.tracks,
+        };
+        const text: [:0]const u8 = strings.printZ(&buffer, "{f}", .{strings.grouped(total)}) catch "";
+        gtk.gtk_label_set_text(label, text.ptr);
+    }
 }
 
 fn switchTo(self: *App, page: Page) void {
@@ -791,118 +853,74 @@ pub fn goTo(self: *App, page: Page) void {
     showPage(self, page);
 }
 
-fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
-    goTo(state(data), sidebarPage(index) orelse return);
+fn navClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    for (std.enums.values(Page)) |page| {
+        const item = self.nav_items.get(page) orelse continue;
+        if (@as(?*anyopaque, item) == button) return goTo(self, page);
+    }
 }
 
-fn sidebarItem(section: *adw.SidebarSection, title: [*:0]const u8, icon: [*:0]const u8) *adw.SidebarItem {
-    const item = adw.adw_sidebar_item_new(title);
-    adw.adw_sidebar_item_set_icon_name(item, icon);
-    adw.adw_sidebar_section_append(section, item);
-    return item;
-}
-
-fn primaryMenu() *gtk.Widget {
-    const library = gtk.g_menu_new();
-    gtk.g_menu_append(library, "Add Music Folder…", "app.add-folder");
-    gtk.g_menu_append(library, "Rescan Library", "app.rescan");
-    gtk.g_menu_append(library, "Settings", "app.preferences");
-    const help = gtk.g_menu_new();
-    gtk.g_menu_append(help, "Keyboard Shortcuts", "app.shortcuts");
-    gtk.g_menu_append(help, "About Orca", "app.about");
-    const model = gtk.g_menu_new();
-    gtk.g_menu_append_section(model, null, gtk.cast(gtk.GMenuModel, library));
-    gtk.g_menu_append_section(model, null, gtk.cast(gtk.GMenuModel, help));
-    gtk.g_object_unref(library);
-    gtk.g_object_unref(help);
-    const button = gtk.gtk_menu_button_new();
-    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), "open-menu-symbolic");
-    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, model));
-    gtk.gtk_menu_button_set_primary(gtk.cast(gtk.MenuButton, button), gtk.true_);
-    gtk.gtk_widget_set_tooltip_text(button, "Main Menu");
-    gtk.g_object_unref(model);
+fn navItem(self: *App, item: NavItem) *gtk.Widget {
+    const icon = gtk.gtk_image_new_from_icon_name(item.icon);
+    gtk.gtk_widget_add_css_class(icon, "nav-icon");
+    const label = gtk.gtk_label_new(item.page.title());
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
+    gtk.gtk_widget_set_hexpand(label, gtk.true_);
+    const count = gtk.gtk_label_new("");
+    gtk.gtk_widget_add_css_class(count, "numeric");
+    gtk.gtk_widget_add_css_class(count, "nav-count");
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    for ([_]*gtk.Widget{ icon, label, count }) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, row), child);
+    const button = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), row);
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "nav-item");
+    _ = gtk.signalConnect(button, "clicked", gtk.callback(navClicked), self);
+    self.nav_items.set(item.page, button);
+    const count_label = gtk.cast(gtk.Label, count);
+    switch (item.page) {
+        .albums => self.library_counts.set(.albums, count_label),
+        .artists => self.library_counts.set(.artists, count_label),
+        .tracks => self.library_counts.set(.tracks, count_label),
+        .queue => self.queue_count = count_label,
+        .matches => self.matches_count = count_label,
+        else => {},
+    }
     return button;
 }
 
-fn countSuffix(item: *adw.SidebarItem) *gtk.Label {
-    const count = gtk.gtk_label_new("");
-    gtk.gtk_widget_add_css_class(count, "numeric");
-    gtk.gtk_widget_add_css_class(count, "sidebar-count");
-    adw.adw_sidebar_item_set_suffix(item, count);
-    return gtk.cast(gtk.Label, count);
-}
-
-fn titledSection(title: [*:0]const u8) *adw.SidebarSection {
-    const section = adw.adw_sidebar_section_new();
-    adw.adw_sidebar_section_set_title(section, title);
-    return section;
-}
-
-fn settingsSelected(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    syncSidebarSelection(state(data));
-}
-
-fn settingsActivated(_: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.window) |w| _ = gtk.gtk_widget_activate_action_variant(gtk.cast(gtk.Widget, w), "app.preferences", null);
-}
-
-fn buildSettingsItem(self: *App) *gtk.Widget {
-    const sidebar = adw.adw_sidebar_new();
-    gtk.gtk_widget_add_css_class(sidebar, "sidebar-settings");
-    self.settings_sidebar = gtk.cast(adw.Sidebar, sidebar);
-    _ = gtk.signalConnect(sidebar, "notify::selected", gtk.callback(settingsSelected), self);
-    _ = gtk.signalConnect(sidebar, "activated", gtk.callback(settingsActivated), self);
-    const section = adw.adw_sidebar_section_new();
-    _ = sidebarItem(section, "Settings", "emblem-system-symbolic");
-    adw.adw_sidebar_append(gtk.cast(adw.Sidebar, sidebar), section);
-    return sidebar;
-}
-
 fn buildSidebar(self: *App) *gtk.Widget {
-    const sidebar = adw.adw_sidebar_new();
-    self.sidebar = gtk.cast(adw.Sidebar, sidebar);
-    gtk.gtk_widget_set_vexpand(sidebar, gtk.true_);
+    const groups = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    for (nav_groups) |group| {
+        const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+        gtk.gtk_widget_add_css_class(box, "nav-group");
+        const title = gtk.gtk_label_new(group.title);
+        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
+        gtk.gtk_widget_add_css_class(title, "nav-group-label");
+        gtk.gtk_box_append(gtk.cast(gtk.Box, box), title);
+        for (group.items) |item| gtk.gtk_box_append(gtk.cast(gtk.Box, box), navItem(self, item));
+        gtk.gtk_box_append(gtk.cast(gtk.Box, groups), box);
+    }
+    const scroller = gtk.gtk_scrolled_window_new();
+    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), groups);
+    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
 
-    const library = titledSection("Library");
-    _ = sidebarItem(library, "Albums", "media-optical-symbolic");
-    _ = sidebarItem(library, "Artists", "avatar-default-symbolic");
-    _ = sidebarItem(library, "Tracks", "audio-x-generic-symbolic");
-    _ = sidebarItem(library, "Genres", "applications-multimedia-symbolic");
-    _ = sidebarItem(library, "Folders", "folder-symbolic");
-    _ = sidebarItem(library, "Loved", feedback.filled_icon);
-    adw.adw_sidebar_append(self.sidebar.?, library);
-
-    const collection = titledSection("Collection");
-    _ = sidebarItem(collection, "Playlists", "media-playlist-consecutive-symbolic");
-    adw.adw_sidebar_append(self.sidebar.?, collection);
-
-    const playback = titledSection("Playback");
-    _ = sidebarItem(playback, "Now Playing", "media-playback-start-symbolic");
-    self.queue_count = countSuffix(sidebarItem(playback, "Queue", "view-list-symbolic"));
-    adw.adw_sidebar_append(self.sidebar.?, playback);
-
-    const tools = titledSection("Library Tools");
-    self.health.count = countSuffix(sidebarItem(tools, "Health", "emblem-important-symbolic"));
-    self.matches_count = countSuffix(sidebarItem(tools, "Matches", "system-search-symbolic"));
-    adw.adw_sidebar_append(self.sidebar.?, tools);
-    _ = gtk.signalConnect(sidebar, "activated", gtk.callback(sidebarActivated), self);
-
-    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), sidebar);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), buildSettingsItem(self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), jobs.build(self));
-
-    const header = adw.adw_header_bar_new();
-    adw.adw_header_bar_set_show_title(gtk.cast(adw.HeaderBar, header), gtk.false_);
     const wordmark = gtk.gtk_label_new("Orca");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, wordmark), 0.0);
     gtk.gtk_widget_add_css_class(wordmark, "wordmark");
-    adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, header), wordmark);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), primaryMenu());
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
-    return view;
+    const handle = gtk.gtk_window_handle_new();
+    gtk.gtk_window_handle_set_child(gtk.cast(gtk.WindowHandle, handle), wordmark);
+
+    const nav = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(nav, "nav");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, nav), handle);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, nav), scroller);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, nav), jobs.build(self));
+    syncSidebarSelection(self);
+    refreshCounts(self);
+    return nav;
 }
 
 fn browseToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1058,7 +1076,6 @@ fn setInt(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const 
 fn tightenPlayerBar(self: *App, breakpoint: *adw.Breakpoint) void {
     if (self.now_playing_box) |box| setInt(breakpoint, box, "width-request", 0);
     if (self.format_slot) |slot| setBoolean(breakpoint, slot, "visible", false);
-    if (self.adjustments_label) |label| setBoolean(breakpoint, label, "visible", false);
     if (self.device_label) |label| setBoolean(breakpoint, label, "visible", false);
     if (self.device_icon) |icon| setBoolean(breakpoint, icon, "visible", true);
     if (self.volume_icon) |icon| setBoolean(breakpoint, icon, "visible", false);
@@ -1232,8 +1249,8 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     self.split_view = gtk.cast(adw.NavigationSplitView, split);
     adw.adw_navigation_split_view_set_sidebar(self.split_view.?, sidebar);
     adw.adw_navigation_split_view_set_content(self.split_view.?, content);
-    adw.adw_navigation_split_view_set_min_sidebar_width(self.split_view.?, 200);
-    adw.adw_navigation_split_view_set_max_sidebar_width(self.split_view.?, 240);
+    adw.adw_navigation_split_view_set_min_sidebar_width(self.split_view.?, 216);
+    adw.adw_navigation_split_view_set_max_sidebar_width(self.split_view.?, 216);
 
     const root = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, root), split);

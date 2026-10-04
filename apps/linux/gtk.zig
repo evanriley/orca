@@ -66,6 +66,7 @@ pub const Adjustment = opaque {};
 pub const Scale = opaque {};
 pub const Range = opaque {};
 pub const ProgressBar = opaque {};
+pub const WindowHandle = opaque {};
 pub const DropDown = opaque {};
 pub const StringList = opaque {};
 pub const StringObject = opaque {};
@@ -166,11 +167,16 @@ pub const PHASE_BUBBLE: c_int = 2;
 pub const PHASE_TARGET: c_int = 3;
 
 pub const KEY_space: c_uint = 0x020;
+pub const KEY_1: c_uint = 0x031;
+pub const KEY_5: c_uint = 0x035;
+pub const KEY_L: c_uint = 0x04c;
+pub const KEY_l: c_uint = 0x06c;
 pub const MODIFIER_SHIFT: c_uint = 1 << 0;
 pub const MODIFIER_CONTROL: c_uint = 1 << 2;
 pub const MODIFIER_ALT: c_uint = 1 << 3;
 
 pub const POS_RIGHT: c_int = 1;
+pub const POS_TOP: c_int = 2;
 pub const POS_BOTTOM: c_int = 3;
 
 pub const INVALID_LIST_POSITION: c_uint = 0xffffffff;
@@ -887,6 +893,10 @@ pub extern fn gtk_range_get_value(range: *Range) f64;
 pub extern fn gtk_progress_bar_new() *Widget;
 pub extern fn gtk_progress_bar_set_fraction(bar: *ProgressBar, fraction: f64) void;
 pub extern fn gtk_progress_bar_pulse(bar: *ProgressBar) void;
+pub extern fn gtk_progress_bar_set_pulse_step(bar: *ProgressBar, fraction: f64) void;
+
+pub extern fn gtk_window_handle_new() *Widget;
+pub extern fn gtk_window_handle_set_child(handle: *WindowHandle, child: ?*Widget) void;
 
 pub extern fn gtk_string_list_new(strings: ?[*]const ?[*:0]const u8) *StringList;
 pub extern fn gtk_string_list_append(list: *StringList, string: [*:0]const u8) void;
@@ -1109,6 +1119,12 @@ pub extern fn gtk_grid_set_column_spacing(grid: *Grid, spacing: c_uint) void;
 pub extern fn gtk_grid_set_row_spacing(grid: *Grid, spacing: c_uint) void;
 pub extern fn gtk_widget_get_layout_manager(widget: *Widget) ?*LayoutManager;
 pub extern fn gtk_layout_manager_get_layout_child(manager: *LayoutManager, child: *Widget) *LayoutChild;
+pub const CustomMeasure = *const fn (widget: *Widget, orientation: c_int, for_size: c_int, minimum: *c_int, natural: *c_int, minimum_baseline: *c_int, natural_baseline: *c_int) callconv(.c) void;
+pub const CustomAllocate = *const fn (widget: *Widget, width: c_int, height: c_int, baseline: c_int) callconv(.c) void;
+pub extern fn gtk_custom_layout_new(request_mode: ?*const anyopaque, measure: CustomMeasure, allocate: CustomAllocate) *LayoutManager;
+pub extern fn gtk_widget_set_layout_manager(widget: *Widget, layout_manager: ?*LayoutManager) void;
+pub extern fn gtk_widget_measure(widget: *Widget, orientation: c_int, for_size: c_int, minimum: ?*c_int, natural: ?*c_int, minimum_baseline: ?*c_int, natural_baseline: ?*c_int) void;
+pub extern fn gtk_widget_size_allocate(widget: *Widget, allocation: *const Rectangle, baseline: c_int) void;
 pub extern fn gtk_grid_layout_child_set_row(child: *GridLayoutChild, row: c_int) void;
 pub extern fn gtk_grid_layout_child_set_column(child: *GridLayoutChild, column: c_int) void;
 pub extern fn gtk_grid_layout_child_set_column_span(child: *GridLayoutChild, span: c_int) void;

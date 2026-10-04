@@ -577,7 +577,7 @@ fn emptyText(self: *const App) struct { title: [*:0]const u8, description: [*:0]
     if (self.album_filters.count() != 0 or self.album_artist_filter != null)
         return .{ .title = "No matching albums", .description = "Clear the filters to see more albums." };
     return switch (shelf(self)) {
-        .all => .{ .title = "No albums yet", .description = "Add a music folder from the main menu." },
+        .all => .{ .title = "No albums yet", .description = "Add a music folder in Settings › Library." },
         .loved => .{ .title = "No loved albums", .description = "Love an album from its page or its menu." },
         .high_resolution => .{ .title = "No high-resolution albums", .description = "Albums above 16-bit or 48 kHz appear here." },
         .needs_review => .{ .title = "Nothing to review", .description = "Albums with matches waiting for review appear here." },
@@ -1037,7 +1037,7 @@ pub fn build(self: *App) *gtk.Widget {
     self.albums_empty = gtk.cast(adw.StatusPage, empty);
     adw.adw_status_page_set_icon_name(self.albums_empty.?, "media-optical-symbolic");
     adw.adw_status_page_set_title(self.albums_empty.?, "No albums yet");
-    adw.adw_status_page_set_description(self.albums_empty.?, "Add a music folder from the main menu.");
+    adw.adw_status_page_set_description(self.albums_empty.?, "Add a music folder in Settings › Library.");
     const body = gtk.gtk_stack_new();
     self.albums_body = gtk.cast(gtk.Stack, body);
     _ = gtk.gtk_stack_add_named(self.albums_body.?, scroller, "grid");
@@ -1934,6 +1934,7 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
         adw.adw_navigation_page_set_child(pushed, scroller);
         adw.adw_navigation_page_set_title(pushed, title_text.ptr);
         window.markPushed(pushed, .{ .album = release_id });
+        page_ui.refresh(self);
         return true;
     }
     const pushed = adw.adw_navigation_page_new(scroller, title_text.ptr);

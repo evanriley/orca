@@ -340,6 +340,10 @@ fn loadAppearance(self: *App, keys: *gtk.GKeyFile) void {
         defer gtk.g_free(value);
         appearance.reduce_animation = std.mem.eql(u8, std.mem.span(value), "true");
     }
+    if (getString(keys, "appearance", "sidebar_counts")) |value| {
+        defer gtk.g_free(value);
+        appearance.sidebar_counts = std.mem.eql(u8, std.mem.span(value), "true");
+    }
     if (appearance.inspector_open and self.sidebar_page == .hidden) self.sidebar_page = .details;
 }
 
@@ -408,6 +412,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "appearance", "density", @tagName(appearance.density));
     gtk.g_key_file_set_string(keys, "appearance", "inspector_open", if (appearance.inspector_open) "true" else "false");
     gtk.g_key_file_set_string(keys, "appearance", "reduce_animation", if (appearance.reduce_animation) "true" else "false");
+    gtk.g_key_file_set_string(keys, "appearance", "sidebar_counts", if (appearance.sidebar_counts) "true" else "false");
     var album_columns_buffer: [64]u8 = undefined;
     gtk.g_key_file_set_string(keys, "view", "album_columns", albums.formatColumns(&album_columns_buffer, self.album_columns).ptr);
     var columns_buffer: [256]u8 = undefined;

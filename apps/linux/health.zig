@@ -46,7 +46,6 @@ pub const State = struct {
     about_title: ?*gtk.Label = null,
     about_text: ?*gtk.Label = null,
     about_action: ?*gtk.Label = null,
-    count: ?*gtk.Label = null,
     issues_shown: u64 = 0,
     unanalysed_shown: u64 = 0,
     restore_scroll: ?f64 = null,
@@ -1233,11 +1232,6 @@ pub fn reload(self: *App) void {
 
     const total = self.runtime.libraryHealthIssueCount(library) catch 0;
     self.health.issues_shown = total;
-    if (self.health.count) |count_label| {
-        var count_buffer: [16]u8 = undefined;
-        const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&count_buffer, "{d}", .{total}) catch "";
-        gtk.gtk_label_set_text(count_label, text.ptr);
-    }
     const unanalysed = unanalysedCount(self, library);
     self.health.unanalysed_shown = unanalysed;
     showOverview(self, library, total);

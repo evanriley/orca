@@ -14,9 +14,6 @@ pub const HeaderBar = opaque {};
 pub const Toast = opaque {};
 pub const ToastOverlay = opaque {};
 pub const StatusPage = opaque {};
-pub const Sidebar = opaque {};
-pub const SidebarSection = opaque {};
-pub const SidebarItem = opaque {};
 pub const Breakpoint = opaque {};
 pub const BreakpointCondition = opaque {};
 pub const BreakpointBin = opaque {};
@@ -107,9 +104,6 @@ pub extern fn adw_toast_set_action_name(toast: *Toast, action_name: ?[*:0]const 
 pub const TOOLBAR_FLAT: c_int = 0;
 pub const TOOLBAR_RAISED: c_int = 1;
 pub const TOOLBAR_RAISED_BORDER: c_int = 2;
-
-pub const SIDEBAR_MODE_SIDEBAR: c_int = 0;
-pub const SIDEBAR_MODE_PAGE: c_int = 1;
 
 pub extern fn adw_application_new(application_id: [*:0]const u8, flags: c_uint) ?*Application;
 
@@ -237,19 +231,6 @@ pub extern fn adw_banner_set_revealed(banner: *Banner, revealed: gtk.gboolean) v
 
 pub extern fn adw_avatar_new(size: c_int, text: ?[*:0]const u8, show_initials: gtk.gboolean) *gtk.Widget;
 pub extern fn adw_avatar_set_text(avatar: *Avatar, text: ?[*:0]const u8) void;
-
-pub extern fn adw_sidebar_new() *gtk.Widget;
-pub extern fn adw_sidebar_append(sidebar: *Sidebar, section: *SidebarSection) void;
-pub extern fn adw_sidebar_get_selected(sidebar: *Sidebar) c_uint;
-pub extern fn adw_sidebar_set_selected(sidebar: *Sidebar, selected: c_uint) void;
-pub extern fn adw_sidebar_set_mode(sidebar: *Sidebar, mode: c_int) void;
-pub extern fn adw_sidebar_section_new() *SidebarSection;
-pub extern fn adw_sidebar_section_set_title(section: *SidebarSection, title: ?[*:0]const u8) void;
-pub extern fn adw_sidebar_section_append(section: *SidebarSection, item: *SidebarItem) void;
-pub extern fn adw_sidebar_section_remove_all(section: *SidebarSection) void;
-pub extern fn adw_sidebar_item_new(title: [*:0]const u8) *SidebarItem;
-pub extern fn adw_sidebar_item_set_icon_name(item: *SidebarItem, icon_name: ?[*:0]const u8) void;
-pub extern fn adw_sidebar_item_set_suffix(item: *SidebarItem, suffix: ?*gtk.Widget) void;
 
 pub extern fn adw_dialog_present(dialog: *Dialog, parent: ?*gtk.Widget) void;
 

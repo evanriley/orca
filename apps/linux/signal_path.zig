@@ -12,6 +12,7 @@ pub const audio_backend = "PipeWire";
 pub const pipewire_hedge = "PipeWire's own volume and resampling are not visible to Orca.";
 
 const bullet = " • ";
+const dot = " · ";
 const arrow = " → ";
 pub const minus = "−";
 
@@ -47,42 +48,32 @@ fn write(writer: *std.Io.Writer, path: liborca.SignalPath, device: []const u8) s
     try writeFooter(writer, path);
 }
 
-/// The bar's line, such as `FLAC • 44.1 kHz • Native`, or an empty string
-/// when nothing is playing.
-pub fn renderCompact(buffer: []u8, path: liborca.SignalPath) [:0]const u8 {
+pub fn renderTechnology(buffer: []u8, path: liborca.SignalPath) [:0]const u8 {
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    writeCompact(&writer, path) catch {};
+    writeTechnology(&writer, path) catch {};
     return finish(buffer, &writer);
 }
 
-pub fn writeCompact(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Error!void {
+fn writeTechnology(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Error!void {
     const source = path.source orelse return;
     if (path.codec) |codec| {
         try writeCodecName(writer, codec);
-        try writer.writeAll(bullet);
+        try writer.writeAll(dot);
     }
     try writeRate(writer, source.sample_rate);
-    if (path.output == null) return;
-    try writer.writeAll(bullet);
-    try writer.writeAll(if (resampledTo(path) == null) "Native" else "Resampled");
-}
-
-pub fn renderAdjustments(buffer: []u8, path: liborca.SignalPath) [:0]const u8 {
-    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    writeAdjustments(&writer, path) catch {};
-    return finish(buffer, &writer);
-}
-
-fn writeAdjustments(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Error!void {
-    if (path.source == null) return;
-    if (path.replay_gain_db) |decibels| {
-        try writer.writeAll("RG ");
-        try writeSignedDecibels(writer, decibels);
-        try writer.writeAll(" •");
-    }
-    if (dspActive(path)) {
-        if (writer.end != 0) try writer.writeByte(' ');
-        try writer.writeAll("DSP •");
+    const verdict: ?[]const u8 = if (dspActive(path))
+        "DSP"
+    else if (path.output == null)
+        null
+    else if (resampledTo(path) != null)
+        "Resampled"
+    else if (path.bit_perfect_eligible)
+        "Native"
+    else
+        null;
+    if (verdict) |text| {
+        try writer.writeAll(dot);
+        try writer.writeAll(text);
     }
 }
 
@@ -644,16 +635,25 @@ test "there is no verdict before an output opens" {
     try expectVerdict("", .{});
 }
 
-test "the bar line names the codec, the rate and whether it is native" {
+test "the bar's technology line names the codec, the rate, DSP and a bit-perfect path" {
     var buffer: [64]u8 = undefined;
-    try testing.expectEqualStrings("FLAC • 44.1 kHz • Native", renderCompact(&buffer, flacPath()));
+    try testing.expectEqualStrings("FLAC · 44.1 kHz · Native", renderTechnology(&buffer, flacPath()));
     var resampled = flacPath();
     resampled.device_rate = 48_000;
-    try testing.expectEqualStrings("FLAC • 44.1 kHz • Resampled", renderCompact(&buffer, resampled));
+    try testing.expectEqualStrings("FLAC · 44.1 kHz · Resampled", renderTechnology(&buffer, resampled));
+    var gain = withReason(flacPath(), .sample_processing);
+    gain.replay_gain_db = -3.1;
+    try testing.expectEqualStrings("FLAC · 44.1 kHz", renderTechnology(&buffer, gain));
+    var dsp = withReason(flacPath(), .sample_processing);
+    dsp.crossfeed = 0.3;
+    try testing.expectEqualStrings("FLAC · 44.1 kHz · DSP", renderTechnology(&buffer, dsp));
+    var flat = flacPath();
+    flat.equalizer = .{};
+    try testing.expectEqualStrings("FLAC · 44.1 kHz · Native", renderTechnology(&buffer, flat));
     var closed = flacPath();
     closed.output = null;
-    try testing.expectEqualStrings("FLAC • 44.1 kHz", renderCompact(&buffer, closed));
-    try testing.expectEqualStrings("", renderCompact(&buffer, .{}));
+    try testing.expectEqualStrings("FLAC · 44.1 kHz", renderTechnology(&buffer, closed));
+    try testing.expectEqualStrings("", renderTechnology(&buffer, .{}));
 }
 
 test "the chain runs from the source format through the engine to the device" {
@@ -661,21 +661,6 @@ test "the chain runs from the source format through the engine to the device" {
     var writer = std.Io.Writer.fixed(&buffer);
     try writeChain(&writer, flacPath(), "USB DAC");
     try testing.expectEqualStrings("FLAC 16-bit / 44.1 kHz → 32-bit float → USB DAC", writer.buffered());
-}
-
-test "the bar's second line leads with applied ReplayGain and active DSP only" {
-    var buffer: [64]u8 = undefined;
-    try testing.expectEqualStrings("", renderAdjustments(&buffer, flacPath()));
-    var gain = flacPath();
-    gain.replay_gain_db = -3.1;
-    try testing.expectEqualStrings("RG −3.1 dB •", renderAdjustments(&buffer, gain));
-    var both = gain;
-    both.crossfeed = 0.3;
-    try testing.expectEqualStrings("RG −3.1 dB • DSP •", renderAdjustments(&buffer, both));
-    var flat = flacPath();
-    flat.equalizer = .{};
-    try testing.expectEqualStrings("", renderAdjustments(&buffer, flat));
-    try testing.expectEqualStrings("", renderAdjustments(&buffer, .{}));
 }
 
 test "the Gain stage names album ReplayGain and the track figure it replaced" {

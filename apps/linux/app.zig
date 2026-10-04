@@ -182,6 +182,7 @@ pub const Appearance = struct {
     density: Density = .comfortable,
     inspector_open: bool = false,
     reduce_animation: bool = false,
+    sidebar_counts: bool = false,
 };
 
 pub const default_album_tile_pixels: c_int = 148;
@@ -305,8 +306,8 @@ pub const App = struct {
     toasts: ?*adw.ToastOverlay = null,
     split_view: ?*adw.NavigationSplitView = null,
     content_page: ?*adw.NavigationPage = null,
-    sidebar: ?*adw.Sidebar = null,
-    settings_sidebar: ?*adw.Sidebar = null,
+    nav_items: std.EnumArray(window.Page, ?*gtk.Widget) = .initFill(null),
+    library_counts: std.EnumArray(window.LibraryCount, ?*gtk.Label) = .initFill(null),
     pages: ?*gtk.Stack = null,
     current_page: window.Page = .albums,
     history: window.History = .{},
@@ -456,6 +457,10 @@ pub const App = struct {
     fetch_artist_info: bool = true,
 
     scan_revealer: ?*gtk.Revealer = null,
+    activity_label: ?*gtk.Label = null,
+    activity_percent: ?*gtk.Label = null,
+    activity_bar: ?*gtk.ProgressBar = null,
+    activity_popover: ?*gtk.Popover = null,
     scan_label: ?*gtk.Label = null,
     scan_detail: ?*gtk.Label = null,
 
@@ -483,7 +488,6 @@ pub const App = struct {
     format_slot: ?*gtk.Widget = null,
     format_button: ?*gtk.Widget = null,
     format_label: ?*gtk.Label = null,
-    adjustments_label: ?*gtk.Label = null,
     signal_path_popover: ?*gtk.Popover = null,
     signal_path_has_output: bool = false,
     volume_settle_timer: c_uint = 0,

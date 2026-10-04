@@ -13,6 +13,8 @@
 #   move:X,Y  click:X,Y  rclick:X,Y   the virtual pointer, in output pixels
 #   scroll:N     N wheel steps, positive down
 #   wait:MS      sleeps MS milliseconds
+#   shot:PATH    saves a screenshot to PATH at once, without waiting to settle
+#   tree:PATH    saves sway's window tree, with window titles, to PATH as JSON
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
 # scripts/design-fixture.sh when missing; the app gets a copy. Output is
@@ -24,7 +26,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '5,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '5,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -52,7 +54,7 @@ case "$page" in
 esac
 for step in "${steps[@]}"; do
     case "$step" in
-        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | rclick:*,*) ;;
+        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | rclick:*,* | shot:?*.png | tree:?*) ;;
         *) fail "unknown step '$step'; see the usage in $0" ;;
     esac
 done
@@ -384,10 +386,17 @@ pointer_command() {
     echo "$*" >&4
 }
 
+shot() {
+    private_display
+    grim -o HEADLESS-1 "$1"
+}
+
 run_step() {
     local step=$1 value
     value=${step#*:}
     case "$step" in
+        shot:*) shot "$value" ;;
+        tree:*) swaymsg -t get_tree >"$value" ;;
         key:*) press "$value" ;;
         type:*) type_text "$value" ;;
         wait:*) sleep "$(awk -v ms="$value" 'BEGIN { print ms / 1000 }')" ;;
@@ -422,11 +431,6 @@ show_page "$page"
 for step in "${steps[@]}"; do
     run_step "$step"
 done
-
-shot() {
-    private_display
-    grim -o HEADLESS-1 "$1"
-}
 
 previous="$runtime/shot-a.png"
 current="$runtime/shot-b.png"

@@ -1,6 +1,6 @@
 //! What every content page shares: the window's one top bar — Back and
-//! Forward, the trail to the page showing, the library search and the
-//! inspector's toggles — and the title block that opens the content with the
+//! Forward, the trail to the page showing and the library search — and the
+//! title block that opens the content with the
 //! page's name and its count.
 
 const std = @import("std");
@@ -9,6 +9,8 @@ const adw = @import("adw.zig");
 const app = @import("app.zig");
 const palette = @import("palette.zig");
 const window = @import("window.zig");
+const strings = @import("strings.zig");
+const preferences = @import("preferences.zig");
 
 const App = app.App;
 
@@ -17,11 +19,9 @@ pub const Bar = struct {
     forward: ?*gtk.Widget = null,
     trail: ?*gtk.Stack = null,
     parent: ?*gtk.Widget = null,
-    separator: ?*gtk.Widget = null,
     current: ?*gtk.Label = null,
     search: ?*gtk.Stack = null,
     entry: ?*gtk.Widget = null,
-    panels: ?*gtk.Box = null,
 };
 
 fn state(data: ?*anyopaque) *App {
@@ -31,6 +31,7 @@ fn state(data: ?*anyopaque) *App {
 fn historyButton(icon: [*:0]const u8, label: [*:0]const u8, tooltip: [*:0]const u8, clicked: gtk.GCallback, self: *App) *gtk.Widget {
     const button = gtk.gtk_button_new_from_icon_name(icon);
     gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "history-button");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(button, tooltip);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
@@ -72,7 +73,6 @@ fn buildTrail(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, trail), crumbs, "trail");
     self.top_bar.trail = gtk.cast(gtk.Stack, trail);
     self.top_bar.parent = parent;
-    self.top_bar.separator = separator;
     self.top_bar.current = gtk.cast(gtk.Label, current);
     return trail;
 }
@@ -81,7 +81,7 @@ fn buildSearch(self: *App) *gtk.Widget {
     const entry = gtk.gtk_search_entry_new();
     gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), "Search your library…");
     gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, entry), app.search_delay_ms);
-    gtk.gtk_widget_set_hexpand(entry, gtk.true_);
+    if (gtk.gtk_widget_get_first_child(entry)) |icon| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, icon), "orca-search-symbolic");
     _ = gtk.signalConnect(entry, "search-changed", gtk.callback(window.searchChanged), self);
     _ = gtk.signalConnect(entry, "activate", gtk.callback(window.searchActivated), self);
     const hint = gtk.gtk_label_new("Ctrl K");
@@ -94,7 +94,7 @@ fn buildSearch(self: *App) *gtk.Widget {
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, field), entry);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, field), hint);
 
-    const button = gtk.gtk_button_new_from_icon_name("system-search-symbolic");
+    const button = gtk.gtk_button_new_from_icon_name("orca-search-symbolic");
     gtk.gtk_widget_add_css_class(button, "flat");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(button, "Search your library");
@@ -112,25 +112,19 @@ fn buildSearch(self: *App) *gtk.Widget {
     return switcher;
 }
 
-fn buildPanelSlot(self: *App) *gtk.Widget {
-    const slot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_widget_set_valign(slot, gtk.ALIGN_CENTER);
-    self.top_bar.panels = gtk.cast(gtk.Box, slot);
-    return slot;
-}
-
 pub fn build(self: *App) *gtk.Widget {
     const bar = adw.adw_header_bar_new();
     adw.adw_header_bar_set_show_title(gtk.cast(adw.HeaderBar, bar), gtk.false_);
+    adw.adw_header_bar_set_show_start_title_buttons(gtk.cast(adw.HeaderBar, bar), gtk.false_);
+    adw.adw_header_bar_set_show_end_title_buttons(gtk.cast(adw.HeaderBar, bar), gtk.false_);
     gtk.gtk_widget_add_css_class(bar, "page-header");
-    const back = historyButton("go-previous-symbolic", "Back", "Back (Alt+Left)", gtk.callback(backClicked), self);
-    const forward = historyButton("go-next-symbolic", "Forward", "Forward (Alt+Right)", gtk.callback(forwardClicked), self);
+    const back = historyButton("orca-back-symbolic", "Back", "Back (Alt+Left)", gtk.callback(backClicked), self);
+    const forward = historyButton("orca-forward-symbolic", "Forward", "Forward (Alt+Right)", gtk.callback(forwardClicked), self);
     self.top_bar.back = back;
     self.top_bar.forward = forward;
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), back);
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), forward);
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), buildTrail(self));
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildPanelSlot(self));
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildSearch(self));
     return bar;
 }
@@ -145,6 +139,38 @@ pub fn refresh(self: *App) void {
     if (bar.back) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoBack(self)));
     if (bar.forward) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoForward(self)));
     showTrail(self);
+    showPlaceholder(self);
+    showWindowTitle(self);
+}
+
+fn placeholder(self: *App) [*:0]const u8 {
+    if (self.current_page == .settings) return "Search settings…";
+    const page = window.filterTarget(self) orelse return "Search your library…";
+    return switch (page) {
+        .albums => "Search albums, artists or genres…",
+        .artists => "Search artists…",
+        .tracks => "Search tracks, artists, albums…",
+        .playlists => "Search playlists…",
+        else => "Search your library…",
+    };
+}
+
+fn showPlaceholder(self: *App) void {
+    const entry = self.top_bar.entry orelse return;
+    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), placeholder(self));
+}
+
+pub fn showWindowTitle(self: *App) void {
+    const root = self.window orelse return;
+    const page = self.current_page;
+    var buffer: [512]u8 = undefined;
+    const text: [:0]const u8 = if (window.pushedPage(self, page)) |pushed|
+        strings.printZ(&buffer, "Orca — {s}", .{adw.adw_navigation_page_get_title(pushed)}) catch "Orca"
+    else if (page == .settings)
+        strings.printZ(&buffer, "Orca — Settings · {s}", .{preferences.tabLabel(self.settings_page.tab)}) catch "Orca"
+    else
+        strings.printZ(&buffer, "Orca — {s}", .{page.windowTitle()}) catch "Orca";
+    gtk.gtk_window_set_title(root, text.ptr);
 }
 
 fn showTrail(self: *App) void {
@@ -152,26 +178,23 @@ fn showTrail(self: *App) void {
     const trail = bar.trail orelse return;
     const page = self.current_page;
     if (gtk.gtk_stack_get_child_by_name(trail, page.name()) != null) {
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, trail), gtk.true_);
         gtk.gtk_stack_set_visible_child_name(trail, page.name());
         return;
     }
+    const pushed = window.pushedPage(self, page) orelse {
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, trail), gtk.false_);
+        return;
+    };
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, trail), gtk.true_);
     gtk.gtk_stack_set_visible_child_name(trail, "trail");
-    var parent: ?[*:0]const u8 = null;
-    var current = page.title();
-    if (window.pushedPage(self, page)) |pushed| {
-        current = adw.adw_navigation_page_get_title(pushed);
-        const navigation = window.pageNavigation(self, page).?;
-        parent = if (adw.adw_navigation_view_get_previous_page(navigation, pushed)) |previous|
-            adw.adw_navigation_page_get_title(previous)
-        else
-            page.title();
-    }
-    if (bar.parent) |button| {
-        if (parent) |text| gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), text);
-        gtk.gtk_widget_set_visible(button, @intFromBool(parent != null));
-    }
-    if (bar.separator) |separator| gtk.gtk_widget_set_visible(separator, @intFromBool(parent != null));
-    if (bar.current) |label| gtk.gtk_label_set_text(label, current);
+    const navigation = window.pageNavigation(self, page).?;
+    const parent = if (adw.adw_navigation_view_get_previous_page(navigation, pushed)) |previous|
+        adw.adw_navigation_page_get_title(previous)
+    else
+        page.title();
+    if (bar.parent) |button| gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), parent);
+    if (bar.current) |label| gtk.gtk_label_set_text(label, adw.adw_navigation_page_get_title(pushed));
 }
 
 fn showSearch(self: *App) void {

@@ -125,14 +125,16 @@ pub fn showPlaying(self: *App) void {
     }
 }
 
-pub fn toggleLoveOfPlaying(self: *App) void {
-    const track_id = self.shown_track_id orelse return;
-    const target: Target = .{
-        .track_id = track_id,
+pub fn playingTarget(self: *App) ?Target {
+    return .{
+        .track_id = self.shown_track_id orelse return null,
         .recording_id = self.shown_recording_id,
         .feedback = self.shown_feedback,
     };
-    toggle(self, target);
+}
+
+pub fn toggleLoveOfPlaying(self: *App) void {
+    toggle(self, playingTarget(self) orelse return);
 }
 
 pub fn toggle(self: *App, target: Target) void {

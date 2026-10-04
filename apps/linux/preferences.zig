@@ -21,6 +21,7 @@ const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
 const lyrics = @import("lyrics.zig");
 const page_ui = @import("page.zig");
+const main_window = @import("window.zig");
 const signal_path = @import("signal_path.zig");
 const albums = @import("albums.zig");
 const appearance = @import("appearance.zig");
@@ -1681,6 +1682,13 @@ fn animationSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     showChoices(self);
 }
 
+fn countsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.appearance.sidebar_counts = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    showChoices(self);
+    main_window.refreshCounts(self);
+}
+
 const tile_settle_ms: c_uint = 400;
 
 fn cancelTileTimer(self: *App) void {
@@ -1772,6 +1780,13 @@ fn appearanceTab(self: *App) *gtk.Widget {
         "Turns off transitions and other motion in Orca",
         choices.reduce_animation,
         gtk.callback(animationSwitched),
+        self,
+    ));
+    behaviour.add(switchRow(
+        "Show counts in sidebar",
+        "Shows how many albums, artists and tracks the library holds beside their pages",
+        choices.sidebar_counts,
+        gtk.callback(countsSwitched),
         self,
     ));
     return tab(self, .appearance, null, &.{look.widget}, &.{behaviour.widget});
@@ -2010,6 +2025,11 @@ fn syncTabs(self: *App) void {
 pub fn selectTab(self: *App, which: app.SettingsTab) void {
     self.settings_page.tab = which;
     syncTabs(self);
+    page_ui.showWindowTitle(self);
+}
+
+pub fn tabLabel(which: app.SettingsTab) [*:0]const u8 {
+    return tab_info.get(which).label;
 }
 
 fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
