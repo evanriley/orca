@@ -5,7 +5,7 @@ const liborca = @import("liborca");
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         var stderr_buffer: [256]u8 = undefined;
-        var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
+        var stderr_file_writer: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &stderr_buffer);
         const stderr = &stderr_file_writer.interface;
         stderr.print("orca-cli: {s}\n", .{describe(err)}) catch {};
         stderr.flush() catch {};
@@ -131,7 +131,7 @@ fn run(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
+    var stdout_file_writer: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
     const command = if (args.len > 1) findCommand(args[1], args.len - 2) else null;

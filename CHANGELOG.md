@@ -1416,6 +1416,12 @@
   resolved to whichever Track the new order put there, and the engine moved
   the cursor onto it. Records now move to their entry's new position, and
   removing an entry forgets its record.
+- **orca-cli output redirected to a file follows what is there.** Standard
+  output and standard error wrote at offset 0 of a regular file, so
+  `{ echo header; orca-cli stats DB; } > out` lost the header and a second
+  command's output overwrote the first's. Both now write at the file's
+  current offset. `zig build test` checks it with
+  `scripts/check-cli-stdio.sh`.
 
 ## 0.8.1 - 2026-10-02
 

@@ -229,6 +229,11 @@ pub fn build(b: *std.Build) void {
     const abi_coverage_step = b.step("abi-coverage", "Check every Runtime method has a C ABI path or a stated reason it has none");
     abi_coverage_step.dependOn(&check_abi_coverage.step);
     test_step.dependOn(&check_abi_coverage.step);
+    const check_cli_stdio = b.addSystemCommand(&.{"bash"});
+    check_cli_stdio.addFileArg(b.path("scripts/check-cli-stdio.sh"));
+    check_cli_stdio.addArtifactArg(cli);
+    _ = check_cli_stdio.addOutputDirectoryArg("cli-stdio");
+    test_step.dependOn(&check_cli_stdio.step);
 
     const fuzz_tests = b.addTest(.{
         .root_module = liborca_module,
