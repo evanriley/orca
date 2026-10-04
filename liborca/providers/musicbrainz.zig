@@ -726,6 +726,8 @@ const ReleaseMedium = struct {
 
 const ReleaseGroup = struct {
     id: []const u8 = "",
+    @"primary-type": ?[]const u8 = null,
+    @"secondary-types": []const []const u8 = &.{},
 };
 
 const ReleaseBody = struct {
@@ -786,6 +788,7 @@ pub const ReleaseLookup = struct {
             .release_artist_mbid = if (release_credit.len == 1) soleArtistId(release_credit[0]) else null,
             .release_date = nonEmpty(release.date orelse ""),
             .release_group_mbid = if (release.@"release-group") |group| validId(group.id) else null,
+            .release_type = if (release.@"release-group") |group| try releaseType(arena, group) else null,
             .release_track_mbid = chosen.track.id,
             .track_number = chosen.track.position,
             .disc_number = chosen.medium.position,
@@ -794,6 +797,22 @@ pub const ReleaseLookup = struct {
 
     const Placed = struct { medium: *const ReleaseMedium, track: *const ReleaseTrack };
 };
+
+const max_release_type = 64;
+
+fn releaseType(arena: std.mem.Allocator, group: ReleaseGroup) !?[]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    for (group.@"secondary-types") |kind| {
+        const name = std.mem.trim(u8, kind[0 .. std.mem.indexOfScalar(u8, kind, '/') orelse kind.len], " \t");
+        if (name.len == 0) continue;
+        if (text.items.len + name.len + 3 > max_release_type) break;
+        if (text.items.len != 0) try text.appendSlice(arena, " + ");
+        try text.appendSlice(arena, name);
+    }
+    if (text.items.len != 0) return text.items;
+    const primary = nonEmpty(group.@"primary-type" orelse "") orelse return null;
+    return primary[0..@min(primary.len, max_release_type)];
+}
 
 fn soleArtistId(credit: ReleaseCredit) ?[]const u8 {
     const artist = credit.artist orelse return null;
@@ -1212,6 +1231,7 @@ test "a release lookup yields the recording's track by position, with its own cr
     try testing.expectEqualStrings("0383dadf-2a4e-4d10-a46a-e9e041da8eb3", duet.release_artist_mbid.?);
     try testing.expectEqualStrings("2014", duet.release_date.?);
     try testing.expectEqualStrings("3918b90b-340e-3779-9d7e-ba1593653498", duet.release_group_mbid.?);
+    try testing.expectEqualStrings("Album", duet.release_type.?);
     try testing.expectEqualStrings("6a31811e-e7ac-44d9-8345-7a6918130bf7", duet.release_track_mbid);
     try testing.expectEqual(@as(?u32, 7), duet.track_number);
     try testing.expectEqual(@as(?u32, 2), duet.disc_number);
@@ -1250,6 +1270,28 @@ test "a release credited to two artists names them both and gives no album-artis
     try testing.expectEqual(@as(?[]const u8, null), track.track_artist);
     try testing.expectEqual(@as(?[]const u8, null), track.release_date);
     try testing.expectEqual(@as(?[]const u8, null), track.release_group_mbid);
+}
+
+test "a release's type is its release group's secondary types up to their slash, else its primary type" {
+    const mixtape = try parseRelease(
+        \\{"id":"047a4aae-27f8-4f2d-92fb-214fd8dc865a","title":"ONEPOINTFIVE","release-group":{"id":"3918b90b-340e-3779-9d7e-ba1593653498",
+        \\ "primary-type":"Album","secondary-types":["Mixtape/Street"]},
+        \\ "media":[{"position":1,"tracks":[{"id":"7938be9a-8cd9-40d0-b17f-9555cf5168c2","position":1,"title":"Song","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9"}}]}]}
+    );
+    defer mixtape.deinit();
+    try testing.expectEqualStrings("Mixtape", (try mixtape.enrichment(duet_mbid, null)).?.release_type.?);
+
+    const live = try parseRelease(
+        \\{"id":"047a4aae-27f8-4f2d-92fb-214fd8dc865a","title":"Live","release-group":{"id":"3918b90b-340e-3779-9d7e-ba1593653498",
+        \\ "primary-type":"Album","secondary-types":["Compilation","Live"]},
+        \\ "media":[{"position":1,"tracks":[{"id":"7938be9a-8cd9-40d0-b17f-9555cf5168c2","position":1,"title":"Song","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9"}}]}]}
+    );
+    defer live.deinit();
+    try testing.expectEqualStrings("Compilation + Live", (try live.enrichment(duet_mbid, null)).?.release_type.?);
+
+    const untyped = try parseRelease(twice_release);
+    defer untyped.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), (try untyped.enrichment(duet_mbid, null)).?.release_type);
 }
 
 test "an answer that is not a release is refused as invalid" {

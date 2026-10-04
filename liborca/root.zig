@@ -290,6 +290,7 @@ pub const MatchEvidence = runtime.MatchEvidence;
 pub const ReleaseFieldDiff = runtime.ReleaseFieldDiff;
 pub const ReleaseTrackAlignment = runtime.ReleaseTrackAlignment;
 pub const ReleaseMatchDiff = runtime.ReleaseMatchDiff;
+pub const ArtworkSize = runtime.ArtworkSize;
 pub const CorrectionGroup = runtime.CorrectionGroup;
 pub const CorrectionGroupMember = runtime.CorrectionGroupMember;
 pub const CorrectionGroupPage = runtime.CorrectionGroupPage;

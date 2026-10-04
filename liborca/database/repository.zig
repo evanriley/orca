@@ -160,6 +160,7 @@ pub const ReleaseMatchProposal = identification.ReleaseMatchProposal;
 pub const ReleaseMatchTrack = identification.ReleaseMatchTrack;
 pub const ReleaseMatchView = identification.ReleaseMatchView;
 pub const LocalArtworkSource = identification.LocalArtworkSource;
+pub const ArtworkSize = identification.ArtworkSize;
 pub const RecordingMbid = tracks.RecordingMbid;
 pub const TrackSummary = tracks.TrackSummary;
 pub const TrackPage = tracks.TrackPage;

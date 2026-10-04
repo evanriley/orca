@@ -227,7 +227,7 @@ zig build run -- love-artist DATABASE IDS [--clear]   # artist love; kept in the
 zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
 zig build run -- match DATABASE (--track=ID | --release=ID) --reidentify   # again, ignoring IDs and earlier searches; confirmed= counts IDs found again
 zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal; the replaced ID last
-zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= title= date= candidate_tracks=, then `confident= needs_review= unmatched=`
+zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9] [--filter=TEXT] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= title= date= candidate_tracks=, then `confident= needs_review= unmatched=`
 zig build run -- matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff | --dismiss=MBID)   # evidence: fingerprints=N/M durations_within_1s= date_agrees= artist_agrees= title_agrees=, then note=; diff: a line per field, then per Track; dismiss: Not This Release
 zig build run -- verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N] [--cancel-after=MS]   # recording IDs against AcoustID; proposes corrections
 zig build run -- corrections DATABASE [--limit N] [--offset N]   # album groups of corrections

@@ -462,6 +462,7 @@ pub const MatchEvidence = library_pass.matching.MatchEvidence;
 pub const ReleaseFieldDiff = library_pass.matching.ReleaseFieldDiff;
 pub const ReleaseTrackAlignment = library_pass.matching.ReleaseTrackAlignment;
 pub const ReleaseMatchDiff = library_pass.matching.ReleaseMatchDiff;
+pub const ArtworkSize = database.ArtworkSize;
 pub const MatchAcceptance = database.ProposalAcceptance;
 
 pub const ConfidentMatchAcceptance = struct {
@@ -1558,22 +1559,26 @@ pub const OrcaRuntime = struct {
     /// A Release is `confident` when its best candidate's confidence is at
     /// least `confident_at`, `needs_review` when it is lower, and
     /// `unmatched` with no candidate. Weighing every Release, a page costs a
-    /// walk of the library.
+    /// walk of the library. A `filter` keeps the Releases whose title or
+    /// album artist has a word starting with each of its words, as `search`
+    /// matches them; at most 256 bytes.
     pub fn libraryReleaseMatchPage(
         self: *OrcaRuntime,
         library: LibraryHandle,
         allocator: std.mem.Allocator,
         bucket: ReleaseMatchBucket,
         confident_at: f32,
+        filter: ?[]const u8,
         limit: u32,
         offset: u32,
     ) !ReleaseMatchPage {
-        return runtime_listens.libraryReleaseMatchPage(self, library, allocator, bucket, confident_at, limit, offset);
+        return runtime_listens.libraryReleaseMatchPage(self, library, allocator, bucket, confident_at, filter, limit, offset);
     }
 
-    /// How many Releases each bucket of `libraryReleaseMatchPage` holds.
-    pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32) !ReleaseMatchCounts {
-        return runtime_listens.libraryReleaseMatchCounts(self, library, confident_at);
+    /// How many Releases each bucket of `libraryReleaseMatchPage` holds
+    /// under the same `filter`.
+    pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32, filter: ?[]const u8) !ReleaseMatchCounts {
+        return runtime_listens.libraryReleaseMatchCounts(self, library, confident_at, filter);
     }
 
     /// Why the Release is or is not `release_mbid`, or its best candidate

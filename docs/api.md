@@ -806,8 +806,8 @@ defer page.deinit();
   candidate locked, so they outrank file tags.
   [metadata.md](metadata.md#applying-a-release) says when each applies.
   Release matches serve the Matches and Match Review screens.
-  `libraryReleaseMatchPage(library, allocator, bucket, confident_at, limit,
-  offset)` returns a `ReleaseMatchPage` of at most 512 `ReleaseMatchItem`s in
+  `libraryReleaseMatchPage(library, allocator, bucket, confident_at,
+  filter, limit, offset)` returns a `ReleaseMatchPage` of at most 512 `ReleaseMatchItem`s in
   one `ReleaseMatchBucket`, by album artist and title: each Release's title,
   artist, Track count and `best` `ReleaseCandidate` (release ID, title, date,
   track count, confidence). A Release's candidates are the MusicBrainz
@@ -823,9 +823,12 @@ defer page.deinit();
   - `unmatched`: there is no candidate.
   `confident_at` is in (0, 1], else `error.InvalidMinimumConfidence`. Only
   Releases with a Track whose play file has a release tag or an undismissed
-  proposal are weighed, 256 at a time; the rest are unmatched.
-  `libraryReleaseMatchCounts(library,
-  confident_at)` counts each bucket. `libraryReleaseMatchEvidence(library,
+  proposal are weighed, 256 at a time; the rest are unmatched. A non-null
+  `filter` keeps the Releases whose title or album artist has a word
+  starting with each of its words, through the search index; one with no
+  word filters nothing, and one over `max_search_text` bytes is
+  `error.SearchTextTooLong`. `libraryReleaseMatchCounts(library,
+  confident_at, filter)` counts each bucket under the same filter. `libraryReleaseMatchEvidence(library,
   release_id, release_mbid)` returns a `MatchEvidence` against
   `release_mbid`, or the best candidate when null
   (`error.NoReleaseCandidate` when there is none): Tracks AcoustID heard on
@@ -835,7 +838,15 @@ defer page.deinit();
   `libraryReleaseMatchDiff(library, allocator, release_id, release_mbid)`
   returns a `ReleaseMatchDiff`: a `ReleaseFieldDiff` per `ReleaseField` in
   order, local beside candidate, and a `ReleaseTrackAlignment` per Track
-  (position, local and candidate title, duration delta, fingerprint).
+  (position, local and candidate title, duration delta, fingerprint). The
+  candidate's release type is its release group's secondary types, each up
+  to its first "/", else its primary type ("Mixtape", "Album"), and is
+  compared ignoring case. The artwork field names each side's cover with
+  its size, "embedded · 1200 × 1200" and "Cover Art Archive · 1200 × 1200",
+  or "—" for an unmeasured size; `local_artwork_size` and
+  `candidate_artwork_size` hold the `ArtworkSize`s, the archive's from the
+  stored cover candidates' front cover or the cover fetched from that
+  release.
   `libraryDismissReleaseCandidate(library, release_id, release_mbid)` marks
   a release as not the Release; it stops being a candidate for it. An ID
   that is not a MusicBrainz ID is `error.InvalidMusicBrainzId`, an unknown

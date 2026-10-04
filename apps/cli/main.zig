@@ -261,7 +261,7 @@ const commands = [_]Command{
     .{
         .name = "matches",
         .usage = "matches DATABASE (TRACK_ID | --releases [--bucket=confident|needs_review|unmatched]\n" ++ usage_indent ++
-            "  [--min-score=SCORE] [--limit=N] [--offset=N] | --release=ID [--candidate=MBID]\n" ++ usage_indent ++
+            "  [--min-score=SCORE] [--filter=TEXT] [--limit=N] [--offset=N] | --release=ID [--candidate=MBID]\n" ++ usage_indent ++
             "  (--evidence | --diff | --dismiss=MBID))",
         .min_arguments = 2,
         .max_arguments = 7,
@@ -4795,6 +4795,7 @@ fn listReleaseMatches(context: Context) !void {
     const stdout = context.stdout;
     var bucket: ?liborca.ReleaseMatchBucket = null;
     var confident_at = default_confident_at;
+    var filter: ?[]const u8 = null;
     var limit: u32 = 512;
     var offset: u32 = 0;
     for (context.arguments[2..]) |argument| {
@@ -4802,6 +4803,8 @@ fn listReleaseMatches(context: Context) !void {
             bucket = std.meta.stringToEnum(liborca.ReleaseMatchBucket, argument["--bucket=".len..]) orelse return error.UnknownOption;
         } else if (std.mem.startsWith(u8, argument, "--min-score=")) {
             confident_at = try std.fmt.parseFloat(f32, argument["--min-score=".len..]);
+        } else if (std.mem.startsWith(u8, argument, "--filter=")) {
+            filter = argument["--filter=".len..];
         } else if (std.mem.startsWith(u8, argument, "--limit=")) {
             limit = try std.fmt.parseInt(u32, argument["--limit=".len..], 10);
         } else if (std.mem.startsWith(u8, argument, "--offset=")) {
@@ -4813,7 +4816,7 @@ fn listReleaseMatches(context: Context) !void {
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const buckets: []const liborca.ReleaseMatchBucket = if (bucket) |one| &.{one} else &.{ .confident, .needs_review, .unmatched };
     for (buckets) |each| {
-        const page = try runtime.libraryReleaseMatchPage(library, context.allocator, each, confident_at, limit, offset);
+        const page = try runtime.libraryReleaseMatchPage(library, context.allocator, each, confident_at, filter, limit, offset);
         defer page.deinit();
         for (page.items) |item| {
             try stdout.print("{d}\t{s}\t{s}\t{s}\ttracks={d}", .{ item.release_id, @tagName(item.bucket), item.title, item.artist, item.track_count });
@@ -4826,7 +4829,7 @@ fn listReleaseMatches(context: Context) !void {
             try stdout.writeAll("\n");
         }
     }
-    const counts = try runtime.libraryReleaseMatchCounts(library, confident_at);
+    const counts = try runtime.libraryReleaseMatchCounts(library, confident_at, filter);
     try stdout.print("confident={d} needs_review={d} unmatched={d}\n", .{ counts.confident, counts.needs_review, counts.unmatched });
 }
 

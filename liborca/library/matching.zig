@@ -918,7 +918,9 @@ pub const MatchEvidence = struct {
 };
 
 /// A Release value beside the candidate's. `differs` is true when the
-/// candidate has a value and it is not the local one.
+/// candidate has a value and it is not the local one; release types compare
+/// without case, and covers differ only when the Release has none or both
+/// sizes are known and unequal.
 pub const ReleaseFieldDiff = struct {
     field: database.ReleaseField,
     local: []const u8,
@@ -946,6 +948,11 @@ pub const ReleaseMatchDiff = struct {
     tracks: []ReleaseTrackAlignment,
     /// Tracks the release names.
     aligned: u32,
+    /// The Release's front cover's measured size.
+    local_artwork_size: ?database.ArtworkSize = null,
+    /// The size of the release's Cover Art Archive front cover, from the
+    /// stored cover candidates or the cover fetched from it.
+    candidate_artwork_size: ?database.ArtworkSize = null,
 
     pub fn deinit(self: ReleaseMatchDiff) void {
         const child = self.arena.child_allocator;
@@ -970,6 +977,7 @@ const CandidateRelease = struct {
     title: []const u8 = "",
     artist: []const u8 = "",
     date: []const u8 = "",
+    release_type: []const u8 = "",
 };
 
 fn candidateRelease(view: *const database.ReleaseMatchView, release_mbid: []const u8) CandidateRelease {
@@ -978,10 +986,13 @@ fn candidateRelease(view: *const database.ReleaseMatchView, release_mbid: []cons
     for (view.tracks) |*track| {
         const proposal = track.chosen(release_mbid) orelse continue;
         if (!proposal.payload.isEnriched() or !std.mem.eql(u8, proposal.payload.release_mbid.?, release_mbid)) continue;
-        if (proposal.payload.release_artist) |artist| if (artist.len != 0) {
+        if (result.artist.len == 0) if (proposal.payload.release_artist) |artist| {
             result.artist = artist;
-            break;
         };
+        if (result.release_type.len == 0) if (proposal.payload.release_type) |kind| {
+            result.release_type = kind;
+        };
+        if (result.artist.len != 0 and result.release_type.len != 0) break;
     }
     return result;
 }
@@ -1100,6 +1111,8 @@ pub fn releaseMatchDiff(
     diff.tracks = tracks;
 
     const release = candidateRelease(view, release_mbid);
+    diff.local_artwork_size = view.artwork_size;
+    diff.candidate_artwork_size = coverArtSize(view, release_mbid);
     const fields = try owned.alloc(ReleaseFieldDiff, std.meta.fields(database.ReleaseField).len);
     for (fields, 0..) |*field_diff, index| {
         const field: database.ReleaseField = @enumFromInt(index);
@@ -1107,10 +1120,13 @@ pub fn releaseMatchDiff(
             .album => .{ view.title, release.title },
             .album_artist => .{ view.album_artist, release.artist },
             .release_date => .{ view.release_date orelse "", release.date },
-            .release_type => .{ view.release_type orelse "", "" },
+            .release_type => .{ view.release_type orelse "", release.release_type },
             .release_id => .{ view.release_mbid orelse "", release_mbid },
             .genre => .{ try std.mem.join(owned, " / ", view.genres), "" },
-            .artwork => .{ localArtwork(view, release_mbid), if (hasCoverArt(view, release_mbid)) cover_art_archive else "" },
+            .artwork => .{
+                try sizedArtwork(owned, localArtwork(view, release_mbid), diff.local_artwork_size),
+                try sizedArtwork(owned, if (hasCoverArt(view, release_mbid)) cover_art_archive else "", diff.candidate_artwork_size),
+            },
             .track_titles => .{
                 try std.fmt.allocPrint(owned, "{d} of {d} differ", .{ titles_differ, view.tracks.len }),
                 try std.fmt.allocPrint(owned, "{d} of {d} on the release", .{ diff.aligned, view.tracks.len }),
@@ -1120,7 +1136,12 @@ pub fn releaseMatchDiff(
             .field = field,
             .local = try owned.dupe(u8, local),
             .candidate = try owned.dupe(u8, candidate),
-            .differs = if (field == .track_titles) titles_differ != 0 else candidate.len != 0 and !std.mem.eql(u8, local, candidate),
+            .differs = switch (field) {
+                .track_titles => titles_differ != 0,
+                .release_type => candidate.len != 0 and !std.ascii.eqlIgnoreCase(local, candidate),
+                .artwork => candidate.len != 0 and (local.len == 0 or sizesDiffer(diff.local_artwork_size, diff.candidate_artwork_size)),
+                else => candidate.len != 0 and !std.mem.eql(u8, local, candidate),
+            },
         };
     }
     diff.fields = fields;
@@ -1143,6 +1164,29 @@ fn localArtwork(view: *const database.ReleaseMatchView, release_mbid: []const u8
             "fetched",
         .chosen => "chosen",
     };
+}
+
+fn coverArtSize(view: *const database.ReleaseMatchView, release_mbid: []const u8) ?database.ArtworkSize {
+    for (view.cover_art_releases, 0..) |mbid, index| {
+        if (!std.mem.eql(u8, mbid, release_mbid)) continue;
+        if (index < view.cover_art_sizes.len) if (view.cover_art_sizes[index]) |size| return size;
+    }
+    if (view.artwork == .fetched) if (view.artwork_release_mbid) |mbid| {
+        if (std.mem.eql(u8, mbid, release_mbid)) return view.artwork_size;
+    };
+    return null;
+}
+
+fn sizedArtwork(allocator: std.mem.Allocator, source: []const u8, size: ?database.ArtworkSize) ![]const u8 {
+    if (source.len == 0) return "";
+    const measured = size orelse return std.fmt.allocPrint(allocator, "{s} · —", .{source});
+    return std.fmt.allocPrint(allocator, "{s} · {d} × {d}", .{ source, measured.width, measured.height });
+}
+
+fn sizesDiffer(local: ?database.ArtworkSize, candidate: ?database.ArtworkSize) bool {
+    const a = local orelse return false;
+    const b = candidate orelse return false;
+    return a.width != b.width or a.height != b.height;
 }
 
 fn hasCoverArt(view: *const database.ReleaseMatchView, release_mbid: []const u8) bool {

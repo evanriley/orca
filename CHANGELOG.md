@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Release match filter, types and cover sizes.**
+  `libraryReleaseMatchPage` and `libraryReleaseMatchCounts` take a
+  `filter` that keeps Releases whose title or album artist has a word
+  starting with each of its words, and `orca-cli matches --releases`
+  takes `--filter=TEXT`. `libraryReleaseMatchDiff` gives the
+  candidate's release type from its release group ("Mixtape") and both
+  covers' sizes (`ArtworkSize`), which `matches --release=ID --diff`
+  prints.
 - **Artwork Review.** `orca-gtk` has an Artwork Review page, opened by Fix
   on Library Health's Missing artwork row or the palette's Show Artwork
   Review: the albums with missing, undersized or conflicting artwork, each

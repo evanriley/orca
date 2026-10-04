@@ -303,14 +303,15 @@ pub fn libraryReleaseMatchPage(
     allocator: std.mem.Allocator,
     bucket: ReleaseMatchBucket,
     confident_at: f32,
+    filter: ?[]const u8,
     limit: u32,
     offset: u32,
 ) !ReleaseMatchPage {
-    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchPage(allocator, bucket, confident_at, limit, offset);
+    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchPage(allocator, bucket, confident_at, filter, limit, offset);
 }
 
-pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32) !ReleaseMatchCounts {
-    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchCounts(self.allocator, confident_at);
+pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32, filter: ?[]const u8) !ReleaseMatchCounts {
+    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchCounts(self.allocator, confident_at, filter);
 }
 
 pub fn libraryReleaseMatchEvidence(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !MatchEvidence {

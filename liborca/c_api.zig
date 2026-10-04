@@ -5010,7 +5010,7 @@ pub export fn orca_library_query_release_matches(
     const which = importReleaseMatchBucket(bucket) orelse
         return box.reject(@src(), .invalid_argument, "bucket is not an orca_release_match_bucket");
     if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
-    const page = box.runtime.libraryReleaseMatchPage(importLibrary(library), box.runtime.allocator, which, confident_at, limit, offset) catch |err|
+    const page = box.runtime.libraryReleaseMatchPage(importLibrary(library), box.runtime.allocator, which, confident_at, null, limit, offset) catch |err|
         return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
@@ -5042,7 +5042,7 @@ pub export fn orca_library_release_match_counts(
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
-    const counts = box.runtime.libraryReleaseMatchCounts(importLibrary(library), confident_at) catch |err|
+    const counts = box.runtime.libraryReleaseMatchCounts(importLibrary(library), confident_at, null) catch |err|
         return box.fail(@src(), err);
     destination.* = .{ .confident = counts.confident, .needs_review = counts.needs_review, .unmatched = counts.unmatched };
     return .ok;

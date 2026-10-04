@@ -2,6 +2,8 @@ const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const metadata = @import("../../metadata/model.zig");
 const columns = @import("../columns.zig");
+const artwork_problems = @import("artwork_problems.zig");
+const search = @import("search.zig");
 
 const duplicateNullableColumn = columns.duplicateNullableColumn;
 const max_page = columns.max_page;
@@ -66,6 +68,7 @@ pub const ProposalPayload = struct {
     release_artist_mbid: ?[]const u8 = null,
     release_date: ?[]const u8 = null,
     release_group_mbid: ?[]const u8 = null,
+    release_type: ?[]const u8 = null,
     release_track_mbid: ?[]const u8 = null,
     disc_number: ?u32 = null,
 
@@ -111,6 +114,7 @@ pub const ProposalPayload = struct {
         self.release_artist_mbid = enrichment.release_artist_mbid;
         self.release_date = enrichment.release_date;
         self.release_group_mbid = enrichment.release_group_mbid;
+        self.release_type = enrichment.release_type;
         self.release_track_mbid = enrichment.release_track_mbid;
         if (enrichment.track_number) |number| self.track_number = number;
         self.disc_number = enrichment.disc_number;
@@ -124,6 +128,7 @@ pub const ProposalPayload = struct {
         self.release_artist_mbid = null;
         self.release_date = null;
         self.release_group_mbid = null;
+        self.release_type = null;
         self.release_track_mbid = null;
         self.disc_number = null;
     }
@@ -136,6 +141,7 @@ pub const ProposalPayload = struct {
         self.release_artist_mbid = from.release_artist_mbid;
         self.release_date = from.release_date;
         self.release_group_mbid = from.release_group_mbid;
+        self.release_type = from.release_type;
         self.release_track_mbid = from.release_track_mbid;
         self.disc_number = from.disc_number;
     }
@@ -168,6 +174,9 @@ pub const ReleaseEnrichment = struct {
     release_artist_mbid: ?[]const u8 = null,
     release_date: ?[]const u8 = null,
     release_group_mbid: ?[]const u8 = null,
+    /// The release group's secondary types, each up to its first "/" and
+    /// joined by " + ", else its primary type: "Mixtape", "Album".
+    release_type: ?[]const u8 = null,
     release_track_mbid: []const u8,
     track_number: ?u32 = null,
     disc_number: ?u32 = null,
@@ -930,6 +939,9 @@ pub const ReleaseMatchTrack = struct {
 
 pub const LocalArtworkSource = enum { embedded, folder, fetched, chosen };
 
+/// A cover's measured size in pixels.
+pub const ArtworkSize = struct { width: u32, height: u32 };
+
 /// A Release beside every MusicBrainz release its Tracks are named on.
 pub const ReleaseMatchView = struct {
     arena: *std.heap.ArenaAllocator,
@@ -947,10 +959,15 @@ pub const ReleaseMatchView = struct {
     /// The rest is read only with details.
     genres: []const []const u8 = &.{},
     artwork: ?LocalArtworkSource = null,
+    /// The measured size of `artwork`; null when it was never measured.
+    artwork_size: ?ArtworkSize = null,
     /// The release a stored Cover Art Archive front cover came from.
     artwork_release_mbid: ?[]const u8 = null,
     /// Releases Orca fetched Cover Art Archive images of for the Release.
     cover_art_releases: []const []const u8 = &.{},
+    /// The size of each of `cover_art_releases`' largest measured front
+    /// cover, in its order; null when none was measured.
+    cover_art_sizes: []const ?ArtworkSize = &.{},
 
     pub fn deinit(self: ReleaseMatchView) void {
         const child = self.arena.child_allocator;
@@ -1029,6 +1046,13 @@ pub const ReleaseMatchView = struct {
     }
 };
 
+fn measuredSize(statement: sqlite.Statement, first: c_int) ?ArtworkSize {
+    const width = columns.countColumn(statement, first) orelse return null;
+    const height = columns.countColumn(statement, first + 1) orelse return null;
+    if (width == 0 or height == 0) return null;
+    return .{ .width = width, .height = height };
+}
+
 fn presentOrNull(value: ?[]const u8) ?[]const u8 {
     const text = value orelse return null;
     return if (text.len == 0) null else text;
@@ -1072,6 +1096,14 @@ const releases_with_candidate_sources =
     "SELECT tracks.release_id FROM sources JOIN tracks ON tracks.preferred_file_id = sources.file_id\n" ++
     "UNION SELECT tracks.release_id FROM sources JOIN files ON files.id = sources.file_id\n" ++
     "    JOIN tracks ON tracks.recording_id = files.recording_id";
+
+const release_search_kind = std.fmt.comptimePrint("{d}", .{@intFromEnum(search.SearchKind.release)});
+
+/// True for a Release whose title or album artist holds every word of the
+/// match expression bound as `?2`, and for every Release when it is null.
+const release_match_filter =
+    "(?2 IS NULL OR releases.id * 8 + " ++ release_search_kind ++ " IN (SELECT rowid FROM search_index\n" ++
+    "    WHERE search_index MATCH ?2 AND rowid % 8 = " ++ release_search_kind ++ "))";
 
 pub fn releaseMatchBucket(best: ?ReleaseCandidate, confident_at: f32) ReleaseMatchBucket {
     const candidate = best orelse return .unmatched;
@@ -1635,7 +1667,7 @@ pub const IdentificationProposalRepository = struct {
         }
         {
             var statement = try self.db.prepare(
-                "SELECT source, musicbrainz_release_id FROM release_artwork\n" ++
+                "SELECT source, musicbrainz_release_id, width, height FROM release_artwork\n" ++
                     "WHERE release_id=?1 AND kind=0 AND image IS NOT NULL;",
             );
             defer statement.deinit();
@@ -1648,6 +1680,7 @@ pub const IdentificationProposalRepository = struct {
                     else => .chosen,
                 };
                 view.artwork_release_mbid = presentOrNull(try duplicateNullableColumn(owned, statement, 1));
+                view.artwork_size = measuredSize(statement, 2);
             }
         }
         if (view.artwork == null) {
@@ -1663,33 +1696,62 @@ pub const IdentificationProposalRepository = struct {
                 if (statement.columnInt64(0) != 0) view.artwork = .folder else if (statement.columnInt64(1) != 0) view.artwork = .embedded;
             }
         }
+        if (view.artwork_size == null) switch (view.artwork orelse .chosen) {
+            .folder => if ((try artwork_problems.loadReleaseFacts(self.db, view.release_id)).folder) |folder| {
+                if (folder.width != null and folder.height != null) view.artwork_size = .{ .width = folder.width.?, .height = folder.height.? };
+            },
+            .embedded => {
+                var statement = try self.db.prepare(
+                    "SELECT observed_file_tags.artwork_width, observed_file_tags.artwork_height\n" ++
+                        "FROM tracks JOIN observed_file_tags ON observed_file_tags.file_id = " ++ track_play_file ++ "\n" ++
+                        "WHERE tracks.release_id=?1 AND observed_file_tags.artwork_width > 0 AND observed_file_tags.artwork_height > 0\n" ++
+                        "ORDER BY tracks.disc_number, tracks.track_number, tracks.id LIMIT 1;",
+                );
+                defer statement.deinit();
+                try statement.bindInt64(1, view.release_id);
+                if (try statement.step() == .row) view.artwork_size = measuredSize(statement, 0);
+            },
+            else => {},
+        };
         {
             var statement = try self.db.prepare(
-                "SELECT DISTINCT musicbrainz_release_id FROM cover_art_candidates WHERE release_id=?1\n" ++
-                    "ORDER BY musicbrainz_release_id LIMIT ?2;",
+                "SELECT musicbrainz_release_id, CASE WHEN kind=0 THEN width END, CASE WHEN kind=0 THEN height END,\n" ++
+                    "       max(CASE WHEN kind=0 AND width > 0 AND height > 0 THEN width * height ELSE -1 END)\n" ++
+                    "FROM cover_art_candidates WHERE release_id=?1\n" ++
+                    "GROUP BY musicbrainz_release_id ORDER BY musicbrainz_release_id LIMIT ?2;",
             );
             defer statement.deinit();
             try statement.bindInt64(1, view.release_id);
             try statement.bindInt64(2, max_page);
             var releases: std.ArrayList([]const u8) = .empty;
-            while (try statement.step() == .row) try releases.append(owned, try owned.dupe(u8, statement.columnText(0)));
+            var sizes: std.ArrayList(?ArtworkSize) = .empty;
+            while (try statement.step() == .row) {
+                try releases.append(owned, try owned.dupe(u8, statement.columnText(0)));
+                try sizes.append(owned, measuredSize(statement, 1));
+            }
             view.cover_art_releases = releases.items;
+            view.cover_art_sizes = sizes.items;
         }
     }
 
     /// Releases by album artist and title whose best candidate puts them in
     /// `bucket` against `confident_at`. Only Releases a tag or a proposal
     /// could name a release for are weighed; every other one is unmatched.
+    /// A `filter` keeps only Releases whose title or album artist has a word
+    /// starting with each of its words.
     pub fn releaseMatchPage(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         bucket: ReleaseMatchBucket,
         confident_at: f32,
+        filter: ?[]const u8,
         limit: u32,
         offset: u32,
     ) !ReleaseMatchPage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
         if (!validMinimumConfidence(confident_at)) return error.InvalidMinimumConfidence;
+        var expression_buffer: [search.max_match_expression]u8 = undefined;
+        const expression = if (filter) |text| try search.matchExpression(&expression_buffer, text) else null;
         const arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(allocator);
         var page: ReleaseMatchPage = .{ .arena = arena, .items = &.{} };
@@ -1699,12 +1761,15 @@ pub const IdentificationProposalRepository = struct {
         var skipped: u32 = 0;
         var releases = try self.db.prepare(if (bucket == .unmatched)
             "SELECT id, id IN (" ++ releases_with_candidate_sources ++ ") FROM releases\n" ++
+                "WHERE " ++ release_match_filter ++ "\n" ++
                 "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;"
         else
             "SELECT id, 1 FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ")\n" ++
+                "AND " ++ release_match_filter ++ "\n" ++
                 "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;");
         defer releases.deinit();
         try releases.bindInt64(1, @intFromEnum(ProposalState.dismissed));
+        try releases.bindOptionalText(2, expression);
         var ids: [weigh_chunk]i64 = undefined;
         var weighed: [weigh_chunk]bool = undefined;
         var more = true;
@@ -1775,23 +1840,33 @@ pub const IdentificationProposalRepository = struct {
         return page;
     }
 
+    /// How many Releases each bucket holds, under the same `filter` as
+    /// `releaseMatchPage`.
     pub fn releaseMatchCounts(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         confident_at: f32,
+        filter: ?[]const u8,
     ) !ReleaseMatchCounts {
         if (!validMinimumConfidence(confident_at)) return error.InvalidMinimumConfidence;
+        var expression_buffer: [search.max_match_expression]u8 = undefined;
+        const expression = if (filter) |text| try search.matchExpression(&expression_buffer, text) else null;
         var counts: ReleaseMatchCounts = .{};
         var total: u64 = 0;
         {
-            var statement = try self.db.prepare("SELECT count(*) FROM releases;");
+            var statement = try self.db.prepare("SELECT count(*) FROM releases WHERE " ++ release_match_filter ++ ";");
             defer statement.deinit();
+            try statement.bindOptionalText(2, expression);
             if (try statement.step() != .row) return error.SqlFailed;
             total = @intCast(statement.columnInt64(0));
         }
-        var releases = try self.db.prepare(releases_with_candidate_sources ++ ";");
+        var releases = try self.db.prepare(if (expression == null)
+            releases_with_candidate_sources ++ ";"
+        else
+            "SELECT id FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ") AND " ++ release_match_filter ++ ";");
         defer releases.deinit();
         try releases.bindInt64(1, @intFromEnum(ProposalState.dismissed));
+        if (expression != null) try releases.bindOptionalText(2, expression);
         var more = true;
         while (more) {
             var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
