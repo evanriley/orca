@@ -17,10 +17,11 @@ pub const HealthIssueKind = enum(u8) {
     corrupt_audio,
     exact_duplicate,
     likely_duplicate,
-    /// The file behind a row could not be opened or would not decode. Owned by
-    /// the property backfill alone, which is why it is not `corrupt_audio`:
-    /// that kind belongs to the analyzer, which decodes the whole stream, and
-    /// a header-only pass must not be able to clear a finding made by reading
+    /// The file behind a row could not be opened or would not decode; the
+    /// details say why. Owned by the header probes of the scanner and the
+    /// property backfill, which is why it is not `corrupt_audio`: that kind
+    /// belongs to the analyzer, which decodes the whole stream, and a
+    /// header-only pass must not be able to clear a finding made by reading
     /// audio it never looked at.
     unreadable_file,
     recording_mismatch,

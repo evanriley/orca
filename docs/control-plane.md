@@ -128,11 +128,16 @@ read-only connection; the connection closes only after the drain has joined
 the thread, so the interrupt never reaches a closed connection.
 
 Progress with no honest denominator is reported as a count, never as a fraction.
-A filesystem scan does not know how many files it will find until it has found
-them, so its snapshot carries `completed_units` and no total. A pass keyed on
-`files.id` does know: the property backfill and the library-wide analysis each
-answer "how many rows still owe work" with one indexed count before they start,
-so their snapshots carry a total and a host may show a fraction.
+A pass keyed on `files.id` knows its denominator: the property backfill and the
+library-wide analysis each answer "how many rows still owe work" with one
+indexed count before they start, so their snapshots carry a total and a host
+may show a fraction. A scan or reconcile first counts the files its walk will
+reach, reading directories and opening no file, and reports that count as its
+total from then on; until then its snapshot has no total. A file added during
+the walk raises the total to the files walked, and a walk that finishes
+replaces it with the files it saw, so a succeeded scan ends at 100%. Other Jobs
+that report `ScanStats` (projection, property backfill, analysis, tag write)
+are unaffected.
 
 Cancellation is not only a shutdown path. The library-wide analysis decodes
 whole files, so a library-wide run is long and stopping it is the ordinary way
@@ -195,7 +200,7 @@ wall-clock second the Job left `queued` or `waiting` for `running`.
 `completed_units`, sampled on the monotonic clock at most every 500 ms as the
 pump syncs progress; it is null until 10 s of progress has been sampled, while
 paused (the window restarts on resume), and for a Job with no total, such as a
-scan. `current_item` is the path or title the worker is working on, and
+scan still counting its files. `current_item` is the path or title the worker is working on, and
 `detail` names a constraint the host shows beside it, such as "14 threads" or
 "rate-limited to 1 request a second".
 

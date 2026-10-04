@@ -422,6 +422,8 @@ static void capture_now_playing(void *context, const orca_now_playing_view *view
     capture->title_length = view->title.length;
 }
 
+#define EXPECT_WALK_TOTAL 2
+
 /* Pumps the control lane and drains events, reporting whether the named job
  * reached a terminal state. */
 static int job_settled(orca_runtime *runtime, orca_handle job, uint8_t *state,
@@ -442,9 +444,15 @@ static int job_settled(orca_runtime *runtime, orca_handle job, uint8_t *state,
         if (remaining == 0) break;
     }
     if (orca_job_snapshot_get(runtime, job, &snapshot) != ORCA_STATUS_OK) return -1;
-    /* A filesystem walk must not invent a denominator; a backfill, which knows
-     * how many rows still owe a probe before it starts, must publish one. */
-    if ((snapshot.has_total != 0) != (expect_total != 0)) return -1;
+    /* A backfill, which knows how many rows still owe a probe before it
+     * starts, must publish a total; a walk publishes one once it has counted
+     * its files, and never reports more files than that. */
+    if (expect_total == EXPECT_WALK_TOTAL) {
+        if (snapshot.has_total != 0 && snapshot.completed_units > snapshot.total_units) return -1;
+        if (snapshot.state == ORCA_JOB_SUCCEEDED && snapshot.has_total == 0) return -1;
+    } else if ((snapshot.has_total != 0) != (expect_total != 0)) {
+        return -1;
+    }
     if (snapshot.state == ORCA_JOB_SUCCEEDED || snapshot.state == ORCA_JOB_FAILED ||
         snapshot.state == ORCA_JOB_CANCELLED) {
         *state = snapshot.state;
@@ -2227,7 +2235,7 @@ static int roots_v2_smoke(orca_runtime *runtime, orca_handle library, int64_t ro
     SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, root_path, &job) ==
                 ORCA_STATUS_OK);
     uint8_t state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(await_job(runtime, job, &state, EXPECT_WALK_TOTAL, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
     uint64_t track_count = root.track_count;
     memset(&root, 0, sizeof root);
     SMOKE_CHECK(orca_library_query_roots_v2(runtime, library, 64, 0, &root, capture_root_v2) ==
@@ -2996,7 +3004,7 @@ static int watch_smoke(orca_runtime *runtime) {
         goto unwatch;
     }
     uint8_t reconcile_state = ORCA_JOB_RUNNING;
-    if (await_job(runtime, reconcile_job, &reconcile_state, 0, 60000) != 1 ||
+    if (await_job(runtime, reconcile_job, &reconcile_state, EXPECT_WALK_TOTAL, 60000) != 1 ||
         reconcile_state != ORCA_JOB_SUCCEEDED) {
         result = 227;
         goto unwatch;
@@ -3419,7 +3427,7 @@ static int coverless_release_steps(orca_runtime *runtime, const char *root,
     SMOKE_CHECK(orca_library_start_scan(runtime, *library, root_id, 0, &scan_job) ==
                 ORCA_STATUS_OK);
     uint8_t scan_state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, scan_job, &scan_state, 0, 60000) == 1);
+    SMOKE_CHECK(await_job(runtime, scan_job, &scan_state, EXPECT_WALK_TOTAL, 60000) == 1);
     SMOKE_CHECK(scan_state == ORCA_JOB_SUCCEEDED);
 
     static struct titled_tracks tracks;
@@ -3482,7 +3490,7 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
     SMOKE_CHECK(orca_library_start_scan(runtime, *library, root_id, 0, &scan_job) ==
                 ORCA_STATUS_OK);
     uint8_t scan_state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, scan_job, &scan_state, 0, 60000) == 1);
+    SMOKE_CHECK(await_job(runtime, scan_job, &scan_state, EXPECT_WALK_TOTAL, 60000) == 1);
     SMOKE_CHECK(scan_state == ORCA_JOB_SUCCEEDED);
     struct tag_track_capture track;
     if (tag_track(runtime, *library, &track) != 0) return 1;
@@ -4033,7 +4041,7 @@ static int host_job_origin_is(orca_runtime *runtime, orca_handle job, int64_t ro
     SMOKE_CHECK(orca_job_reconcile_root(runtime, job, &reconciled, &has_reconciled) == ORCA_STATUS_OK);
     SMOKE_CHECK(has_reconciled == has_root_id && reconciled == root_id);
     uint8_t state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(await_job(runtime, job, &state, EXPECT_WALK_TOTAL, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
     SMOKE_CHECK(orca_job_origin_get(runtime, job, &origin) == ORCA_STATUS_OK && origin == ORCA_JOB_ORIGIN_HOST);
     return 0;
 }
@@ -4183,11 +4191,11 @@ static int job_queue_smoke(orca_runtime *runtime, orca_handle library, int64_t r
     SMOKE_CHECK(orca_library_jobs_paused(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
 
     uint8_t state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, first, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(await_job(runtime, first, &state, EXPECT_WALK_TOTAL, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
     state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, second, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(await_job(runtime, second, &state, EXPECT_WALK_TOTAL, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
     state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, third, &state, 0, 60000) == 1 && state == ORCA_JOB_CANCELLED);
+    SMOKE_CHECK(await_job(runtime, third, &state, EXPECT_WALK_TOTAL, 60000) == 1 && state == ORCA_JOB_CANCELLED);
 
     struct job_history_capture history;
     if (read_job_history(runtime, library, ORCA_JOB_HISTORY_PROBLEMS, &history) != 0) return 1;
@@ -4196,7 +4204,7 @@ static int job_queue_smoke(orca_runtime *runtime, orca_handle library, int64_t r
     orca_handle retried;
     SMOKE_CHECK(orca_library_retry_job(runtime, library, history.entry.id, &retried) == ORCA_STATUS_OK);
     state = ORCA_JOB_RUNNING;
-    SMOKE_CHECK(await_job(runtime, retried, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(await_job(runtime, retried, &state, EXPECT_WALK_TOTAL, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
 
     if (read_job_history(runtime, library, ORCA_JOB_HISTORY_SCANS, &history) != 0) return 1;
     SMOKE_CHECK(history.entry.state == ORCA_JOB_SUCCEEDED && history.entry.retryable == 0);
@@ -4288,7 +4296,7 @@ int main(int argc, char **argv) {
     /* start_scan is nonblocking: this loop is the proof, because the job is
      * still running on its own worker while this thread polls. */
     uint8_t scan_state = ORCA_JOB_RUNNING;
-    int settled = await_job(runtime, scan_job, &scan_state, 0, 60000);
+    int settled = await_job(runtime, scan_job, &scan_state, EXPECT_WALK_TOTAL, 60000);
     if (settled != 1) return 22;
     if (scan_state != ORCA_JOB_SUCCEEDED) return 23;
 

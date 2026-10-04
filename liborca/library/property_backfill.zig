@@ -13,9 +13,10 @@
 //! filesystem, and it touches only the rows that are actually incomplete.
 //!
 //! It observes the same law the scanner does — it writes `files` and the one
-//! health-issue kind it owns, and nothing else. Turning repaired properties
-//! into Track durations is the projection's job, which is why each committed
-//! batch is handed to the projection exactly as a scan batch is.
+//! health-issue kind it shares with the scanner, and nothing else. Turning
+//! repaired properties into Track durations is the projection's job, which is
+//! why each committed batch is handed to the projection exactly as a scan
+//! batch is.
 
 const std = @import("std");
 const codec = @import("../codec/root.zig");
@@ -78,9 +79,8 @@ pub const PropertyBackfill = struct {
     codecs: ?*const codec.CodecRegistry = null,
     cancellation: ?*const CancellationToken = null,
     current_item: ?*CurrentItem = null,
-    /// Rows examined so far, published for a host showing progress. Unlike a
-    /// filesystem walk this pass has an honest denominator before it starts,
-    /// which the runtime reads separately through `incompletePropertiesCount`.
+    /// Rows examined so far, published for a host showing progress. The
+    /// runtime reads the total separately through `incompletePropertiesCount`.
     progress: ?*std.atomic.Value(u64) = null,
     /// Rows per selected page and per bounded commit.
     batch_size: usize = 256,
@@ -194,9 +194,9 @@ pub const PropertyBackfill = struct {
             // Sniffing decides who opens a file, so a container nothing claims
             // is a row that is not audio, and one no registered codec decodes
             // is audio Orca cannot read yet. Neither is a broken file.
-            if (err == error.UnsupportedAudioFormat or err == error.CodecUnavailable)
+            const reason = scanner.unreadableReason(if (detection) |resolved| resolved.format else null, err) orelse
                 return .skipped;
-            return .{ .unreadable = @errorName(err) };
+            return .{ .unreadable = reason };
         };
         return .{ .probed = .{
             .codec = properties.codec orelse "",
@@ -220,8 +220,9 @@ pub const PropertyBackfill = struct {
         for (repairs) |repair| switch (repair.outcome) {
             .probed => |properties| {
                 try self.files.updatePropertiesLocked(repair.file_id, properties);
-                // The pass owns this kind outright, so retiring it here cannot
-                // erase a finding some other worker made.
+                // Only this pass and the scanner record this kind, both from a
+                // header probe, so retiring it here cannot erase a finding made
+                // by reading audio.
                 try self.health_issues.clearLocked(repair.file_id, .unreadable_file);
                 if (properties.duration_ms == null) {
                     result.unchanged += 1;

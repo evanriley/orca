@@ -15,6 +15,13 @@
   scan. The C ABI adds `orca_library_track_details_v3` with an
   `orca_track_details_text_view` and `ORCA_METADATA_FIELD_COMPOSER` (14) and
   `ORCA_METADATA_FIELD_COMMENT` (15).
+- **Scan totals and unreadable-file reasons.** A scan now records each file
+  it cannot read as an `unreadable_file` health issue with the reason, and
+  clears it once the file reads. A scan or reconcile Job now counts the
+  files its walk will reach before reading any, and its Job snapshot
+  reports them as `total_units`, with the files walked as
+  `completed_units`, so it has a percent and an ETA like other Jobs;
+  `orca-cli scan` progress lines print `total=`.
 - **Change history.** `libraryTagWriteGroupPage` lists finished tag writes
   newest first with their files, Release title, state (`applied`,
   `undoing`, `undone`, `rolled_back`, `failed`, `needs_reconciliation`) and

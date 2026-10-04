@@ -1380,10 +1380,10 @@ typedef struct orca_zone_status {
 typedef struct orca_job_snapshot {
     uint8_t kind;   /* orca_job_kind */
     uint8_t state;  /* orca_job_state */
-    /* Zero for a scan. A filesystem walk has no honest denominator until it
-     * has finished walking, and Orca does not invent one. A property backfill
-     * does have one before it starts - how many rows still owe a probe is one
-     * indexed count - so it reports a total and a host may show a fraction. */
+    /* Zero for a scan or reconcile while it counts the files its walk will
+     * reach; one from then on, with `total_units` that count and
+     * `completed_units` the files walked. A property backfill knows its total
+     * before it starts - how many rows still owe a probe is one indexed count. */
     uint8_t has_total;
     uint8_t reserved[5];
     uint64_t completed_units;

@@ -123,7 +123,7 @@ zig build run -- demo
 zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown), then `rates=44100-384000 depths=16,24,32 channels=2 state=active|suspended|unavailable`, or `rates=- depths=- channels=- state=unknown` when PipeWire did not answer within 500 ms; the silent sink is virtual
 
 # library
-zig build run -- scan DATABASE ROOT   # `progress stage=discover|read_tags|done files= albums= current=` lines, then the counters
+zig build run -- scan DATABASE ROOT   # `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
 zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N
 zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now

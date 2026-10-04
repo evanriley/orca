@@ -104,9 +104,9 @@ filesystem events.
 
 A running scan or reconcile reports where it is through `ScanStats`:
 
-- `stage` is `discover` until the walk starts, `read_tags` while it walks,
-  and `done` once the Job's worker has finished. Other Jobs that report
-  `ScanStats` stay `discover` until they are `done`.
+- `stage` is `discover` while the Job counts the files its walks will reach,
+  `read_tags` while it walks, and `done` once the Job's worker has finished.
+  Other Jobs that report `ScanStats` stay `discover` until they are `done`.
 - `current_path` is the file being read during `read_tags`, and empty
   otherwise.
 - `albums_found` counts the distinct Releases the Job's projection wrote
@@ -115,8 +115,21 @@ A running scan or reconcile reports where it is through `ScanStats`:
   a Release the projection wrote and then pruned, as one a duplicate copy's
   folder held until its Tracks moved, counts there and not here.
 
-`orca-cli scan` prints these as `progress stage= files= albums= current=`
-lines, on each stage change and every half second.
+The scanner reads and probes each file as its walk reaches it; there is no
+separate discovery pass inside the walk. So that a host can show a fraction
+and an ETA, a scan or reconcile Job first runs `scanner.countFiles` over every
+root or directory it will walk: the same walk with the same skips, counting
+regular files and opening none. Its Job snapshot then carries that count as
+`total_units` and the files walked so far (`files_seen`, images and files that
+are not audio included) as `completed_units`. The count is of files walked,
+not of audio files, because telling audio apart means opening each file, and
+an unchanged file is otherwise never opened. A file added between the count
+and the walk raises the total to the files walked; a walk that finishes sets
+it to the files it saw. Cancelled during the count, a Job reports no total.
+
+`orca-cli scan` prints these as `progress stage= files= total= albums=
+current=` lines, on each stage change and every half second; `total=-` while
+the files are counted.
 
 ## Estimating a folder before it is a root
 

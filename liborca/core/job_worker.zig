@@ -372,6 +372,7 @@ pub fn reobserve(
         .root_id = location.root_id,
         .generation = location.generation,
         .projection = &pass,
+        .health_issues = &library_database.health_issues,
     };
     defer scanner.deinit();
     _ = try scanner.observeFiles(&.{location.uri});
@@ -457,8 +458,7 @@ pub const Request = union(enum) {
 };
 
 /// What a scan job observed, mirroring `scanner.Result` plus what the
-/// projection made of it. A scan has no honest denominator until its walk
-/// finishes, so there is a count of files processed and no total.
+/// projection made of it.
 pub const ScanStats = struct {
     files_seen: u64 = 0,
     changed: u64 = 0,
@@ -504,6 +504,8 @@ const LiveScanStats = struct {
     marked_missing: std.atomic.Value(u64) = .init(0),
     stage: std.atomic.Value(ScanStage) = .init(.discover),
     found_releases: library_pass.projection.FoundReleases = .{},
+    total_files: std.atomic.Value(u64) = .init(0),
+    total_known: std.atomic.Value(bool) = .init(false),
 
     fn read(self: *const LiveScanStats, in_flight: u64) ScanStats {
         return .{
@@ -1480,6 +1482,7 @@ pub const JobWorker = struct {
             return;
         };
         defer roots.deinit();
+        self.countScanFiles(io, roots.items, request.root_id);
         for (roots.items) |root| {
             if (self.cancelled()) {
                 self.stats.scan.cancelled.store(true, .release);
@@ -1491,6 +1494,42 @@ pub const JobWorker = struct {
             }
             self.scanRoot(io, root, request.batch_size) catch self.failed.store(true, .release);
         }
+        self.settleTotal();
+    }
+
+    fn countScanFiles(self: *JobWorker, io: std.Io, roots: []const database.repository.LibraryRoot, root_id: ?i64) void {
+        var total: u64 = 0;
+        for (roots) |root| {
+            if (!root.enabled) continue;
+            if (root_id) |wanted| {
+                if (root.id != wanted) continue;
+            }
+            total += self.countRootFiles(io, root, null) orelse return;
+        }
+        self.publishTotal(total);
+    }
+
+    fn countRootFiles(self: *JobWorker, io: std.Io, root: database.repository.LibraryRoot, subtree: ?[]const u8) ?u64 {
+        return library_pass.scanner.countFiles(
+            io,
+            self.allocator,
+            root.path,
+            subtree,
+            library_pass.watch.Ignore.forLibrary(self.database),
+            &self.token,
+        ) catch 0;
+    }
+
+    fn publishTotal(self: *JobWorker, total: u64) void {
+        self.stats.scan.total_files.store(total, .release);
+        self.stats.scan.total_known.store(true, .release);
+    }
+
+    fn settleTotal(self: *JobWorker) void {
+        const stats = &self.stats.scan;
+        if (!stats.total_known.load(.acquire)) return;
+        if (stats.cancelled.load(.acquire) or self.failed.load(.acquire)) return;
+        stats.total_files.store(stats.files_seen.load(.acquire), .release);
     }
 
     fn runReconcile(self: *JobWorker, request: ReconcileRequest) void {
@@ -1507,9 +1546,22 @@ pub const JobWorker = struct {
             return;
         };
         switch (request.scope) {
-            .whole_root => self.scanRoot(io, root, request.batch_size) catch self.failed.store(true, .release),
-            .subtrees => |subtrees| self.reconcileSubtrees(io, root, subtrees, request.batch_size) catch self.failed.store(true, .release),
+            .whole_root => {
+                if (self.countRootFiles(io, root, null)) |total| self.publishTotal(total);
+                self.scanRoot(io, root, request.batch_size) catch self.failed.store(true, .release);
+            },
+            .subtrees => |subtrees| {
+                self.countSubtreeFiles(io, root, subtrees);
+                self.reconcileSubtrees(io, root, subtrees, request.batch_size) catch self.failed.store(true, .release);
+            },
         }
+        self.settleTotal();
+    }
+
+    fn countSubtreeFiles(self: *JobWorker, io: std.Io, root: database.repository.LibraryRoot, subtrees: []const []const u8) void {
+        var total: u64 = 0;
+        for (subtrees) |subtree| total += self.countRootFiles(io, root, subtree) orelse return;
+        self.publishTotal(total);
     }
 
     fn rootScanner(
@@ -1537,6 +1589,7 @@ pub const JobWorker = struct {
             .progress = &self.progress,
             .projection = pass,
             .ignore = library_pass.watch.Ignore.forLibrary(self.database),
+            .health_issues = &self.database.health_issues,
         };
     }
 
@@ -1745,6 +1798,16 @@ pub const JobWorker = struct {
                 .release_info => self.progress.load(.acquire),
                 else => 0,
             },
+        };
+    }
+
+    pub fn totalUnits(self: *const JobWorker, completed_units: u64) ?u64 {
+        return switch (self.stats) {
+            .scan => |*stats| if (stats.total_known.load(.acquire))
+                @max(stats.total_files.load(.acquire), completed_units)
+            else
+                null,
+            .duplicates, .matching, .submission, .lyrics, .artist_info => null,
         };
     }
 

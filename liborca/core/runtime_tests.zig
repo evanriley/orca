@@ -162,6 +162,44 @@ test "a completed scan projects what it observed" {
     try std.testing.expect(try runtime.libraryTrackCount(library) > 0);
 }
 
+test "a scan Job reports the files its walk will reach as its total" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-scan-job-total?mode=memory&cache=shared",
+    );
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    while (true) {
+        runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        if (snapshot.total_units) |total| try std.testing.expect(snapshot.completed_units <= total);
+        if (snapshot.state == .succeeded) break;
+        if (snapshot.state == .failed or snapshot.state == .cancelled)
+            return error.ScanDidNotSucceed;
+        std.Thread.yield() catch {};
+    }
+    const snapshot = try runtime.jobSnapshotSynced(job_handle);
+    const stats = try runtime.jobScanStats(job_handle);
+    try std.testing.expect(stats.files_seen > 0);
+    try std.testing.expectEqual(@as(?u64, stats.files_seen), snapshot.total_units);
+    try std.testing.expectEqual(stats.files_seen, snapshot.completed_units);
+
+    const reconcile = try runtime.startLibraryReconcile(library, .{
+        .root_id = binding.root_id,
+        .scope = .{ .subtrees = &.{ "Missing", "Missing Too" } },
+    });
+    while (true) {
+        runtime.reapFinishedJobs();
+        const state = (try runtime.jobSnapshotSynced(reconcile)).state;
+        if (state == .succeeded) break;
+        if (state == .failed or state == .cancelled) return error.ReconcileDidNotSucceed;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(@as(?u64, 0), (try runtime.jobSnapshotSynced(reconcile)).total_units);
+}
+
 /// Scans `fixtures/audio` to completion and returns the details of the Track
 /// whose file is named `file_name`.
 fn scannedFixtureDetails(

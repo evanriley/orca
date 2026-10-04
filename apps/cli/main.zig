@@ -338,6 +338,7 @@ fn writeHelp(stdout: *std.Io.Writer) !void {
 const help_details =
     \\scan prints a `progress` line each time the stage changes and every
     \\half second: stage=discover|read_tags|done, files= read so far,
+    \\total= the files the walk will reach (- while they are counted),
     \\albums= distinct Releases written, and current= the file being read.
     \\
     \\estimate counts the audio files under PATH, by their bytes, without
@@ -879,9 +880,9 @@ fn awaitScan(runtime: *liborca.Runtime, stdout: *std.Io.Writer, job_handle: libo
         const stats = try runtime.jobScanStats(job_handle);
         if (printed_stage != stats.stage or since_printed_ms >= scan_progress_interval_ms) {
             const current = stats.current_path.slice();
-            try stdout.print("progress stage={t} files={d} albums={d} current={s}\n", .{
-                stats.stage,
-                stats.files_seen,
+            try stdout.print("progress stage={t} files={d} total=", .{ stats.stage, stats.files_seen });
+            if (snapshot.total_units) |total| try stdout.print("{d}", .{total}) else try stdout.writeAll("-");
+            try stdout.print(" albums={d} current={s}\n", .{
                 stats.albums_found,
                 if (current.len == 0) "-" else current,
             });

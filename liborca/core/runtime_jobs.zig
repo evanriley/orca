@@ -938,7 +938,9 @@ fn syncJobProgress(self: *OrcaRuntime) void {
     const now_ms = runtime_listens.sampleTime(self).mono_ms;
     for (self.job_workers.items) |worker| {
         if (worker.retired) continue;
-        self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+        const completed = worker.filesProcessed();
+        if (worker.totalUnits(completed)) |total| self.jobs.observeTotal(worker.job, total) catch {};
+        self.jobs.observeProgress(worker.job, completed) catch {};
         self.jobs.sampleProgress(worker.job, now_ms) catch {};
     }
 }
@@ -1010,7 +1012,9 @@ pub fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) 
         .cancelled
     else
         .succeeded;
-    self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+    const completed = worker.filesProcessed();
+    if (worker.totalUnits(completed)) |total| self.jobs.observeTotal(worker.job, total) catch {};
+    self.jobs.observeProgress(worker.job, completed) catch {};
     self.jobs.finish(worker.job, state) catch {};
     recordWorkerHistory(self, worker, state);
     if (worker.matchStats().accepted != 0) runtime_listens.recordingIdsChanged(self, worker.library);

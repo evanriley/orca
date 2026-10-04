@@ -253,6 +253,14 @@ pub const Manager = struct {
         }
     }
 
+    pub fn observeTotal(self: *Manager, job_handle: object.JobHandle, total_units: u64) !void {
+        const job = try self.jobs.get(job_handle);
+        switch (job.snapshot.state) {
+            .running, .cancelling, .paused => job.snapshot.total_units = total_units,
+            else => return error.InvalidJobTransition,
+        }
+    }
+
     /// Terminal transition, recorded once the worker behind the job has been
     /// joined. Only the control lane may call it, and only with a terminal
     /// state.

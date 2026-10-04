@@ -229,9 +229,10 @@ The boundary covers the whole engine, not a fragment of it:
   [metadata.md](metadata.md#change-history).
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
-  `orca_library_scan_stats` observe it. Scan progress is a count of files
-  processed with `has_total = 0` — a walk has no honest denominator until it has
-  finished. A scan projects as it commits;
+  `orca_library_scan_stats` observe it. Scan progress is the files walked
+  out of the files the walk will reach, which the Job counts first, reading
+  directories only; `has_total = 0` until that count is done. A scan projects
+  as it commits;
   `orca_library_start_projection` reprojects without a walk.
   `orca_library_start_reconcile` walks only the given directories of one
   root, or the whole root when given none, and reports as

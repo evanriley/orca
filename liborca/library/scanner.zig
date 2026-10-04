@@ -98,12 +98,35 @@ const PendingEntry = struct {
     quick_hash: storage.QuickHash,
     properties: codec.registry.Properties,
     tags: ?tag_reader.Tags,
+    unreadable: ?[]const u8,
 
     fn deinit(self: PendingEntry, allocator: std.mem.Allocator) void {
         if (self.tags) |tags| tags.deinit();
         allocator.free(self.path);
     }
 };
+
+/// Why a file that sniffed as `format` would not open, as a host shows it; null
+/// when the failure says nothing is wrong with the file, only that Orca cannot
+/// decode its encoding yet.
+pub fn unreadableReason(format: ?storage.AudioFormat, err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.UnsupportedAudioFormat, error.CodecUnavailable => null,
+        error.TruncatedFlac, error.EndOfStream, error.ReadFailed, error.InputOutput => "Read error · file may be incomplete",
+        else => if (format) |known| switch (known) {
+            .wav => "Not a valid WAV stream",
+            .aiff => "Not a valid AIFF stream",
+            .flac => "Not a valid FLAC stream",
+            .mp3 => "Not a valid MP3 stream",
+            .mp4 => "Not a valid MP4 stream",
+            .opus => "Not a valid Opus stream",
+            .vorbis => "Not a valid Ogg Vorbis stream",
+            .wavpack => "Not a valid WavPack stream",
+            .qoa => "Not a valid QOA stream",
+            .aac => "Not a valid AAC stream",
+        } else "Not a valid audio stream",
+    };
+}
 
 const image_extensions = [_][]const u8{ ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp" };
 
@@ -146,9 +169,13 @@ pub const Scanner = struct {
     generation: i64 = 0,
     cancellation: ?*const CancellationToken = null,
     current_item: ?*CurrentItem = null,
-    /// Files walked so far, published for a host that is showing progress. A
-    /// scan has no honest denominator until the walk finishes, so this is a
-    /// count and never a fraction. Optional: nothing here depends on it.
+    /// Where a changed file that would not open is recorded as
+    /// `unreadable_file`, and cleared once its new bytes open. Absent, a scan
+    /// records no health issues.
+    health_issues: ?*database.repository.HealthIssueRepository = null,
+    /// Files walked so far, published for a host that is showing progress.
+    /// `countFiles` gives the same walk's total. Optional: nothing here
+    /// depends on it.
     progress: ?*std.atomic.Value(u64) = null,
     batch_size: usize = 256,
     /// Decoders used to read each changed file's declared audio properties.
@@ -444,11 +471,15 @@ pub const Scanner = struct {
         // decoder there would throw that away. A file that will not open is
         // recorded with no properties rather than failing the scan —
         // truncated and malformed audio is normal in a real library.
+        var unreadable: ?[]const u8 = null;
         const properties = codecs.probe(
             self.allocator,
             audio_format,
             local.readable(),
-        ) catch codec.registry.Properties{};
+        ) catch |err| failed: {
+            unreadable = unreadableReason(audio_format, err);
+            break :failed codec.registry.Properties{};
+        };
         try pending.append(self.allocator, .{
             .path = path,
             .audio_format = audio_format,
@@ -456,6 +487,7 @@ pub const Scanner = struct {
             .quick_hash = try storage.quick_hash.fromSource(local.readable()),
             .properties = properties,
             .tags = tags,
+            .unreadable = unreadable,
         });
         owned_path = false;
         result.changed += 1;
@@ -569,6 +601,13 @@ pub const Scanner = struct {
                 .file_id = file_id,
                 .values = tags.values,
             }}) else try self.observed_tags.clearLocked(file_id);
+            if (self.health_issues) |issues| {
+                if (entry.unreadable) |reason| try issues.recordLocked(file_id, .{
+                    .kind = .unreadable_file,
+                    .severity = .warning,
+                    .details = reason,
+                }) else try issues.clearLocked(file_id, .unreadable_file);
+            }
             if (self.projection != null) {
                 try self.projected.append(self.allocator, file_id);
                 // After the fork: when both copies resolve to one Track, the folder projected last decides its file.
@@ -597,6 +636,39 @@ const optionalCount = database.columns.optionalCount;
 /// same file identically.
 pub fn pathUnder(allocator: std.mem.Allocator, root_path: []const u8, relative: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ root_path, relative });
+}
+
+pub fn countFiles(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    subtree: ?[]const u8,
+    ignore: watch.Ignore,
+    cancellation: ?*const CancellationToken,
+) !?u64 {
+    if (subtree) |relative| try validateSubtree(relative);
+    const root = try std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true });
+    defer root.close(io);
+    const start = if (subtree) |relative|
+        root.openDir(io, relative, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return 0,
+            else => return err,
+        }
+    else
+        root;
+    defer if (subtree != null) start.close(io);
+    var walker = try start.walk(allocator);
+    defer walker.deinit();
+    var files: u64 = 0;
+    while (try walker.next(io)) |entry| {
+        if (cancellation) |token| if (token.checkpoint()) return null;
+        if (ignore.matches(entry.basename)) {
+            if (entry.kind == .directory) walker.leave(io);
+            continue;
+        }
+        if (entry.kind == .file) files += 1;
+    }
+    return files;
 }
 
 pub fn validateSubtree(subtree: []const u8) error{InvalidReconcileDirectory}!void {
@@ -678,6 +750,62 @@ test "scanner batches audio and skips unchanged files on restart" {
     const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
     defer observed.deinit();
     try std.testing.expectEqualStrings("Observed title", observed.values.title.?);
+}
+
+test "a scan records why a changed file would not open and clears it once the file opens" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "invalid.flac",
+        .data = "fLaC but not a stream at all, though long enough to hold a header",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "short.flac",
+        .data = "fLaC cut short",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unreadable?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .health_issues = &library.health_issues,
+    };
+    defer scanner.deinit();
+    _ = try scanner.scan(root_path);
+
+    var issues = try library.health_issues.pageOfKind(std.testing.allocator, .unreadable_file, 8, 0);
+    defer issues.deinit();
+    try std.testing.expectEqual(@as(usize, 2), issues.items.len);
+    for (issues.items) |issue| try std.testing.expectEqualStrings(
+        if (std.mem.endsWith(u8, issue.path, "/short.flac"))
+            "Read error · file may be incomplete"
+        else
+            "Not a valid FLAC stream",
+        issue.details,
+    );
+
+    try copyFixtureTo(temporary.dir, "tagged-reference.flac", "short.flac");
+    _ = try scanner.scan(root_path);
+    var after = try library.health_issues.pageOfKind(std.testing.allocator, .unreadable_file, 8, 0);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(usize, 1), after.items.len);
+    try std.testing.expectEqualStrings("Not a valid FLAC stream", after.items[0].details);
 }
 
 test "a scan projects only the batches it changed and reprojects nothing on a rescan" {
@@ -1961,4 +2089,22 @@ test "a cancelled walk records no scan time for the folders it did not finish" {
     defer root.deinit();
     try std.testing.expectEqual(@as(?i64, null), root.last_scanned_at);
     try std.testing.expectEqual(@as(u32, 0), root.image_count);
+}
+
+test "a file count names every file a walk reaches and none it skips" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album/Disc 2");
+    for ([_][]const u8{ "Album/01.flac", "Album/cover.jpg", "Album/Disc 2/01.flac", "notes.txt", "Album/01.flac.orca-stage-1" }) |path| {
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "x" });
+    }
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+
+    try std.testing.expectEqual(@as(?u64, 4), try countFiles(std.testing.io, std.testing.allocator, root_path, null, .{}, null));
+    try std.testing.expectEqual(@as(?u64, 1), try countFiles(std.testing.io, std.testing.allocator, root_path, "Album/Disc 2", .{}, null));
+    try std.testing.expectEqual(@as(?u64, 0), try countFiles(std.testing.io, std.testing.allocator, root_path, "Gone", .{}, null));
+    var token: CancellationToken = .{};
+    token.cancel();
+    try std.testing.expectEqual(@as(?u64, null), try countFiles(std.testing.io, std.testing.allocator, root_path, null, .{}, &token));
 }
