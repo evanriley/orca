@@ -595,6 +595,13 @@ issues of one kind in the order of `libraryHealthIssuePage`. Both leave out
 dismissed issues as the page and count do, and both reach the kind through
 `library_health_by_kind`: the page searches it for one kind, and the summary
 scans it once, as the count does.
+`libraryArtworkProblemReleasePage` and `libraryArtworkProblemReleaseCount`
+(`orca-cli health --kind=artwork_problem --albums`) page and count the
+Releases with visible `artwork_problem` issues instead, by title, each once
+with its worst problem (a missing front, then a conflict, then an
+undersized cover), that problem's details and how many of its files have
+one. A file's Release is that of the lowest Track id it backs, as for
+`HealthIssue.release_id`.
 
 ### Actions
 

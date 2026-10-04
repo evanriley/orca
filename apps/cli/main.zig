@@ -216,7 +216,7 @@ const commands = [_]Command{
     .{ .name = "relocate-root", .usage = "relocate-root DATABASE ID PATH", .min_arguments = 3, .max_arguments = 3, .run = relocateRoot },
     .{ .name = "availability", .usage = "availability DATABASE [RELEASE_ID...]", .min_arguments = 1, .max_arguments = null, .run = showAvailability },
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
-    .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND] [OFFSET]", .min_arguments = 1, .max_arguments = 3, .run = listHealthIssues },
+    .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND [--albums]] [OFFSET]", .min_arguments = 1, .max_arguments = 4, .run = listHealthIssues },
     .{ .name = "stats", .usage = "stats DATABASE", .min_arguments = 1, .max_arguments = 1, .run = printLibraryStats },
     .{ .name = "listens", .usage = "listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]", .min_arguments = 1, .max_arguments = 4, .run = listenSettings },
     .{ .name = "cache", .usage = "cache DATABASE [--clear]", .min_arguments = 1, .max_arguments = 2, .run = providerCache },
@@ -830,9 +830,11 @@ const help_details =
     \\only issues of that kind, in the same order. --summary prints one line
     \\per kind with an issue: kind, highest severity, count, files and bytes;
     \\for exact_duplicate and likely_duplicate, bytes counts only the copies
-    \\beyond the one kept. health-dismiss hides an issue of a file until the
-    \\file's bytes change; health-restore shows it again. KIND is the kind
-    \\health prints.
+    \\beyond the one kept. --kind=artwork_problem --albums prints one line per
+    \\album instead: release id, its worst problem, files=N with one,
+    \\size=WIDTHxHEIGHT or size=- and the title, then albums and their count.
+    \\health-dismiss hides an issue of a file until the file's bytes change;
+    \\health-restore shows it again. KIND is the kind health prints.
     \\
     \\stats prints key=value lines: artists, releases, tracks, files (those
     \\with a location that is not missing), bytes, duration_ms,
@@ -1679,11 +1681,14 @@ fn analyzeFile(context: Context) !void {
 fn listHealthIssues(context: Context) !void {
     const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
     var summary = false;
+    var albums = false;
     var kind: ?liborca.HealthIssueKind = null;
     var offset: ?u32 = null;
     for (context.arguments[1..]) |argument| {
         if (std.mem.eql(u8, argument, "--summary")) {
             summary = true;
+        } else if (std.mem.eql(u8, argument, "--albums")) {
+            albums = true;
         } else if (std.mem.startsWith(u8, argument, "--kind=")) {
             kind = std.meta.stringToEnum(liborca.HealthIssueKind, argument["--kind=".len..]) orelse
                 return error.UnknownHealthKind;
@@ -1697,6 +1702,23 @@ fn listHealthIssues(context: Context) !void {
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library_handle = try runtime.openLibrary(context.io, database_path);
+    if (albums) {
+        if (kind != .artwork_problem) return error.AlbumsNeedArtworkProblemKind;
+        const releases = try runtime.libraryArtworkProblemReleasePage(library_handle, 256, offset orelse 0);
+        defer releases.deinit();
+        for (releases.items) |album| {
+            const release = try runtime.libraryRelease(library_handle, album.release_id);
+            defer if (release) |summary_row| summary_row.deinit(runtime.allocator);
+            try context.stdout.print("{d}\t{s}\tfiles={d}\t", .{ album.release_id, @tagName(album.finding.problem), album.files });
+            if (album.finding.width != null and album.finding.height != null)
+                try context.stdout.print("size={d}x{d}", .{ album.finding.width.?, album.finding.height.? })
+            else
+                try context.stdout.writeAll("size=-");
+            try context.stdout.print("\t{s}\n", .{if (release) |summary_row| summary_row.title else "-"});
+        }
+        try context.stdout.print("albums\t{d}\n", .{try runtime.libraryArtworkProblemReleaseCount(library_handle)});
+        return;
+    }
     if (summary) {
         const kinds = try runtime.libraryHealthSummary(library_handle);
         for (kinds.items()) |entry| try context.stdout.print(

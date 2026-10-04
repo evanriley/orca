@@ -1138,6 +1138,24 @@ pub const OrcaRuntime = struct {
         return database.ArtworkFinding.parse(issue.details);
     }
 
+    /// A page of Releases with an open `artwork_problem` issue, ordered by
+    /// title, each with its worst problem and how many files have one.
+    pub fn libraryArtworkProblemReleasePage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        limit: u32,
+        offset: u32,
+    ) !database.ReleaseArtworkProblemPage {
+        const library_database = try libraryDatabase(self, library);
+        return database.repository.releaseArtworkProblemPage(library_database.database, self.allocator, limit, offset);
+    }
+
+    /// How many Releases `libraryArtworkProblemReleasePage` pages through.
+    pub fn libraryArtworkProblemReleaseCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        const library_database = try libraryDatabase(self, library);
+        return database.repository.releaseArtworkProblemCount(library_database.database);
+    }
+
     /// Asks for a cover without waiting for it. The lookup runs on the
     /// Library's artwork loader, and the result is collected with
     /// `libraryTakeArtwork`. At most `artwork.capacity` requests are

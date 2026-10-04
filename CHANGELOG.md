@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Albums with artwork problems.** `libraryArtworkProblemReleasePage` and
+  `libraryArtworkProblemReleaseCount` page and count the Releases with
+  visible `artwork_problem` issues by title, each once with its worst
+  problem and how many of its files have one; `orca-cli health
+  --kind=artwork_problem --albums` prints them. Not yet in the C ABI.
 - **Release match review.** `libraryReleaseMatchPage` and
   `libraryReleaseMatchCounts` sort Releases into confident, needs review and
   unmatched by their best MusicBrainz release candidate against an

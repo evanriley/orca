@@ -318,6 +318,71 @@ pub fn measurableCoverCount(db: sqlite.Database, offline_roots: []const u8) !u64
     return @intCast(statement.columnInt64(0));
 }
 
+pub const ReleaseArtworkProblem = struct {
+    release_id: i64,
+    finding: ArtworkFinding,
+    files: u32,
+};
+
+pub const ReleaseArtworkProblemPage = struct {
+    allocator: std.mem.Allocator,
+    items: []ReleaseArtworkProblem,
+
+    pub fn deinit(self: ReleaseArtworkProblemPage) void {
+        self.allocator.free(self.items);
+    }
+};
+
+const release_problem_issues_sql = "(SELECT (SELECT tracks.release_id FROM tracks WHERE tracks.id = (\n" ++
+    "            SELECT min(tracks.id) FROM tracks\n" ++
+    "            WHERE tracks.preferred_file_id = library_health_issues.file_id\n" ++
+    "               OR tracks.recording_id = files.recording_id)) AS release_id,\n" ++
+    "        CASE WHEN details LIKE 'problem=missing_front%' THEN 0\n" ++
+    "             WHEN details LIKE 'problem=conflicting%' THEN 1\n" ++
+    "             WHEN details LIKE 'problem=undersized%' THEN 2\n" ++
+    "             ELSE 3 END AS problem_rank,\n" ++
+    "        details\n" ++
+    health.visible_issues_sql ++ "\n" ++
+    "  AND library_health_issues.kind = ?1) AS issues\n" ++
+    "JOIN releases ON releases.id = issues.release_id\n" ++
+    "WHERE issues.problem_rank < 3\n";
+
+pub fn releaseProblemPage(
+    db: sqlite.Database,
+    allocator: std.mem.Allocator,
+    limit: u32,
+    offset: u32,
+) !ReleaseArtworkProblemPage {
+    if (limit == 0 or limit > columns.max_page) return error.PageOutOfRange;
+    var statement = try db.prepare("SELECT issues.release_id, min(issues.problem_rank), issues.details, count(*)\nFROM " ++
+        release_problem_issues_sql ++
+        "GROUP BY issues.release_id\n" ++
+        "ORDER BY releases.title COLLATE NOCASE, issues.release_id LIMIT ?2 OFFSET ?3;");
+    defer statement.deinit();
+    try statement.bindInt64(1, @intFromEnum(health.HealthIssueKind.artwork_problem));
+    try statement.bindInt64(2, limit);
+    try statement.bindInt64(3, offset);
+    var items: std.ArrayList(ReleaseArtworkProblem) = .empty;
+    errdefer items.deinit(allocator);
+    while (try statement.step() == .row) {
+        const finding = ArtworkFinding.parse(statement.columnText(2)) orelse return error.InvalidStoredHealthIssue;
+        try items.append(allocator, .{
+            .release_id = statement.columnInt64(0),
+            .finding = finding,
+            .files = @intCast(statement.columnInt64(3)),
+        });
+    }
+    return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+}
+
+pub fn releaseProblemCount(db: sqlite.Database) !u64 {
+    var statement = try db.prepare("SELECT count(DISTINCT issues.release_id)\nFROM " ++ release_problem_issues_sql ++ ";");
+    defer statement.deinit();
+    try statement.bindInt64(1, @intFromEnum(health.HealthIssueKind.artwork_problem));
+    if (try statement.step() != .row) return error.SqlFailed;
+    return @intCast(statement.columnInt64(0));
+}
+
 /// Records the measurement of an embedded or folder `cover`, unless a scan
 /// measured it first or a folder image's bytes changed since it was paged.
 /// Caller holds the write lane and settles the Releases afterwards.
@@ -494,4 +559,90 @@ test "a Release's files are settled from the covers the Library measured, file b
     try settleReleaseLocked(db, 1);
     try testing.expectEqual(@as(?ArtworkFinding, null), try problemOf(db, 1));
     try testing.expectEqual(@as(?ArtworkFinding, null), try problemOf(db, 2));
+}
+
+const artwork_kind = @intFromEnum(health.HealthIssueKind.artwork_problem);
+
+test "a Release with several files with artwork problems is one album, with its worst problem" {
+    var library = try openTestLibrary("release-page");
+    defer library.close();
+    const db = library.database;
+    try db.exec(std.fmt.comptimePrint(
+        \\INSERT INTO releases(id, title, release_key) VALUES (2, 'Before', 'before'), (3, 'Cover', 'cover');
+        \\INSERT INTO files(id) VALUES (3), (4), (5);
+        \\INSERT INTO tracks(id, title, release_id, preferred_file_id) VALUES (12, 'c', 2, 3), (13, 'd', 3, 4), (14, 'e', 3, 5);
+        \\INSERT INTO library_health_issues(file_id, kind, severity, details) VALUES
+        \\    (1, {0d}, 1, 'problem=undersized width=300 height=300'),
+        \\    (2, {0d}, 1, 'problem=conflicting'),
+        \\    (3, {0d}, 1, 'problem=undersized width=400 height=380'),
+        \\    (4, {0d}, 1, 'problem=missing_front'),
+        \\    (5, {0d}, 1, 'problem=undersized width=200 height=200');
+    , .{artwork_kind}));
+
+    try testing.expectEqual(@as(u64, 3), try releaseProblemCount(db));
+    const page = try releaseProblemPage(db, testing.allocator, 512, 0);
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 3), page.items.len);
+    try testing.expectEqual(@as(i64, 1), page.items[0].release_id);
+    try testing.expectEqual(ArtworkProblem.conflicting, page.items[0].finding.problem);
+    try testing.expectEqual(@as(u32, 2), page.items[0].files);
+    try testing.expectEqual(@as(i64, 2), page.items[1].release_id);
+    try testing.expectEqual(ArtworkFinding{ .problem = .undersized, .width = 400, .height = 380 }, page.items[1].finding);
+    try testing.expectEqual(@as(i64, 3), page.items[2].release_id);
+    try testing.expectEqual(ArtworkProblem.missing_front, page.items[2].finding.problem);
+    try testing.expectEqual(@as(u32, 2), page.items[2].files);
+}
+
+test "albums with artwork problems page by title and reject a page past the limit" {
+    var library = try openTestLibrary("release-paging");
+    defer library.close();
+    const db = library.database;
+    try db.exec(std.fmt.comptimePrint(
+        \\INSERT INTO releases(id, title, release_key) VALUES (2, 'Before', 'before');
+        \\INSERT INTO files(id) VALUES (3);
+        \\INSERT INTO tracks(id, title, release_id, preferred_file_id) VALUES (12, 'c', 2, 3);
+        \\INSERT INTO library_health_issues(file_id, kind, severity, details) VALUES
+        \\    (1, {0d}, 1, 'problem=missing_front'), (2, {0d}, 1, 'problem=missing_front'),
+        \\    (3, {0d}, 1, 'problem=missing_front');
+    , .{artwork_kind}));
+
+    const first = try releaseProblemPage(db, testing.allocator, 1, 0);
+    defer first.deinit();
+    try testing.expectEqual(@as(usize, 1), first.items.len);
+    try testing.expectEqual(@as(i64, 1), first.items[0].release_id);
+    const second = try releaseProblemPage(db, testing.allocator, 1, 1);
+    defer second.deinit();
+    try testing.expectEqual(@as(usize, 1), second.items.len);
+    try testing.expectEqual(@as(i64, 2), second.items[0].release_id);
+    const past = try releaseProblemPage(db, testing.allocator, 1, 2);
+    defer past.deinit();
+    try testing.expectEqual(@as(usize, 0), past.items.len);
+    try testing.expectError(error.PageOutOfRange, releaseProblemPage(db, testing.allocator, 0, 0));
+    try testing.expectError(error.PageOutOfRange, releaseProblemPage(db, testing.allocator, columns.max_page + 1, 0));
+}
+
+test "a dismissed artwork problem leaves its album out until every file's is dismissed" {
+    var library = try openTestLibrary("release-dismissed");
+    defer library.close();
+    const db = library.database;
+    try db.exec(std.fmt.comptimePrint(
+        \\INSERT INTO library_health_issues(file_id, kind, severity, details) VALUES
+        \\    (1, {0d}, 1, 'problem=missing_front'), (2, {0d}, 1, 'problem=undersized width=300 height=300');
+        \\INSERT INTO health_dismissals(file_id, kind, quick_hash, dismissed_at) VALUES (1, {0d}, NULL, 1);
+    , .{artwork_kind}));
+
+    const page = try releaseProblemPage(db, testing.allocator, 512, 0);
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 1), page.items.len);
+    try testing.expectEqual(ArtworkProblem.undersized, page.items[0].finding.problem);
+    try testing.expectEqual(@as(u32, 1), page.items[0].files);
+
+    try db.exec(std.fmt.comptimePrint(
+        "INSERT INTO health_dismissals(file_id, kind, quick_hash, dismissed_at) VALUES (2, {0d}, NULL, 1);",
+        .{artwork_kind},
+    ));
+    try testing.expectEqual(@as(u64, 0), try releaseProblemCount(db));
+    const none = try releaseProblemPage(db, testing.allocator, 512, 0);
+    defer none.deinit();
+    try testing.expectEqual(@as(usize, 0), none.items.len);
 }

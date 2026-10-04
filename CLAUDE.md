@@ -137,7 +137,8 @@ zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]   # probes files missing properties, then measures covers observed before covers were measured
 zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
 zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
-zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file
+zig build run -- health DATABASE --kind=artwork_problem --albums [OFFSET]   # one line per album by title: release id, worst problem, files=N, size=WxH|-, title; then `albums N`
+zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file, and `metadata_issues N`, open consistency issues
 zig build run -- formats   # each format Orca reads, `NAME<TAB>planned` for one recognized but not yet decoded
 zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
 zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=

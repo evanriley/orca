@@ -59,6 +59,8 @@ declare -A reasons=(
     [libraryStoredReleaseArtwork]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
     [libraryClearReleaseArtwork]="later: a Release's cover art candidates and chosen covers (docs/roadmap.md, Later)"
     [libraryArtworkProblem]="later: what an artwork_problem issue found; its details text already crosses the ABI (docs/roadmap.md, Later)"
+    [libraryArtworkProblemReleasePage]="later: the albums with artwork problems, for an Artwork Review page (docs/roadmap.md, Later)"
+    [libraryArtworkProblemReleaseCount]="later: the albums with artwork problems, for an Artwork Review page (docs/roadmap.md, Later)"
     [libraryTrackFieldStates]="later: a selection's shared, mixed and edited field values and cover, for a metadata editor (docs/roadmap.md, Later)"
 )
 
