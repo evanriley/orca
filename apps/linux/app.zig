@@ -32,6 +32,7 @@ const health = @import("health.zig");
 const activity = @import("activity.zig");
 const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
+const audio_problems = @import("audio_problems.zig");
 const first_run = @import("first_run.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
@@ -472,6 +473,7 @@ pub const App = struct {
     activity: activity.State = .{},
     changes: changes.State = .{},
     duplicates: duplicates.State = .{},
+    audio_problems: audio_problems.State = .{},
     first_run: first_run.State = .{},
 
     matches_list: ?*gtk.ListBox = null,

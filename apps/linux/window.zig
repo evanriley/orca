@@ -24,6 +24,7 @@ const health = @import("health.zig");
 const activity = @import("activity.zig");
 const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
+const audio_problems = @import("audio_problems.zig");
 const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
@@ -320,6 +321,7 @@ pub const Page = enum(c_uint) {
     scan,
     changes,
     duplicates,
+    audio_problems,
 
     pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -339,6 +341,7 @@ pub const Page = enum(c_uint) {
             .scan => "scan",
             .changes => "changes",
             .duplicates => "duplicates",
+            .audio_problems => "audio-problems",
         };
     }
 
@@ -360,6 +363,7 @@ pub const Page = enum(c_uint) {
             .scan => "Scan",
             .changes => "Change History",
             .duplicates => "Duplicates",
+            .audio_problems => "Audio Problems",
         };
     }
 
@@ -806,7 +810,7 @@ const nav_groups = [_]NavGroup{
 
 pub fn syncSidebarSelection(self: *App) void {
     const current: Page = switch (self.current_page) {
-        .duplicates => .health,
+        .duplicates, .audio_problems => .health,
         else => self.current_page,
     };
     for (std.enums.values(Page)) |page| {
@@ -860,6 +864,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .activity) activity.shown(self);
     if (page == .changes) changes.shown(self);
     if (page == .duplicates) duplicates.shown(self);
+    if (page == .audio_problems) audio_problems.shown(self);
     offline.showBanner(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
@@ -1318,6 +1323,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, activity.build(self), Page.activity.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, changes.build(self), Page.changes.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, duplicates.build(self), Page.duplicates.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, audio_problems.build(self), Page.audio_problems.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, first_run.buildScan(self), Page.scan.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());

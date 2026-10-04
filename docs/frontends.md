@@ -1032,30 +1032,37 @@ The window is an `AdwNavigationSplitView`:
   and opens the new playlist. The sidebar's Queue badge counts the tracks
   left.
 
-- **Health** lists what liborca found wrong with the library. The page,
-  titled Library Health, opens with the issue count
-  (`libraryHealthIssueCount`),
-  a Find Duplicates button and the library's album, track and artist counts
-  (`libraryReleaseCount`, `libraryTrackCount`, `libraryArtistCount`), then a
-  card per kind of issue in `libraryHealthSummary`'s order: a symbolic icon
-  tinted by the kind's highest severity, the kind's name and a one-line
-  explanation, its file count and, for `recording_mismatch`, Review, which
-  opens Matches. Expanding a card pages
-  that kind's issues (`libraryHealthIssuePageOfKind`) 512 at a time, with
-  Show more while more remain; each row names the file, the issue's details
-  and its folder. Open cards, how many issues each has loaded and the scroll
-  position are kept across reloads. Each row offers the issue's
-  `HealthAction`: Fix, a menu of Match and Edit Tags; Fetch Cover; Compare,
-  a dialog of the duplicate's two files (`libraryHealthFile`) side by side,
-  each with Reveal, that deletes nothing (a second location of the same
-  file, which has no `related_file_id`, is described instead of shown);
-  Review, which opens the
-  correction in Matches; or Show in Files, which opens the file's folder
-  and says "File not found" when the file is gone. Dismiss hides the issue
-  until its file changes (`libraryDismissHealthIssue`), with Undo
-  (`libraryRestoreHealthIssue`). A card above the kinds offers Analyse while
-  `libraryUnanalyzedCount` is above zero and no analysis runs. The page
-  reloads when matching, analysis or duplicate finding finishes.
+- **Health** is the Library Health overview. Under the title, Last
+  analyzed (`LibraryStats.last_analysis_at`) and Analyze Again, which
+  starts analysis and, when it succeeds, duplicate finding. A status card
+  says "Your library is in good shape." or, while
+  `libraryMissingFileCount` is above zero, "Some files need attention.",
+  beside the album and track counts (`libraryStats`). Seven rows follow,
+  each with a tinted icon, its count, a note and an action; a chevron
+  expands a row into a paragraph about it and, for rows backed by health
+  kinds, their files (`libraryHealthIssuePageOfKind`, 512 at a time, Show
+  more). Counts come from `libraryHealthSummary` unless noted:
+  - Duplicates: `exact_duplicate` and `likely_duplicate`, "Potentially
+    SIZE" from their redundant bytes; Review opens Duplicates.
+  - Mismatched metadata: `album_artist_anomaly`, `missing_metadata`,
+    `missing_track_number` and `technical_anomaly`; Review expands the row,
+    whose files offer Match and Edit Tags.
+  - Possible clipping: `clipping`, each file as `0.0 dBFS · N samples`;
+    Review opens Audio Problems at Possible clipping.
+  - Missing loudness analysis: `missing_analysis` plus
+    `libraryUnanalyzedCount`; Analyze starts analysis.
+  - Unmatched releases: `libraryReleaseMatchCounts`' unmatched Releases;
+    Review opens Matches.
+  - Missing artwork: `artwork_problem`; Fix expands the row, whose files
+    offer Fetch Cover.
+  - Missing files: `libraryMissingFileCount`; Locate opens Folders.
+
+  A row with nothing to show is dimmed and its action disabled. A file's
+  Dismiss hides the issue until its file changes
+  (`libraryDismissHealthIssue`), with Undo (`libraryRestoreHealthIssue`).
+  Open rows, how many files each has loaded and the scroll position are
+  kept across reloads. The page reloads when matching, analysis or
+  duplicate finding finishes.
 - **Matches** lists the tracks with MusicBrainz or AcoustID proposals
   awaiting review (`libraryMatchReviewPage`), with their count in the
   sidebar, as a card of flush rows under the page title. Each row shows
@@ -1441,6 +1448,22 @@ for the kept copy and each other; Ignore calls
 `libraryIgnoreDuplicateGroup`. A group that is one file in several places
 has a single card and offers Ignore only. No file is written or deleted.
 The page reloads with Library Health.
+
+**Audio Problems** is a page, opened by Review on Library Health's
+Possible clipping row or the command palette's Show Audio Problems, under
+the trail Library Health › Audio Problems. The left list holds four
+categories with their counts from `libraryHealthSummary`: Possible clipping
+(`clipping`), Decode errors (`corrupt_audio`), Malformed headers
+(`unreadable_file`) and Missing ReplayGain (`missing_analysis`). The
+selected category shows a paragraph on what the finding means and a card
+per file (`libraryHealthIssuePageOfKind`, 50 first, then 512 per Show
+more): the title, `ARTIST · ALBUM · FORMAT` from `libraryTrackSummary`,
+the path and the issue's details. Show in Folder opens the file's folder;
+Re-analyze calls `libraryReanalyzeFile` on a thread, which decodes and
+measures the file again even when nothing is owed, then toasts the outcome
+and reloads; Not a problem calls `libraryDismissHealthIssue`, with Undo.
+Missing ReplayGain also counts files not yet analysed
+(`libraryUnanalyzedCount`) with an Analyze button.
 
 **Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title an underlined tab bar switches between eight tabs;

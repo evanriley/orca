@@ -38,6 +38,7 @@ declare -A reasons=(
     [playerDrained]="later: drain detection for hosts (docs/roadmap.md, Later)"
     [playerSeekToTail]="test and CLI aid for checking transitions; not for hosts"
     [libraryAnalyzeFile]="later: one-file analysis on the caller's thread (docs/roadmap.md, Later)"
+    [libraryReanalyzeFile]="later: one-file re-analysis on the caller's thread (docs/roadmap.md, Later)"
     [libraryTrackFingerprint]="later: a Track's fingerprint (docs/roadmap.md, Later)"
     [libraryReleaseLetterIndex]="later: the Albums letter index (docs/roadmap.md, Later)"
     [libraryReleaseQueryTotals]="later: filtered Release totals (docs/roadmap.md, Later)"

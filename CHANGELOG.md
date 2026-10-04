@@ -22,6 +22,18 @@
   `orca_library_apply_matched_release_fields`. `orca-cli matches --releases
   [--bucket=]`, `matches --release=ID --evidence|--diff|--dismiss=MBID` and
   `apply-release --fields=`.
+- **Library Health and Audio Problems.** `orca-gtk`'s Library Health is
+  an overview: when the library was last analysed with Analyze Again, a
+  status card with album and track counts, and rows for Duplicates,
+  Mismatched metadata, Possible clipping, Missing loudness analysis,
+  Unmatched releases, Missing artwork and Missing files, each with its
+  count and an action that opens Duplicates, Audio Problems, Matches or
+  Folders, starts analysis or lists the files. A new Audio Problems page
+  sorts clipping, decode errors, malformed headers and missing ReplayGain
+  into categories, explains each and shows a card per file with Show in
+  Folder, Re-analyze and Not a problem. `libraryReanalyzeFile` decodes and
+  measures one file again, even when it owes nothing, and settles its
+  health issues.
 - **Duplicates page.** `orca-gtk`'s Compare on a Library Health duplicate
   opens a Duplicates page instead of a dialog: the groups with their copies
   and potential savings, Group N of M, a card per copy with the suggested

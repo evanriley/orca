@@ -533,7 +533,8 @@ are sniffed or not recognized until then:
   (`setOutputFactory`), Zone policy and render strategy (`setZonePolicy`,
   `zoneRenderStrategy`), playing a file outside a Library
   (`playerLoadFile`), drain detection (`playerDrained`), one-file analysis
-  on the caller's thread (`libraryAnalyzeFile`), a Track's fingerprint
+  on the caller's thread (`libraryAnalyzeFile`) and re-analysis
+  (`libraryReanalyzeFile`), a Track's fingerprint
   (`libraryTrackFingerprint`), the Albums letter index
   (`libraryReleaseLetterIndex`) and filtered totals
   (`libraryReleaseQueryTotals`, `libraryTrackQueryTotals`), a listing's

@@ -204,6 +204,9 @@ pub const LibraryAnalysis = struct {
     /// under anything else would store results no Player would ever adopt.
     /// It is a field only so a test can shrink the waveform it does not read.
     parameters: analysis.diagnostics.Parameters = .{},
+    /// Measures this one file again, whether or not it still owes a
+    /// measurement, and settles its health; nothing else is selected.
+    only_file_id: ?i64 = null,
 
     pub fn run(self: *LibraryAnalysis) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
@@ -237,12 +240,15 @@ pub const LibraryAnalysis = struct {
         // files still owe a measurement is a property of the rows.
         var cursor: i64 = 0;
         while (true) {
-            var page = try self.files.unanalyzedPage(
-                self.allocator,
-                cursor,
-                page_limit,
-                measurement_selector,
-            );
+            var page = if (self.only_file_id) |file_id|
+                try self.files.analysisCandidate(self.allocator, file_id)
+            else
+                try self.files.unanalyzedPage(
+                    self.allocator,
+                    cursor,
+                    page_limit,
+                    measurement_selector,
+                );
             defer page.deinit();
             if (page.items.len == 0) break;
             cursor = page.items[page.items.len - 1].id;
@@ -281,7 +287,7 @@ pub const LibraryAnalysis = struct {
                 measurements.clearRetainingCapacity();
                 result.batches_committed += 1;
             }
-            if (result.cancelled) break;
+            if (result.cancelled or self.only_file_id != null) break;
         }
         return result;
     }
@@ -1199,4 +1205,33 @@ test "a file that turns corrupt keeps only corrupt audio" {
     const kinds = try issueKinds(&fixture.library, file_id);
     defer testing.allocator.free(kinds);
     try testing.expectEqualSlices(database.HealthIssueKind, &.{.corrupt_audio}, kinds);
+}
+
+test "analysing one file measures it again even when it owes nothing and settles its health" {
+    var fixture = try Fixture.init("file:orca-analysis-one-file?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const clipped = try sineWav(2);
+    defer testing.allocator.free(clipped);
+    try fixture.writeBytes("loud.wav", clipped);
+    const loud = try fixture.record("loud.wav");
+    const clean = try sineWav(0.5);
+    defer testing.allocator.free(clean);
+    try fixture.writeBytes("clean.wav", clean);
+    _ = try fixture.record("clean.wav");
+
+    var pass = fixture.pass();
+    _ = try pass.run();
+    try fixture.library.database.exec("DELETE FROM library_health_issues;");
+
+    var one = fixture.pass();
+    one.only_file_id = loud;
+    const result = try one.run();
+    try testing.expectEqual(@as(u64, 1), result.files_seen);
+    const kinds = try issueKinds(&fixture.library, loud);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{.clipping}, kinds);
+
+    var missing = fixture.pass();
+    missing.only_file_id = loud + 100;
+    try testing.expectEqual(@as(u64, 0), (try missing.run()).files_seen);
 }

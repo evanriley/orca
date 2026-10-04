@@ -115,6 +115,7 @@ pub const HealthAction = database.HealthAction;
 pub const HealthFile = database.HealthFile;
 pub const HealthKindSummary = database.HealthKindSummary;
 pub const HealthSummary = database.HealthSummary;
+pub const ReanalysisOutcome = runtime.ReanalysisOutcome;
 pub const DuplicateGroup = runtime.DuplicateGroup;
 pub const DuplicateGroupPage = runtime.DuplicateGroupPage;
 pub const DuplicateGroupTotals = runtime.DuplicateGroupTotals;

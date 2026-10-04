@@ -376,6 +376,32 @@ pub const FileRepository = struct {
         return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
     }
 
+    /// File `file_id` as an analysis candidate, whether or not it still owes a
+    /// measurement: an empty page when no such file exists.
+    pub fn analysisCandidate(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !AnalysisCandidatePage {
+        var statement = try self.db.prepare(
+            "SELECT files.id, files.quick_hash, " ++ location_uri_column ++
+                " FROM files WHERE files.id = ?1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row)
+            return .{ .allocator = allocator, .items = try allocator.alloc(AnalysisCandidate, 0) };
+        const uri = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(uri);
+        const items = try allocator.alloc(AnalysisCandidate, 1);
+        items[0] = .{
+            .id = statement.columnInt64(0),
+            .source_identity = digestColumn(statement, 1),
+            .uri = uri,
+        };
+        return .{ .allocator = allocator, .items = items };
+    }
+
     /// How many files still owe that measurement. Like the backfill and unlike
     /// a filesystem walk, a library-wide analysis has an honest denominator
     /// before it starts, so its job snapshot reports a fraction.

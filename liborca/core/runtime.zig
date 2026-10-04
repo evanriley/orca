@@ -59,6 +59,10 @@ pub const EditableTrackField = track_fields.EditableField;
 pub const TrackFieldCover = track_fields.Cover;
 pub const TrackFieldCoverSource = track_fields.CoverSource;
 pub const DuplicateGroup = runtime_duplicates.DuplicateGroup;
+/// What `libraryReanalyzeFile` found: a measurement stored, a file that
+/// opened and would not decode, or nothing measured because the file is gone,
+/// changed since the last scan, or in a format no decoder reads.
+pub const ReanalysisOutcome = enum { measured, unreadable, skipped };
 pub const DuplicateGroupPage = runtime_duplicates.DuplicateGroupPage;
 pub const DuplicateGroupTotals = runtime_duplicates.DuplicateGroupTotals;
 pub const DuplicateCopy = runtime_duplicates.DuplicateCopy;
@@ -803,6 +807,34 @@ pub const OrcaRuntime = struct {
         };
         const binding = try library_database.resolveOrCreateFile(io, path, .{});
         return service.analyzeFile(binding.file_id, path, .{});
+    }
+
+    /// Decodes file `file_id` again on the caller's thread, even when its
+    /// stored analysis is current, and settles its clipping, silence, loudness
+    /// and corrupt-audio issues as a library analysis would.
+    pub fn libraryReanalyzeFile(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        file_id: i64,
+    ) !ReanalysisOutcome {
+        const library_database = try libraryDatabase(self, library);
+        var pass: library_pass.LibraryAnalysis = .{
+            .allocator = self.allocator,
+            .io = io,
+            .files = &library_database.files,
+            .analysis_cache = &library_database.analysis_cache,
+            .health_issues = &library_database.health_issues,
+            .write_lane = library_database.write_lane,
+            .database_handle = library_database.database,
+            .threads = 1,
+            .batch_size = 1,
+            .only_file_id = file_id,
+        };
+        const result = try pass.run();
+        if (result.errors > 0) return .unreadable;
+        if (result.changed + result.unchanged > 0) return .measured;
+        return .skipped;
     }
 
     /// The AcoustID fingerprint of the file a Track plays, from the Library's
