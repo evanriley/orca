@@ -16,6 +16,7 @@ const matches = @import("matches.zig");
 const page_ui = @import("page.zig");
 const details = @import("details.zig");
 const window = @import("window.zig");
+const duplicates = @import("duplicates.zig");
 
 const App = app.App;
 
@@ -264,7 +265,7 @@ fn reviewClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn compareClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const issue = issueOf(data);
-    compare(issue.self, issue.file_id, issue.related_file_id);
+    duplicates.showFile(issue.self, issue.file_id);
 }
 
 fn showInFilesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

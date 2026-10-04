@@ -2544,6 +2544,15 @@ static int duplicate_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(copies.count >= 2 && copies.count <= 16 && copies.consistent == copies.count);
     SMOKE_CHECK(copies.suggested == 1 && copies.first_suggested == 1);
 
+    struct text_capture names;
+    memset(&names, 0, sizeof names);
+    SMOKE_CHECK(orca_library_duplicate_copy_playlists(runtime, library, copies.file_ids[0], &names,
+                                                      capture_text) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_duplicate_copy_playlists(runtime, library, -1, &names,
+                                                      capture_text) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_duplicate_copy_playlists(runtime, library, copies.file_ids[0], &names,
+                                                      0) == ORCA_STATUS_INVALID_ARGUMENT);
+
     SMOKE_CHECK(orca_library_ignore_duplicate_group(runtime, library, groups.first.id) ==
                 ORCA_STATUS_OK);
     orca_duplicate_group_totals after;

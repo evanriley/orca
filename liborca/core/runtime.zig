@@ -1831,6 +1831,18 @@ pub const OrcaRuntime = struct {
         return runtime_duplicates.libraryDuplicateGroup(self, library, allocator, group_id);
     }
 
+    /// The names of the manual playlists holding a duplicate copy's
+    /// recording, by name, at most 512. Caller-owned.
+    /// `error.UnknownFile` when no file has `file_id`.
+    pub fn libraryDuplicateCopyPlaylists(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) ![][]u8 {
+        return runtime_duplicates.libraryDuplicateCopyPlaylists(self, library, allocator, file_id);
+    }
+
     /// Dismisses the duplicate issues of two files of one group, so neither
     /// is reported as a copy until its bytes change.
     /// `error.NotDuplicates` when they are not in one group.

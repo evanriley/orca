@@ -1,6 +1,7 @@
 const std = @import("std");
 const database = @import("../database/root.zig");
 const library_pass = @import("../library/root.zig");
+const metadata = @import("../metadata/root.zig");
 const runtime = @import("runtime.zig");
 const track_details = @import("track_details.zig");
 
@@ -70,6 +71,12 @@ pub const DuplicateCopy = struct {
     playlist_count: u64,
     /// The file's locations that are not missing, at least 1.
     locations: u32,
+    /// What this file's own tags state, unresolved, where `details` holds
+    /// the values of the Track and Release its copies share. Null when the
+    /// tags state nothing.
+    tagged_date: ?[]u8 = null,
+    tagged_track_number: ?u32 = null,
+    tagged_track_total: ?u32 = null,
 };
 
 /// The copies of one group, the suggested one first. Caller-owned.
@@ -82,7 +89,10 @@ pub const DuplicateCopyList = struct {
     bytes_redundant: u64,
 
     pub fn deinit(self: *DuplicateCopyList) void {
-        for (self.items) |item| if (item.details) |details| details.deinit();
+        for (self.items) |item| {
+            if (item.details) |details| details.deinit();
+            if (item.tagged_date) |date| self.allocator.free(date);
+        }
         self.allocator.free(self.items);
         self.* = undefined;
     }
@@ -213,7 +223,10 @@ pub fn libraryDuplicateGroup(
 
     var items: std.ArrayList(DuplicateCopy) = .empty;
     errdefer {
-        for (items.items) |item| if (item.details) |details| details.deinit();
+        for (items.items) |item| {
+            if (item.details) |details| details.deinit();
+            if (item.tagged_date) |date| allocator.free(date);
+        }
         items.deinit(allocator);
     }
     for (ranked.files, 0..) |file, index| {
@@ -222,6 +235,11 @@ pub fn libraryDuplicateGroup(
         else
             null;
         errdefer if (details) |value| value.deinit();
+        const tags = try library_database.observed_tags.get(allocator, file.file_id);
+        defer if (tags) |stored| stored.deinit();
+        const tagged: metadata.ObservedTags = if (tags) |stored| stored.values else .{};
+        const tagged_date = if (tagged.date) |date| try allocator.dupe(u8, date) else null;
+        errdefer if (tagged_date) |date| allocator.free(date);
         try items.append(allocator, .{
             .file_id = file.file_id,
             .track_id = file.track_id,
@@ -232,6 +250,9 @@ pub fn libraryDuplicateGroup(
             else
                 0,
             .locations = file.copies,
+            .tagged_date = tagged_date,
+            .tagged_track_number = tagged.track_number,
+            .tagged_track_total = tagged.track_total,
         });
     }
     return .{
@@ -242,6 +263,18 @@ pub fn libraryDuplicateGroup(
         .copies = ranked.copies,
         .bytes_redundant = ranked.bytes_redundant,
     };
+}
+
+pub fn libraryDuplicateCopyPlaylists(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    file_id: i64,
+) ![][]u8 {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const file = try library_database.duplicate_groups.file(file_id) orelse return error.UnknownFile;
+    const recording = file.recording_id orelse return allocator.alloc([]u8, 0);
+    return library_database.duplicate_groups.playlistNames(allocator, recording, max_page);
 }
 
 pub fn libraryKeepBoth(self: *OrcaRuntime, library: LibraryHandle, file_id: i64, other_file_id: i64) !void {
@@ -355,6 +388,30 @@ test "duplicate groups page, total, rank their copies, and leave the view when k
     try std.testing.expect(!copies.items[1].suggested_keep);
     try std.testing.expectEqualStrings("flac", copies.items[0].details.?.codec);
     try std.testing.expectEqualStrings("mp3", copies.items[1].details.?.codec);
+    try std.testing.expectEqualStrings("2026", copies.items[0].tagged_date.?);
+    try std.testing.expectEqual(@as(?u32, 1), copies.items[0].tagged_track_number);
+    try std.testing.expectEqual(@as(?u32, 3), copies.items[0].tagged_track_total);
+    try std.testing.expectEqual(@as(?[]u8, null), copies.items[1].tagged_date);
+    try std.testing.expectEqual(@as(?u32, 1), copies.items[1].tagged_track_number);
+    try std.testing.expectEqual(@as(?u32, null), copies.items[1].tagged_track_total);
+
+    const road = try owner.libraryCreatePlaylist(library, "Road Trip");
+    const late = try owner.libraryCreatePlaylist(library, "late night");
+    _ = try owner.libraryPlaylistInsert(library, road, &.{copies.items[1].track_id.?}, null);
+    _ = try owner.libraryPlaylistInsert(library, late, &.{ copies.items[1].track_id.?, copies.items[1].track_id.? }, null);
+    const names = try owner.libraryDuplicateCopyPlaylists(library, std.testing.allocator, mp3);
+    defer {
+        for (names) |name| std.testing.allocator.free(name);
+        std.testing.allocator.free(names);
+    }
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("late night", names[0]);
+    try std.testing.expectEqualStrings("Road Trip", names[1]);
+    const generated = try fixtureFile(library_database, "/generated-reference.flac");
+    const none = try owner.libraryDuplicateCopyPlaylists(library, std.testing.allocator, generated);
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+    try std.testing.expectError(error.UnknownFile, owner.libraryDuplicateCopyPlaylists(library, std.testing.allocator, 1_000_000));
 
     try std.testing.expectError(error.NotDuplicates, owner.libraryKeepBoth(library, flac, wav));
     try owner.libraryKeepBoth(library, mp3, flac);

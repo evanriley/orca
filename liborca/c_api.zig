@@ -2211,6 +2211,28 @@ pub export fn orca_library_merge_duplicate_metadata(
     return .ok;
 }
 
+pub export fn orca_library_duplicate_copy_playlists(
+    runtime: ?*Runtime,
+    library: Handle,
+    file_id: i64,
+    context: ?*anyopaque,
+    callback: ?StringCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const names = box.runtime.libraryDuplicateCopyPlaylists(importLibrary(library), box.runtime.allocator, file_id) catch |err|
+        return box.fail(@src(), err);
+    defer {
+        for (names) |name| box.runtime.allocator.free(name);
+        box.runtime.allocator.free(names);
+    }
+    for (names) |name| {
+        const view = stringView(name);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
 pub export fn orca_library_artist_count(
     runtime: ?*Runtime,
     library: Handle,

@@ -271,7 +271,7 @@ fn showEditorActions(self: *App) void {
         gtk.gtk_button_set_label(gtk.cast(gtk.Button, save), if (metadata) "Apply to Orca" else "Save Smart Playlist");
     }
     if (self.top_bar.editor_actions) |actions| gtk.gtk_widget_set_visible(actions, @intFromBool(editing));
-    const searching = !editing and !write_tags.isShown(self);
+    const searching = !editing and !write_tags.isShown(self) and self.current_page != .duplicates;
     if (self.top_bar.search) |search| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, search), @intFromBool(searching));
 }
 

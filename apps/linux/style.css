@@ -6722,6 +6722,228 @@ button.changes-export:hover {
   color: @orca_text;
 }
 
+/* Duplicates */
+
+@define-color orca_dup_keep #1D232B;
+
+.page-title.duplicates-title {
+  padding: 12px 32px 0 32px;
+}
+
+.page-title .meta.duplicates-summary {
+  margin-top: -2px;
+  font-size: 13.5px;
+  color: @orca_text_2;
+}
+
+.duplicates-position {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.duplicates-split {
+  margin: 18px 32px 24px 32px;
+  border-top: 1px solid @orca_border;
+}
+
+.duplicates-groups {
+  border-right: 1px solid @orca_border;
+}
+
+.duplicates-list {
+  padding: 12px 14px 12px 0;
+}
+
+.duplicates-empty {
+  padding: 12px 12px;
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+button.duplicates-row {
+  padding: 8px 12px;
+  border-radius: 8px;
+  min-height: 0;
+  font-weight: 400;
+}
+
+button.duplicates-row:hover {
+  background-color: @orca_bg_popover;
+}
+
+button.duplicates-row.selected {
+  background-color: @orca_bg_selected;
+}
+
+.duplicates-row-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.duplicates-row-subtitle {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.duplicates-detail {
+  padding: 14px 0 8px 24px;
+}
+
+.duplicates-heading {
+  font-size: 20px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.duplicates-subtitle {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.duplicates-evidence {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.duplicates-card {
+  min-height: 36px;
+  margin-bottom: 12px;
+  padding: 0 12px;
+  border-radius: 9px;
+  background-color: @orca_bg_popover;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+}
+
+.duplicates-card.later {
+  margin-left: 24px;
+}
+
+.duplicates-card.kept {
+  background-color: @orca_dup_keep;
+  box-shadow: inset 0 0 0 1.5px @orca_accent_ring;
+}
+
+.duplicates-copy {
+  font-size: 13px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+checkbutton.duplicates-radio {
+  padding: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+checkbutton.duplicates-radio radio,
+checkbutton.duplicates-radio radio:hover {
+  min-width: 12px;
+  min-height: 12px;
+  margin-right: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: @orca_text;
+  background-image: none;
+  box-shadow: none;
+  -gtk-icon-source: none;
+}
+
+checkbutton.duplicates-radio radio:checked,
+checkbutton.duplicates-radio radio:checked:hover {
+  min-width: 11px;
+  min-height: 11px;
+  border: 1px solid @orca_accent;
+  background-color: @orca_accent;
+  box-shadow: inset 0 0 0 2px @orca_dup_keep;
+}
+
+.duplicates-suggested {
+  font-size: 11.5px;
+  color: @orca_accent_text;
+}
+
+.duplicates-field,
+.duplicates-value {
+  padding: 10px 0;
+  border-top: 1px solid @orca_border;
+  font-size: 13px;
+}
+
+.duplicates-field {
+  color: @orca_text_3;
+}
+
+.duplicates-value {
+  color: @orca_text_2;
+}
+
+.duplicates-value.later {
+  padding-left: 24px;
+}
+
+.duplicates-value.kept {
+  color: @orca_text;
+}
+
+.duplicates-value.differs {
+  color: @orca_diff;
+}
+
+.duplicates-note {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: @orca_bg_popover;
+}
+
+.duplicates-note-icon {
+  margin-top: 1px;
+  color: @orca_text_3;
+}
+
+.duplicates-note-text {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: @orca_text_2;
+}
+
+.duplicates-actions {
+  margin-top: 2px;
+}
+
+button.duplicates-action,
+button.duplicates-ignore {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+button.duplicates-action {
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  color: @orca_text;
+}
+
+button.duplicates-action:hover {
+  background-color: @orca_bg_hover;
+}
+
+button.duplicates-action:disabled {
+  color: @orca_text_3;
+}
+
+button.duplicates-ignore {
+  color: @orca_text_2;
+}
+
+button.duplicates-ignore:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
 /* First Run */
 
 @define-color orca_first_glow #1A1F24;

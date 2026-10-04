@@ -1401,6 +1401,30 @@ selection made while one runs is loaded after it. Undo This Change… asks for c
 `exportTagWriteHistory`, replacing a file the dialog has confirmed. The page
 reloads after every library job.
 
+**Duplicates** is a page, opened by Compare on a Library Health duplicate
+row or the command palette's Show Duplicates, under the trail Library
+Health › Duplicates. Under its title, `N recordings appear more than once ·
+potentially SIZE. Orca never deletes on its own.` sums
+`libraryDuplicateGroupTotals`, and `Group N of M` with previous and next
+buttons steps through the groups. The left list holds up to 512 groups of
+`libraryDuplicateGroupPage`, each `TITLE` over `ARTIST · N copies`.
+Selecting one reads `libraryDuplicateGroup` on the main thread and shows
+the title, artist and album, the evidence (`Fingerprints match · 99%`,
+`Identical audio` at 100%), and a card per copy, `Copy A · keep` with
+Suggested on the suggested copy; picking another card's radio makes it the
+kept copy. A table compares Path, Format, Size, Duration, Album, Track,
+Date, Loudness, MusicBrainz (Matched or Not matched), Plays · rating, as
+one shared row when the copies are the same recording, and In playlists
+(`libraryDuplicateCopyPlaylists`), with values that differ from the kept
+copy's coloured; duration and loudness are not. A note says why the kept
+copy is suggested and what merging adds. Merge Metadata Only calls
+`libraryMergeDuplicateMetadata` from each other copy's Track into the kept
+one; Keep Both (Keep All with three or more copies) calls `libraryKeepBoth`
+for the kept copy and each other; Ignore calls
+`libraryIgnoreDuplicateGroup`. A group that is one file in several places
+has a single card and offers Ignore only. No file is written or deleted.
+The page reloads with Library Health.
+
 **Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title an underlined tab bar switches between eight tabs;
 it is one Tab stop, Left and Right move between tabs, and it shows icons

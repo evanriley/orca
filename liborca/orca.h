@@ -2092,6 +2092,16 @@ orca_status orca_library_merge_duplicate_metadata(
     int64_t from_track_id,
     orca_duplicate_merge *output
 );
+/* Calls `callback` with the name of each manual playlist holding file
+ * `file_id`'s recording, by name, at most 512. ORCA_STATUS_NOT_FOUND, with the
+ * callback not called, when no file has that id. */
+orca_status orca_library_duplicate_copy_playlists(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t file_id,
+    void *context,
+    orca_string_callback callback
+);
 
 
 /* ------------------------------------------------------------- browsing */

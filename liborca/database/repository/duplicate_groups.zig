@@ -262,6 +262,35 @@ pub const DuplicateGroupRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 
+    /// The names of the manual playlists holding `recording_id`, by name,
+    /// at most `limit` of them. Caller-owned.
+    pub fn playlistNames(
+        self: *const DuplicateGroupRepository,
+        allocator: std.mem.Allocator,
+        recording_id: i64,
+        limit: u32,
+    ) ![][]u8 {
+        var statement = try self.db.prepare(
+            \\SELECT playlists.name FROM playlists
+            \\WHERE playlists.id IN (SELECT playlist_id FROM playlist_entries WHERE recording_id = ?1)
+            \\ORDER BY playlists.name COLLATE NOCASE, playlists.id LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, recording_id);
+        try statement.bindInt64(2, limit);
+        var names: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (names.items) |name| allocator.free(name);
+            names.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const name = try allocator.dupe(u8, statement.columnText(0));
+            errdefer allocator.free(name);
+            try names.append(allocator, name);
+        }
+        return names.toOwnedSlice(allocator);
+    }
+
     /// The title and artist a group is shown under: its kept copy's Track's,
     /// or the copy's path as the title when it backs no Track.
     pub fn label(

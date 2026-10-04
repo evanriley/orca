@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Duplicates page.** `orca-gtk`'s Compare on a Library Health duplicate
+  opens a Duplicates page instead of a dialog: the groups with their copies
+  and potential savings, Group N of M, a card per copy with the suggested
+  one to keep, and Path, Format, Size, Duration, Album, Track, Date,
+  Loudness, MusicBrainz, Plays · rating (one shared row for the same
+  recording) and In playlists side by side. Merge Metadata Only, Keep Both
+  and Ignore act on the group; nothing is deleted.
+  `libraryDuplicateCopyPlaylists` names the playlists holding a copy's
+  recording, and the C ABI adds `orca_library_duplicate_copy_playlists`.
 - **Edit Metadata and Write to Files pages.** `orca-gtk`'s tag editor is a
   page: a checklist of the selected tracks, fields with `Mixed` placeholders
   and Edited badges, Apply to Orca, and the front cover with where it comes

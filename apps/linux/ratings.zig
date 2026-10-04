@@ -66,7 +66,7 @@ pub fn setStarSize(stars: *gtk.Widget, pixels: c_int) void {
     }
 }
 
-fn starsFor(rating: ?u8) usize {
+pub fn starsFor(rating: ?u8) usize {
     const value = rating orelse return 0;
     return std.math.clamp((@as(usize, value) + star_step / 2) / star_step, 1, star_count);
 }
