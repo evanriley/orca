@@ -1120,8 +1120,13 @@ The window is an `AdwNavigationSplitView`:
   in Settings (90% by default, `[matching] accept_confidence`). "Search
   matches…" in the top bar, focused by Ctrl+F, filters the tabs, their
   counts and the list by album title or artist; the badge stays unfiltered.
-  Counts and the tab's first 100 Releases (`libraryReleaseMatchPage`), with each one's
-  evidence and diff, are read on a loader thread. Each row shows the cover,
+  Counts and the tab's Releases (`libraryReleaseMatchPage`), with each one's
+  evidence and diff, are read on a loader thread, 100 at a time: the next
+  100 are read and appended as the list scrolls near its end, until the tab
+  has no more. Changing the tab or the filter starts again from the first
+  100 at the top; a reload after an accept or a Job reads as many as are
+  listed and keeps the scroll position, and a read started before a tab or
+  filter change is dropped. Each row shows the cover,
   title and artist, "Best candidate" with the release's title and year, the
   confidence over a bar, and Accept and Review; an Unmatched row has only
   Search, which starts a re-identify Job for the album. Clicking a row

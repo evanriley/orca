@@ -105,7 +105,9 @@
   covers' sizes (`ArtworkSize`), which `matches --release=ID --diff`
   prints. The page replaces the per-track proposal list and its Accept Confident and
   Submit to AcoustID buttons; Submit to AcoustID stays in the command
-  palette.
+  palette. Each tab lists all of its albums, reading the next 100 as the
+  list nears its end, and a reload after an accept or a Job keeps the
+  albums already listed and the scroll position.
 - **Artwork Review.** `orca-gtk` has an Artwork Review page, opened by Fix
   on Library Health's Missing artwork row or the palette's Show Artwork
   Review: the albums with missing, undersized or conflicting artwork, each

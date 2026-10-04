@@ -40,51 +40,89 @@ pub const Detail = struct {
     }
 };
 
+const Loaded = struct {
+    page: liborca.ReleaseMatchPage,
+    details: []Detail,
+
+    fn deinit(self: *Loaded) void {
+        self.page.deinit();
+        freeDetails(self.details);
+    }
+};
+
+fn freeLoaded(loaded: *std.ArrayList(Loaded)) void {
+    for (loaded.items) |*each| each.deinit();
+    loaded.deinit(std.heap.smp_allocator);
+    loaded.* = .empty;
+}
+
 const Loader = struct {
     runtime: *liborca.Runtime,
     library: liborca.LibraryHandle,
     waker: liborca.HostWaker,
+    want: Want,
+    generation: u32,
     bucket: Bucket,
     confident_at: f32,
     filter: Filter,
-    with_page: bool,
+    offset: u32,
+    rows: u32,
     thread: ?std.Thread = null,
     finished: std.atomic.Value(bool) = .init(false),
     counts: ?liborca.ReleaseMatchCounts = null,
     filtered_counts: ?liborca.ReleaseMatchCounts = null,
     groups: ?liborca.CorrectionGroupPage = null,
-    page: ?liborca.ReleaseMatchPage = null,
-    details: []Detail = &.{},
+    loaded: std.ArrayList(Loaded) = .empty,
+    complete: bool = false,
 
     fn run(self: *Loader) void {
         const filter = self.filter.text();
-        self.counts = self.runtime.libraryReleaseMatchCounts(self.library, self.confident_at, null) catch null;
-        if (filter != null) self.filtered_counts = self.runtime.libraryReleaseMatchCounts(self.library, self.confident_at, filter) catch null;
-        self.groups = self.runtime.libraryCorrectionGroups(self.library, std.heap.smp_allocator, app.page_size, 0) catch null;
-        if (self.with_page) {
-            self.page = self.runtime.libraryReleaseMatchPage(self.library, std.heap.smp_allocator, self.bucket, self.confident_at, filter, list_limit, 0) catch null;
-            if (self.page) |page| self.readDetails(page.items);
+        if (self.want != .more) {
+            self.counts = self.runtime.libraryReleaseMatchCounts(self.library, self.confident_at, null) catch null;
+            if (filter != null) self.filtered_counts = self.runtime.libraryReleaseMatchCounts(self.library, self.confident_at, filter) catch null;
+            self.groups = self.runtime.libraryCorrectionGroups(self.library, std.heap.smp_allocator, app.page_size, 0) catch null;
         }
+        if (self.want != .counts) self.readPages(filter);
         self.finished.store(true, .release);
         self.waker.wake_fn(self.waker.context);
     }
 
-    fn readDetails(self: *Loader, items: []const liborca.ReleaseMatchItem) void {
-        const read = std.heap.smp_allocator.alloc(Detail, items.len) catch return;
+    fn readPages(self: *Loader, filter: ?[]const u8) void {
+        var read: u32 = 0;
+        while (read < self.rows) : (read += list_limit) {
+            const page = self.runtime.libraryReleaseMatchPage(self.library, std.heap.smp_allocator, self.bucket, self.confident_at, filter, list_limit, self.offset + read) catch return;
+            if (page.items.len == 0) {
+                page.deinit();
+                self.complete = true;
+                return;
+            }
+            var loaded: Loaded = .{ .page = page, .details = self.readDetails(page.items) };
+            self.loaded.append(std.heap.smp_allocator, loaded) catch {
+                loaded.deinit();
+                return;
+            };
+            if (page.items.len < list_limit) {
+                self.complete = true;
+                return;
+            }
+        }
+    }
+
+    fn readDetails(self: *Loader, items: []const liborca.ReleaseMatchItem) []Detail {
+        const read = std.heap.smp_allocator.alloc(Detail, items.len) catch return &.{};
         for (items, read) |item, *detail| {
             detail.* = .{};
             const best = item.best orelse continue;
             detail.evidence = self.runtime.libraryReleaseMatchEvidence(self.library, item.release_id, best.release_mbid) catch null;
             detail.diff = self.runtime.libraryReleaseMatchDiff(self.library, std.heap.smp_allocator, item.release_id, best.release_mbid) catch null;
         }
-        self.details = read;
+        return read;
     }
 
     fn destroy(self: *Loader, allocator: std.mem.Allocator) void {
         if (self.thread) |thread| thread.join();
         if (self.groups) |*groups| groups.deinit();
-        if (self.page) |*page| page.deinit();
-        freeDetails(self.details);
+        freeLoaded(&self.loaded);
         allocator.destroy(self);
     }
 };
@@ -94,7 +132,7 @@ fn freeDetails(read: []Detail) void {
     if (read.len != 0) std.heap.smp_allocator.free(read);
 }
 
-const Want = enum { none, counts, page };
+const Want = enum { none, counts, more, page };
 
 pub const Filter = struct {
     buffer: [liborca.max_search_text]u8 = undefined,
@@ -128,15 +166,19 @@ pub const State = struct {
     filtered_counts: ?liborca.ReleaseMatchCounts = null,
     group_count: u64 = 0,
     bucket: Bucket = .needs_review,
-    page: ?liborca.ReleaseMatchPage = null,
-    details: []Detail = &.{},
+    generation: u32 = 0,
+    loaded: std.ArrayList(Loaded) = .empty,
+    complete: bool = false,
+    listed_generation: u32 = 0,
+    listed_bucket: ?Bucket = null,
+    listed_filter: Filter = .{},
+    restore_scroll: ?f64 = null,
     expanded: ?i64 = null,
     loader: ?*Loader = null,
     wanted: Want = .none,
     tabs: std.EnumArray(Bucket, Tab) = .initFill(.{}),
     list: ?*gtk.Box = null,
     empty: ?*gtk.Label = null,
-    note: ?*gtk.Label = null,
     corrections: ?*gtk.ListBox = null,
     corrections_box: ?*gtk.Widget = null,
     scroller: ?*gtk.ScrolledWindow = null,
@@ -144,12 +186,16 @@ pub const State = struct {
     search: ?*gtk.Widget = null,
 
     pub fn deinit(self: *State) void {
-        if (self.page) |*page| page.deinit();
-        self.page = null;
-        freeDetails(self.details);
-        self.details = &.{};
+        freeLoaded(&self.loaded);
+        self.complete = false;
     }
 };
+
+fn rowCount(self: *const App) usize {
+    var count: usize = 0;
+    for (self.matches.loaded.items) |each| count += each.page.items.len;
+    return count;
+}
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -462,10 +508,11 @@ const Shown = struct {
 };
 
 fn shownItem(self: *App, release_id: i64) ?Shown {
-    const page = self.matches.page orelse return null;
-    for (page.items, 0..) |item, index| {
-        if (item.release_id != release_id) continue;
-        return .{ .item = item, .detail = if (index < self.matches.details.len) &self.matches.details[index] else null };
+    for (self.matches.loaded.items) |each| {
+        for (each.page.items, 0..) |item, index| {
+            if (item.release_id != release_id) continue;
+            return .{ .item = item, .detail = if (index < each.details.len) &each.details[index] else null };
+        }
     }
     return null;
 }
@@ -548,15 +595,17 @@ fn acceptClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn reviewClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const row = rowOf(data);
     const self = row.self;
-    const page = self.matches.page orelse return;
     var entries: std.ArrayList(match_review.Entry) = .empty;
     defer entries.deinit(self.allocator);
     var at: usize = 0;
-    for (page.items) |item| {
-        if (item.release_id == row.release_id) at = entries.items.len;
-        const confidence = if (item.best) |best| best.confidence else 0;
-        entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence }) catch return;
+    for (self.matches.loaded.items) |each| {
+        for (each.page.items) |item| {
+            if (item.release_id == row.release_id) at = entries.items.len;
+            const confidence = if (item.best) |best| best.confidence else 0;
+            entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence }) catch return;
+        }
     }
+    if (entries.items.len == 0) return;
     const bucket = self.matches.bucket;
     const total: u64 = if (tabCounts(self)) |counts| switch (bucket) {
         .confident => counts.confident,
@@ -730,6 +779,7 @@ fn tabClicked(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         self.matches.bucket = bucket;
         self.matches.expanded = null;
         self.matches.stale = true;
+        self.matches.generation +%= 1;
         request(self, .page);
         return;
     }
@@ -767,6 +817,7 @@ fn filterChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     matches.filtered_counts = null;
     matches.expanded = null;
     matches.stale = true;
+    matches.generation +%= 1;
     request(self, .page);
 }
 
@@ -857,15 +908,12 @@ pub fn build(self: *App) *gtk.Widget {
     const empty = label("", "match-empty");
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, empty), gtk.true_);
     matches.empty = gtk.cast(gtk.Label, empty);
-    const note = label("", "match-note");
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, note), gtk.true_);
-    matches.note = gtk.cast(gtk.Label, note);
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(content, "matches-body");
     gtk.gtk_widget_set_size_request(content, content_width, -1);
     gtk.gtk_widget_set_hexpand(content, gtk.false_);
-    append(content, &.{ title.widget, tabs, corrections_box, list, empty, note });
+    append(content, &.{ title.widget, tabs, corrections_box, list, empty });
     matches.content = content;
     const clamp = adw.adw_clamp_new();
     adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_width);
@@ -884,6 +932,12 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
     matches.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(scrollerDestroyed), self);
+    _ = gtk.signalConnect(
+        gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
+        "value-changed",
+        gtk.callback(scrolled),
+        self,
+    );
 
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
@@ -947,37 +1001,65 @@ fn emptyText(bucket: Bucket, filtered: bool) [*:0]const u8 {
     };
 }
 
+fn appendRows(self: *App, loaded: *const Loaded) void {
+    const list = self.matches.list orelse return;
+    for (loaded.page.items, 0..) |item, index| {
+        const detail: ?*const Detail = if (index < loaded.details.len) &loaded.details[index] else null;
+        const row = matchRow(self, item, detail) orelse continue;
+        gtk.gtk_box_append(list, row);
+    }
+}
+
 fn showList(self: *App) void {
     const matches = &self.matches;
     const list = matches.list orelse return;
     while (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, list))) |child| gtk.gtk_box_remove(list, child);
-    const items = if (matches.page) |page| page.items else &.{};
-    for (items, 0..) |item, index| {
-        const detail: ?*const Detail = if (index < matches.details.len) &matches.details[index] else null;
-        const row = matchRow(self, item, detail) orelse continue;
-        gtk.gtk_box_append(list, row);
-    }
+    for (matches.loaded.items) |*each| appendRows(self, each);
     if (matches.empty) |empty| {
         gtk.gtk_label_set_text(empty, emptyText(matches.bucket, matches.filter.len != 0));
-        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, empty), @intFromBool(items.len == 0));
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, empty), @intFromBool(rowCount(self) == 0));
     }
-    const total: u64 = if (tabCounts(self)) |counts| switch (matches.bucket) {
-        .confident => counts.confident,
-        .needs_review => counts.needs_review,
-        .unmatched => counts.unmatched,
-    } else items.len;
-    if (matches.note) |note| {
-        var buffer: [160]u8 = undefined;
-        const text: [:0]const u8 = if (total > items.len)
-            strings.format(&buffer, "Showing the first {f} of {f}. orca-cli matches --releases lists them all.", .{
-                strings.grouped(items.len),
-                strings.grouped(total),
-            })
-        else
-            "";
-        gtk.gtk_label_set_text(note, text.ptr);
-        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, note), @intFromBool(text.len != 0));
-    }
+}
+
+fn restoreScroll(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const value = self.matches.restore_scroll orelse return gtk.false_;
+    self.matches.restore_scroll = null;
+    const scroller = self.matches.scroller orelse return gtk.false_;
+    gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), value);
+    return gtk.false_;
+}
+
+fn scrollLater(self: *App, value: f64) void {
+    if (self.matches.restore_scroll == null) _ = gtk.g_idle_add(restoreScroll, self);
+    self.matches.restore_scroll = value;
+}
+
+fn canLoadMore(self: *const App) bool {
+    const matches = &self.matches;
+    return !matches.complete and matches.loaded.items.len != 0 and matches.listed_generation == matches.generation;
+}
+
+fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (!canLoadMore(self)) return;
+    const value = gtk.cast(gtk.Adjustment, adjustment);
+    const page = gtk.gtk_adjustment_get_page_size(value);
+    const remaining = gtk.gtk_adjustment_get_upper(value) - (gtk.gtk_adjustment_get_value(value) + page);
+    if (remaining < page) request(self, .more);
+}
+
+fn listsCurrent(self: *const App, bucket: Bucket, filter: *const Filter) bool {
+    const matches = &self.matches;
+    const listed = matches.listed_bucket orelse return false;
+    return listed == bucket and matches.listed_filter.eql(filter);
+}
+
+fn reloadRows(self: *const App) u32 {
+    if (!listsCurrent(self, self.matches.bucket, &self.matches.filter)) return list_limit;
+    const rows = std.math.cast(u32, rowCount(self)) orelse return list_limit;
+    const pages = std.math.divCeil(u32, rows, list_limit) catch unreachable;
+    return std.math.mul(u32, @max(1, pages), list_limit) catch list_limit;
 }
 
 fn request(self: *App, want: Want) void {
@@ -987,26 +1069,62 @@ fn request(self: *App, want: Want) void {
         if (@intFromEnum(want) > @intFromEnum(matches.wanted)) matches.wanted = want;
         return;
     }
+    if (want == .more and !canLoadMore(self)) return;
+    const offset: u32 = if (want == .more) std.math.cast(u32, rowCount(self)) orelse return else 0;
     matches.wanted = .none;
     const loader = self.allocator.create(Loader) catch return;
     loader.* = .{
         .runtime = self.runtime,
         .library = library,
         .waker = self.waker(),
+        .want = want,
+        .generation = matches.generation,
         .bucket = matches.bucket,
         .confident_at = thresholdFraction(self),
         .filter = matches.filter,
-        .with_page = want == .page,
+        .offset = offset,
+        .rows = switch (want) {
+            .none, .counts => 0,
+            .more => list_limit,
+            .page => reloadRows(self),
+        },
     };
-    matches.counts_stale = false;
+    if (want != .more) matches.counts_stale = false;
     if (want == .page) matches.stale = false;
     loader.thread = std.Thread.spawn(.{}, Loader.run, .{loader}) catch {
         self.allocator.destroy(loader);
-        matches.counts_stale = true;
+        if (want != .more) matches.counts_stale = true;
         if (want == .page) matches.stale = true;
         return;
     };
     matches.loader = loader;
+}
+
+fn adoptPage(self: *App, loader: *Loader) void {
+    const matches = &self.matches;
+    const kept_scroll: ?f64 = if (listsCurrent(self, loader.bucket, &loader.filter))
+        if (matches.scroller) |scroller| gtk.gtk_adjustment_get_value(gtk.gtk_scrolled_window_get_vadjustment(scroller)) else null
+    else
+        null;
+    matches.deinit();
+    matches.loaded = loader.loaded;
+    loader.loaded = .empty;
+    matches.complete = loader.complete;
+    matches.listed_generation = loader.generation;
+    matches.listed_bucket = loader.bucket;
+    matches.listed_filter = loader.filter;
+    showList(self);
+    scrollLater(self, kept_scroll orelse 0);
+}
+
+fn adoptMore(self: *App, loader: *Loader) void {
+    const matches = &self.matches;
+    const first = matches.loaded.items.len;
+    matches.loaded.ensureUnusedCapacity(std.heap.smp_allocator, loader.loaded.items.len) catch return;
+    matches.loaded.appendSliceAssumeCapacity(loader.loaded.items);
+    loader.loaded.clearRetainingCapacity();
+    matches.complete = loader.complete;
+    for (matches.loaded.items[first..]) |*each| appendRows(self, each);
 }
 
 pub fn tick(self: *App) void {
@@ -1016,28 +1134,28 @@ pub fn tick(self: *App) void {
     matches.loader = null;
     defer loader.destroy(self.allocator);
 
-    const unmatched_before = if (matches.counts) |counts| counts.unmatched else null;
-    if (loader.counts) |counts| matches.counts = counts;
-    const current_filter = loader.filter.eql(&matches.filter);
-    if (current_filter) matches.filtered_counts = loader.filtered_counts;
-    matches.group_count = if (loader.groups) |groups| groups.items.len else 0;
-    showCounts(self);
-    if (matches.built) showCorrections(self, loader.groups);
-    if (loader.with_page and loader.bucket == matches.bucket and current_filter) {
-        matches.deinit();
-        matches.page = loader.page;
-        matches.details = loader.details;
-        loader.page = null;
-        loader.details = &.{};
-        showList(self);
+    if (loader.want != .more) {
+        const unmatched_before = if (matches.counts) |counts| counts.unmatched else null;
+        if (loader.counts) |counts| matches.counts = counts;
+        if (loader.filter.eql(&matches.filter)) matches.filtered_counts = loader.filtered_counts;
+        matches.group_count = if (loader.groups) |groups| groups.items.len else 0;
+        showCounts(self);
+        if (matches.built) showCorrections(self, loader.groups);
+        const unmatched_after = if (matches.counts) |counts| counts.unmatched else null;
+        if (unmatched_before != unmatched_after) health.reload(self);
     }
-    const unmatched_after = if (matches.counts) |counts| counts.unmatched else null;
-    if (unmatched_before != unmatched_after) health.reload(self);
+    if (loader.generation == matches.generation) switch (loader.want) {
+        .none, .counts => {},
+        .more => adoptMore(self, loader),
+        .page => adoptPage(self, loader),
+    };
 
     const wanted = matches.wanted;
     matches.wanted = .none;
     if (wanted == .page or (matches.stale and self.current_page == .matches)) {
         request(self, .page);
+    } else if (wanted == .more and canLoadMore(self)) {
+        request(self, .more);
     } else if (wanted == .counts or matches.counts_stale) {
         request(self, .counts);
     }
@@ -1059,6 +1177,8 @@ pub fn forgetLibrary(self: *App) void {
     matches.wanted = .none;
     matches.stale = true;
     matches.counts_stale = true;
+    matches.generation +%= 1;
+    matches.listed_bucket = null;
     showList(self);
     showCorrections(self, null);
 }
@@ -1074,6 +1194,7 @@ pub fn showBucket(self: *App, bucket: Bucket) void {
         matches.bucket = bucket;
         matches.expanded = null;
         matches.stale = true;
+        matches.generation +%= 1;
         if (matches.tabs.get(bucket).button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
     }
     window.goTo(self, .matches);
@@ -1083,6 +1204,7 @@ pub fn showBucket(self: *App, bucket: Bucket) void {
 pub fn invalidate(self: *App) void {
     self.matches.stale = true;
     self.matches.counts_stale = true;
+    self.matches.generation +%= 1;
     match_review.invalidate(self);
     request(self, if (self.current_page == .matches) .page else .counts);
 }

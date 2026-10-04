@@ -5052,8 +5052,7 @@ image.match-differs {
   color: @orca_text_2;
 }
 
-.match-empty,
-.match-note {
+.match-empty {
   margin-top: 18px;
   font-size: 13px;
   color: @orca_text_3;
