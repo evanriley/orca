@@ -292,7 +292,7 @@ fn thresholdChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callcon
     if (percent == self.match_threshold_percent) return;
     self.match_threshold_percent = percent;
     settings.save(self);
-    matches.reload(self);
+    matches.invalidate(self);
 }
 
 fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -301,7 +301,7 @@ fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
     if (enabled == self.match_fingerprints) return;
     self.match_fingerprints = enabled;
     settings.save(self);
-    matches.reload(self);
+    matches.invalidate(self);
     maintenance.apply(self) catch self.toast("Could not change idle maintenance");
     showMaintenanceStatus(self);
     self.requestTick();
@@ -695,7 +695,7 @@ fn playbackTab(self: *App) *gtk.Widget {
     adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, replay), switch (mode) {
         .off => 0,
         .track => 1,
-        .album => 2,
+        .album, .smart => 2,
     });
     _ = gtk.signalConnect(replay, "notify::selected", gtk.callback(replayGainChanged), self);
     volume.add(replay);

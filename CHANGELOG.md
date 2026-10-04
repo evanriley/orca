@@ -83,6 +83,16 @@
   `orca_device_view_v3`, `orca_device_state` and the `ORCA_DEVICE_BIT_DEPTH_*`
   bits. `OutputFactory.discover` and its vtable now take a `DiscoveryDetail`,
   so a Zone's kind lookup skips the format round.
+- **Output picker.** orca-gtk's device list is now a Play on popover with a
+  refresh button: each output shows its bus icon and a note from its
+  capabilities, a check marks the chosen one, and a summary gives what is
+  sent, the DSP mode and what the device supports, above a volume slider and
+  links to the signal path and Settings › Sound. The player bar shows the
+  technology line over the device name and a chevron, and keeps the name
+  below 900sp; its `DSP` now also counts ReplayGain, as the Mode line does.
+  `enumerateOutputDevices` takes a `DiscoveryDetail`: `.identity` skips the
+  format round, and the frontend asks for `.capabilities` only when the
+  picker opens.
 - **Folder entries with images, status and last scan.** Scans record the
   PNG, JPEG, GIF, WebP and BMP files beside the music in `folder_images`
   (schema version 45), never as Tracks, with a role from the file name
@@ -732,6 +742,17 @@
 
 ### Changed
 
+- **orca-gtk's Signal Path inspector follows the redesign.** A header with
+  "How this track gets from file to output.", a verdict card over the chain,
+  and stages on a rail that leave out what does not apply: Source,
+  ReplayGain (track or album gain and peak protection), Parametric EQ (the
+  saved preset's name and a table of type, frequency, gain and Q) or Graphic
+  EQ, Crossfeed, Volume, Engine, System (PipeWire's rate, and whether it
+  resamples) and Output. A stage that changes the samples has an accent
+  node and says so. A closing card words the verdict from
+  `SignalPath.reasons`, e.g. "Not bit-perfect: ReplayGain and EQ change the
+  samples. Nothing is resampled between source and output." The verdict
+  card no longer toggles every stage's detail; each stage does its own.
 - **Smart Playlist editor redesign in orca-gtk.** The editor follows the
   new design as a page pushed in the Playlists section instead of a dialog:
   the top bar holds the breadcrumb with Cancel and Save Smart Playlist,

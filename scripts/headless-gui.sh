@@ -10,7 +10,10 @@
 # after PAGE is shown:
 #   key:SPEC     one key, with modifiers: key:Return, key:ctrl+k, key:alt+Left
 #   type:TEXT    types TEXT
-#   move:X,Y  click:X,Y  rclick:X,Y   the virtual pointer, in output pixels
+#   move:X,Y  click:X,Y  dclick:X,Y  rclick:X,Y   the virtual pointer, in
+#                output pixels; dclick is a double click
+#   drag:X1,Y1,X2,Y2   presses the left button at X1,Y1, moves to X2,Y2 in
+#                small steps, then releases
 #   scroll:N     N wheel steps, positive down
 #   wait:MS      sleeps MS milliseconds
 #   shot:PATH    saves a screenshot to PATH at once, without waiting to settle
@@ -479,7 +482,11 @@ for _ in $(seq 20); do
 done
 [ "$settled" = 1 ] || echo "headless-gui: the window was still changing after 10 s; saving the last frame" >&2
 pointer_command quit
-mv "$current" "$output"
+if [ "$settled" = 1 ]; then
+    mv "$current" "$output"
+else
+    mv "$previous" "$output"
+fi
 finished=1
 echo "$output"
 

@@ -1132,8 +1132,6 @@ fn setInt(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const 
 fn tightenPlayerBar(self: *App, breakpoint: *adw.Breakpoint) void {
     if (self.now_playing_box) |box| setInt(breakpoint, box, "width-request", 0);
     if (self.format_slot) |slot| setBoolean(breakpoint, slot, "visible", false);
-    if (self.device_label) |label| setBoolean(breakpoint, label, "visible", false);
-    if (self.device_icon) |icon| setBoolean(breakpoint, icon, "visible", true);
     if (self.volume_icon) |icon| setBoolean(breakpoint, icon, "visible", false);
     if (self.volume_scale) |scale| setBoolean(breakpoint, scale, "visible", false);
     if (self.volume_menu) |button| setBoolean(breakpoint, button, "visible", true);

@@ -1088,11 +1088,12 @@ pulled out from under the output.
   seek bar, with elapsed and total time in tabular figures. Its glyphs are
   Orca's own 1.6 px stroke icons, as are the volume and queue buttons'. On the right: a signal icon, then a button with
   the codec, the source rate and one verdict, read from the signal path
-  (such as `FLAC · 44.1 kHz · Native`; `DSP` while the equalizer or
-  crossfeed changes the signal, else `Resampled` when the output runs at
+  (such as `FLAC · 44.1 kHz · Native`; `DSP` while ReplayGain, the
+  equalizer or crossfeed changes the samples, exactly when the output
+  picker's Mode line lists DSP stages, else `Resampled` when the output runs at
   another rate, `Native` on a bit-perfect path; hidden while nothing
   plays), which opens the signal path; under it the output device's name
-  and a chevron, which opens the device list; a 76 px
+  and a chevron, which opens the output picker; a 76 px
   volume slider, whose knob shows on hover or focus and whose level is saved as `[playback] volume` once it settles;
   and the queue. Each control is built once and only made insensitive or
   hidden as the state changes, and the three groups fill the bar's height,
@@ -1100,9 +1101,29 @@ pulled out from under the output.
   not anything plays. A heart beside the title loves the audible
   track and, pressed again, removes the love; it is read when the audible track
   changes and after any change. Below the 900sp breakpoint the signal icon
-  is hidden, the device name becomes an icon
-  that opens the same device list,
+  is hidden, the device name stays and ellipsizes,
   and the volume slider moves into a popover behind the speaker button.
+- The output picker is a 400 px popover titled Play on, opened a few pixels
+  above the bar's top edge, with a refresh button that re-reads the outputs
+  and keeps the chosen one. Each output is a row
+  with an icon for its bus, its name and a note read from its
+  `DeviceCapabilities`: `USB · bit-perfect capable`, `HDMI · up to 48 kHz`,
+  `Bluetooth · lossy, re-encoded by the OS` in the caution colour,
+  `Virtual`, or `<bus> · not responding` when the device is `unavailable`,
+  which dims the row and makes it insensitive; System default, device 0,
+  reads `Follows your OS output · shared mode`. A check marks the chosen
+  output, and choosing another reopens the open output on it and keeps the
+  picker open. Below the list a summary reads the signal path: Sending (the
+  output's rate, depth and channels), Mode (`DSP:` and the active stages, such
+  as `ReplayGain −6.2 dB`, or `Native` on a bit-perfect path) and Device
+  supports (the reported rates and depths, such as `44.1–384 kHz ·
+  16/24/32-bit`, with `As reported by the device` as its tooltip, left out
+  when the device reported none). Then a volume slider with its value, and a
+  footer with Signal Path, which opens the signal path inspector, and Sound
+  settings, which opens Settings › Sound. Opening the picker is the only
+  place the frontend asks for capabilities (`enumerateOutputDevices` with
+  `.capabilities`), once per opening and once per refresh; every other
+  device list asks for `.identity`.
 
 **Love and dislike** are kept by liborca per recording (`librarySetFeedback`);
 album love is kept per Release (`librarySetReleaseLove`) and changes no track.
@@ -1232,7 +1253,7 @@ narrower than 1260sp or the window narrower than 900sp:
   device.
 - Sound: the equalizer, graphic or parametric, and beside it Output Device,
   Crossfeed and Audio Information. Output Device re-reads the outputs each
-  time the tab is shown, as the player bar's menu does when it opens, and
+  time the tab is shown, as the player bar's picker does when it opens, and
   both lists stay in step.
 - Listening: ListenBrainz, and Fetch lyrics from LRCLIB, saved as
   `[lyrics] fetch=true|false`.
@@ -1296,7 +1317,7 @@ because applying pauses the engine briefly. An edit still settling when the
 app quits, to either equalizer or the volume, is saved to `settings.ini`
 without being applied, so it holds at the next launch. Beside the equalizer, Output
 Device is a drop-down over the same list and selection as the player bar's
-output menu; choosing in either updates the other. Audio Information shows
+output picker; choosing in either updates the other. Audio Information shows
 the playing Track's format, sample rate, bit depth and channels from the
 signal path, or Nothing playing.
 
@@ -1381,27 +1402,43 @@ launch. `ORCA_LISTENBRAINZ_URL` selects another server, for a self-hosted
 instance or a local mock; `ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` do
 the same for matching and submission.
 
-The **signal path** sheet opens with a verdict card: Bit-perfect, Native
-sample rate or Resampled 44.1 → 96 kHz, then what changes the samples (gain
-adjusted, DSP active, volume), over the chain from the source format through
-the 32-bit float engine to the output device. Five stages follow on a rail,
-each with an icon, a short tag and two or three lines: Source (title, artist
-and album, format), ReplayGain / Gain (Track or Album ReplayGain by the
-correction applied, the applied gain, `−3.1 dB (from −6.2 dB)` when an album
-gain replaced a different track gain, `No album gain for this Track` on a
-fallback, and the volume), DSP (the equalizer and crossfeed, or No processing), Engine / System
-(32-bit float, and whether Orca resamples) and Output (the device, its rate
-and format). Output's tag says how the device is attached: USB, PCI,
-Bluetooth, HDMI or Virtual, and nothing when liborca does not know. Each
-stage's chevron reveals its technical detail; the Engine and Output details
-carry the transport and stream counters (`playerSnapshot`, `zoneStats`),
-read when the sheet is drawn and when the detail is revealed, and the
-Engine's leads with the device's block size from the signal path
-(`Block size 256 frames`) once the stream has run. Clicking the verdict card shows or hides every stage's
-detail. A footer says "Everything is working as intended." or names the
-reasons the path is not bit-perfect, and adds that PipeWire's own volume and
-resampling are not visible to Orca. The player bar's format button opens it
-in the inspector's Signal Path mode on a page with an inspector, and in a
+The **signal path** inspector is titled Signal Path, "How this track gets
+from file to output.", with a × that closes it. A verdict card follows:
+Bit-perfect, Native sample rate or Resampled 44.1 → 96 kHz, then `DSP
+active` when ReplayGain or DSP changes the samples and `volume` below full
+volume, over the chain from the source format through the 32-bit float
+engine to the output device (`FLAC 16-bit / 44.1 kHz → 32-bit float →
+Topping DX7 Pro`). The stages follow on a rail, in chain order, each with an
+icon node, its name, a value and a line or two; a stage that does not apply
+to the path is left out, not shown empty:
+
+| Stage | Shown | Value | Lines |
+| --- | --- | --- | --- |
+| Source | always | codec | title · artist; `16-bit · 44.1 kHz · Stereo` |
+| ReplayGain | gain applied or a mode on | `−5.3 dB` or None | `Track gain · peak protection on`; a missing album gain or the track gain it replaced |
+| Parametric EQ | parametric mode | `4 filters` | `HD 650 preset · preamp −3.0 dB`, the preset named when the curve is a saved one |
+| Graphic EQ | graphic mode | `10 bands` | the preamp, or `Flat · changes nothing` |
+| Crossfeed | on | percent | |
+| Volume | below full volume | percent | |
+| Engine | always | output depth | `Orca audio engine · no resampling`, or the rates it resamples between |
+| System | an output is open | PipeWire | the device rate, or the rates PipeWire resamples between |
+| Output | an output is open | USB, PCI, Bluetooth, HDMI or Virtual | device name; what is sent, `44.1 kHz · 32-bit float · 2 ch` |
+
+A stage that changes the samples has an accent node and a `Changes
+samples` line. Clicking a stage shows or hides its detail; the equalizer
+stages open with a table of type, frequency, gain and Q per filter or band,
+and the others carry technical lines. The Engine and Output details carry
+the transport and stream counters (`playerSnapshot`, `zoneStats`), read when
+the inspector is drawn and when the detail is revealed, and the System
+detail leads with the device's block size (`Block size 256 frames`) once
+the stream has run and says that PipeWire's own volume and resampling are
+not visible to Orca. A closing card gives the verdict in words, built from
+`SignalPath.reasons`: "Bit-perfect: nothing changes the samples between
+source and output.", or "Not bit-perfect:" and what changes the samples,
+remixes, rounds or is lossy, then where resampling happens or "Nothing is
+resampled between source and output.". The player bar's format button and
+the output picker's Signal Path link open it in the inspector's Signal
+Path mode on a page with an inspector, and the format button opens a
 popover on any other page. It comes from `Runtime.playerSignalPath`,
 which pauses the engine briefly, so one read serves the format line, what
 changes the samples, the popover and the inspector, and it is read only when the audible track,

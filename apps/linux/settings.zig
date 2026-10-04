@@ -9,8 +9,8 @@
 //! files Measure Loudness decodes at once, whether lyrics are fetched from
 //! LRCLIB, whether artist info is fetched, whether the queue shows what it
 //! played, what the inspector shows, how albums and artists are sorted and
-//! laid out, which columns an album's tracks show, the volume, and the
-//! Appearance tab's choices.
+//! laid out, which artists the Artists page lists, which columns an album's
+//! tracks show, the volume, and the Appearance tab's choices.
 //! Nothing about the library does, and never the ListenBrainz token
 //! or the AcoustID key, which live in the Secret Service.
 
@@ -286,6 +286,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         if (std.meta.stringToEnum(albums.Layout, std.mem.span(value))) |layout| self.artist_layout = layout;
     }
+    if (getString(keys, "view", "artists_role")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(liborca.ArtistRole, std.mem.span(value))) |role| self.artist_info.role = role;
+    }
     if (getString(keys, "view", "genre")) |value| {
         defer gtk.g_free(value);
         self.genres.selected = std.fmt.parseInt(i64, std.mem.span(value), 10) catch null;
@@ -300,11 +304,19 @@ pub fn load(self: *App) void {
     }
     if (getString(keys, "view", "track_columns") orelse getString(keys, "view", "song_columns")) |value| {
         defer gtk.g_free(value);
-        self.track_columns.columns = track_table.parseColumns(std.mem.span(value));
+        track_table.parseColumns(std.mem.span(value), &self.track_columns);
     }
     if (getString(keys, "view", "track_column_widths") orelse getString(keys, "view", "song_column_widths")) |value| {
         defer gtk.g_free(value);
         track_table.parseWidths(std.mem.span(value), &self.track_columns.widths);
+    }
+    if (getString(keys, "view", "track_columns_large")) |value| {
+        defer gtk.g_free(value);
+        track_table.parseColumns(std.mem.span(value), &self.track_columns_large);
+    }
+    if (getString(keys, "view", "track_column_widths_large")) |value| {
+        defer gtk.g_free(value);
+        track_table.parseWidths(std.mem.span(value), &self.track_columns_large.widths);
     }
     if (getString(keys, "playback", "volume")) |value| {
         defer gtk.g_free(value);
@@ -398,6 +410,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "view", "playlists_layout", @tagName(self.playlists.layout));
     gtk.g_key_file_set_string(keys, "view", "artist_sort", @tagName(self.artist_sort));
     gtk.g_key_file_set_string(keys, "view", "artists_layout", @tagName(self.artist_layout));
+    gtk.g_key_file_set_string(keys, "view", "artists_role", @tagName(self.artist_info.role));
     if (self.genres.selected) |genre| {
         var genre_buffer: [24]u8 = undefined;
         gtk.g_key_file_set_string(keys, "view", "genre", strings.format(&genre_buffer, "{d}", .{genre}).ptr);
@@ -412,10 +425,12 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "view", "album_columns", albums.formatColumns(&album_columns_buffer, self.album_columns).ptr);
     var tile_buffer: [16]u8 = undefined;
     gtk.g_key_file_set_string(keys, "view", "album_cover_size", strings.format(&tile_buffer, "{d}", .{appearance.album_grid_tile}).ptr);
-    var columns_buffer: [256]u8 = undefined;
-    gtk.g_key_file_set_string(keys, "view", "track_columns", track_table.formatColumns(&columns_buffer, self.track_columns.columns).ptr);
-    var widths_buffer: [256]u8 = undefined;
+    var columns_buffer: [384]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "view", "track_columns", track_table.formatColumns(&columns_buffer, &self.track_columns).ptr);
+    var widths_buffer: [384]u8 = undefined;
     gtk.g_key_file_set_string(keys, "view", "track_column_widths", track_table.formatWidths(&widths_buffer, &self.track_columns.widths).ptr);
+    gtk.g_key_file_set_string(keys, "view", "track_columns_large", track_table.formatColumns(&columns_buffer, &self.track_columns_large).ptr);
+    gtk.g_key_file_set_string(keys, "view", "track_column_widths_large", track_table.formatWidths(&widths_buffer, &self.track_columns_large.widths).ptr);
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);

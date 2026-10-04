@@ -32,8 +32,12 @@ const playlists = @import("playlists.zig");
 
 const App = app.App;
 
-const inspector_width: f64 = 420;
-const key_width = 98;
+const track_width: f64 = 316;
+const artist_width: f64 = 300;
+const playlist_width: f64 = 290;
+const lyrics_width: f64 = 380;
+const signal_path_width: f64 = 388;
+const key_width = 104;
 const separator = " · ";
 const minus = "−";
 
@@ -109,12 +113,25 @@ const Proposal = struct {
     dismiss: *gtk.Widget,
 };
 
+const signal_table_rows = @max(liborca.max_parametric_filters, liborca.equalizer_band_frequencies_hz.len);
+
+const SignalTable = struct {
+    grid: *gtk.Widget,
+    cells: [signal_table_rows][signal_path.table_columns]*gtk.Label,
+};
+
 const StageView = struct {
-    tag: *gtk.Label,
+    row: *gtk.Widget,
+    node: *gtk.Widget,
+    rail: *gtk.Widget,
+    button: *gtk.Widget,
+    value: *gtk.Label,
+    chevron: *gtk.Image,
     lines: *gtk.Label,
-    tech: *gtk.Label,
+    badge: *gtk.Widget,
     revealer: *gtk.Widget,
-    chevron: *gtk.Widget,
+    tech: *gtk.Label,
+    table: ?SignalTable,
 };
 
 pub const Panel = struct {
@@ -334,6 +351,23 @@ fn showMode(panel: *Panel, mode: app.Sidebar) void {
     if (mode != .hidden) gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, panel.root), pageName(mode));
     adw.adw_overlay_split_view_set_collapsed(split, boolean(overlays(panel.self)));
     adw.adw_overlay_split_view_set_show_sidebar(split, boolean(mode != .hidden));
+    fitWidth(panel);
+}
+
+fn fitWidth(panel: *Panel) void {
+    const width = switch (panel.laid_out) {
+        .lyrics => lyrics_width,
+        .signal_path => signal_path_width,
+        .hidden, .details => if (gtk.gtk_widget_get_visible(panel.artist_view.content) != 0)
+            artist_width
+        else if (gtk.gtk_widget_get_visible(panel.playlist_view.content) != 0)
+            playlist_width
+        else
+            track_width,
+    };
+    const split = gtk.cast(adw.OverlaySplitView, panel.split);
+    adw.adw_overlay_split_view_set_min_sidebar_width(split, width);
+    adw.adw_overlay_split_view_set_max_sidebar_width(split, width);
 }
 
 fn sidebarShownChanged(split: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -855,17 +889,31 @@ fn fetchArtistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 /// briefly, so the inspector never reads it itself.
 pub fn showSignalPath(self: *App, path: ?liborca.SignalPath) void {
     if (shownMode(self) != .signal_path) return;
-    const context: signal_path.Context = .{
-        .title = labelText(self.now_playing_title),
-        .subtitle = labelText(self.now_playing_detail),
+    const panel = self.inspector orelse return;
+    const current = mpris.nowPlaying(self.runtime, self.player);
+    defer if (current) |value| value.deinit();
+    var context: signal_path.Context = .{
         .device = transport.deviceName(self),
         .replay_gain_mode = self.runtime.playerReplayGainMode(self.player) catch .off,
     };
-    drawSignalPath(self.inspector orelse return, path, context);
+    if (current) |value| {
+        context.title = value.summary.title;
+        context.artist = if (value.summary.artist.len != 0) value.summary.artist else value.summary.album_artist;
+    }
+    if (path) |value| if (value.parametric) |curve| {
+        context.preset = presetName(self, &curve);
+    };
+    drawSignalPath(panel, path, context);
 }
 
-fn labelText(label: ?*gtk.Label) []const u8 {
-    return std.mem.span(gtk.gtk_label_get_text(label orelse return ""));
+fn presetName(self: *App, curve: *const liborca.ParametricEqualizer) []const u8 {
+    for (self.parametric.presets[0..self.parametric.preset_count]) |*preset| {
+        if (preset.curve.count != curve.count or preset.curve.preamp_db != curve.preamp_db) continue;
+        for (preset.curve.filterList(), curve.filterList()) |left, right| {
+            if (!std.meta.eql(left, right)) break;
+        } else return preset.name();
+    }
+    return "";
 }
 
 fn drawSignalPath(panel: *Panel, maybe_path: ?liborca.SignalPath, context: signal_path.Context) void {
@@ -875,48 +923,59 @@ fn drawSignalPath(panel: *Panel, maybe_path: ?liborca.SignalPath, context: signa
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, panel.signal_status), gtk.false_);
     gtk.gtk_widget_set_visible(panel.signal_content, gtk.true_);
 
-    var buffer: [512]u8 = undefined;
-    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    signal_path.writeVerdict(&writer, path) catch {};
-    if (writer.end == 0) writer.writeAll("No output open") catch {};
-    gtk.gtk_label_set_text(panel.signal_verdict_label, finish(&buffer, &writer).ptr);
-    writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    signal_path.writeChain(&writer, path, context.device) catch {};
-    gtk.gtk_label_set_text(panel.signal_chain_label, finish(&buffer, &writer).ptr);
-    if (signal_path.native(path))
-        gtk.gtk_widget_add_css_class(panel.signal_dot, "native")
-    else
-        gtk.gtk_widget_remove_css_class(panel.signal_dot, "native");
+    if (!writeLabel(panel.signal_verdict_label, signal_path.writeVerdict, .{path}))
+        gtk.gtk_label_set_text(panel.signal_verdict_label, "No output open");
+    _ = writeLabel(panel.signal_chain_label, signal_path.writeChain, .{ path, context.device });
 
-    for (signal_path.all_stages, panel.signal_stages) |stage, view| {
-        writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-        signal_path.writeTag(&writer, path, stage) catch {};
-        gtk.gtk_label_set_text(view.tag, finish(&buffer, &writer).ptr);
-        writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-        signal_path.writeLines(&writer, path, stage, context) catch {};
-        gtk.gtk_label_set_text(view.lines, finish(&buffer, &writer).ptr);
-        if (signal_path.isLive(stage)) {
-            writeLiveTech(panel, stage, view);
-        } else {
-            writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-            signal_path.writeTech(&writer, path, stage) catch {};
-            gtk.gtk_label_set_text(view.tech, finish(&buffer, &writer).ptr);
-        }
+    var last: ?*StageView = null;
+    for (signal_path.all_stages, &panel.signal_stages) |stage, *view| {
+        const shown = signal_path.applies(path, stage, context);
+        gtk.gtk_widget_set_visible(view.row, boolean(shown));
+        if (!shown) continue;
+        last = view;
+        gtk.gtk_widget_remove_css_class(view.rail, "last");
+        _ = writeLabel(view.value, signal_path.writeValue, .{ path, stage });
+        _ = writeLabel(view.lines, signal_path.writeLines, .{ path, stage, context });
+        const changes = signal_path.changesSamples(path, stage);
+        gtk.gtk_widget_set_visible(view.badge, boolean(changes));
+        if (changes)
+            gtk.gtk_widget_add_css_class(view.node, "active")
+        else
+            gtk.gtk_widget_remove_css_class(view.node, "active");
+        if (view.table) |table| fillSignalTable(table, path, stage);
+        const tech = if (signal_path.isLive(stage))
+            writeLiveTech(panel, stage, view.tech)
+        else
+            writeLabel(view.tech, signal_path.writeTech, .{ path, stage });
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, view.tech), boolean(tech));
     }
+    if (last) |view| gtk.gtk_widget_add_css_class(view.rail, "last");
 
-    writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    signal_path.writeFooter(&writer, path) catch {};
-    gtk.gtk_label_set_text(panel.signal_footer_label, finish(&buffer, &writer).ptr);
+    _ = writeLabel(panel.signal_footer_label, signal_path.writeFooter, .{path});
 }
 
-fn writeLiveTech(panel: *Panel, stage: signal_path.Stage, view: StageView) void {
-    const self = panel.self;
-    const snapshot = self.runtime.playerSnapshot(self.player) catch null;
-    const stats = if (self.zone) |zone| self.runtime.zoneStats(zone) catch null else null;
-    var buffer: [256]u8 = undefined;
+fn writeLabel(label: *gtk.Label, comptime write_fn: anytype, arguments: anytype) bool {
+    var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    signal_path.writeLiveTech(&writer, stage, panel.signal_block_frames, snapshot, stats) catch {};
-    gtk.gtk_label_set_text(view.tech, finish(&buffer, &writer).ptr);
+    @call(.auto, write_fn, .{&writer} ++ arguments) catch {};
+    gtk.gtk_label_set_text(label, finish(&buffer, &writer).ptr);
+    return writer.end != 0;
+}
+
+fn fillSignalTable(table: SignalTable, path: liborca.SignalPath, stage: signal_path.Stage) void {
+    const rows = signal_path.tableRows(path, stage);
+    for (table.cells, 0..) |cells, row| for (cells, 0..) |cell, column| {
+        const shown = row < rows and writeLabel(cell, signal_path.writeTableCell, .{ path, stage, row, column });
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, cell), boolean(shown));
+    };
+    gtk.gtk_widget_set_visible(table.grid, boolean(rows != 0));
+}
+
+fn writeLiveTech(panel: *Panel, stage: signal_path.Stage, label: *gtk.Label) bool {
+    const self = panel.self;
+    const snapshot = if (stage == .engine) self.runtime.playerSnapshot(self.player) catch null else null;
+    const stats = if (stage == .output) if (self.zone) |zone| self.runtime.zoneStats(zone) catch null else null else null;
+    return writeLabel(label, signal_path.writeLiveTech, .{ stage, panel.signal_block_frames, snapshot, stats });
 }
 
 fn showSignalStatus(panel: *Panel, text: [*:0]const u8) void {
@@ -927,10 +986,13 @@ fn showSignalStatus(panel: *Panel, text: [*:0]const u8) void {
 
 fn stageIcon(stage: signal_path.Stage) [*:0]const u8 {
     return switch (stage) {
-        .source => "x-office-document-symbolic",
-        .gain => "multimedia-volume-control-symbolic",
-        .dsp => "orca-pulse-symbolic",
-        .engine => "emblem-system-symbolic",
+        .source => "orca-file-symbolic",
+        .replay_gain => "orca-gain-symbolic",
+        .parametric, .graphic => "orca-health-symbolic",
+        .crossfeed => "orca-shuffle-symbolic",
+        .volume => "orca-volume-low-symbolic",
+        .engine => "orca-engine-symbolic",
+        .system => "orca-system-symbolic",
         .output => "audio-headphones-symbolic",
     };
 }
@@ -938,18 +1000,19 @@ fn stageIcon(stage: signal_path.Stage) [*:0]const u8 {
 fn expandStage(panel: *Panel, index: usize, expanded: bool) void {
     const view = panel.signal_stages[index];
     const stage = signal_path.all_stages[index];
-    if (expanded and signal_path.isLive(stage)) writeLiveTech(panel, stage, view);
+    if (expanded and signal_path.isLive(stage))
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, view.tech), boolean(writeLiveTech(panel, stage, view.tech)));
     gtk.gtk_revealer_set_reveal_child(gtk.cast(gtk.Revealer, view.revealer), boolean(expanded));
-    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, view.chevron), if (expanded) "pan-down-symbolic" else "go-next-symbolic");
-    gtk.gtk_widget_set_tooltip_text(view.chevron, if (expanded) "Hide details" else "Show details");
-    gtk.gtk_accessible_update_state(gtk.cast(gtk.Accessible, view.chevron), gtk.ACCESSIBLE_STATE_EXPANDED, @as(c_int, boolean(expanded)), @as(c_int, -1));
+    gtk.gtk_image_set_from_icon_name(view.chevron, if (expanded) "orca-chevron-down-symbolic" else "orca-chevron-right-symbolic");
+    gtk.gtk_widget_set_tooltip_text(view.button, if (expanded) "Hide details" else "Show details");
+    gtk.gtk_accessible_update_state(gtk.cast(gtk.Accessible, view.button), gtk.ACCESSIBLE_STATE_EXPANDED, @as(c_int, boolean(expanded)), @as(c_int, -1));
 }
 
 fn stageExpanded(panel: *Panel, index: usize) bool {
     return gtk.gtk_revealer_get_reveal_child(gtk.cast(gtk.Revealer, panel.signal_stages[index].revealer)) != 0;
 }
 
-fn stageChevronClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn stageClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
     const index = slotOf(button);
     expandStage(panel, index, !stageExpanded(panel, index));
@@ -959,76 +1022,99 @@ fn closeClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     showSidebar(panelData(data).self, .hidden);
 }
 
+fn newSignalTable() SignalTable {
+    const grid = gtk.gtk_grid_new();
+    gtk.gtk_widget_add_css_class(grid, "signal-table");
+    gtk.gtk_grid_set_row_spacing(gtk.cast(gtk.Grid, grid), 5);
+    gtk.gtk_grid_set_column_spacing(gtk.cast(gtk.Grid, grid), 8);
+    var cells: [signal_table_rows][signal_path.table_columns]*gtk.Label = undefined;
+    for (&cells, 0..) |*row_cells, row| for (row_cells, 0..) |*cell, column| {
+        const label = gtk.gtk_label_new("");
+        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), if (column == 0) 0.0 else 1.0);
+        gtk.gtk_widget_set_hexpand(label, gtk.true_);
+        gtk.gtk_widget_add_css_class(label, switch (column) {
+            0 => "signal-table-kind",
+            signal_path.table_columns - 1 => "signal-table-q",
+            else => "signal-table-figure",
+        });
+        gtk.gtk_grid_attach(gtk.cast(gtk.Grid, grid), label, @intCast(column), @intCast(row), 1, 1);
+        cell.* = gtk.cast(gtk.Label, label);
+    };
+    return .{ .grid = grid, .cells = cells };
+}
+
 fn newStage(panel: *Panel, index: usize, flow: *gtk.Box) StageView {
     const stage = signal_path.all_stages[index];
     const icon = gtk.gtk_image_new_from_icon_name(stageIcon(stage));
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 20);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 18);
     const node = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(node, "signal-node");
     gtk.gtk_widget_set_halign(node, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_hexpand(node, gtk.false_);
-    gtk.gtk_widget_set_vexpand(node, gtk.false_);
-    gtk.gtk_widget_set_hexpand(icon, gtk.true_);
-    gtk.gtk_widget_set_vexpand(icon, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, node), icon);
     const rail = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(rail, "signal-rail");
     gtk.gtk_widget_set_halign(rail, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_vexpand(rail, gtk.true_);
-    gtk.gtk_widget_set_visible(rail, boolean(index + 1 < signal_path.all_stages.len));
     const track = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_hexpand(track, gtk.false_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, track), node);
     gtk.gtk_box_append(gtk.cast(gtk.Box, track), rail);
 
-    const title = gtk.gtk_label_new(signal_path.stageTitle(stage).ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
-    gtk.gtk_widget_set_hexpand(title, gtk.true_);
-    gtk.gtk_widget_add_css_class(title, "signal-stage");
-    const tag = newLabel("signal-tag");
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, tag), gtk.false_);
-    const head = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, head), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, head), tag);
-
-    const lines = newLabel("signal-lines");
-    gtk.gtk_widget_set_hexpand(lines, gtk.true_);
-    const chevron = gtk.gtk_button_new_from_icon_name("go-next-symbolic");
-    gtk.gtk_widget_add_css_class(chevron, "flat");
+    const name = newLabel("signal-stage-name");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, name), signal_path.stageTitle(stage).ptr);
+    gtk.gtk_widget_set_hexpand(name, gtk.true_);
+    const value = newLabel("signal-stage-value");
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, value), gtk.false_);
+    const chevron = gtk.gtk_image_new_from_icon_name("orca-chevron-right-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, chevron), 14);
     gtk.gtk_widget_add_css_class(chevron, "signal-chevron");
-    gtk.gtk_widget_set_valign(chevron, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(chevron, "Show details");
-    gtk.g_object_set_data(chevron, "orca-slot", @ptrFromInt(index));
-    _ = gtk.signalConnect(chevron, "clicked", gtk.callback(stageChevronClicked), panel);
-    const body = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), lines);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), chevron);
+    const trailing = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, trailing), value);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, trailing), chevron);
+    const head = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, head), name);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, head), trailing);
 
+    const lines = newLabel("signal-stage-lines");
+    const badge = newLabel("signal-badge");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, badge), "Changes samples");
     const tech = newLabel("signal-tech");
-    gtk.gtk_widget_add_css_class(tech, "numeric");
-    gtk.gtk_label_set_selectable(gtk.cast(gtk.Label, tech), gtk.true_);
+    const detail = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
+    gtk.gtk_widget_add_css_class(detail, "signal-detail");
+    const table: ?SignalTable = if (signal_path.hasTable(stage)) newSignalTable() else null;
+    if (table) |value_table| gtk.gtk_box_append(gtk.cast(gtk.Box, detail), value_table.grid);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, detail), tech);
     const revealer = gtk.gtk_revealer_new();
     gtk.gtk_revealer_set_transition_type(gtk.cast(gtk.Revealer, revealer), gtk.REVEALER_TRANSITION_SLIDE_DOWN);
-    gtk.gtk_revealer_set_child(gtk.cast(gtk.Revealer, revealer), tech);
+    gtk.gtk_revealer_set_child(gtk.cast(gtk.Revealer, revealer), detail);
 
-    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 4);
-    gtk.gtk_widget_add_css_class(text, "signal-text");
-    gtk.gtk_widget_set_hexpand(text, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, text), head);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, text), body);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, text), revealer);
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    for ([_]*gtk.Widget{ head, lines, badge, revealer }) |widget|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, content), widget);
+    const button = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
+    gtk.gtk_widget_add_css_class(button, "signal-stage");
+    gtk.gtk_widget_set_hexpand(button, gtk.true_);
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_START);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, signal_path.stageTitle(stage).ptr, @as(c_int, -1));
+    gtk.g_object_set_data(button, "orca-slot", @ptrFromInt(index));
+    _ = gtk.signalConnect(button, "clicked", gtk.callback(stageClicked), panel);
 
-    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
-    gtk.gtk_widget_add_css_class(row, "signal-stage-row");
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), track);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), button);
     gtk.gtk_box_append(flow, row);
     return .{
-        .tag = gtk.cast(gtk.Label, tag),
+        .row = row,
+        .node = node,
+        .rail = rail,
+        .button = button,
+        .value = gtk.cast(gtk.Label, value),
+        .chevron = gtk.cast(gtk.Image, chevron),
         .lines = gtk.cast(gtk.Label, lines),
-        .tech = gtk.cast(gtk.Label, tech),
+        .badge = badge,
         .revealer = revealer,
-        .chevron = chevron,
+        .tech = gtk.cast(gtk.Label, tech),
+        .table = table,
     };
 }
 
@@ -2152,8 +2238,8 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const signal_title = newLabel("signal-title");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, signal_title), "Signal Path");
     const signal_subtitle = newLabel("signal-subtitle");
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, signal_subtitle), "See how your audio is processed from source to output.");
-    const signal_titles = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, signal_subtitle), "How this track gets from file to output.");
+    const signal_titles = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 3);
     gtk.gtk_widget_set_hexpand(signal_titles, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_titles), signal_title);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_titles), signal_subtitle);
@@ -2161,7 +2247,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     gtk.gtk_widget_add_css_class(signal_close, "flat");
     gtk.gtk_widget_add_css_class(signal_close, "signal-close");
     gtk.gtk_widget_set_valign(signal_close, gtk.ALIGN_START);
-    gtk.gtk_widget_set_tooltip_text(signal_close, "Close");
+    gtk.gtk_widget_set_tooltip_text(signal_close, "Close signal path");
     const signal_header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_icon);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_titles);
@@ -2192,14 +2278,10 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const footer_icon = gtk.gtk_image_new_from_icon_name("orca-info-symbolic");
     gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, footer_icon), 16);
     gtk.gtk_widget_set_valign(footer_icon, gtk.ALIGN_START);
-    const signal_footer_label = newLabel("signal-footer-title");
-    const footer_detail = newLabel("signal-footer-detail");
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, footer_detail), signal_path.pipewire_hedge);
-    const footer_text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_set_hexpand(footer_text, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, footer_text), signal_footer_label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, footer_text), footer_detail);
-    const signal_footer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(footer_icon, "signal-footer-icon");
+    const signal_footer_label = newLabel("signal-footer-text");
+    gtk.gtk_widget_set_hexpand(signal_footer_label, gtk.true_);
+    const signal_footer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(signal_footer, "signal-footer");
     gtk.gtk_widget_set_valign(signal_footer, gtk.ALIGN_END);
     gtk.gtk_box_append(gtk.cast(gtk.Box, signal_footer), footer_icon);
@@ -2290,7 +2372,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     _ = gtk.signalConnect(find_button, "clicked", gtk.callback(findMatchClicked), panel);
     _ = gtk.signalConnect(verify_button, "clicked", gtk.callback(verifyClicked), panel);
     _ = gtk.signalConnect(signal_close, "clicked", gtk.callback(closeClicked), panel);
-    _ = gtk.signalConnect(signal_verdict, "clicked", gtk.callback(verdictClicked), panel);
+    for (signal_path.all_stages, 0..) |stage, index| expandStage(panel, index, signal_path.hasTable(stage));
     panel.lyrics.init(self);
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), panel.lyrics.root, "lyrics");
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(signal_body), "signal_path");
