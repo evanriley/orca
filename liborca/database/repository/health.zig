@@ -59,6 +59,9 @@ pub const HealthIssueInput = struct {
     details: []const u8 = "",
     /// The other file of a duplicate.
     related_file_id: ?i64 = null,
+    /// How alike a `likely_duplicate`'s audio is to its related file's, from
+    /// 0 to 1.
+    similarity: ?f32 = null,
 };
 
 pub const HealthIssue = struct {
@@ -139,12 +142,13 @@ pub fn clearReleaseLocked(db: sqlite.Database, release_id: i64, kind: HealthIssu
 
 pub fn recordIssueLocked(db: sqlite.Database, file_id: i64, issue: HealthIssueInput) !void {
     var statement = try db.prepare(
-        \\INSERT INTO library_health_issues(file_id, kind, severity, details, related_file_id, updated_at)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+        \\INSERT INTO library_health_issues(file_id, kind, severity, details, related_file_id, similarity, updated_at)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
         \\ON CONFLICT(file_id, kind) DO UPDATE SET
         \\    severity=excluded.severity,
         \\    details=excluded.details,
         \\    related_file_id=excluded.related_file_id,
+        \\    similarity=excluded.similarity,
         \\    updated_at=excluded.updated_at;
     );
     defer statement.deinit();
@@ -153,6 +157,7 @@ pub fn recordIssueLocked(db: sqlite.Database, file_id: i64, issue: HealthIssueIn
     try statement.bindInt64(3, @intFromEnum(issue.severity));
     try statement.bindText(4, issue.details);
     try statement.bindOptionalInt64(5, issue.related_file_id);
+    try statement.bindOptionalDouble(6, if (issue.similarity) |value| value else null);
     if (try statement.step() != .done) return error.SqlFailed;
 }
 
@@ -276,8 +281,8 @@ pub const HealthIssueRepository = struct {
         try delete.bindInt64(1, file_id);
         if (try delete.step() != .done) return error.SqlFailed;
         var insert = try self.db.prepare(
-            \\INSERT INTO library_health_issues(file_id, kind, severity, details, related_file_id, updated_at)
-            \\VALUES (?1, ?2, ?3, ?4, ?5, unixepoch());
+            \\INSERT INTO library_health_issues(file_id, kind, severity, details, related_file_id, similarity, updated_at)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch());
         );
         defer insert.deinit();
         for (issues) |issue| {
@@ -286,6 +291,7 @@ pub const HealthIssueRepository = struct {
             try insert.bindInt64(3, @intFromEnum(issue.severity));
             try insert.bindText(4, issue.details);
             try insert.bindOptionalInt64(5, issue.related_file_id);
+            try insert.bindOptionalDouble(6, if (issue.similarity) |value| value else null);
             if (try insert.step() != .done) return error.SqlFailed;
             try insert.reset();
         }

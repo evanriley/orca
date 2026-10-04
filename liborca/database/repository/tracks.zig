@@ -695,6 +695,17 @@ pub const TrackRepository = struct {
         allocator: std.mem.Allocator,
         track_id: i64,
     ) !?TrackFileFacts {
+        return self.fileFactsOf(allocator, track_id, null);
+    }
+
+    /// `fileFacts` about one named file of the Track instead of the one it
+    /// resolves to, or about the resolved file when `file_id` is null.
+    pub fn fileFactsOf(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+        file_id: ?i64,
+    ) !?TrackFileFacts {
         var statement = try self.db.prepare(
             \\SELECT files.id, files.codec, files.size_bytes, files.sample_rate,
             \\       files.bit_depth, files.channels, files.duration_ms, files.quick_hash,
@@ -717,6 +728,7 @@ pub const TrackRepository = struct {
             \\             AND member_tags.track_total > 0)
             \\FROM tracks
             \\JOIN files ON files.id = COALESCE(
+            \\    ?2,
             \\    tracks.preferred_file_id,
             \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1)
             \\)
@@ -726,6 +738,7 @@ pub const TrackRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, track_id);
+        try statement.bindOptionalInt64(2, file_id);
         if (try statement.step() != .row) return null;
         const codec = try allocator.dupe(u8, statement.columnText(1));
         errdefer allocator.free(codec);

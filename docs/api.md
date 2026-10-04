@@ -310,6 +310,23 @@ defer page.deinit();
   one kind's issues. For `exact_duplicate` and `likely_duplicate`, `bytes`
   is what removing the redundant copies would free. See
   [analysis.md](analysis.md#by-kind).
+- Duplicates are shown as groups. `libraryDuplicateGroupPage(library,
+  allocator, limit, offset)` returns a `DuplicateGroupPage` of
+  `DuplicateGroup`s, each named by its lowest file id, and
+  `libraryDuplicateGroupTotals` a `DuplicateGroupTotals`.
+  `libraryDuplicateGroup(library, allocator, id)` returns a
+  `DuplicateCopyList` of `DuplicateCopy`s, the suggested copy first, each
+  with its `TrackDetails`. `libraryKeepBoth(library, file_id,
+  other_file_id)` and `libraryIgnoreDuplicateGroup(library, id)` dismiss
+  duplicate issues; `libraryMergeDuplicateMetadata(library, keep_track_id,
+  from_track_id)` copies what one Track has and the other lacks and returns
+  a `DuplicateMerge`. No file is written. The C ABI mirrors them as
+  `orca_library_query_duplicate_groups`,
+  `orca_library_duplicate_group_totals`,
+  `orca_library_query_duplicate_group`, `orca_library_keep_both_duplicates`,
+  `orca_library_ignore_duplicate_group` and
+  `orca_library_merge_duplicate_metadata`. See
+  [analysis.md](analysis.md#groups).
 - `libraryStats(library)` returns `LibraryStats`: the Artist, Release and
   Track counts the unfiltered listings show, the files with a location that
   is not missing and their bytes, the Tracks' summed `total_duration_ms`,

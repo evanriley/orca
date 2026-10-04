@@ -21,6 +21,7 @@ const provider_sources = @import("provider_sources.zig");
 const providers = @import("../providers/root.zig");
 const queue_history = @import("queue.zig");
 const runtime_artist_info = @import("runtime_artist_info.zig");
+const runtime_duplicates = @import("runtime_duplicates.zig");
 const runtime_genres = @import("runtime_genres.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
@@ -50,6 +51,12 @@ pub const queue_history_capacity = queue_history.queue_history_capacity;
 pub const TrackDetails = track_details.TrackDetails;
 pub const RecordingIdSource = track_details.RecordingIdSource;
 pub const TrackLoudness = track_details.Loudness;
+pub const DuplicateGroup = runtime_duplicates.DuplicateGroup;
+pub const DuplicateGroupPage = runtime_duplicates.DuplicateGroupPage;
+pub const DuplicateGroupTotals = runtime_duplicates.DuplicateGroupTotals;
+pub const DuplicateCopy = runtime_duplicates.DuplicateCopy;
+pub const DuplicateCopyList = runtime_duplicates.DuplicateCopyList;
+pub const DuplicateMerge = runtime_duplicates.DuplicateMerge;
 pub const PlayStats = database.PlayStats;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
@@ -1760,6 +1767,67 @@ pub const OrcaRuntime = struct {
         file_id: i64,
     ) !?database.HealthFile {
         return (try libraryDatabase(self, library)).health_issues.file(allocator, file_id);
+    }
+
+    /// A page of the groups of files the duplicate scan found to be copies of
+    /// one another, ordered by group id. `limit` is at most 512.
+    pub fn libraryDuplicateGroupPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !DuplicateGroupPage {
+        return runtime_duplicates.libraryDuplicateGroupPage(self, library, allocator, limit, offset);
+    }
+
+    /// How many duplicate groups there are, and the bytes removing every copy
+    /// but each group's suggested one would free.
+    pub fn libraryDuplicateGroupTotals(self: *OrcaRuntime, library: LibraryHandle) !DuplicateGroupTotals {
+        return runtime_duplicates.libraryDuplicateGroupTotals(self, library);
+    }
+
+    /// The copies of one duplicate group, the suggested one to keep first.
+    /// `error.UnknownDuplicateGroup` when no group has `group_id`.
+    pub fn libraryDuplicateGroup(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        group_id: i64,
+    ) !DuplicateCopyList {
+        return runtime_duplicates.libraryDuplicateGroup(self, library, allocator, group_id);
+    }
+
+    /// Dismisses the duplicate issues of two files of one group, so neither
+    /// is reported as a copy until its bytes change.
+    /// `error.NotDuplicates` when they are not in one group.
+    pub fn libraryKeepBoth(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        file_id: i64,
+        other_file_id: i64,
+    ) !void {
+        return runtime_duplicates.libraryKeepBoth(self, library, file_id, other_file_id);
+    }
+
+    /// Dismisses the duplicate issues of every file of one group.
+    pub fn libraryIgnoreDuplicateGroup(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !void {
+        return runtime_duplicates.libraryIgnoreDuplicateGroup(self, library, group_id);
+    }
+
+    /// Gives the Track `keep_track_id` what `from_track_id` has and it lacks:
+    /// Orca values for fields it has none for, a locked value over an unlocked
+    /// one, and the rating and love or hate of `from_track_id`'s recording
+    /// when its own has none. One transaction; a locked value of the kept
+    /// Track always stays, listens stay with their recording, and no media
+    /// file is written. The kept files are reprojected before this returns.
+    pub fn libraryMergeDuplicateMetadata(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        keep_track_id: i64,
+        from_track_id: i64,
+    ) !DuplicateMerge {
+        return runtime_duplicates.libraryMergeDuplicateMetadata(self, library, keep_track_id, from_track_id);
     }
 
     pub fn createPlayer(self: *OrcaRuntime) !PlayerHandle {

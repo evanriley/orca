@@ -86,6 +86,8 @@ const Finding = struct {
     /// The other row of the finding, or null when the duplicate is a second
     /// location of this same row.
     related_file_id: ?i64 = null,
+    /// The fingerprint score behind `likely_details`.
+    similarity: ?f32 = null,
 
     fn deinit(self: Finding, allocator: std.mem.Allocator) void {
         if (self.exact_details) |details| allocator.free(details);
@@ -292,6 +294,7 @@ pub const DuplicateScan = struct {
             .{ path, 100 * best_score },
         );
         finding.related_file_id = matched;
+        finding.similarity = best_score;
         return .likely;
     }
 
@@ -393,6 +396,7 @@ pub const DuplicateScan = struct {
                     .severity = .information,
                     .details = details,
                     .related_file_id = finding.related_file_id,
+                    .similarity = finding.similarity,
                 });
             } else {
                 try self.health_issues.clearLocked(finding.file_id, .likely_duplicate);
@@ -692,6 +696,15 @@ test "audio that only resembles another file is reported as likely rather than e
     defer testing.allocator.free(details);
     try testing.expect(std.mem.indexOf(u8, details, "/music/one.mp3") != null);
     try testing.expect(std.mem.indexOf(u8, details, "% match") != null);
+    var similarity = try fixture.library.database.prepare(
+        "SELECT similarity FROM library_health_issues WHERE file_id = ?1 AND kind = ?2;",
+    );
+    defer similarity.deinit();
+    try similarity.bindInt64(1, first);
+    try similarity.bindInt64(2, @intFromEnum(database.HealthIssueKind.likely_duplicate));
+    try testing.expectEqual(database.sqlite.Step.row, try similarity.step());
+    try testing.expect(similarity.columnDouble(0) >= pass.likely_threshold);
+    try testing.expect(similarity.columnDouble(0) <= 1);
 }
 
 test "a file outside the duration window is never compared with one inside it" {

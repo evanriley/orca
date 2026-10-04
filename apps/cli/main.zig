@@ -187,7 +187,17 @@ const commands = [_]Command{
         .max_arguments = null,
         .run = analyzeLibrary,
     },
-    .{ .name = "duplicates", .usage = "duplicates DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = findDuplicates },
+    .{
+        .name = "duplicates",
+        .usage = "duplicates DATABASE [--batch=N] [--cancel-after=MS]\n" ++ usage_indent ++
+            "  | --groups [--limit N] [--offset N] | --group=ID",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = findDuplicates,
+    },
+    .{ .name = "merge-duplicate", .usage = "merge-duplicate DATABASE KEEP_TRACK_ID FROM_TRACK_ID", .min_arguments = 3, .max_arguments = 3, .run = mergeDuplicate },
+    .{ .name = "keep-both", .usage = "keep-both DATABASE FILE_ID FILE_ID", .min_arguments = 3, .max_arguments = 3, .run = keepBothDuplicates, .shares_usage_line = true },
+    .{ .name = "ignore-duplicate", .usage = "ignore-duplicate DATABASE GROUP_ID", .min_arguments = 2, .max_arguments = 2, .run = ignoreDuplicateGroup, .shares_usage_line = true },
     .{
         .name = "jobs",
         .usage = "jobs DATABASE [--start=KIND]... [--pause-after=MS] [--resume-after=MS]\n" ++ usage_indent ++
@@ -1462,6 +1472,13 @@ fn analyzeLibrary(context: Context) !void {
 /// measurements rather than over the files. It opens nothing, so a run is
 /// seconds where the analysis behind it is hours.
 fn findDuplicates(context: Context) !void {
+    for (context.arguments[1..]) |argument| {
+        if (std.mem.eql(u8, argument, "--groups")) return listDuplicateGroups(context);
+        if (std.mem.startsWith(u8, argument, "--group=")) {
+            if (context.arguments.len != 2) return error.UnknownOption;
+            return showDuplicateGroup(context, try std.fmt.parseInt(i64, argument["--group=".len..], 10));
+        }
+    }
     const stdout = context.stdout;
     const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
     const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
@@ -1480,6 +1497,109 @@ fn findDuplicates(context: Context) !void {
     try stdout.flush();
     try awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms);
     try printDuplicateStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+fn listDuplicateGroups(context: Context) !void {
+    var limit: u32 = 256;
+    var offset: u32 = 0;
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.eql(u8, argument, "--groups")) continue;
+        if (std.mem.eql(u8, argument, "--limit") or std.mem.eql(u8, argument, "--offset")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            const value = try std.fmt.parseInt(u32, context.arguments[index], 10);
+            if (std.mem.eql(u8, argument, "--limit")) limit = value else offset = value;
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var page = try runtime.libraryDuplicateGroupPage(library, context.allocator, limit, offset);
+    defer page.deinit();
+    for (page.items) |group| {
+        try context.stdout.print("{d}\t{s}\t{s}\tcopies={d} same_recording={s} similarity=", .{
+            group.id,
+            group.title,
+            group.artist,
+            group.copies,
+            if (group.same_recording) "yes" else "no",
+        });
+        if (group.similarity) |similarity| try context.stdout.print("{d:.2}", .{similarity}) else try context.stdout.writeByte('-');
+        try context.stdout.print(" bytes_redundant={d}\n", .{group.bytes_redundant});
+    }
+    const totals = try runtime.libraryDuplicateGroupTotals(library);
+    try context.stdout.print("groups={d} bytes={d}\n", .{ totals.groups, totals.bytes });
+}
+
+fn showDuplicateGroup(context: Context, group_id: i64) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var copies = try runtime.libraryDuplicateGroup(library, context.allocator, group_id);
+    defer copies.deinit();
+    try context.stdout.print("group={d} same_recording={s} similarity=", .{ group_id, if (copies.same_recording) "yes" else "no" });
+    if (copies.similarity) |similarity| try context.stdout.print("{d:.2}\n", .{similarity}) else try context.stdout.writeAll("-\n");
+    for (copies.items) |copy| {
+        try context.stdout.print("file={d} track=", .{copy.file_id});
+        if (copy.track_id) |track_id| try context.stdout.print("{d}", .{track_id}) else try context.stdout.writeByte('-');
+        try context.stdout.print(" keep={s} locations={d} playlists={d}", .{
+            if (copy.suggested_keep) "yes" else "no",
+            copy.locations,
+            copy.playlist_count,
+        });
+        if (copy.details) |details| {
+            try context.stdout.print(" codec={s} rate={d} depth={d} bytes={d} duration_ms={d} plays={d} rating=", .{
+                details.codec,
+                details.sample_rate orelse 0,
+                details.bit_depth orelse 0,
+                details.size_bytes orelse 0,
+                details.duration_ms orelse 0,
+                details.play_count,
+            });
+            if (details.rating) |rating| try context.stdout.print("{d}", .{rating}) else try context.stdout.writeByte('-');
+            try context.stdout.print(" lufs=", .{});
+            if (details.loudness) |loudness| try context.stdout.print("{d:.1}", .{loudness.integrated_lufs}) else try context.stdout.writeByte('-');
+            try context.stdout.print(" album={s} title={s} path={s}", .{ details.album, details.title, details.path orelse "-" });
+        }
+        try context.stdout.writeByte('\n');
+    }
+}
+
+fn mergeDuplicate(context: Context) !void {
+    const keep = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const from = try std.fmt.parseInt(i64, context.arguments[2], 10);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const merged = try runtime.libraryMergeDuplicateMetadata(library, keep, from);
+    try context.stdout.print("track={d} values={d} genres={s} rating={s} feedback={s}\n", .{
+        merged.track_id,
+        merged.values,
+        if (merged.genres) "copied" else "kept",
+        if (merged.rating) "copied" else "kept",
+        if (merged.feedback) "copied" else "kept",
+    });
+}
+
+fn keepBothDuplicates(context: Context) !void {
+    const file_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const other_file_id = try std.fmt.parseInt(i64, context.arguments[2], 10);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryKeepBoth(library, file_id, other_file_id);
+    try context.stdout.print("kept files {d} and {d}\n", .{ file_id, other_file_id });
+}
+
+fn ignoreDuplicateGroup(context: Context) !void {
+    const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryIgnoreDuplicateGroup(library, group_id);
+    try context.stdout.print("ignored group {d}\n", .{group_id});
 }
 
 fn analyzeFile(context: Context) !void {

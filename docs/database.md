@@ -853,6 +853,15 @@ set to null when that file is deleted, with the partial index
 severity, file_id)` serves the per-kind page and summary; see
 [analysis.md](analysis.md#by-kind).
 
+Version 49 adds `library_health_issues.similarity`, a nullable `REAL`: the
+fingerprint score behind a `likely_duplicate`, which before lived only as a
+rounded percentage in `details`. It is null for every other kind and for
+likely duplicates recorded before version 49 until the duplicate pass runs
+again. [Duplicate groups](analysis.md#groups) read it, and
+`DuplicateGroupRepository.mergeMetadata` writes
+`orca_metadata_values`, `track_genres`, `ratings` and `feedback` in one
+transaction; see [analysis.md](analysis.md#resolving-a-group).
+
 `recording_verifications` (version 28) holds each file's latest
 [verification](providers.md#verification), keyed on `files.id` and going
 with its file: the `quick_hash` the file had, the `recording_mbid` in effect,

@@ -2454,6 +2454,106 @@ static int health_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+struct duplicate_group_capture {
+    int count;
+    int consistent;
+    orca_duplicate_group_view first;
+};
+
+static void collect_duplicate_group(void *context, const orca_duplicate_group_view *group) {
+    struct duplicate_group_capture *capture = context;
+    if (capture->count == 0) capture->first = *group;
+    capture->count += 1;
+    if (group->id > 0 && group->copies >= 2 && group->title.pointer != 0 &&
+        group->artist.pointer != 0 &&
+        (!group->has_similarity || (group->similarity >= 0.0f && group->similarity <= 1.0f)))
+        capture->consistent += 1;
+}
+
+struct duplicate_copy_capture {
+    int count;
+    int suggested;
+    int first_suggested;
+    int consistent;
+    int64_t file_ids[16];
+};
+
+static void collect_duplicate_copy(void *context, const orca_duplicate_copy_view *copy,
+                                   const orca_track_details_view *details) {
+    struct duplicate_copy_capture *capture = context;
+    if (capture->count == 0) capture->first_suggested = copy->suggested_keep;
+    if (capture->count < 16) capture->file_ids[capture->count] = copy->file_id;
+    capture->count += 1;
+    capture->suggested += copy->suggested_keep;
+    if (copy->locations >= 1 && (details != 0) == (copy->has_track_id != 0) &&
+        (details == 0 || details->track_id == copy->track_id))
+        capture->consistent += 1;
+}
+
+static int duplicate_smoke(orca_runtime *runtime, orca_handle library) {
+    orca_duplicate_group_totals totals;
+    memset(&totals, 0, sizeof totals);
+    SMOKE_CHECK(orca_library_duplicate_group_totals(runtime, library, &totals) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_duplicate_group_totals(runtime, library, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(totals.groups > 0);
+
+    struct duplicate_group_capture groups;
+    memset(&groups, 0, sizeof groups);
+    SMOKE_CHECK(orca_library_query_duplicate_groups(runtime, library, 512, 0, &groups,
+                                                    collect_duplicate_group) == ORCA_STATUS_OK);
+    SMOKE_CHECK((uint64_t)groups.count == totals.groups);
+    SMOKE_CHECK(groups.consistent == groups.count);
+    SMOKE_CHECK(orca_library_query_duplicate_groups(runtime, library, 0, 0, &groups,
+                                                    collect_duplicate_group) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_duplicate_groups(runtime, library, 1, 0, &groups, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    struct duplicate_copy_capture copies;
+    memset(&copies, 0, sizeof copies);
+    SMOKE_CHECK(orca_library_query_duplicate_group(runtime, library, -1, 0, &copies,
+                                                   collect_duplicate_copy) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(copies.count == 0);
+    SMOKE_CHECK(orca_library_ignore_duplicate_group(runtime, library, -1) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_keep_both_duplicates(runtime, library, -1, -2) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_merge_duplicate_metadata(runtime, library, 1, 1, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_merge_duplicate_metadata(runtime, library, 999999, 999998, 0) ==
+                ORCA_STATUS_NOT_FOUND);
+
+    orca_duplicate_group_view group;
+    memset(&group, 0, sizeof group);
+    SMOKE_CHECK(orca_library_query_duplicate_group(runtime, library, groups.first.id, &group,
+                                                   &copies, collect_duplicate_copy) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(group.id == groups.first.id && group.copies == groups.first.copies);
+    SMOKE_CHECK(group.bytes_redundant == groups.first.bytes_redundant);
+    SMOKE_CHECK(group.same_recording == groups.first.same_recording);
+    SMOKE_CHECK(copies.count >= 2 && copies.count <= 16 && copies.consistent == copies.count);
+    SMOKE_CHECK(copies.suggested == 1 && copies.first_suggested == 1);
+
+    SMOKE_CHECK(orca_library_ignore_duplicate_group(runtime, library, groups.first.id) ==
+                ORCA_STATUS_OK);
+    orca_duplicate_group_totals after;
+    SMOKE_CHECK(orca_library_duplicate_group_totals(runtime, library, &after) == ORCA_STATUS_OK);
+    SMOKE_CHECK(after.groups == totals.groups - 1);
+    for (int index = 0; index < copies.count; index += 1) {
+        SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, copies.file_ids[index],
+                                                      ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE) ==
+                    ORCA_STATUS_OK);
+        SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, copies.file_ids[index],
+                                                      ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE) ==
+                    ORCA_STATUS_OK);
+    }
+    SMOKE_CHECK(orca_library_duplicate_group_totals(runtime, library, &after) == ORCA_STATUS_OK);
+    SMOKE_CHECK(after.groups == totals.groups && after.bytes == totals.bytes);
+    return 0;
+}
+
 static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
     static struct titled_tracks tracks;
     memset(&tracks, 0, sizeof tracks);
@@ -4940,6 +5040,7 @@ int main(int argc, char **argv) {
     if (lyrics_smoke(runtime, library) != 0) return 1;
     if (coverless_release_smoke(runtime) != 0) return 1;
     if (health_smoke(runtime, library) != 0) return 1;
+    if (duplicate_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;
     if (provider_smoke(runtime, library) != 0) return 1;
     if (matching_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0) return 1;

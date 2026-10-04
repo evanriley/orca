@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 48;
+pub const current_version = 49;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1449,6 +1449,11 @@ const migration_48 =
     \\
 ;
 
+const migration_49 =
+    \\ALTER TABLE library_health_issues ADD COLUMN similarity REAL;
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -1981,6 +1986,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 46 and target_version >= 46) try db.exec(migration_46);
     if (version < 47 and target_version >= 47) try db.exec(migration_47);
     if (version < 48 and target_version >= 48) try db.exec(migration_48);
+    if (version < 49 and target_version >= 49) try db.exec(migration_49);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -3822,4 +3828,26 @@ test "a version-47 library keeps its listens, each marked syncable, and a new li
         \\VALUES (1, 1, 1700000100, 31000, 'One', 'Artist', 0);
     );
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM listens WHERE syncable = 0;"));
+}
+
+test "a version-48 library keeps its duplicate issues, each with no stored similarity" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v48-similarity.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 48);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10), (2, 1, 10);
+        \\INSERT INTO library_health_issues(file_id, kind, severity, details, related_file_id, updated_at)
+        \\VALUES (1, 10, 0, 'audio resembles b (99.0% match)', 2, 0);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM library_health_issues WHERE similarity IS NULL;"));
+    try db.exec("UPDATE library_health_issues SET similarity = 0.99;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM library_health_issues WHERE similarity IS NULL;"));
 }

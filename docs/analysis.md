@@ -447,6 +447,60 @@ bit-exactly through libFLAC (see [codecs.md](codecs.md#flac)). Two lossless
 files holding identical PCM hash identically whatever their container or encoder
 settings, and are reported as `exact_duplicate`.
 
+### Groups
+
+`Runtime.libraryDuplicateGroupPage` (`orca-cli duplicates DATABASE
+--groups`) joins the visible `exact_duplicate` and `likely_duplicate` issues
+into groups: files linked by an issue, directly or through another file, are
+one group, and a file held at several present locations is a group on its
+own. A group's id is its lowest file id, so it is the same on every read
+while its issues are unchanged; grouping runs over the visible issues on each
+read and stores nothing. Issues naming a file that no longer exists are left
+out.
+
+`DuplicateGroup` carries the suggested copy's title and artist, `copies`
+(each further location of a file counting as one), `same_recording` (every
+file is an encoding of one recording, so the copies share one play count and
+rating), `similarity` and `bytes_redundant`, what removing every copy but the
+suggested one frees. `similarity` is the lowest score among the group's
+`likely_duplicate` links, 1 for exact links, read from
+`library_health_issues.similarity`; it is null when a link was recorded
+before that column existed. `libraryDuplicateGroupTotals` sums the groups
+and their bytes. Those bytes can differ from the duplicate bytes of
+[By kind](#by-kind), which counts the lowest-numbered file as the kept copy
+rather than the suggested one.
+
+`Runtime.libraryDuplicateGroup` (`orca-cli duplicates DATABASE --group=ID`)
+returns a group's files, the suggested copy first. Each `DuplicateCopy` holds
+the lowest Track id the file backs, that Track's `TrackDetails` with this
+file's format, size, path and loudness, the number of playlists holding its
+recording, and its present locations. The suggested copy is the lossless one
+over the lossy, then the higher sample rate, the higher bit depth and the
+larger file, and the lower file id on a tie.
+
+### Resolving a group
+
+Three actions resolve a group. None writes, moves or deletes a file.
+
+- **Keep Both** (`libraryKeepBoth`, `orca-cli keep-both DATABASE FILE_ID
+  FILE_ID`) dismisses the duplicate issues of two files of one group.
+- **Ignore** (`libraryIgnoreDuplicateGroup`, `orca-cli ignore-duplicate
+  DATABASE GROUP_ID`) dismisses the duplicate issues of every file of the
+  group.
+- **Merge Metadata Only** (`libraryMergeDuplicateMetadata`, `orca-cli
+  merge-duplicate DATABASE KEEP FROM`) gives Track KEEP what Track FROM has
+  and KEEP lacks, in one transaction on the write lane, then reprojects KEEP's
+  files when a value changed. Orca values of FROM's file fill each of KEEP's
+  files that has no value for the field, and a value FROM has locked replaces
+  one KEEP has not; a value KEEP has locked always stays. FROM's user genres
+  replace KEEP's genres when KEEP has no user genres. FROM's rating and
+  feedback are copied only when the two Tracks are different recordings and
+  KEEP's recording has none; copied feedback is queued for ListenBrainz.
+  Listens stay with their recording. Merging does not dismiss the group.
+
+Dismissals follow [Dismissals](#dismissals): an issue shows again once the
+file's bytes change. Moving a copy to the trash is not offered.
+
 ### Memory
 
 `orca-cli duplicates` builds its runtime on `std.heap.smp_allocator` rather

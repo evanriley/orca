@@ -894,6 +894,46 @@ pub const HealthFileView = extern struct {
 
 pub const HealthFileCallback = *const fn (?*anyopaque, *const HealthFileView) callconv(.c) void;
 
+pub const DuplicateGroupView = extern struct {
+    id: i64,
+    bytes_redundant: u64,
+    copies: u32,
+    similarity: f32,
+    same_recording: u8,
+    has_similarity: u8,
+    _reserved: [6]u8 = @splat(0),
+    title: StringView,
+    artist: StringView,
+};
+
+pub const DuplicateGroupCallback = *const fn (?*anyopaque, *const DuplicateGroupView) callconv(.c) void;
+
+pub const DuplicateGroupTotalsView = extern struct {
+    groups: u64,
+    bytes: u64,
+};
+
+pub const DuplicateCopyView = extern struct {
+    file_id: i64,
+    track_id: i64,
+    playlist_count: u64,
+    locations: u32,
+    has_track_id: u8,
+    suggested_keep: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const DuplicateCopyCallback = *const fn (?*anyopaque, *const DuplicateCopyView, ?*const TrackDetailsView) callconv(.c) void;
+
+pub const DuplicateMergeView = extern struct {
+    track_id: i64,
+    values: u32,
+    rating: u8,
+    feedback: u8,
+    genres: u8,
+    _reserved: [1]u8 = @splat(0),
+};
+
 pub const RootView = extern struct {
     id: i64,
     volume_id: i64,
@@ -2026,6 +2066,135 @@ pub export fn orca_library_health_file(
         .codec = stringView(file.codec),
     };
     visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_query_duplicate_groups(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?DuplicateGroupCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.libraryDuplicateGroupPage(importLibrary(library), box.runtime.allocator, limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |group| {
+        var view = duplicateGroupView(group.id, group.same_recording, group.similarity, group.copies, group.bytes_redundant);
+        view.title = stringView(group.title);
+        view.artist = stringView(group.artist);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+fn duplicateGroupView(id: i64, same_recording: bool, similarity: ?f32, copies: u32, bytes_redundant: u64) DuplicateGroupView {
+    return .{
+        .id = id,
+        .bytes_redundant = bytes_redundant,
+        .copies = copies,
+        .similarity = similarity orelse 0,
+        .same_recording = @intFromBool(same_recording),
+        .has_similarity = @intFromBool(similarity != null),
+        .title = stringView(""),
+        .artist = stringView(""),
+    };
+}
+
+pub export fn orca_library_duplicate_group_totals(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*DuplicateGroupTotalsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const totals = box.runtime.libraryDuplicateGroupTotals(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .groups = totals.groups, .bytes = totals.bytes };
+    return .ok;
+}
+
+pub export fn orca_library_query_duplicate_group(
+    runtime: ?*Runtime,
+    library: Handle,
+    group_id: i64,
+    group: ?*DuplicateGroupView,
+    context: ?*anyopaque,
+    callback: ?DuplicateCopyCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var copies = box.runtime.libraryDuplicateGroup(importLibrary(library), box.runtime.allocator, group_id) catch |err|
+        return box.fail(@src(), err);
+    defer copies.deinit();
+    if (group) |destination| destination.* = duplicateGroupView(
+        group_id,
+        copies.same_recording,
+        copies.similarity,
+        copies.copies,
+        copies.bytes_redundant,
+    );
+    for (copies.items) |copy| {
+        const view: DuplicateCopyView = .{
+            .file_id = copy.file_id,
+            .track_id = copy.track_id orelse 0,
+            .playlist_count = copy.playlist_count,
+            .locations = copy.locations,
+            .has_track_id = @intFromBool(copy.track_id != null),
+            .suggested_keep = @intFromBool(copy.suggested_keep),
+        };
+        if (copy.details) |*details| {
+            const details_view = trackDetailsView(details);
+            visit(context, &view, &details_view);
+        } else visit(context, &view, null);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_keep_both_duplicates(
+    runtime: ?*Runtime,
+    library: Handle,
+    file_id: i64,
+    other_file_id: i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryKeepBoth(importLibrary(library), file_id, other_file_id) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_ignore_duplicate_group(
+    runtime: ?*Runtime,
+    library: Handle,
+    group_id: i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryIgnoreDuplicateGroup(importLibrary(library), group_id) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_merge_duplicate_metadata(
+    runtime: ?*Runtime,
+    library: Handle,
+    keep_track_id: i64,
+    from_track_id: i64,
+    output: ?*DuplicateMergeView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const merged = box.runtime.libraryMergeDuplicateMetadata(importLibrary(library), keep_track_id, from_track_id) catch |err|
+        return box.fail(@src(), err);
+    if (output) |destination| destination.* = .{
+        .track_id = merged.track_id,
+        .values = merged.values,
+        .rating = @intFromBool(merged.rating),
+        .feedback = @intFromBool(merged.feedback),
+        .genres = @intFromBool(merged.genres),
+    };
     return .ok;
 }
 
@@ -7529,6 +7698,7 @@ fn mapError(err: anyerror) Status {
         error.UnknownTagWriteGroup => .not_found,
         error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
         error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
+        error.UnknownDuplicateGroup => .not_found,
         error.MutationGroupAlreadyUndone => .already_done,
         error.MutationNeedsReconciliation => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
@@ -7590,6 +7760,8 @@ fn mapError(err: anyerror) Status {
         error.RuleNestingTooDeep,
         error.TooManyRules,
         error.InvalidRulePlaylist,
+        error.NotDuplicates,
+        error.SameDuplicateTrack,
         => .invalid_argument,
         else => .internal,
     };

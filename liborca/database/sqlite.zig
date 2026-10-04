@@ -198,6 +198,11 @@ pub const Statement = struct {
             return error.BindFailed;
     }
 
+    pub fn bindOptionalDouble(self: Statement, index: c_int, value: ?f64) Error!void {
+        if (value) |number| return self.bindDouble(index, number);
+        if (c.sqlite3_bind_null(self.handle, index) != c.SQLITE_OK) return error.BindFailed;
+    }
+
     pub fn bindOptionalInt64(self: Statement, index: c_int, value: ?i64) Error!void {
         const result = if (value) |number|
             c.sqlite3_bind_int64(self.handle, index, number)

@@ -14,6 +14,24 @@
   journal and only read. `orca-cli changes` lists, shows and exports them, and
   the C ABI adds `orca_library_query_tag_write_groups` and
   `orca_library_query_tag_write_group`.
+- **Duplicate groups and metadata merge.** `libraryDuplicateGroupPage` and
+  `libraryDuplicateGroupTotals` join duplicate issues into groups named by
+  their lowest file id, each with its copies, whether they are one
+  recording, their similarity and the bytes the redundant copies take.
+  `libraryDuplicateGroup` lists a group's copies with their `TrackDetails`
+  and playlist counts, suggesting lossless over lossy, then the higher rate
+  and depth, then the larger file. `libraryMergeDuplicateMetadata` gives one
+  Track the Orca values, user genres, rating and feedback another has and it
+  lacks, in one transaction, never over its own locks and never writing a
+  file. `libraryKeepBoth` and `libraryIgnoreDuplicateGroup` dismiss the
+  issues. Schema version 49 adds `library_health_issues.similarity`.
+  `orca-cli duplicates --groups`, `duplicates --group=ID`,
+  `merge-duplicate`, `keep-both` and `ignore-duplicate` reach them, and the
+  C ABI adds `orca_library_query_duplicate_groups`,
+  `orca_library_duplicate_group_totals`,
+  `orca_library_query_duplicate_group`, `orca_library_keep_both_duplicates`,
+  `orca_library_ignore_duplicate_group` and
+  `orca_library_merge_duplicate_metadata`.
 - **Listen policy, history clearing and cache size.** A Library keeps a
   `ListenPolicy` (`half_or_four_minutes`, ListenBrainz's rule and the
   default, `thirty_seconds` or `full_track`) and a recording switch,

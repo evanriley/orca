@@ -1049,6 +1049,78 @@ typedef void (*orca_health_file_callback)(
     const orca_health_file_view *file
 );
 
+/* Files the duplicate scan found to be copies of one another. `id` is the
+ * group's lowest file id, the same on every read while its duplicate issues
+ * are unchanged. `title` and `artist` are the suggested copy's Track's, or
+ * its path and an empty artist when it backs none. `copies` counts each
+ * further location of a file as a copy. `same_recording` is 1 when every
+ * copy is an encoding of one recording, so they share one play count and
+ * rating. `similarity`, 0..1, is how alike the least alike copies sound, 1
+ * for exact copies; valid when `has_similarity`. `bytes_redundant` is what
+ * removing every copy but the suggested one would free. */
+typedef struct orca_duplicate_group_view {
+    int64_t id;
+    uint64_t bytes_redundant;
+    uint32_t copies;
+    float similarity;
+    uint8_t same_recording;
+    uint8_t has_similarity;
+    uint8_t reserved[6];
+    orca_string_view title;
+    orca_string_view artist;
+} orca_duplicate_group_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_duplicate_group_callback)(
+    void *context,
+    const orca_duplicate_group_view *group
+);
+
+typedef struct orca_duplicate_group_totals {
+    uint64_t groups;
+    /* The summed `bytes_redundant` of every group. */
+    uint64_t bytes;
+} orca_duplicate_group_totals;
+
+/* One file of a duplicate group. `track_id` is the lowest-numbered Track the
+ * file backs, valid when `has_track_id`. `suggested_keep` is 1 for exactly
+ * one copy of a group: lossless over lossy, then the higher sample rate, the
+ * higher bit depth, then the larger file. `playlist_count` counts the
+ * playlists holding the file's recording; `locations` the file's locations
+ * that are not missing, at least 1. */
+typedef struct orca_duplicate_copy_view {
+    int64_t file_id;
+    int64_t track_id;
+    uint64_t playlist_count;
+    uint32_t locations;
+    uint8_t has_track_id;
+    uint8_t suggested_keep;
+    uint8_t reserved[2];
+} orca_duplicate_copy_view;
+
+/* `details` is the Track as this file describes it, its format, size, path
+ * and loudness being this file's; null when the file backs no Track. String
+ * views are valid only for the duration of this callback. */
+typedef void (*orca_duplicate_copy_callback)(
+    void *context,
+    const orca_duplicate_copy_view *copy,
+    const orca_track_details_view *details
+);
+
+/* What orca_library_merge_duplicate_metadata changed. `track_id` is the kept
+ * Track's id afterwards: a new id when a copied value moved it to another
+ * Release. `values` counts Orca value rows written. `genres` is 1 when the
+ * other Track's user genres replaced the kept Track's, which had none of its
+ * own. */
+typedef struct orca_duplicate_merge {
+    int64_t track_id;
+    uint32_t values;
+    uint8_t rating;
+    uint8_t feedback;
+    uint8_t genres;
+    uint8_t reserved[1];
+} orca_duplicate_merge;
+
 typedef struct orca_root_view {
     int64_t id;
     int64_t volume_id;
@@ -1938,6 +2010,67 @@ orca_status orca_library_health_file(
     int64_t file_id,
     void *context,
     orca_health_file_callback callback
+);
+/* Calls `callback` once per duplicate group, ordered by id. Dismissed
+ * duplicate issues form no group. `limit` is 1..512, else
+ * ORCA_STATUS_INVALID_ARGUMENT. */
+orca_status orca_library_query_duplicate_groups(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_duplicate_group_callback callback
+);
+/* Fills `output` with the number of duplicate groups and their redundant
+ * bytes. A null `output` is ORCA_STATUS_INVALID_ARGUMENT. */
+orca_status orca_library_duplicate_group_totals(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_duplicate_group_totals *output
+);
+/* Calls `callback` once per copy of group `group_id`, the suggested copy
+ * first. `group`, which may be null, receives the group's row with empty
+ * string views. ORCA_STATUS_NOT_FOUND, with the callback not called, when no
+ * group has that id. */
+orca_status orca_library_query_duplicate_group(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t group_id,
+    orca_duplicate_group_view *group,
+    void *context,
+    orca_duplicate_copy_callback callback
+);
+/* Dismisses the duplicate issues of both files, until either file's bytes
+ * change. Neither file is touched. ORCA_STATUS_INVALID_ARGUMENT when the two
+ * files are not in one group. */
+orca_status orca_library_keep_both_duplicates(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t file_id,
+    int64_t other_file_id
+);
+/* Dismisses the duplicate issues of every file of group `group_id`.
+ * ORCA_STATUS_NOT_FOUND when no group has that id. */
+orca_status orca_library_ignore_duplicate_group(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t group_id
+);
+/* In one transaction, gives Track `keep_track_id` the Orca values, user
+ * genres, rating and feedback of Track `from_track_id` that it lacks. A value
+ * locked on the kept Track always stays, as do its user genres; a value
+ * locked on the other replaces an unlocked one.
+ * The rating and feedback are copied only when the two are different
+ * recordings and the kept one has none; listens stay with their recording.
+ * No file is written or moved. `output` may be null. The same Track twice is
+ * ORCA_STATUS_INVALID_ARGUMENT; an unknown Track ORCA_STATUS_NOT_FOUND. */
+orca_status orca_library_merge_duplicate_metadata(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t keep_track_id,
+    int64_t from_track_id,
+    orca_duplicate_merge *output
 );
 
 

@@ -132,6 +132,17 @@ pub fn load(
     library: *database.LibraryDatabase,
     track_id: i64,
 ) !?TrackDetails {
+    return loadForFile(allocator, library, track_id, null);
+}
+
+/// The details of one Track with the file facts of `file_id`, one of its
+/// files, in place of those of the file it resolves to.
+pub fn loadForFile(
+    allocator: std.mem.Allocator,
+    library: *database.LibraryDatabase,
+    track_id: i64,
+    file_id: ?i64,
+) !?TrackDetails {
     var summary = (try library.tracks.byId(allocator, track_id)) orelse return null;
     allocator.free(summary.codec);
     summary.codec = &.{};
@@ -140,7 +151,7 @@ pub fn load(
     allocator.free(summary.genre);
     summary.genre = &.{};
     errdefer summary.deinit(allocator);
-    const facts = try library.tracks.fileFacts(allocator, track_id);
+    const facts = try library.tracks.fileFactsOf(allocator, track_id, file_id);
     errdefer if (facts) |value| value.deinit();
 
     const loudness = if (facts) |file| try storedLoudness(library, file) else null;
