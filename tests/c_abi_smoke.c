@@ -2245,6 +2245,61 @@ static int roots_v2_smoke(orca_runtime *runtime, orca_handle library, int64_t ro
     return 0;
 }
 
+static int resume_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
+    struct queued_tracks playable;
+    memset(&playable, 0, sizeof playable);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &playable,
+                                          collect_playable) == ORCA_STATUS_OK);
+    SMOKE_CHECK(playable.count >= 2);
+    int64_t *ids = playable.ids;
+
+    SMOKE_CHECK(orca_player_set_long_track_memory(runtime, player, 1, 3600000) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_ALL) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_play_tracks(runtime, player, ids, 2, 1) == ORCA_STATUS_OK);
+    orca_player_status_v3 status;
+    int audible = 0;
+    long deadline = now_ms() + 3000;
+    while (!audible && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(orca_player_status_get_v3(runtime, player, &status) == ORCA_STATUS_OK);
+        audible = status.base.base.track_id == ids[1] && status.base.base.position_ms > 0;
+    }
+    SMOKE_CHECK(audible);
+    SMOKE_CHECK(orca_player_pause(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_save_state(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_clear_queue(runtime, player) == ORCA_STATUS_OK);
+
+    orca_restore_outcome outcome;
+    memset(&outcome, 0xff, sizeof outcome);
+    SMOKE_CHECK(orca_player_restore_state(runtime, player, 3, &outcome) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_restore_state(runtime, player, ORCA_RESTORE_MODE_NONE, &outcome) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(outcome.entries == 0 && outcome.index == 0 && outcome.position_ms == 0 &&
+                outcome.skipped_missing == 0);
+    SMOKE_CHECK(orca_player_restore_state(runtime, player, ORCA_RESTORE_MODE_PAUSED, &outcome) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(outcome.entries == 2 && outcome.index == 1 && outcome.position_ms > 0 &&
+                outcome.skipped_missing == 0);
+
+    memset(&status, 0xff, sizeof status);
+    SMOKE_CHECK(orca_player_status_get_v3(runtime, player, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_status_get_v3(runtime, player, &status) == ORCA_STATUS_OK);
+    SMOKE_CHECK(status.base.base.transport == ORCA_TRANSPORT_PAUSED &&
+                status.base.base.track_id == ids[1] && status.base.base.queue_length == 2 &&
+                status.base.base.queue_index == 1 && status.base.base.repeat == ORCA_REPEAT_ALL);
+    SMOKE_CHECK(status.has_resumed == 1 && status.resumed_from_ms == outcome.position_ms);
+    SMOKE_CHECK(status.base.has_failure == 0);
+
+    SMOKE_CHECK(orca_player_restore_state(runtime, player, ORCA_RESTORE_MODE_PAUSED, 0) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_long_track_memory(runtime, player, 0, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_stop(runtime, player) == ORCA_STATUS_OK);
+    return 0;
+}
+
 static int player_status_v2_smoke(orca_runtime *runtime, orca_handle player,
                                   const orca_player_status *status) {
     orca_player_status_v2 extended;
@@ -5206,6 +5261,7 @@ int main(int argc, char **argv) {
     }
 
     if (queue_smoke(runtime, library, player) != 0) return 1;
+    if (resume_smoke(runtime, library, player) != 0) return 1;
     if (dsp_smoke(runtime, library, player) != 0) return 1;
     if (parametric_smoke(runtime, library, player) != 0) return 1;
     if (playlist_smoke(runtime, library, player) != 0) return 1;

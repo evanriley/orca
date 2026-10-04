@@ -38,6 +38,8 @@ pub fn readStatus(object_value: *PlayerObject) StatusRead {
     const idle = if (entry) |value| value.entry_serial == 0 else false;
     const position: ?u32 = if (idle) object_value.queue.cursorPosition() else if (entry) |value| value.position else null;
     const current: ?TrackRef = if (idle) object_value.queue.refAt(position.?) else if (entry) |value| value.track else null;
+    const entry_serial = if (entry) |value| value.entry_serial else object_value.player.audible_entry_serial.load(.acquire);
+    const resumed = object_value.persistence.resumed;
     return .{
         .audible = current,
         .resolved = entry != null,
@@ -49,7 +51,7 @@ pub fn readStatus(object_value: *PlayerObject) StatusRead {
             .position_ms = if (rate == 0) 0 else snapshot.position_frames * 1000 / rate,
             .duration_ms = if (rate == 0) 0 else frames * 1000 / rate,
             .track_id = if (current) |ref| ref.track_id else null,
-            .entry_serial = if (entry) |value| value.entry_serial else object_value.player.audible_entry_serial.load(.acquire),
+            .entry_serial = entry_serial,
             .queue_length = queue_snapshot.entries,
             .queue_index = position orelse queue_snapshot.cursor,
             .volume = object_value.gain.linear.load(.acquire),
@@ -57,6 +59,10 @@ pub fn readStatus(object_value: *PlayerObject) StatusRead {
                 .track_id = failure.track_id,
                 .reason = .of(failure.err),
             } else null,
+            .resumed_from_ms = if (resumed) |value|
+                (if (entry_serial != 0 and value.entry_serial == entry_serial) value.position_ms else null)
+            else
+                null,
         },
     };
 }

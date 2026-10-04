@@ -236,6 +236,8 @@ pub const QueueStats = runtime.QueueStats;
 pub const QueueHistoryEntry = runtime.QueueHistoryEntry;
 pub const QueueHistoryReason = runtime.QueueHistoryReason;
 pub const queue_history_capacity = runtime.queue_history_capacity;
+pub const RestoreMode = runtime.RestoreMode;
+pub const RestoreOutcome = runtime.RestoreOutcome;
 pub const playback_queue_capacity = audio.playback_queue.capacity;
 
 comptime {

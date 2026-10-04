@@ -776,7 +776,7 @@ test "a host reading status while it moves queue entries never pairs a Track wit
     try std.testing.expect(checked >= 2_000);
 }
 
-fn writeSilentWave(dir: std.Io.Dir, name: []const u8, frames: u32) !void {
+pub fn writeSilentWave(dir: std.Io.Dir, name: []const u8, frames: u32) !void {
     const bytes = try std.testing.allocator.alloc(u8, 44 + frames * 2);
     defer std.testing.allocator.free(bytes);
     writeWaveHeader(bytes, 11_025, frames);

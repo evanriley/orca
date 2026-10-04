@@ -504,6 +504,16 @@ reads Releases in that order from the index instead of sorting every one,
 which took 0.66 s at 429,312 Releases. The rewind to version 25 drops the
 table and the index.
 
+Migration 53 adds the state a Player resumes from, described under
+[Saved playback](#saved-playback): `player_state`, a single row (`id` 1)
+holding the queue's `cursor`, `position_ms`, `repeat` (0 off, 1 all, 2 one),
+`shuffle` and `saved_at` in Unix seconds; `player_queue_entries(position,
+entry, track_id, recording_id)`, one row per entry in playback order,
+`position` the primary key and both `position` and `entry` from 0 to 9999;
+and `track_positions(track_id, position_ms, updated_at)`, where long Tracks
+were left, cascading with their Track. Existing libraries start with none.
+The rewind to version 25 drops all three.
+
 Migration 54 adds `metadata_proposals`, the issues of the metadata
 consistency pass ([analysis.md](analysis.md#metadata-consistency)). One row
 per issue header (`id = group_id`, `option` and `track_id` null), per option
@@ -1488,6 +1498,27 @@ again. Embedded and folder covers are read from the files and
 `releases.has_folder_cover`, and local lyrics from the files, so neither is
 touched. `provider_cache`, the HTTP response cache, is not counted or
 cleared.
+
+## Saved playback
+
+`PlayerStateRepository` keeps one saved queue per Library. A save replaces
+`player_state` and every `player_queue_entries` row in one transaction, at
+most 10,000 entries (`max_saved_entries`), in playback order. `entry` is each
+entry's index in the unshuffled list, so a shuffled queue restores in the
+same order and unshuffles to the same list. Each row stores the Track id and
+the Recording id it had when saved, with no foreign key to either. A load
+resolves each row to the saved Track while that Track still has the saved
+Recording, else to the lowest Track id of that Recording, else to nothing: a
+reprojection that gives a Recording new Track ids keeps the queue, and an
+entry whose Recording is gone is skipped and counted by the restore.
+
+`track_positions` keeps where a long Track was left, keyed by Track and
+cascading with it. Writing a position of zero, or a Track that is gone,
+deletes the row instead. The runtime writes these from the control lane
+only: on pause, seek, stop and each change of entry the host asks for, on
+each save, and when the Player leaves its Library. It deletes a Track's row
+once queue history records the Track as played to its end. See
+[api.md](api.md#surface).
 
 ## Concurrency
 

@@ -1064,6 +1064,21 @@ pub const PlayerStatusV2 = extern struct {
     _reserved: [6]u8 = @splat(0),
 };
 
+pub const PlayerStatusV3 = extern struct {
+    base: PlayerStatusV2,
+    resumed_from_ms: u64,
+    has_resumed: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const RestoreOutcomeView = extern struct {
+    entries: u32,
+    index: u32,
+    position_ms: u64,
+    skipped_missing: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
 pub const EqualizerView = extern struct {
     gains_db: [audio.dsp.band_count]f32,
     preamp_db: f32,
@@ -6515,13 +6530,34 @@ pub export fn orca_player_status_get_v2(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const status = box.runtime.playerStatus(importPlayer(player)) catch |err|
         return box.fail(@src(), err);
+    destination.* = exportPlayerStatusV2(status);
+    return .ok;
+}
+
+pub export fn orca_player_status_get_v3(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*PlayerStatusV3,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const status = box.runtime.playerStatus(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
     destination.* = .{
+        .base = exportPlayerStatusV2(status),
+        .resumed_from_ms = status.resumed_from_ms orelse 0,
+        .has_resumed = @intFromBool(status.resumed_from_ms != null),
+    };
+    return .ok;
+}
+
+fn exportPlayerStatusV2(status: core.runtime.PlayerStatus) PlayerStatusV2 {
+    return .{
         .base = exportPlayerStatus(status),
         .failure_track_id = if (status.last_failure) |failure| failure.track_id else 0,
         .has_failure = @intFromBool(status.last_failure != null),
         .failure_reason = if (status.last_failure) |failure| exportPlaybackFailureReason(failure.reason) else 0,
     };
-    return .ok;
 }
 
 pub fn exportPlaybackFailureReason(reason: core.runtime.PlaybackFailure.Reason) u8 {
@@ -6688,6 +6724,52 @@ pub export fn orca_player_save_queue_as_playlist(
         return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
     destination.* = box.runtime.playerSaveQueueAsPlaylist(player_handle, library, text) catch |err|
         return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_save_state(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    box.runtime.playerSaveState(player_handle, library) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_restore_state(
+    runtime: ?*Runtime,
+    player: Handle,
+    mode: u8,
+    outcome: ?*RestoreOutcomeView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const restore_mode = std.enums.fromInt(core.runtime.RestoreMode, mode) orelse
+        return box.reject(@src(), .invalid_argument, "mode must be 0, 1 or 2");
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    const restored = box.runtime.playerRestoreState(player_handle, library, restore_mode) catch |err|
+        return box.fail(@src(), err);
+    if (outcome) |destination| destination.* = .{
+        .entries = restored.entries,
+        .index = restored.index,
+        .position_ms = restored.position_ms,
+        .skipped_missing = restored.skipped_missing,
+    };
+    return .ok;
+}
+
+pub export fn orca_player_set_long_track_memory(
+    runtime: ?*Runtime,
+    player: Handle,
+    enabled: u8,
+    threshold_ms: u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerSetLongTrackMemory(
+        importPlayer(player),
+        if (enabled != 0) threshold_ms else null,
+    ) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 

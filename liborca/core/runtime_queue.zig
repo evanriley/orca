@@ -6,6 +6,7 @@ const queue_history = @import("queue.zig");
 const track_source = @import("track_source.zig");
 const runtime = @import("runtime.zig");
 const runtime_listens = @import("runtime_listens.zig");
+const runtime_resume = @import("runtime_resume.zig");
 const runtime_status = @import("runtime_status.zig");
 const runtime_zones = @import("runtime_zones.zig");
 
@@ -22,6 +23,12 @@ const TrackRef = runtime.TrackRef;
 pub fn seekPlayer(self: *OrcaRuntime, player: PlayerHandle, frame: u64) !u32 {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
+    const epoch = try seekObject(object_value, frame);
+    runtime_resume.rememberAudible(self, object_value) catch {};
+    return epoch;
+}
+
+fn seekObject(object_value: *PlayerObject, frame: u64) !u32 {
     if (object_value.engine) |engine| {
         engine.quiesce();
         defer engine.release();
@@ -45,11 +52,13 @@ pub fn pausePlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
     const object_value = try self.players.get(player);
     object_value.player.pause();
     if (object_value.engine) |engine| engine.wakeUp();
+    runtime_resume.rememberAudible(self, object_value) catch {};
 }
 
 pub fn stopPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
+    runtime_resume.rememberAudible(self, object_value) catch {};
     forgetAudibleEntry(self, object_value);
     if (object_value.engine) |engine| {
         engine.quiesce();
@@ -75,7 +84,7 @@ pub fn playerLoadFile(
     path: []const u8,
 ) !void {
     try runtime.requireRunning(self);
-    _ = try self.players.get(player);
+    runtime_resume.rememberAudible(self, try self.players.get(player)) catch {};
     const source = try audio.loaded_source.LoadedSource.open(
         self.allocator,
         io,
@@ -126,6 +135,7 @@ pub fn playerBindLibrary(
 
     const object_value = try self.players.get(player);
     if (object_value.opener) |old| runtime_listens.endListen(self, object_value, old.library);
+    runtime_resume.leaveLibrary(self, object_value);
     if (object_value.engine) |engine| {
         engine.quiesce();
         defer engine.release();
@@ -181,6 +191,7 @@ pub fn playerPlayTracksBound(
     try requireBoundLibrary(self, player, library);
     const refs = try trackRefs(self, library, track_ids);
     defer self.allocator.free(refs);
+    runtime_resume.rememberAudible(self, try self.players.get(player)) catch {};
     const engine = try ensureEngine(self, player);
     engine.quiesce();
     defer engine.release();
@@ -198,7 +209,7 @@ pub fn playerPlayTracksBound(
         object_value.player.releaseSources();
         object_value.queue.clear();
     }
-    try loadCursor(object_value);
+    try loadCursor(self, object_value);
     object_value.player.play();
 }
 
@@ -235,7 +246,7 @@ pub fn playerEnqueueTracksBound(
     if (!was_idle or refs.len == 0) return;
     engine.discardPending();
     object_value.queue.seekTo(first_new);
-    try loadCursor(object_value);
+    try loadCursor(self, object_value);
     object_value.player.play();
 }
 
@@ -243,13 +254,14 @@ pub fn playerQueueJump(self: *OrcaRuntime, player: PlayerHandle, position: u32) 
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
     if (position >= object_value.queue.len()) return error.PositionOutOfRange;
+    runtime_resume.rememberAudible(self, object_value) catch {};
     const engine = object_value.engine;
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
     if (engine) |value| value.discardPending();
     endAudibleEntry(self, object_value, .skipped);
     object_value.queue.seekTo(position);
-    try loadCursor(object_value);
+    try loadCursor(self, object_value);
     object_value.player.play();
 }
 
@@ -339,6 +351,7 @@ fn landsInCommittedSpan(cursor: u32, committed: u32, to: u32) bool {
 pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
+    runtime_resume.rememberAudible(self, object_value) catch {};
     const engine = object_value.engine;
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
@@ -346,7 +359,7 @@ pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
     const target = object_value.queue.nextPosition() orelse return false;
     endAudibleEntry(self, object_value, .skipped);
     object_value.queue.seekTo(target);
-    try loadCursor(object_value);
+    try loadCursor(self, object_value);
     object_value.player.play();
     return true;
 }
@@ -354,6 +367,15 @@ pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
 pub fn playerPrevious(self: *OrcaRuntime, player: PlayerHandle) !bool {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
+    runtime_resume.rememberAudible(self, object_value) catch {};
+    const serial = object_value.player.audible_entry_serial.load(.acquire);
+    const moved = try previousObject(self, object_value);
+    if (object_value.player.audible_entry_serial.load(.acquire) == serial)
+        runtime_resume.rememberAudible(self, object_value) catch {};
+    return moved;
+}
+
+fn previousObject(self: *OrcaRuntime, object_value: *PlayerObject) !bool {
     const engine = object_value.engine;
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
@@ -374,7 +396,7 @@ pub fn playerPrevious(self: *OrcaRuntime, player: PlayerHandle) !bool {
     if (engine) |value| value.discardPending();
     endAudibleEntry(self, object_value, .skipped);
     object_value.queue.seekTo(target);
-    try loadCursor(object_value);
+    try loadCursor(self, object_value);
     object_value.player.play();
     return true;
 }
@@ -521,10 +543,15 @@ pub fn playerSaveQueueAsPlaylist(
 
 pub fn observeQueueHistory(object_value: *PlayerObject, now_ms: i64) void {
     const entry = runtime_status.readAudibleEntry(object_value) orelse return;
-    object_value.history.observe(entry.entry_serial, entry.track, entry.drained, now_ms);
+    const history = &object_value.history;
+    const appended_before = history.next;
+    history.observe(entry.entry_serial, entry.track, entry.drained, now_ms);
+    if (history.next == appended_before) return;
+    const ended = history.newest(0) orelse return;
+    if (ended.reason == .finished) runtime_resume.noteFinished(&object_value.persistence, ended.track);
 }
 
-fn endAudibleEntry(self: *OrcaRuntime, object_value: *PlayerObject, reason: queue_history.QueueHistoryReason) void {
+pub fn endAudibleEntry(self: *OrcaRuntime, object_value: *PlayerObject, reason: queue_history.QueueHistoryReason) void {
     const now_ms = historyNowMs(self);
     observeQueueHistory(object_value, now_ms);
     object_value.history.end(reason, now_ms);
@@ -540,7 +567,7 @@ pub fn historyNowMs(self: *OrcaRuntime) i64 {
     return std.Io.Clock.real.now(self.control_threaded.io()).toMilliseconds();
 }
 
-fn requireBoundLibrary(
+pub fn requireBoundLibrary(
     self: *OrcaRuntime,
     player: PlayerHandle,
     library: LibraryHandle,
@@ -599,9 +626,10 @@ fn trackRefs(
     return refs;
 }
 
-/// Opens the entry under the cursor and hard-loads it. The caller must have
-/// quiesced the engine: this replaces the Player's whole `SourceQueue`.
-fn loadCursor(object_value: *PlayerObject) !void {
+/// Opens the entry under the cursor and hard-loads it, resuming a long Track
+/// where it was left. The caller must have quiesced the engine: this
+/// replaces the Player's whole `SourceQueue`.
+pub fn loadCursor(self: *OrcaRuntime, object_value: *PlayerObject) !void {
     const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
     const cursor = object_value.queue.cursorPosition();
     const ref = object_value.queue.current() orelse {
@@ -620,6 +648,7 @@ fn loadCursor(object_value: *PlayerObject) !void {
     }
     session.replay_gain.shares_release = object_value.queue.sharesRelease(cursor, opener.opener());
     audio.engine.loadQueueEntry(object_value.player, object_value.queue, session, cursor);
+    runtime_resume.resumeRemembered(self, object_value, ref);
 }
 
 /// Spawns the Player's single decode producer. Registered with

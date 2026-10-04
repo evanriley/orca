@@ -230,6 +230,35 @@ pub const PlaybackQueue = struct {
         }
     }
 
+    /// Replaces the whole queue with a saved one: `refs` in list order, the
+    /// shuffled playback `order` (a permutation of entry indices) or null
+    /// for list order, and the cursor at playback position `cursor`. Nothing
+    /// is reshuffled, so a restored queue plays on in the order it was saved.
+    pub fn restore(self: *PlaybackQueue, refs: []const TrackRef, order: ?[]const u32, cursor: u32) !void {
+        if (refs.len > capacity) return error.PlaybackQueueFull;
+        if (refs.len != 0 and cursor >= refs.len) return error.PositionOutOfRange;
+        if (order) |permutation| {
+            if (permutation.len != refs.len) return error.InvalidQueueOrder;
+            var seen = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, refs.len);
+            defer seen.deinit(self.allocator);
+            for (permutation) |entry| {
+                if (entry >= refs.len or seen.isSet(entry)) return error.InvalidQueueOrder;
+                seen.set(entry);
+            }
+        }
+        try self.entries.ensureTotalCapacity(self.allocator, refs.len);
+        try self.order.ensureTotalCapacity(self.allocator, if (order) |permutation| permutation.len else 0);
+        self.entries.clearRetainingCapacity();
+        self.entries.appendSliceAssumeCapacity(refs);
+        self.publishCount();
+        self.order.clearRetainingCapacity();
+        if (order) |permutation| self.order.appendSliceAssumeCapacity(permutation);
+        self.shuffle = order != null;
+        self.setCursor(if (refs.len == 0) 0 else cursor);
+        self.decode_position.store(self.cursorPosition(), .release);
+        self.forgetSerials();
+    }
+
     /// Inserts `refs` to play straight after playback position `after`.
     /// Every position past it — the cursors, recorded serials, and `pending`
     /// if the caller holds one — moves with the entries it named.
@@ -774,4 +803,47 @@ test "moving into the played region shifts the cursor with the playing entry" {
     try testing.expectEqual(@as(?u32, 4), queue.positionForSerial(21));
     try testing.expectError(error.PositionOutOfRange, queue.move(6, 0, null));
     try testing.expectError(error.PositionOutOfRange, queue.move(0, 6, null));
+}
+
+test "restoring a saved shuffled queue keeps its order and cursor and turning shuffle off returns to list order" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4 });
+    defer testing.allocator.free(list);
+    try queue.enqueue(list);
+    queue.noteEntrySerial(9, 0);
+
+    try queue.restore(list, &.{ 2, 0, 3, 1 }, 2);
+    var buffer: [8]i64 = undefined;
+    try testing.expectEqualSlices(i64, &.{ 3, 1, 4, 2 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expect(queue.shuffle);
+    try testing.expectEqual(@as(u32, 2), queue.cursorPosition());
+    try testing.expectEqual(@as(u32, 2), queue.decodePosition());
+    try testing.expectEqual(@as(i64, 4), queue.current().?.track_id);
+    try testing.expectEqual(@as(?u32, null), queue.positionForSerial(9));
+
+    try queue.setShuffle(false);
+    try testing.expectEqualSlices(i64, &.{ 1, 2, 3, 4 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expectEqual(@as(i64, 4), queue.current().?.track_id);
+
+    try queue.restore(list[0..2], null, 1);
+    try testing.expect(!queue.shuffle);
+    try testing.expectEqualSlices(i64, &.{ 1, 2 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expectEqual(@as(i64, 2), queue.current().?.track_id);
+}
+
+test "restoring refuses an order that is no permutation and a cursor past the end, leaving the queue as it was" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 1, 2, 3 });
+    defer testing.allocator.free(list);
+    try queue.restore(list, null, 1);
+
+    try testing.expectError(error.InvalidQueueOrder, queue.restore(list, &.{ 0, 0, 1 }, 0));
+    try testing.expectError(error.InvalidQueueOrder, queue.restore(list, &.{ 0, 1, 3 }, 0));
+    try testing.expectError(error.InvalidQueueOrder, queue.restore(list, &.{ 0, 1 }, 0));
+    try testing.expectError(error.PositionOutOfRange, queue.restore(list, null, 3));
+    var buffer: [8]i64 = undefined;
+    try testing.expectEqualSlices(i64, &.{ 1, 2, 3 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expectEqual(@as(i64, 2), queue.current().?.track_id);
 }

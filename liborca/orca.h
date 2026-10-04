@@ -105,6 +105,14 @@ typedef enum orca_repeat_mode {
     ORCA_REPEAT_ONE = 2,
 } orca_repeat_mode;
 
+/* What orca_player_restore_state does with the saved queue: load it paused,
+ * load it and play, or leave the Player as it is. */
+typedef enum orca_restore_mode {
+    ORCA_RESTORE_MODE_PAUSED = 0,
+    ORCA_RESTORE_MODE_PLAYING = 1,
+    ORCA_RESTORE_MODE_NONE = 2,
+} orca_restore_mode;
+
 typedef enum orca_render_policy {
     ORCA_RENDER_POLICY_ROBUST = 0,
     ORCA_RENDER_POLICY_INTERACTIVE = 1,
@@ -1369,6 +1377,28 @@ typedef struct orca_player_status_v2 {
     uint8_t failure_reason;  /* orca_playback_failure */
     uint8_t reserved[6];
 } orca_player_status_v2;
+
+/* orca_player_status_v2 with where the audible entry resumed when it began
+ * part way through: a restored queue's position or a long Track's remembered
+ * one. `resumed_from_ms` is 0 when `has_resumed` is 0. */
+typedef struct orca_player_status_v3 {
+    orca_player_status_v2 base;
+    uint64_t resumed_from_ms;
+    uint8_t has_resumed;
+    uint8_t reserved[7];
+} orca_player_status_v3;
+
+/* What orca_player_restore_state restored. `index` is the playback position
+ * of the entry the queue resumes at and `position_ms` where in it, 0 from its
+ * start. `skipped_missing` counts saved entries left out because neither
+ * their Track nor another Track of their Recording is left. */
+typedef struct orca_restore_outcome {
+    uint32_t entries;
+    uint32_t index;
+    uint64_t position_ms;
+    uint32_t skipped_missing;
+    uint8_t reserved[4];
+} orca_restore_outcome;
 
 typedef struct orca_zone_status {
     uint8_t output_state;  /* orca_output_state */
@@ -5954,6 +5984,11 @@ orca_status orca_player_status_get_v2(
     orca_handle player,
     orca_player_status_v2 *output
 );
+orca_status orca_player_status_get_v3(
+    orca_runtime *runtime,
+    orca_handle player,
+    orca_player_status_v3 *output
+);
 /* The callback runs zero times when nothing is playing. Strings are valid only
  * for its duration. */
 orca_status orca_player_now_playing(
@@ -6009,6 +6044,36 @@ orca_status orca_player_save_queue_as_playlist(
     const char *name,
     size_t name_length,
     int64_t *playlist_id
+);
+/* Saves the queue, its position, repeat and shuffle into the Library the
+ * Player is bound to; entries from other Libraries are left out. From then on
+ * the runtime saves it again every 30 seconds while it plays (from
+ * orca_runtime_pump), when the Player is destroyed, bound to another
+ * Library or its Library is closed, and in orca_runtime_destroy before any
+ * Player is torn down.
+ * ORCA_STATUS_INVALID_STATE when the Player has no Library. */
+orca_status orca_player_save_state(orca_runtime *runtime, orca_handle player);
+/* Replaces the queue with the one last saved into the Player's Library and
+ * loads its current entry at the saved position, then pauses or plays it as
+ * `mode` (orca_restore_mode) says. A saved entry whose Track is gone resolves
+ * to another Track of its Recording, or is skipped and counted. Every field
+ * of `outcome` is 0 when nothing was saved or with ORCA_RESTORE_MODE_NONE.
+ * Any mode makes the runtime save this Player's state from then on, as
+ * orca_player_save_state does. `outcome` may be NULL. */
+orca_status orca_player_restore_state(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t mode,
+    orca_restore_outcome *outcome
+);
+/* With `enabled`, Tracks longer than `threshold_ms` resume where they were
+ * last left and forget it once they play to their end; with `enabled` 0 none
+ * do. On, at 20 minutes, until set. */
+orca_status orca_player_set_long_track_memory(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t enabled,
+    uint64_t threshold_ms
 );
 /* Plays the entry at playback position `position` now: a hard switch, like a
  * skip. ORCA_STATUS_INVALID_ARGUMENT when `position` is not below the queue

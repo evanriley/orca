@@ -289,6 +289,15 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_player_clear_queue_history` empties it. It is held in memory only.
   `orca_player_save_queue_as_playlist` saves the current entry and those
   after it as a playlist in the Player's Library.
+- **Saved playback.** `orca_player_restore_state` loads the queue last saved
+  into the Player's Library at its saved entry and position, paused, playing
+  or not at all by `orca_restore_mode`, and fills an `orca_restore_outcome`.
+  After it, or after `orca_player_save_state`, the runtime saves the queue
+  every 30 seconds from `orca_runtime_pump` while it plays and in
+  `orca_runtime_destroy`. `orca_player_set_long_track_memory` sets the length
+  past which a Track resumes where it was left. `orca_player_status_get_v3`
+  adds `resumed_from_ms` to `orca_player_status_v2`. See
+  [api.md](api.md#surface).
 - **Equalizer, crossfeed and signal path.** `orca_player_set_equalizer`
   turns the ten-band equalizer on with an `orca_equalizer` of band gains and
   a preamp, or off with NULL; `orca_equalizer_preset_get` fills one from an

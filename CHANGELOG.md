@@ -36,6 +36,22 @@
   offers Check Metadata, which runs the `consistency` Job in the activity
   indicator. The Mismatched metadata row no longer counts the missing-tag
   and track-number health kinds; `orca-cli health` still lists them.
+- **Resume playback.** liborca saves a Player's queue (up to 10,000
+  entries), entry, position, repeat and shuffle in the Library:
+  `playerSaveState`, then every 30 seconds from `pump` while it plays, when
+  the Player leaves the Library, and at shutdown before any Player is torn
+  down. `playerRestoreState` loads it back paused or playing and returns a
+  `RestoreOutcome`; a saved Track that is gone resolves through its
+  Recording or is skipped and counted. `playerSetLongTrackMemory` makes
+  Tracks longer than a threshold (20 minutes by default) resume where they
+  were left until they play to their end, and `PlayerStatus.resumed_from_ms`
+  says where the audible entry resumed. Migration 53 adds `player_state`,
+  `player_queue_entries` and `track_positions`. The C ABI adds
+  `orca_player_save_state`, `orca_player_restore_state`,
+  `orca_player_set_long_track_memory` and `orca_player_status_get_v3`.
+  `orca-cli play-tracks --save-state` saves at the end, and `orca-cli
+  resume DATABASE --device=ID [--play] [--limit=MS]` restores and prints the
+  queue and status.
 - **Matches and Match Review.** `orca-gtk`'s Matches page lists albums
   by their best MusicBrainz release in Confident, Needs Review and
   Unmatched tabs with their counts, each row with its candidate, confidence

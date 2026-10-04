@@ -211,9 +211,11 @@ zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start
     [--lyrics]   # prints a `lyric at=` line as each synced line is heard
     [--move=MS:FROM:TO]...   # at MS, moves the entry at playback position FROM to TO; prints `move at= ... result=ok|in_use|out_of_range`
     [--print-history] [--save-queue=NAME]   # at the end: queue history newest first; the queue from the current entry as a playlist
+    [--save-state]   # at the end, saves the queue and position for resume; prints `saved-state entries= index= position_ms=`
     # records listens in the play history; never sends them
     # an entry that cannot be opened prints `failure=TRACK_ID:file_missing|folder_unavailable|codec_unavailable|decode_error|unsupported_channels` and play goes on to the next
 zig build run -- play-folder DATABASE ROOT_ID PATH --device=ID [--shuffle] [--limit=MS]   # every Track below PATH, recursively in path order
+zig build run -- resume DATABASE --device=ID [--play] [--limit=MS]   # restored entries= index= position_ms= skipped_missing=, the queue from the saved index, then `status transport= index= entries= track= position_ms= resumed_from_ms= repeat= shuffle=`; --play plays for MS (default 10 s); the Library keeps where it stopped
 zig build run -- peq-check FILE   # validates an EqualizerAPO file and prints it back normalised
 zig build run -- peq-response FILE [--rate=HZ]   # HZ<TAB>DB at 32 log-spaced frequencies, preamp included; --rate defaults to 44100
 

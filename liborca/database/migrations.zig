@@ -1521,6 +1521,32 @@ const migration_52 =
     \\
 ;
 
+/// The queue and position a Player resumes from, and where long Tracks were
+/// left. Queue entries name a Track and its Recording, with no foreign key: a
+/// restore resolves a Track that is gone through its Recording, or skips it.
+const migration_53 =
+    \\CREATE TABLE player_state (
+    \\    id INTEGER PRIMARY KEY CHECK (id = 1),
+    \\    cursor INTEGER NOT NULL CHECK (cursor >= 0),
+    \\    position_ms INTEGER NOT NULL CHECK (position_ms >= 0),
+    \\    repeat INTEGER NOT NULL CHECK (repeat BETWEEN 0 AND 2),
+    \\    shuffle INTEGER NOT NULL CHECK (shuffle IN (0, 1)),
+    \\    saved_at INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE player_queue_entries (
+    \\    position INTEGER PRIMARY KEY CHECK (position BETWEEN 0 AND 9999),
+    \\    entry INTEGER NOT NULL CHECK (entry BETWEEN 0 AND 9999),
+    \\    track_id INTEGER NOT NULL,
+    \\    recording_id INTEGER
+    \\);
+    \\CREATE TABLE track_positions (
+    \\    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    \\    position_ms INTEGER NOT NULL CHECK (position_ms > 0),
+    \\    updated_at INTEGER NOT NULL
+    \\);
+    \\
+;
+
 const migration_54 =
     \\CREATE TABLE metadata_proposals (
     \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2087,6 +2113,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 50 and target_version >= 50) try db.exec(migration_50);
     if (version < 51 and target_version >= 51) try db.exec(migration_51);
     if (version < 52 and target_version >= 52) try db.exec(migration_52);
+    if (version < 53 and target_version >= 53) try db.exec(migration_53);
     if (version < 54 and target_version >= 54) try db.exec(migration_54);
     if (version < 55 and target_version >= 55) try db.exec(migration_55);
     try checkForeignKeys(db);
@@ -4077,6 +4104,53 @@ test "a version-51 library keeps its releases and gains release candidate dismis
     ));
     try db.exec("DELETE FROM releases WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM dismissed_release_candidates;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-52 library keeps its tracks and gains an empty saved queue and positions that go with their track" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v52-player-state.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 52);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One');
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Mix', 'mix');
+        \\INSERT INTO tracks(id, release_id, title, recording_id) VALUES (1, 1, 'One', 1), (2, 1, 'Two', NULL);
+    );
+    const rows_sql = "SELECT group_concat(id || ':' || title || ':' || COALESCE(recording_id, '-'), ' ') FROM (SELECT * FROM tracks ORDER BY id);";
+    const before = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(before);
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    const after = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM player_state;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM track_positions;"));
+
+    try db.exec(
+        \\INSERT INTO player_state(id, cursor, position_ms, repeat, shuffle, saved_at) VALUES (1, 1, 5000, 2, 1, 1800000000);
+        \\INSERT INTO player_queue_entries(position, entry, track_id, recording_id) VALUES (0, 1, 2, NULL), (1, 0, 1, 1);
+        \\INSERT INTO track_positions(track_id, position_ms, updated_at) VALUES (1, 1500000, 1800000000), (2, 1300000, 1800000000);
+    );
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO player_state(id, cursor, position_ms, repeat, shuffle, saved_at) VALUES (2, 0, 0, 0, 0, 0);",
+    ));
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO player_queue_entries(position, entry, track_id) VALUES (10000, 0, 1);",
+    ));
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO track_positions(track_id, position_ms, updated_at) VALUES (99, 1000, 0);",
+    ));
+    try db.exec("DELETE FROM tracks WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT track_id FROM track_positions;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
     try checkForeignKeys(db);
 }
 

@@ -161,6 +161,7 @@ pub const JobHistoryInput = repository.JobHistoryInput;
 pub const JobHistoryRow = repository.JobHistoryRow;
 pub const JobHistoryPage = repository.JobHistoryPage;
 pub const LibrarySettingsRepository = repository.LibrarySettingsRepository;
+pub const PlayerStateRepository = repository.PlayerStateRepository;
 pub const LibraryStats = repository.LibraryStats;
 pub const LibraryStatsRepository = repository.LibraryStatsRepository;
 pub const CacheSize = repository.CacheSize;

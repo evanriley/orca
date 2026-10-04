@@ -330,6 +330,29 @@ defer page.deinit();
 - `playerSaveQueueAsPlaylist(player, library, name)` saves the current
   entry and those after it as a new playlist and returns its id; see
   [playlists.md](playlists.md#playlists).
+- `playerSaveState(player, library)` saves the queue (at most 10,000
+  entries, those of other Libraries left out), the playing entry, its
+  position, repeat and shuffle into the Library the Player is bound to.
+  `playerRestoreState(player, library, mode)` replaces the queue with the
+  saved one, loads its entry at the saved position and, by `RestoreMode`,
+  leaves it `paused` or starts `playing`; `none` changes nothing. It returns
+  a `RestoreOutcome`: `entries`, the resumed `index`, `position_ms` and
+  `skipped_missing`, saved entries whose Track and Recording are both gone.
+  Either call, in any mode, makes the runtime save the Player's state from
+  then on: every 30 seconds from `pump` while it plays, once more on the
+  next of those ticks after it pauses or stops, when the Player is destroyed
+  or bound to another Library, when its Library is destroyed, and in
+  `shutdown` after every worker is joined and before any Zone or Player is
+  torn down. A host calls `playerRestoreState` once at launch and nothing
+  else.
+- `playerSetLongTrackMemory(player, threshold_ms)` sets how long a Track has
+  to be for the Player to remember where it was left: on pause, seek, stop
+  or a skip away, the position is kept in the Library, and the next time the
+  Track is loaded it resumes there. A Track that plays to its end forgets
+  it. 20 minutes until set; null turns it off. A gapless move into such a
+  Track starts it from the beginning. `PlayerStatus.resumed_from_ms` is
+  where the audible entry resumed, from a restore or a remembered position,
+  and null when it began at its start. See [database.md](database.md#saved-playback).
 - Health can be shown grouped by kind: `libraryHealthSummary` returns a
   `HealthSummary` of `HealthKindSummary`s, each kind's count, highest
   severity, `files` and `bytes`, and `libraryHealthIssuePageOfKind` pages

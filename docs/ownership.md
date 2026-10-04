@@ -69,6 +69,10 @@ work → Zones → Players → Libraries:
    workers, which closes each loader's read-only connection before its
    Library's database closes, discard tag write plans awaiting approval,
    finish every waiting host job `cancelled`, and cancel and drain Jobs.
+   Last, with no worker left to hold a Library's write lane and every Player
+   and Library still alive, save the queue and position of each Player
+   whose state the host saved or restored, and where each Player's long
+   Track was left ([api.md](api.md#surface)).
 3. Destroy Zones, closing their output sessions; Zones depend on Players and
    output resources.
 4. Free Players.

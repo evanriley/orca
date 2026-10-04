@@ -251,6 +251,7 @@ const commands = [_]Command{
     .{ .name = "health-restore", .usage = "health-restore DATABASE FILE_ID KIND", .min_arguments = 3, .max_arguments = 3, .run = restoreHealthIssue, .shares_usage_line = true },
     .{ .name = "play-tracks", .usage = "play-tracks DATABASE (IDS | --playlist=ID) [OPTIONS]", .min_arguments = 2, .max_arguments = null, .run = playTracks },
     .{ .name = "play-folder", .usage = "play-folder DATABASE ROOT_ID PATH --device=ID [--shuffle] [--limit=MS]", .min_arguments = 4, .max_arguments = 6, .run = playFolder },
+    .{ .name = "resume", .usage = "resume DATABASE --device=ID [--play] [--limit=MS]", .min_arguments = 2, .max_arguments = 4, .run = resumePlayback },
     .{ .name = "scrobble", .usage = "scrobble DATABASE [--status] [--timeout=MS]", .min_arguments = 1, .max_arguments = null, .run = scrobble },
     .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
     .{ .name = "rate", .usage = "rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setRating },
@@ -635,6 +636,9 @@ const help_details =
     \\                     reason (finished|skipped|replaced), track and title
     \\  --save-queue=NAME  at the end, save the current entry and those after
     \\                     it as playlist NAME and print its id and entry count
+    \\  --save-state       at the end, save the queue and position for resume and
+    \\                     print a `saved-state` line with entries, index and
+    \\                     position_ms
     \\
     \\play-tracks prints one `signal:` line once playback is a second in: the
     \\source, each stage that changes the samples, the output stream,
@@ -652,6 +656,15 @@ const help_details =
     \\prints the queue, then a `now-playing` line as each entry is heard.
     \\--device=ID is required; --shuffle shuffles the queue after its first
     \\entry; --limit=MS stops after MS of wall clock (default 10 minutes).
+    \\
+    \\resume loads the queue last saved into the Library, as by play-tracks
+    \\--save-state, and prints `restored entries= index= position_ms=
+    \\skipped_missing=`, where skipped_missing counts saved entries whose
+    \\Track and Recording are both gone, then the queue from the saved index
+    \\and a `status` line. It leaves the queue paused at the saved position;
+    \\--play plays it for --limit=MS (default 10 seconds) and prints the
+    \\`status` line again. The Library keeps where it stopped. --device=ID is
+    \\required.
     \\
     \\peq-check reads an EqualizerAPO file and prints it back normalised: the
     \\Preamp, then one Filter line per filter, shelves as LSC and HSC, Gain on
@@ -2491,6 +2504,7 @@ const PlayTracksOptions = struct {
     lyrics: bool = false,
     print_history: bool = false,
     save_queue: ?[]const u8 = null,
+    save_state: bool = false,
 };
 
 fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
@@ -2512,6 +2526,10 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
     }
     if (std.mem.eql(u8, argument, "--stop-after-current")) {
         options.stop_after_current = true;
+        return;
+    }
+    if (std.mem.eql(u8, argument, "--save-state")) {
+        options.save_state = true;
         return;
     }
     const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
@@ -2949,6 +2967,96 @@ fn playTracks(context: Context) !void {
         defer playlist.deinit(runtime.allocator);
         try stdout.print("saved-queue playlist_id={d} entries={d}\n", .{ playlist_id, playlist.entries });
     }
+    if (options.save_state) {
+        try runtime.playerSaveState(player, library);
+        const status = try runtime.playerStatus(player);
+        try stdout.print("saved-state entries={d} index={d} position_ms={d}\n", .{
+            status.queue_length,
+            status.queue_index,
+            status.position_ms,
+        });
+    }
+}
+
+fn resumePlayback(context: Context) !void {
+    const io = context.io;
+    const stdout = context.stdout;
+    var device: ?u64 = null;
+    var play = false;
+    var limit_ms: u64 = 10 * 1000;
+    for (context.arguments[1..]) |argument| {
+        if (std.mem.eql(u8, argument, "--play")) {
+            play = true;
+        } else if (std.mem.startsWith(u8, argument, "--device=")) {
+            device = try std.fmt.parseInt(u64, argument["--device=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--limit=")) {
+            limit_ms = try std.fmt.parseInt(u64, argument["--limit=".len..], 10);
+        } else return error.UnknownOption;
+    }
+
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    const library = try openBrowseLibrary(context.allocator, io, &runtime, context.arguments[0]);
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, device orelse return error.MissingDevice);
+    try runtime.playerBindLibrary(player, library, io);
+    const outcome = try runtime.playerRestoreState(player, library, if (play) .playing else .paused);
+    try stdout.print("restored entries={d} index={d} position_ms={d} skipped_missing={d}\n", .{
+        outcome.entries,
+        outcome.index,
+        outcome.position_ms,
+        outcome.skipped_missing,
+    });
+
+    var refs: [64]liborca.TrackRef = undefined;
+    var position = outcome.index;
+    while (outcome.entries > 0) {
+        const count = try runtime.playerQueuePage(player, position, &refs);
+        for (refs[0..count]) |ref| {
+            const details = try runtime.libraryTrackDetails(library, ref.track_id);
+            defer if (details) |value| value.deinit();
+            try stdout.print("queue position={d} track={d} title={s}\n", .{
+                position,
+                ref.track_id,
+                if (details) |value| value.title else "",
+            });
+            position += 1;
+        }
+        if (count < refs.len) break;
+    }
+    try printResumeStatus(&runtime, stdout, player);
+    if (!play) return;
+
+    var elapsed_ms: u64 = 0;
+    while (elapsed_ms < limit_ms) {
+        _ = runtime.processNextCommand();
+        if (try runtime.playerDrained(player)) break;
+        sleepMilliseconds(10);
+        elapsed_ms += 10;
+    }
+    try runtime.pausePlayer(player);
+    try printResumeStatus(&runtime, stdout, player);
+}
+
+fn printResumeStatus(runtime: *liborca.Runtime, stdout: *std.Io.Writer, player: liborca.PlayerHandle) !void {
+    const status = try runtime.playerStatus(player);
+    try stdout.print(
+        "status transport={t} index={d} entries={d} track={?d} position_ms={d} resumed_from_ms={?d} repeat={t} shuffle={}\n",
+        .{
+            status.transport,
+            status.queue_index,
+            status.queue_length,
+            status.track_id,
+            status.position_ms,
+            status.resumed_from_ms,
+            status.repeat,
+            status.shuffle,
+        },
+    );
+    try stdout.flush();
 }
 
 fn printQueueHistory(

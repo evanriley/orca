@@ -91,6 +91,8 @@ const struct_pairs = .{
     .{ c_api.NowPlayingView, c.orca_now_playing_view },
     .{ c_api.PlayerStatus, c.orca_player_status },
     .{ c_api.PlayerStatusV2, c.orca_player_status_v2 },
+    .{ c_api.PlayerStatusV3, c.orca_player_status_v3 },
+    .{ c_api.RestoreOutcomeView, c.orca_restore_outcome },
     .{ c_api.ZoneStatus, c.orca_zone_status },
     .{ c_api.EqualizerView, c.orca_equalizer },
     .{ c_api.ParametricFilterView, c.orca_parametric_filter },
@@ -629,6 +631,13 @@ const import_mappings = .{
     struct {
         pub const prefix = "ORCA_REPEAT_";
         pub const Tag = audio.playback_queue.RepeatMode;
+        pub fn consume(value: u8) ?Tag {
+            return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RESTORE_MODE_";
+        pub const Tag = core.runtime.RestoreMode;
         pub fn consume(value: u8) ?Tag {
             return std.enums.fromInt(Tag, value);
         }

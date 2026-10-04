@@ -27,6 +27,7 @@ const runtime_genres = @import("runtime_genres.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
+const runtime_resume = @import("runtime_resume.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const storage = @import("../storage/root.zig");
 const tag_write_history = @import("tag_write_history.zig");
@@ -50,6 +51,8 @@ pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const QueueHistoryEntry = queue_history.QueueHistoryEntry;
 pub const QueueHistoryReason = queue_history.QueueHistoryReason;
+pub const RestoreMode = runtime_resume.RestoreMode;
+pub const RestoreOutcome = runtime_resume.RestoreOutcome;
 pub const queue_history_capacity = queue_history.queue_history_capacity;
 pub const TrackDetails = track_details.TrackDetails;
 pub const RecordingIdSource = track_details.RecordingIdSource;
@@ -197,6 +200,7 @@ pub const PlayerObject = struct {
     /// Sampled by the control lane while the Player is bound to a Library.
     listens: providers.listens.ListenTracker = .{},
     history: queue_history.QueueHistory = .{},
+    persistence: runtime_resume.State = .{},
 };
 pub const ZoneObject = struct {
     zone: *audio.zone_runtime.ZoneRuntime,
@@ -510,6 +514,9 @@ pub const PlayerStatus = struct {
     /// The last entry that could not be opened, kept until an entry opened
     /// after it is audible.
     last_failure: ?PlaybackFailure = null,
+    /// Where the audible entry resumed when it began part way through: a
+    /// restored queue's position or a long Track's remembered one.
+    resumed_from_ms: ?u64 = null,
 };
 
 pub const PlaybackFailure = struct {
@@ -679,6 +686,7 @@ pub const OrcaRuntime = struct {
         runtime_jobs.discardPendingTagWrites(self, null);
         runtime_jobs.dropWaitingJobs(self, null);
         self.jobs.cancelAndDrain();
+        runtime_resume.saveAtShutdown(self);
         for (self.zones.slots.items) |*slot| {
             if (slot.value) |zone| zone.zone.destroy();
         }
@@ -756,6 +764,7 @@ pub const OrcaRuntime = struct {
             const object_value = if (slot.value) |*value| value else continue;
             const opener = object_value.opener orelse continue;
             if (!opener.library.eql(library)) continue;
+            runtime_resume.leaveLibrary(self, object_value);
             runtime_queue.forgetAudibleEntry(self, object_value);
             if (object_value.engine) |engine| {
                 engine.quiesce();
@@ -2146,6 +2155,7 @@ pub const OrcaRuntime = struct {
         // Only this Player's workers: draining the registry would cancel other
         // Players' engines and every running job.
         self.work_registry.drainOwner(playerOwnerTag(player));
+        runtime_resume.leaveLibrary(self, destroyed);
         const removed = try self.players.remove(player);
         self.freePlayerObject(removed);
         // Detaching also closes each Zone's output: an OutputSession whose
@@ -2509,6 +2519,37 @@ pub const OrcaRuntime = struct {
         name: []const u8,
     ) !i64 {
         return runtime_queue.playerSaveQueueAsPlaylist(self, player, library, name);
+    }
+
+    /// Saves the queue, its position, repeat and shuffle into `library`, the
+    /// Library the Player is bound to; entries from other Libraries are left
+    /// out. From then on the runtime saves it again every 30 seconds while it
+    /// plays, when the Player is destroyed, bound to another Library or its
+    /// Library is destroyed, and at shutdown before any Player is torn down.
+    pub fn playerSaveState(self: *OrcaRuntime, player: PlayerHandle, library: LibraryHandle) !void {
+        return runtime_resume.playerSaveState(self, player, library);
+    }
+
+    /// Replaces the queue with the one last saved into `library` and loads
+    /// its current entry at the saved position, then pauses or plays it. A
+    /// saved entry whose Track is gone resolves through its Recording, or is
+    /// skipped and counted. `.none` restores nothing. Any mode makes the
+    /// runtime save this Player's state from then on, as `playerSaveState`
+    /// does.
+    pub fn playerRestoreState(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        mode: RestoreMode,
+    ) !RestoreOutcome {
+        return runtime_resume.playerRestoreState(self, player, library, mode);
+    }
+
+    /// Tracks longer than `threshold_ms` resume where they were left, and
+    /// forget it when they play to their end; null turns it off. Twenty
+    /// minutes until set.
+    pub fn playerSetLongTrackMemory(self: *OrcaRuntime, player: PlayerHandle, threshold_ms: ?u64) !void {
+        return runtime_resume.playerSetLongTrackMemory(self, player, threshold_ms);
     }
 
     /// Reads engine-thread counters, so it stops the engine for the duration.
@@ -3523,6 +3564,7 @@ pub const OrcaRuntime = struct {
             runtime_jobs.queuedJobPumpDueMs(self),
             runtime_watch.watchPumpDueMs(self),
             runtime_maintenance.maintenancePumpDueMs(self),
+            runtime_resume.resumePumpDueMs(self),
         }) |candidate| {
             const value = candidate orelse continue;
             due = if (due) |current| @min(current, value) else value;
@@ -3534,8 +3576,8 @@ pub const OrcaRuntime = struct {
     /// at most the command queue's capacity so a host that keeps submitting
     /// cannot trap its loop here, joins finished job workers and publishes
     /// their progress, starts the waiting host jobs whose turn has come,
-    /// takes what watchers reported and starts their reconciles, then starts
-    /// a due maintenance unit.
+    /// takes what watchers reported and starts their reconciles, starts a
+    /// due maintenance unit, then saves the Players whose state is due.
     pub fn pump(self: *OrcaRuntime) void {
         var executed: usize = 0;
         while (executed < control.CommandQueue.capacity and self.processNextCommand()) executed += 1;
@@ -3543,6 +3585,7 @@ pub const OrcaRuntime = struct {
         runtime_jobs.startWaitingJobs(self);
         runtime_watch.pumpWatchers(self);
         runtime_maintenance.pumpMaintenance(self);
+        runtime_resume.pumpResume(self);
     }
 
     /// Executes at most one command on the runtime's serialized logical control
