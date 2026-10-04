@@ -638,6 +638,10 @@
   texture and paints again from the cache when shown. On a 41,000-album
   library the Albums page sorted by Date Added peaks at 293 MB instead of
   575 MB while scrolling.
+- **Matches builds when opened.** orca-gtk no longer builds the Matches
+  page's rows at startup or on every library change; it marks the page stale
+  and reloads it when you open it, or at once when it is already showing.
+  The sidebar count stays current.
 - **Newsreader, Geist and Geist Mono replace Inter and Source Serif 4.**
   `orca-gtk` sets display titles in Newsreader and the interface in Geist,
   and bundles Geist Mono, all under the SIL Open Font License and

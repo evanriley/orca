@@ -327,9 +327,13 @@ fn launched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque)
 
 /// Opens the folder holding `path` with the file selected, when the file is
 /// there to show.
-fn revealPath(self: *App, path: ?[]const u8) void {
+pub fn revealPath(self: *App, path: ?[]const u8) void {
     const location = path orelse return self.toast("File not found");
     if (location.len == 0) return self.toast("File not found");
+    if (self.debug_reveal) {
+        std.debug.print("orca-gtk reveal: {s}\n", .{location});
+        return;
+    }
     const terminated = self.allocator.dupeZ(u8, location) catch return;
     defer self.allocator.free(terminated);
     const file = gtk.g_file_new_for_path(terminated.ptr);

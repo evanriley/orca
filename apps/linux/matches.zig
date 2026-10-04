@@ -105,7 +105,7 @@ fn refused(self: *App, err: anyerror, fallback: [:0]const u8) void {
 }
 
 fn changed(self: *App) void {
-    reload(self);
+    invalidate(self);
     details.invalidate(self);
     self.requestTick();
 }
@@ -684,7 +684,29 @@ pub fn reveal(self: *App, track_id: i64) void {
     reload(self);
 }
 
+pub fn invalidate(self: *App) void {
+    if (self.current_page == .matches) {
+        reload(self);
+        return;
+    }
+    self.matches_dirty = true;
+    refreshBadge(self);
+}
+
+pub fn shown(self: *App) void {
+    if (self.matches_dirty) reload(self);
+}
+
+pub fn refreshBadge(self: *App) void {
+    const library = self.library orelse return;
+    var page = self.runtime.libraryCorrectionGroups(library, self.allocator, app.page_size, 0) catch return;
+    defer page.deinit();
+    self.matches_group_count = page.items.len;
+    updateCount(self);
+}
+
 pub fn reload(self: *App) void {
+    self.matches_dirty = false;
     const list = self.matches_list orelse return;
     gtk.gtk_list_box_remove_all(list);
     const library = self.library orelse return;

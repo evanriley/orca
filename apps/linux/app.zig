@@ -423,6 +423,7 @@ pub const App = struct {
     matches_corrections: ?*gtk.ListBox = null,
     matches_corrections_box: ?*gtk.Widget = null,
     matches_group_count: u64 = 0,
+    matches_dirty: bool = false,
     matches_note: ?*gtk.Label = null,
     matches_body: ?*gtk.Stack = null,
     matches_meta: ?*gtk.Label = null,

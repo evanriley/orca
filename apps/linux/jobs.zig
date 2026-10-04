@@ -77,7 +77,7 @@ pub fn reloadLibraryViews(self: *App) void {
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
-    matches.reload(self);
+    matches.invalidate(self);
     playlists.refresh(self);
     playlists.reloadPage(self, true);
     loved.reload(self);
@@ -569,7 +569,7 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
     if (mode != .search) {
         const track_id = self.match_task_track;
         self.match_task_track = null;
-        matches.reload(self);
+        matches.invalidate(self);
         details.invalidate(self);
         return switch (mode) {
             .verify => verificationFinished(self, track_id, state_value, stats),
@@ -586,7 +586,7 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
     self.match_task_track = null;
     const matched = if (stats) |value| value.matched else 0;
     if (searched) |track_id| self.unmatched_track = if (state_value == .succeeded and matched == 0) track_id else null;
-    matches.reload(self);
+    matches.invalidate(self);
     details.invalidate(self);
     if (state_value == .cancelled) return self.toast("Stopped");
     if (state_value != .succeeded) return self.toast(switch (if (stats) |value| value.busy else .none) {
@@ -603,7 +603,7 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
 }
 
 fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.SubmissionStats) void {
-    matches.reload(self);
+    matches.invalidate(self);
     if (state_value == .cancelled) return self.toast("Stopped");
     const result = stats orelse return self.toast("AcoustID could not be reached; try again later");
     if (state_value != .succeeded) return self.toast(switch (result.outcome) {

@@ -1855,7 +1855,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         peak_row.root,
         replay_gain_row.root,
     }, null);
-    const identity_section = newSection("auth-fingerprint-symbolic", "Identity", &.{
+    const identity_section = newSection("orca-matches-symbolic", "Identity", &.{
         musicbrainz_row.root,
         acoustid_row.root,
         match_status.root,

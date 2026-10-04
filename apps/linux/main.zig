@@ -149,7 +149,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
-    matches.reload(self);
+    matches.invalidate(self);
     if (self.library == null) self.toast("The library could not be opened");
     window.refreshCounts(self);
     window.focusSidebar(self);

@@ -43,7 +43,7 @@ pub fn tick(self: *App) void {
     const total = self.runtime.libraryHealthIssueCount(library) catch shown;
     if (found or total != shown) health.reload(self);
     if (!found) return;
-    matches.reload(self);
+    matches.invalidate(self);
     details.invalidate(self);
 }
 

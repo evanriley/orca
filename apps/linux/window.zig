@@ -810,6 +810,7 @@ fn switchTo(self: *App, page: Page) void {
     if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     syncSidebarSelection(self);
     if (page == .loved) loved.reload(self);
+    if (page == .matches) matches.shown(self);
     if (page == .genres) genres.shown(self);
     if (page == .folders) folders.shown(self);
     if (page == .settings) preferences.show(self);
