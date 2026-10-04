@@ -923,6 +923,7 @@ fn queueEndPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
 fn rememberPositionSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.playback.remember_long_position = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    transport.applyLongTrackMemory(self);
     settings.save(self);
 }
 

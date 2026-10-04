@@ -21,6 +21,8 @@
 #   log:PATH     copies orca-gtk's output so far to PATH; set ORCA_GTK_DEBUG
 #                (art, frames, reveal) to add its debug reports
 #   db:PATH      copies the app's library, with its -wal, to PATH
+#   close        closes the window, as its close button does, and waits for
+#                orca-gtk to exit
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
 # scripts/design-fixture.sh when missing; the app gets a copy. Settings
@@ -36,7 +38,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '5,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '5,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -64,7 +66,7 @@ case "$page" in
 esac
 for step in "${steps[@]}"; do
     case "$step" in
-        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | dclick:*,* | rclick:*,* | drag:*,*,*,* | shot:?*.png | tree:?* | log:?* | db:?*) ;;
+        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | dclick:*,* | rclick:*,* | drag:*,*,*,* | shot:?*.png | tree:?* | log:?* | db:?* | close) ;;
         *) fail "unknown step '$step'; see the usage in $0" ;;
     esac
 done
@@ -435,6 +437,15 @@ copy_library() {
     done
 }
 
+orca_exited() {
+    [ "$(awk '{ print $3 }' "/proc/$orca_pid/stat" 2>/dev/null || echo Z)" = Z ]
+}
+
+close_window() {
+    swaymsg "[app_id=\"$application_id\"] kill" >/dev/null
+    wait_for "orca-gtk to exit after its window closed" 100 orca_exited
+}
+
 run_step() {
     local step=$1 value
     value=${step#*:}
@@ -443,6 +454,7 @@ run_step() {
         tree:*) swaymsg -t get_tree >"$value" ;;
         log:*) cp "$runtime/orca-gtk.log" "$value" ;;
         db:*) copy_library "$value" ;;
+        close) close_window ;;
         key:*) press "$value" ;;
         type:*) type_text "$value" ;;
         wait:*) sleep "$(awk -v ms="$value" 'BEGIN { print ms / 1000 }')" ;;

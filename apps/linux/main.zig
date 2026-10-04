@@ -161,6 +161,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     transport.refreshDevices(self);
     // The output is opened on first play, not here: an idle window must not
     // hold the user's default sink.
+    transport.restoreAtLaunch(self);
     browse.reload(self);
     self.reload();
     offline.refresh(self);
@@ -199,6 +200,12 @@ fn frameFinished(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const elapsed = gtk.g_get_monotonic_time() - self.frame_started_us;
     self.slowest_frame_us = @max(self.slowest_frame_us, elapsed);
     std.debug.print("orca-gtk frames: frame {d} us, slowest {d} us\n", .{ elapsed, self.slowest_frame_us });
+}
+
+fn openOutputForMpris(context: *anyopaque) bool {
+    const self: *App = @ptrCast(@alignCast(context));
+    const status = self.runtime.playerStatus(self.player) catch return false;
+    return status.queue_length == 0 or transport.ensureOutput(self);
 }
 
 fn activatePlayPause(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -626,6 +633,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else |_| {}
     }
     settings.load(&self);
+    transport.applyLongTrackMemory(&self);
     _ = watching.apply(&self);
     maintenance.apply(&self) catch {};
 
@@ -700,6 +708,7 @@ pub fn main(init: std.process.Init) !u8 {
     addIntegerAction(application, "settings-folder-remove", activateSettingsFolderRemove, &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io, self.waker());
+    self.mpris.open_output = .{ .context = &self, .open_fn = openOutputForMpris };
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);
     const wake_source = gtk.g_unix_fd_add(wake_fd, gtk.IO_IN, onWake, &self);
 
@@ -729,6 +738,8 @@ pub fn main(init: std.process.Init) !u8 {
     match_review.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
+    if (self.library) |library| runtime.playerSaveState(self.player, library) catch |err|
+        std.log.warn("The queue and position were not saved for the next launch ({t}); it restores the last save made while playing", .{err});
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};
     runtime.destroyPlayer(self.player) catch {};
     if (self.library) |library| runtime.destroyLibrary(library) catch {};

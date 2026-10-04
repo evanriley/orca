@@ -15,6 +15,7 @@ const feedback = @import("feedback.zig");
 const playlists = @import("playlists.zig");
 const settings = @import("settings.zig");
 const page_ui = @import("page.zig");
+const transport = @import("transport.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -295,6 +296,7 @@ fn nextMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn nextActivated(_: ?*anyopaque, row: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (row >= self.queue.next_count) return;
+    if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
     self.runtime.playerQueueJump(self.player, self.queue.next_positions[row]) catch return;
     self.mpris.notify();
     self.requestTick();

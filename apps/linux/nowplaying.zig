@@ -20,6 +20,7 @@ const track_model = @import("track_model.zig");
 const inspector = @import("details.zig");
 const signal_path = @import("signal_path.zig");
 const page_ui = @import("page.zig");
+const transport = @import("transport.zig");
 
 const App = app.App;
 
@@ -500,6 +501,7 @@ fn upNextActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv
     const index = gtk.gtk_list_box_row_get_index(gtk.cast(gtk.ListBoxRow, row.?));
     if (index < 0) return;
     const position = self.now_playing.up_next_start + @as(u32, @intCast(index));
+    if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
     self.runtime.playerQueueJump(self.player, position) catch return;
     self.mpris.notify();
     self.requestTick();

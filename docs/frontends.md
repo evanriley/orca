@@ -1603,9 +1603,14 @@ again at launch.
   - Output: Output device, the same list as the player bar's picker, re-read
     each time the tab is shown; Match source sample rate, always on; Audio
     backend.
-  - Resume: Remember position in long tracks (`remember_long_position`) and
-    On launch (`on_launch=restore_paused|restore_playing|start_empty`). Both
-    are saved only; nothing reads them yet.
+  - Resume: Remember position in long tracks (`remember_long_position`)
+    calls `playerSetLongTrackMemory` with 20 minutes, or null when off, at
+    launch and when switched. On launch
+    (`on_launch=restore_paused|restore_playing|start_empty`) is applied
+    once, when the window is first built: `playerRestoreState` with
+    `.paused`, `.playing` or `.none`. `.none` restores nothing but still
+    makes the runtime save this session, so a later launch restores what
+    was played after it.
 - Sound, saved in `[sound]`:
   - Equalizer: Off, Graphic or Parametric (`equalizer_mode`). Graphic shows
     the ten-band preset, preamp and sliders. Parametric shows Preset (Flat,
@@ -1927,7 +1932,14 @@ that cannot be written now show no card.
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the device list; see
-[Testing playback without making noise](../CLAUDE.md).
+[Testing playback without making noise](../CLAUDE.md). A paused restore at
+launch loads the saved entry at its position and opens no output, so the
+player bar shows the track, its position and the seek bar with nothing
+held; play from the bar, the Space key or MPRIS opens the output first and
+continues from that position. Restore and play opens it as play does.
+Closing the window calls `playerSaveState` before the Zone and Player are
+destroyed; the runtime saves again when the Player is destroyed, which
+writes the same state.
 
 Covers go through `apps/linux/art.zig`. A widget asks for a cover while it is
 bound and forgets it when unbound; the frontend asks liborca's artwork loader
@@ -1999,6 +2011,7 @@ steps after the output path run in order:
 | `scroll:N` | `N` wheel steps; positive scrolls down |
 | `wait:MS` | Waits `MS` milliseconds |
 | `db:PATH` | Copies the app's library, with its `-wal`, to `PATH` |
+| `close` | Closes the window as its close button does and waits for `orca-gtk` to exit |
 
 The script waits until two consecutive frames match before writing the PNG.
 

@@ -52,6 +52,15 @@
   `orca-cli play-tracks --save-state` saves at the end, and `orca-cli
   resume DATABASE --device=ID [--play] [--limit=MS]` restores and prints the
   queue and status.
+- **Resume at launch.** `orca-gtk` restores the last queue at launch as
+  Settings › Playback › On launch asks: Restore queue, paused (the
+  default), which shows the track and position in the player bar and opens
+  no output until play; Restore and play, which opens the output as play
+  does; or Start empty. Closing the window saves the queue and position
+  with `playerSaveState`, and Remember position in long tracks sets
+  `playerSetLongTrackMemory` to 20 minutes, or off. Play from the player
+  bar or MPRIS opens the output when a restored queue has none.
+  `scripts/headless-gui.sh` gains a `close` step.
 - **Matches and Match Review.** `orca-gtk`'s Matches page lists albums
   by their best MusicBrainz release in Confident, Needs Review and
   Unmatched tabs with their counts, each row with its candidate, confidence

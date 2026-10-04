@@ -245,6 +245,30 @@ pub fn ensureOutput(self: *App) bool {
     return true;
 }
 
+pub fn restoreAtLaunch(self: *App) void {
+    const library = self.library orelse return;
+    const mode: liborca.RestoreMode = switch (self.playback.on_launch) {
+        .restore_paused => .paused,
+        .restore_playing => if (ensureOutput(self)) .playing else .paused,
+        .start_empty => .none,
+    };
+    const outcome = self.runtime.playerRestoreState(self.player, library, mode) catch
+        return self.toast("Could not restore the last queue");
+    if (outcome.entries == 0) if (self.zone) |zone| {
+        self.runtime.destroyZone(zone) catch {};
+        self.zone = null;
+    };
+    self.mpris.notify();
+    self.requestTick();
+}
+
+pub fn applyLongTrackMemory(self: *App) void {
+    const threshold_ms: ?u64 = if (self.playback.remember_long_position) long_track_ms else null;
+    self.runtime.playerSetLongTrackMemory(self.player, threshold_ms) catch {};
+}
+
+const long_track_ms: u64 = 20 * std.time.ms_per_min;
+
 fn deviceActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const index = gtk.gtk_list_box_row_get_index(gtk.cast(gtk.ListBoxRow, row));
@@ -308,6 +332,8 @@ pub fn playIds(self: *App, ids: []const i64, start: u32) void {
 
 pub fn toggle(self: *App) void {
     const status = self.runtime.playerStatus(self.player) catch return;
+    if (status.transport != .playing and status.queue_length != 0 and !ensureOutput(self))
+        return self.toast("No audio output is available");
     const result = if (status.transport == .playing)
         self.runtime.pausePlayer(self.player)
     else

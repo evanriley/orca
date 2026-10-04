@@ -88,11 +88,22 @@ pub const Mpris = struct {
     player: liborca.PlayerHandle = .{ .index = 0, .generation = 0 },
     application: ?*gtk.GApplication = null,
     request_tick: ?liborca.HostWaker = null,
+    open_output: ?OpenOutput = null,
     connection: ?*gtk.GDBusConnection = null,
     node: ?*gtk.GDBusNodeInfo = null,
     owner_id: c_uint = 0,
     root_registration: c_uint = 0,
     player_registration: c_uint = 0,
+
+    pub const OpenOutput = struct {
+        context: *anyopaque,
+        open_fn: *const fn (*anyopaque) bool,
+    };
+
+    fn play(self: *Mpris, runtime: *liborca.Runtime) void {
+        if (self.open_output) |hook| if (!hook.open_fn(hook.context)) return;
+        runtime.playPlayer(self.player) catch {};
+    }
 
     fn requestTick(self: *Mpris) void {
         const waker = self.request_tick orelse return;
@@ -227,7 +238,7 @@ pub const Mpris = struct {
         if (snapshot.transport == .playing)
             runtime.pausePlayer(self.player) catch {}
         else
-            runtime.playPlayer(self.player) catch {};
+            self.play(runtime);
         self.notify();
         self.requestTick();
     }
@@ -453,7 +464,7 @@ fn self_from(data: ?*anyopaque) *Mpris {
 fn playerMethod(mpris: *Mpris, method: []const u8, parameters: *gtk.GVariant) void {
     const runtime = mpris.runtime orelse return;
     if (std.mem.eql(u8, method, "Play")) {
-        runtime.playPlayer(mpris.player) catch {};
+        mpris.play(runtime);
     } else if (std.mem.eql(u8, method, "Pause")) {
         runtime.pausePlayer(mpris.player) catch {};
     } else if (std.mem.eql(u8, method, "Stop")) {
