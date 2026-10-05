@@ -342,9 +342,6 @@ removed.
   the identity cascade still treat it as the old bytes. A merge or an exact
   verdict requires a full-content comparison. Checked by tests with files that
   differ only in the middle.
-- A file the scan fails to open, for a permission, descriptor or I/O error,
-  keeps its availability instead of being swept missing. Checked by a scan
-  over an unreadable file.
 - Root paths are sound. A root path is stored as given: neither `orca-cli
   add-root` nor `orca_library_add_root` makes it absolute or refuses a
   relative one, and an absolute playlist export from a relative root writes

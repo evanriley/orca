@@ -185,6 +185,10 @@ const folder_images_sql = "SELECT uri, mime, role FROM folder_images WHERE " ++ 
     " ORDER BY uri LIMIT ?4 OFFSET ?5;";
 const folder_image_count_sql = "SELECT count(*) FROM folder_images WHERE " ++ folder_images_filter ++ ";";
 
+const under_directory_filter = " WHERE volume_id=?1 AND uri>=?2 || '/' AND uri<?2 || '0' AND +root_id=?3;";
+const seen_under_sql = "UPDATE locations SET last_seen_generation=max(last_seen_generation, ?4)" ++ under_directory_filter;
+const images_seen_under_sql = "UPDATE folder_images SET last_seen_generation=max(last_seen_generation, ?4)" ++ under_directory_filter;
+
 const front_role = std.fmt.comptimePrint("{d}", .{@intFromEnum(ArtworkRole.front)});
 
 /// The `(volume_id, folder path)` of the folder holding most of a Release's
@@ -890,6 +894,17 @@ pub const LocationRepository = struct {
         return statement.columnInt64(0);
     }
 
+    pub fn findImage(self: *const LocationRepository, volume_id: i64, path: []const u8) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT id FROM folder_images WHERE volume_id=?1 AND uri=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, path);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
     /// Caller holds the write lane.
     pub fn markImagesSeenLocked(self: *LocationRepository, ids: []const i64, generation: i64) !void {
         if (ids.len == 0) return;
@@ -901,6 +916,47 @@ pub const LocationRepository = struct {
             try statement.bindInt64(2, generation);
             if (try statement.step() != .done) return error.SqlFailed;
         }
+    }
+
+    /// Stamps every Location of `root_id` under `directory`, the directory's
+    /// own uri, as `markSeenLocked` stamps one. A sibling whose name merely
+    /// starts with the directory's is not under it. Caller holds the write lane.
+    pub fn markSeenUnderLocked(
+        self: *LocationRepository,
+        volume_id: i64,
+        root_id: i64,
+        directory: []const u8,
+        generation: i64,
+    ) !void {
+        try self.stampUnder(seen_under_sql, volume_id, root_id, directory, generation);
+    }
+
+    /// The folder images twin of `markSeenUnderLocked`. Caller holds the write lane.
+    pub fn markImagesSeenUnderLocked(
+        self: *LocationRepository,
+        volume_id: i64,
+        root_id: i64,
+        directory: []const u8,
+        generation: i64,
+    ) !void {
+        try self.stampUnder(images_seen_under_sql, volume_id, root_id, directory, generation);
+    }
+
+    fn stampUnder(
+        self: *LocationRepository,
+        sql: [:0]const u8,
+        volume_id: i64,
+        root_id: i64,
+        directory: []const u8,
+        generation: i64,
+    ) !void {
+        var statement = try self.db.prepare(sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, directory);
+        try statement.bindInt64(3, root_id);
+        try statement.bindInt64(4, generation);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 
     /// Caller holds the write lane.
@@ -1574,6 +1630,56 @@ test "a sweep that forgets a front image or loses a Release's files clears the R
     try std.testing.expectEqual(@as(u64, 2), try library.files.markMissingBelowGenerationUnder(2, 1, 3, "/m/Here"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 2;"));
+}
+
+test "a stamp under a directory raises only its root's rows below that directory, and never lowers one" {
+    var library = try openFolderTestLibrary("seen-under");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO files(id) VALUES (1), (2), (3), (4), (5);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state, last_seen_generation) VALUES
+        \\    (1, 2, 1, '/m/ab/1.flac', 'present', 2),
+        \\    (2, 2, 1, '/m/ab/deep/2.flac', 'present', 9),
+        \\    (3, 2, 1, '/m/abc/3.flac', 'present', 2),
+        \\    (4, 2, 2, '/m/ab/nested/4.flac', 'present', 2),
+        \\    (5, 2, 1, '/m/ab', 'present', 2);
+        \\INSERT INTO folder_images(volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation) VALUES
+        \\    (2, 1, '/m/ab/cover.jpg', 'image/jpeg', 0, 10, 1, 2),
+        \\    (2, 1, '/m/abc/cover.jpg', 'image/jpeg', 0, 10, 1, 2),
+        \\    (2, 2, '/m/ab/nested/cover.jpg', 'image/jpeg', 0, 10, 1, 2);
+    );
+    library.write_lane.acquire();
+    try library.locations.markSeenUnderLocked(2, 1, "/m/ab", 5);
+    try library.locations.markImagesSeenUnderLocked(2, 1, "/m/ab", 5);
+    library.write_lane.release();
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, "SELECT last_seen_generation FROM locations WHERE file_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 9), try scalar(library.database, "SELECT last_seen_generation FROM locations WHERE file_id = 2;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT last_seen_generation FROM locations WHERE file_id = 3;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT last_seen_generation FROM locations WHERE file_id = 4;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT last_seen_generation FROM locations WHERE file_id = 5;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, "SELECT last_seen_generation FROM folder_images WHERE uri = '/m/ab/cover.jpg';"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT last_seen_generation FROM folder_images WHERE uri = '/m/abc/cover.jpg';"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT last_seen_generation FROM folder_images WHERE uri = '/m/ab/nested/cover.jpg';"));
+}
+
+test "a stamp under a directory reads a uri range of the volume's unique index, never the whole root" {
+    var library = try openFolderTestLibrary("seen-under-plan");
+    defer library.close();
+    for ([_][:0]const u8{ seen_under_sql, images_seen_under_sql }) |sql| {
+        const explain = try std.mem.concatWithSentinel(std.testing.allocator, u8, &.{ "EXPLAIN QUERY PLAN ", sql }, 0);
+        defer std.testing.allocator.free(explain);
+        var statement = try library.database.prepare(explain);
+        defer statement.deinit();
+        var plan: std.ArrayList(u8) = .empty;
+        defer plan.deinit(std.testing.allocator);
+        while (try statement.step() == .row) {
+            try plan.appendSlice(std.testing.allocator, statement.columnText(3));
+            try plan.append(std.testing.allocator, '\n');
+        }
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "(volume_id=? AND uri>? AND uri<?)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "_sweep") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SCAN") == null);
+    }
 }
 
 fn testImageUpsert(root_id: ?i64, uri: []const u8, generation: i64) FolderImageUpsert {

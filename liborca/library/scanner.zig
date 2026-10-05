@@ -261,7 +261,7 @@ pub const Scanner = struct {
         else
             root_path;
         defer if (subtree != null) self.allocator.free(start_path);
-        var walker = try start.walk(self.allocator);
+        var walker = try start.walkSelectively(self.allocator);
         defer walker.deinit();
 
         var builtin_codecs = codec.CodecRegistry.builtins();
@@ -285,11 +285,15 @@ pub const Scanner = struct {
                 result.cancelled = true;
                 break;
             };
-            if (self.ignore.matches(entry.basename)) {
-                if (entry.kind == .directory) walker.leave(self.io);
+            if (self.ignore.matches(entry.basename)) continue;
+            try self.enterFolder(&open_folders, std.fs.path.dirnamePosix(entry.path) orelse "", subtree);
+            if (entry.kind == .directory) {
+                walker.enter(self.io, entry) catch |err| switch (err) {
+                    error.OutOfMemory, error.Canceled => return err,
+                    else => try self.keepUnentered(start_path, entry.path, &result),
+                };
                 continue;
             }
-            try self.enterFolder(&open_folders, std.fs.path.dirnamePosix(entry.path) orelse "", subtree);
             if (entry.kind != .file) continue;
             result.files_seen += 1;
             if (self.progress) |counter| counter.store(result.files_seen, .release);
@@ -363,11 +367,11 @@ pub const Scanner = struct {
     /// Records `path` as a folder image when its bytes are one, and reports
     /// whether they were. Only a header is read.
     fn examineImage(self: *Scanner, path: []const u8, basename: []const u8, result: *Result) !bool {
-        var local = storage.LocalFileSource.open(self.io, path) catch return false;
+        var local = storage.LocalFileSource.open(self.io, path) catch return self.keepUnobservedImage(path, result);
         defer local.close();
         const storage_identity = local.readable().identity();
-        const size_bytes = std.math.cast(i64, storage_identity.size) orelse return false;
-        const modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse return false;
+        const size_bytes = std.math.cast(i64, storage_identity.size) orelse return self.keepUnobservedImage(path, result);
+        const modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse return self.keepUnobservedImage(path, result);
         if (try self.locations.unchangedImageId(self.volume_id, path, size_bytes, modified_ns)) |image_id| {
             try self.seen_images.append(self.allocator, image_id);
             if (self.seen_images.items.len >= self.batch_size) try self.flushSeen();
@@ -375,7 +379,7 @@ pub const Scanner = struct {
             return true;
         }
         var header: [16]u8 = undefined;
-        const header_len = local.readable().readAt(0, &header) catch return false;
+        const header_len = local.readable().readAt(0, &header) catch return self.keepUnobservedImage(path, result);
         const mime = metadata_model.sniffImageMimeType(header[0..header_len]) orelse return false;
         const measured = image_header.measureAt(local.readable(), 0, storage_identity.size) catch
             image_header.Measurement{ .hash = image_header.unreadable_hash };
@@ -412,26 +416,14 @@ pub const Scanner = struct {
     ) !void {
         var owned_path = true;
         defer if (owned_path) self.allocator.free(path);
-        var local = storage.LocalFileSource.open(self.io, path) catch {
-            result.errors += 1;
-            return;
-        };
+        var local = storage.LocalFileSource.open(self.io, path) catch return self.keepUnobserved(path, result);
         defer local.close();
         const storage_identity = local.readable().identity();
         const identity = database.StorageIdentityKey{
             .volume_id = self.volume_id,
-            .native_inode = std.math.cast(i64, storage_identity.inode) orelse {
-                result.errors += 1;
-                return;
-            },
-            .size_bytes = std.math.cast(i64, storage_identity.size) orelse {
-                result.errors += 1;
-                return;
-            },
-            .modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse {
-                result.errors += 1;
-                return;
-            },
+            .native_inode = std.math.cast(i64, storage_identity.inode) orelse return self.keepUnobserved(path, result),
+            .size_bytes = std.math.cast(i64, storage_identity.size) orelse return self.keepUnobserved(path, result),
+            .modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse return self.keepUnobserved(path, result),
         };
         const unchanged = if (unchanged_policy == .skip_unchanged)
             try self.locations.unchangedLocationId(self.volume_id, path, identity)
@@ -447,10 +439,11 @@ pub const Scanner = struct {
             result.unchanged += 1;
             return;
         }
-        const detection = (try storage.format.detect(local.readable())) orelse {
+        const detection = (storage.format.detect(local.readable()) catch return self.keepUnobserved(path, result)) orelse {
             result.unsupported += 1;
             return;
         };
+        const quick_hash = storage.quick_hash.fromSource(local.readable()) catch return self.keepUnobserved(path, result);
         const audio_format = detection.format;
         // A tag reader is defined over the container it is handed, so an
         // ID3v2 tag in front of a FLAC stream has to be stepped over before
@@ -493,7 +486,7 @@ pub const Scanner = struct {
             .path = path,
             .audio_format = audio_format,
             .identity = identity,
-            .quick_hash = try storage.quick_hash.fromSource(local.readable()),
+            .quick_hash = quick_hash,
             .properties = properties,
             .tags = tags,
             .unreadable = unreadable,
@@ -527,11 +520,46 @@ pub const Scanner = struct {
             try self.flush(&pending);
             result.batches_committed += 1;
         }
+        try self.flushSeen();
         try self.project(&result);
         return result;
     }
 
-    /// Stamp the run's generation onto Locations it skipped as unchanged.
+    /// A listed file that cannot be read is still present: its Location is
+    /// stamped unchanged, or the sweep would mark it `missing`.
+    fn keepUnobserved(self: *Scanner, path: []const u8, result: *Result) !void {
+        result.errors += 1;
+        if (try self.locations.find(self.volume_id, path)) |location_id| {
+            try self.seen.append(self.allocator, location_id);
+            if (self.seen.items.len >= self.batch_size) try self.flushSeen();
+        }
+    }
+
+    fn keepUnobservedImage(self: *Scanner, path: []const u8, result: *Result) !bool {
+        result.errors += 1;
+        if (try self.locations.findImage(self.volume_id, path)) |image_id| {
+            try self.seen_images.append(self.allocator, image_id);
+            if (self.seen_images.items.len >= self.batch_size) try self.flushSeen();
+        }
+        return true;
+    }
+
+    /// A listed directory that cannot be entered still holds what was recorded
+    /// under it: every Location and folder image of this root below it is
+    /// stamped, or the sweep would mark them all `missing`.
+    fn keepUnentered(self: *Scanner, start_path: []const u8, relative: []const u8, result: *Result) !void {
+        result.errors += 1;
+        const root_id = self.root_id orelse return;
+        const directory = try pathUnder(self.allocator, start_path, relative);
+        defer self.allocator.free(directory);
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.locations.markSeenUnderLocked(self.volume_id, root_id, directory, self.generation);
+        try self.locations.markImagesSeenUnderLocked(self.volume_id, root_id, directory, self.generation);
+    }
+
+    /// Stamp the run's generation onto Locations and images it reached without
+    /// re-recording them.
     fn flushSeen(self: *Scanner) !void {
         if (self.seen.items.len == 0 and self.seen_images.items.len == 0) return;
         self.write_lane.acquire();
@@ -666,16 +694,20 @@ pub fn countFiles(
     else
         root;
     defer if (subtree != null) start.close(io);
-    var walker = try start.walk(allocator);
+    var walker = try start.walkSelectively(allocator);
     defer walker.deinit();
     var files: u64 = 0;
     while (try walker.next(io)) |entry| {
         if (cancellation) |token| if (token.checkpoint()) return null;
-        if (ignore.matches(entry.basename)) {
-            if (entry.kind == .directory) walker.leave(io);
-            continue;
+        if (ignore.matches(entry.basename)) continue;
+        switch (entry.kind) {
+            .file => files += 1,
+            .directory => walker.enter(io, entry) catch |err| switch (err) {
+                error.OutOfMemory, error.Canceled => return err,
+                else => {},
+            },
+            else => {},
         }
-        if (entry.kind == .file) files += 1;
     }
     return files;
 }
@@ -2251,4 +2283,273 @@ test "a file count names every file a walk reaches and none it skips" {
     var token: CancellationToken = .{};
     token.cancel();
     try std.testing.expectEqual(@as(?u64, null), try countFiles(std.testing.io, std.testing.allocator, root_path, null, .{}, &token));
+}
+
+fn skipWhenPermissionsAreIgnored() !void {
+    if (@import("builtin").os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+}
+
+const SweptScan = struct {
+    result: Result,
+    generation: i64,
+    marked_missing: u64,
+};
+
+/// A completed scan of the whole root, swept as a scan job sweeps it.
+fn sweptScan(library: *database.LibraryDatabase, binding: database.RootBinding, root_path: []const u8) !SweptScan {
+    const run = try library.scan_runs.begin(binding.root_id);
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .volume_id = binding.volume_id,
+        .root_id = binding.root_id,
+        .generation = run.generation,
+    };
+    defer scanner.deinit();
+    const result = try scanner.scan(root_path);
+    return .{
+        .result = result,
+        .generation = run.generation,
+        .marked_missing = try library.files.markMissingBelowGeneration(binding.root_id, run.generation),
+    };
+}
+
+fn expectLocation(
+    library: *database.LibraryDatabase,
+    root_path: []const u8,
+    name: []const u8,
+    state: database.LocationState,
+    generation: i64,
+) !void {
+    const uri = try pathUnder(std.testing.allocator, root_path, name);
+    defer std.testing.allocator.free(uri);
+    var statement = try library.database.prepare("SELECT state, last_seen_generation FROM locations WHERE uri=?1;");
+    defer statement.deinit();
+    try statement.bindText(1, uri);
+    try std.testing.expect(try statement.step() == .row);
+    try std.testing.expectEqual(state, database.LocationState.parse(statement.columnText(0)).?);
+    try std.testing.expectEqual(generation, statement.columnInt64(1));
+}
+
+fn imageGeneration(library: *database.LibraryDatabase, root_path: []const u8, name: []const u8) !?i64 {
+    const uri = try pathUnder(std.testing.allocator, root_path, name);
+    defer std.testing.allocator.free(uri);
+    var statement = try library.database.prepare("SELECT last_seen_generation FROM folder_images WHERE uri=?1;");
+    defer statement.deinit();
+    try statement.bindText(1, uri);
+    if (try statement.step() != .row) return null;
+    return statement.columnInt64(0);
+}
+
+test "a file the walk lists but cannot open keeps its location at the run's generation while a deleted sibling is swept" {
+    try skipWhenPermissionsAreIgnored();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    inline for (.{ "locked.flac", "removed.flac", "kept.flac" }) |name| {
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "fLaC" ++ name });
+    }
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unopenable-file?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unopenable-file" });
+    try std.testing.expectEqual(@as(u64, 3), (try sweptScan(&library, binding, root_path)).result.changed);
+
+    try temporary.dir.setFilePermissions(std.testing.io, "locked.flac", .fromMode(0), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "locked.flac", .default_file, .{}) catch {};
+    const locked = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), locked.result.errors);
+    try std.testing.expectEqual(@as(u64, 0), locked.marked_missing);
+    try expectLocation(&library, root_path, "locked.flac", .present, locked.generation);
+
+    try temporary.dir.deleteFile(std.testing.io, "removed.flac");
+    const removed = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), removed.result.errors);
+    try std.testing.expectEqual(@as(u64, 1), removed.marked_missing);
+    try expectLocation(&library, root_path, "locked.flac", .present, removed.generation);
+    try expectLocation(&library, root_path, "kept.flac", .present, removed.generation);
+    try expectLocation(&library, root_path, "removed.flac", .missing, locked.generation);
+}
+
+test "a file whose identity does not fit the database keeps its location at the run's generation" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "future.flac", .data = "fLaC future" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unrepresentable-file?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unrepresentable-file" });
+    try std.testing.expectEqual(@as(u64, 1), (try sweptScan(&library, binding, root_path)).result.changed);
+
+    const year_2300_ns: i96 = 10_413_792_000 * std.time.ns_per_s;
+    try temporary.dir.setTimestamps(std.testing.io, "future.flac", .{
+        .modify_timestamp = .{ .new = .fromNanoseconds(year_2300_ns) },
+    });
+    const stat = try temporary.dir.statFile(std.testing.io, "future.flac", .{});
+    if (std.math.cast(i64, stat.mtime.nanoseconds) != null) return error.SkipZigTest;
+
+    const rescanned = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), rescanned.result.errors);
+    try std.testing.expectEqual(@as(u64, 0), rescanned.marked_missing);
+    try expectLocation(&library, root_path, "future.flac", .present, rescanned.generation);
+}
+
+test "a folder image the walk lists but cannot open keeps its row at the run's generation while a deleted sibling is forgotten" {
+    try skipWhenPermissionsAreIgnored();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "back.png", .data = "\x89PNG\r\n\x1a\n a png" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unopenable-image?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unopenable-image" });
+    try std.testing.expectEqual(@as(u64, 2), (try sweptScan(&library, binding, root_path)).result.images);
+
+    try temporary.dir.setFilePermissions(std.testing.io, "cover.jpg", .fromMode(0), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "cover.jpg", .default_file, .{}) catch {};
+    const locked = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), locked.result.errors);
+    try std.testing.expectEqual(@as(u64, 1), locked.result.images);
+    try std.testing.expectEqual(@as(?i64, locked.generation), try imageGeneration(&library, root_path, "cover.jpg"));
+
+    try temporary.dir.deleteFile(std.testing.io, "back.png");
+    const removed = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), removed.result.errors);
+    try std.testing.expectEqual(@as(?i64, removed.generation), try imageGeneration(&library, root_path, "cover.jpg"));
+    try std.testing.expectEqual(@as(?i64, null), try imageGeneration(&library, root_path, "back.png"));
+    try std.testing.expectEqual(@as(u64, 0), try library.locations.count());
+}
+
+test "a file or image the walk cannot open and never recorded is counted as an error and recorded nowhere" {
+    try skipWhenPermissionsAreIgnored();
+    const names = [_][]const u8{ "locked.flac", "locked.jpg" };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = names[0], .data = "fLaC locked" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = names[1], .data = "\xff\xd8\xff\xe0 a jpeg" });
+    for (names) |name| try temporary.dir.setFilePermissions(std.testing.io, name, .fromMode(0), .{});
+    defer for (names) |name| temporary.dir.setFilePermissions(std.testing.io, name, .default_file, .{}) catch {};
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unopenable-new?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unopenable-new" });
+
+    const scanned = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 2), scanned.result.errors);
+    try std.testing.expectEqual(@as(u64, 0), scanned.result.changed + scanned.result.images);
+    try std.testing.expectEqual(@as(u64, 0), try library.locations.count());
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library.database, "SELECT count(*) FROM folder_images;"));
+}
+
+test "a directory the walk lists but cannot enter keeps everything recorded under it while a deleted sibling is swept" {
+    try skipWhenPermissionsAreIgnored();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "locked/inner");
+    try temporary.dir.createDirPath(std.testing.io, "other");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "locked/one.flac", .data = "fLaC one" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "locked/inner/two.flac", .data = "fLaC two" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "locked/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "other/gone.flac", .data = "fLaC gone" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unenterable-directory?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unenterable-directory" });
+    const scanned = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 3), scanned.result.changed);
+    try std.testing.expectEqual(@as(u64, 1), scanned.result.images);
+
+    try temporary.dir.deleteFile(std.testing.io, "other/gone.flac");
+    try temporary.dir.setFilePermissions(std.testing.io, "locked", .fromMode(0), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "locked", .default_dir, .{}) catch {};
+    const locked = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), locked.result.errors);
+    try std.testing.expectEqual(@as(u64, 1), locked.marked_missing);
+    try expectLocation(&library, root_path, "locked/one.flac", .present, locked.generation);
+    try expectLocation(&library, root_path, "locked/inner/two.flac", .present, locked.generation);
+    try std.testing.expectEqual(@as(?i64, locked.generation), try imageGeneration(&library, root_path, "locked/cover.jpg"));
+    try expectLocation(&library, root_path, "other/gone.flac", .missing, scanned.generation);
+}
+
+test "a directory the walk cannot enter keeps nothing of a sibling whose name starts with its own" {
+    try skipWhenPermissionsAreIgnored();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "ab");
+    try temporary.dir.createDirPath(std.testing.io, "abc");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "ab/kept.flac", .data = "fLaC kept" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "ab/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "abc/gone.flac", .data = "fLaC gone" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "abc/gone.png", .data = "\x89PNG\r\n\x1a\n a png" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unenterable-prefix?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unenterable-prefix" });
+    const scanned = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 2), scanned.result.changed);
+    try std.testing.expectEqual(@as(u64, 2), scanned.result.images);
+
+    try temporary.dir.deleteFile(std.testing.io, "abc/gone.flac");
+    try temporary.dir.deleteFile(std.testing.io, "abc/gone.png");
+    try temporary.dir.setFilePermissions(std.testing.io, "ab", .fromMode(0), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "ab", .default_dir, .{}) catch {};
+    const locked = try sweptScan(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), locked.result.errors);
+    try std.testing.expectEqual(@as(u64, 1), locked.marked_missing);
+    try expectLocation(&library, root_path, "abc/gone.flac", .missing, scanned.generation);
+    try std.testing.expectEqual(@as(?i64, null), try imageGeneration(&library, root_path, "abc/gone.png"));
+    try expectLocation(&library, root_path, "ab/kept.flac", .present, locked.generation);
+    try std.testing.expectEqual(@as(?i64, locked.generation), try imageGeneration(&library, root_path, "ab/cover.jpg"));
+}
+
+test "a file count skips a directory it cannot enter and counts the rest" {
+    try skipWhenPermissionsAreIgnored();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "locked");
+    try temporary.dir.createDirPath(std.testing.io, "open");
+    for ([_][]const u8{ "locked/01.flac", "locked/02.flac", "open/01.flac", "top.flac" }) |path| {
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "x" });
+    }
+    try temporary.dir.setFilePermissions(std.testing.io, "locked", .fromMode(0), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "locked", .default_dir, .{}) catch {};
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+
+    try std.testing.expectEqual(@as(?u64, 2), try countFiles(std.testing.io, std.testing.allocator, root_path, null, .{}, null));
 }

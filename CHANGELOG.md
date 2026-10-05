@@ -1509,6 +1509,20 @@
 
 ### Fixed
 
+- **A folder a scan cannot enter no longer fails the scan.** A directory a
+  scan or reconcile lists but cannot open, for example because its permissions
+  deny it, adds one to `ScanStats.errors` and keeps every file and folder
+  image recorded under it; the rest of the root is still walked and swept. It
+  used to end the run `failed`, so nothing was swept and the Job failed. A
+  root that cannot be opened, or a directory listing that fails, still fails
+  the run without sweeping. The file count before a walk skips such a
+  directory instead of failing.
+- **A file a scan cannot read stays in the library.** A file or folder image
+  that a scan or reconcile lists but cannot open or read, such as one whose
+  permissions deny reading, adds one to `errors` and keeps its location or
+  folder image at the run's generation instead of being marked missing or
+  forgotten by the sweep. A read error inside a listed file no longer fails
+  the whole walk. A file that was never recorded is only counted.
 - **Exact duplicates are exact.** The audio hash is versioned and covers the
   sample rate, channel count and length. For FLAC, ALAC, WAV and AIFF it
   covers the source's own integer samples, so 32-bit files one LSB apart no

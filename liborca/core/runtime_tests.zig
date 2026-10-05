@@ -4361,16 +4361,15 @@ test "reconciling a directory never sweeps a sibling whose name starts with the 
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/Newer/four.ogg")).?.state);
 }
 
-test "an unreadable subdirectory fails the reconcile and sweeps nothing under its directory, while the other directories are swept" {
+test "a reconcile whose directory cannot be opened fails and sweeps nothing under it, while the other directories are swept" {
     if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
     var fixture: ReconcileFixture = undefined;
     try fixture.init("file:orca-reconcile-unreadable?mode=memory&cache=shared");
     defer fixture.deinit();
-    try fixture.temporary.dir.createDirPath(std.testing.io, "A/locked");
     try fixture.temporary.dir.deleteFile(std.testing.io, "A/one.flac");
     try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
-    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .fromMode(0), .{});
-    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .default_dir, .{}) catch {};
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A", .default_dir, .{}) catch {};
 
     const outcome = try fixture.reconcile(&.{ "A", "B" });
     try std.testing.expectEqual(job.State.failed, outcome.state);
@@ -4382,22 +4381,89 @@ test "an unreadable subdirectory fails the reconcile and sweeps nothing under it
     try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
 }
 
-test "a scan whose walk fails on an unreadable subdirectory fails its run and marks nothing missing" {
+test "a reconcile keeps everything under a subdirectory it cannot enter and still sweeps what is gone" {
     if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
     var fixture: ReconcileFixture = undefined;
-    try fixture.init("file:orca-scan-unreadable?mode=memory&cache=shared");
+    try fixture.init("file:orca-reconcile-unenterable?mode=memory&cache=shared");
     defer fixture.deinit();
-    try fixture.temporary.dir.createDirPath(std.testing.io, "A/locked");
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/Locked");
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "A/Locked/three.m4a");
+    try std.testing.expectEqual(job.State.succeeded, (try fixture.reconcile(&.{"A"})).state);
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/one.flac");
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/Locked", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/Locked", .default_dir, .{}) catch {};
+
+    const outcome = try fixture.reconcile(&.{"A"});
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.errors);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/Locked/three.m4a")).?.state);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(@as(i64, 3), try fixture.scanRunCount(.completed));
+}
+
+test "a scan that cannot enter a directory succeeds, keeps everything under it and still sweeps what is gone" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-unenterable?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const scanned = (try fixture.location("A/one.flac")).?;
     try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
-    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .fromMode(0), .{});
-    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .default_dir, .{}) catch {};
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A", .default_dir, .{}) catch {};
+
+    const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, job_handle));
+    const stats = try fixture.runtime.jobScanStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 1), stats.errors);
+    try std.testing.expectEqual(@as(u64, 1), stats.marked_missing);
+    const kept = (try fixture.location("A/one.flac")).?;
+    try std.testing.expectEqual(database.LocationState.present, kept.state);
+    try std.testing.expectEqual(scanned.generation + 1, kept.generation);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, 2), try fixture.scanRunCount(.completed));
+}
+
+test "a scan whose root directory cannot be opened fails its run and marks nothing missing" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-root-locked?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+    try fixture.temporary.parent_dir.setFilePermissions(std.testing.io, &fixture.temporary.sub_path, .fromMode(0), .{});
+    defer fixture.temporary.parent_dir.setFilePermissions(std.testing.io, &fixture.temporary.sub_path, .default_dir, .{}) catch {};
 
     const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
     try std.testing.expectEqual(job.State.failed, try awaitJob(&fixture.runtime, job_handle));
-    try std.testing.expectEqual(@as(u64, 0), (try fixture.runtime.jobScanStats(job_handle)).marked_missing);
+    const stats = try fixture.runtime.jobScanStats(job_handle);
+    try std.testing.expect(!stats.volume_changed);
+    try std.testing.expectEqual(@as(u64, 0), stats.marked_missing);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
     try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.failed));
     try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+}
+
+test "a scan that cannot open a file succeeds, keeps the file present and still sweeps what is gone" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-unopenable-file?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const scanned = (try fixture.location("A/one.flac")).?;
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/one.flac", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/one.flac", .default_file, .{}) catch {};
+
+    const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, job_handle));
+    const stats = try fixture.runtime.jobScanStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 1), stats.errors);
+    try std.testing.expectEqual(@as(u64, 1), stats.marked_missing);
+    const kept = (try fixture.location("A/one.flac")).?;
+    try std.testing.expectEqual(database.LocationState.present, kept.state);
+    try std.testing.expectEqual(scanned.generation + 1, kept.generation);
+    try std.testing.expectEqual(scanned.file_id, kept.file_id);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, 2), try fixture.scanRunCount(.completed));
 }
 
 test "a scan whose root directory is gone fails its run and marks nothing missing" {

@@ -117,12 +117,26 @@ Each walk of a root opens a scan run (`scan_runs`) with the root's next
 generation and stamps every location and folder image it reaches with it.
 Only a run that ends `completed` sweeps: it marks the locations it did not
 reach `missing` and forgets the folder images it did not reach. A cancelled
-run ends `cancelled`, and a walk that errors, for example because the root's
-directory is gone or a subdirectory cannot be opened, ends its run `failed`
-and fails the Job; neither sweeps anything. The one exception is a subtree
-reconcile whose walk of one directory fails: its run ends `failed`, and it
-still sweeps the directories whose walks completed (see
+run ends `cancelled`, and a walk that errors, because the root's directory is
+gone or cannot be opened or because listing a directory fails, ends its run
+`failed` and fails the Job; neither sweeps anything. The one exception is a
+subtree reconcile whose walk of one directory fails: its run ends `failed`,
+and it still sweeps the directories whose walks completed (see
 [Folder-scoped reconciliation](#folder-scoped-reconciliation)).
+
+A directory that a walk lists but cannot enter, for example because its
+permissions deny it, does not fail the walk. It adds one to the scan's
+`errors` count, and every location and folder image the root has recorded
+under it is stamped with the run's generation, so the sweep keeps everything
+under it. Nothing under it is read, and its folder scan time is unchanged. A
+file count before the walk skips it.
+
+A file or folder image that a walk lists but cannot open or read, for example
+because its permissions deny reading, does not fail the walk. It adds one to
+the scan's `errors` count (`ScanStats.errors`), and its existing location or
+folder image row is stamped with the run's generation and otherwise left
+unchanged, so the sweep neither marks it `missing` nor forgets it. One that was
+never recorded is only counted.
 
 Stamps never go backwards. Within a root, a stamp keeps the higher of its
 stored generation and the one being written, so a walk that began earlier
@@ -196,9 +210,10 @@ DATABASE ROOT_ID [DIR...]` runs it.
 - A directory that is gone, or is no longer a directory, counts as a completed
   walk that found nothing. Everything recorded under it becomes `missing`.
 - A directory is swept only if its recursive walk completed and the job was
-  not cancelled. A directory whose walk failed, for example on an unreadable
-  subdirectory, keeps every location it holds, and the job ends `failed`. The
-  other directories are still walked and swept.
+  not cancelled. A directory whose walk failed, for example because the
+  directory itself cannot be opened, keeps every location it holds, and the
+  job ends `failed`. The other directories are still walked and swept. A
+  subdirectory the walk cannot enter does not fail it.
 - The sweep is bounded by `volume_id` and the uri range `[prefix/, prefix0)`
   on the `(volume_id, uri)` unique index, so a sibling such as `A/Newer` is
   never swept for `A/New`, and the sweep reads only that directory's rows.
