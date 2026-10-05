@@ -878,7 +878,8 @@ typedef enum orca_health_issue_kind {
     ORCA_HEALTH_ISSUE_KIND_TECHNICAL_ANOMALY = 7,
     /* The audio would not decode all the way through. */
     ORCA_HEALTH_ISSUE_KIND_CORRUPT_AUDIO = 8,
-    /* Another file holds the same audio. */
+    /* The same bytes are in the library more than once: at a second location
+     * of the file, or in another file with the same full-content hash. */
     ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE = 9,
     /* Another file probably holds the same recording. */
     ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE = 10,
@@ -887,6 +888,8 @@ typedef enum orca_health_issue_kind {
     ORCA_HEALTH_ISSUE_KIND_UNREADABLE_FILE = 11,
     /* A verification proposed another recording ID for the file. */
     ORCA_HEALTH_ISSUE_KIND_RECORDING_MISMATCH = 12,
+    /* Another file holds the same lossless audio in different bytes. */
+    ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO = 13,
 } orca_health_issue_kind;
 
 typedef enum orca_health_severity {
@@ -954,7 +957,8 @@ typedef void (*orca_health_kind_summary_callback)(
 
 /* A kind's summary with the files that have such an issue and their summed
  * size. A file has at most one issue of a kind, so `files` equals
- * `base.count`. For ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE and
+ * `base.count`. For ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE,
+ * ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO and
  * ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE, `bytes` counts only the redundant
  * copies, what removing them would free: of a kept copy and two duplicates of
  * 10 MB each, 20 MB. */
@@ -1082,8 +1086,14 @@ typedef void (*orca_health_file_callback)(
  * further location of a file as a copy. `same_recording` is 1 when every
  * copy is an encoding of one recording, so they share one play count and
  * rating. `similarity`, 0..1, is how alike the least alike copies sound, 1
- * for exact copies; valid when `has_similarity`. `bytes_redundant` is what
- * removing every copy but the suggested one would free. */
+ * for exact copies and identical audio; valid when `has_similarity`.
+ * `verdict` is the orca_health_issue_kind every copy is proven to share, the
+ * weakest of the group's links: ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE (the
+ * same bytes), ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO (the same audio) or
+ * ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE (matching fingerprints). It is 0,
+ * never a duplicate kind, from a liborca that predates the field.
+ * `bytes_redundant` is what removing every copy but the suggested one would
+ * free. */
 typedef struct orca_duplicate_group_view {
     int64_t id;
     uint64_t bytes_redundant;
@@ -1091,7 +1101,8 @@ typedef struct orca_duplicate_group_view {
     float similarity;
     uint8_t same_recording;
     uint8_t has_similarity;
-    uint8_t reserved[6];
+    uint8_t verdict;  /* orca_health_issue_kind */
+    uint8_t reserved[5];
     orca_string_view title;
     orca_string_view artist;
 } orca_duplicate_group_view;
@@ -5200,15 +5211,18 @@ uint16_t orca_analysis_default_threads(void);
  * Starts the duplicate scan: reports every file whose audio the Library also
  * holds somewhere else. `options` may be null.
  *
- * It compares measurements the analysis job stored rather than reading files,
- * through two indexes - equal decoded-audio hash for the certain case, and a
- * duration window inside which temporal fingerprints are compared for the
- * probable one - so a full run over a measured library takes seconds where the
+ * It compares hashes and measurements the Library stored rather than reading
+ * files, through indexes - equal full-content hash and equal lossless audio
+ * hash for the certain cases, and a duration window inside which temporal
+ * fingerprints are compared for the probable one - so a full run over a measured library takes seconds where the
  * analysis itself takes hours.
  *
  * Findings are recorded as library health issues, readable through
- * orca_library_query_health_issues: kind 9 is the certain finding and kind 10
- * the probable one. Both kinds are REWRITTEN for every file examined, so a second run converges on the same
+ * orca_library_query_health_issues: kind 9 (EXACT_DUPLICATE) says the same
+ * bytes are held twice, kind 13 (IDENTICAL_AUDIO) that different bytes hold
+ * the same lossless audio, and kind 10 (LIKELY_DUPLICATE) that fingerprints
+ * match. A file gets at most one, the strongest. All three kinds are
+ * REWRITTEN for every file examined, so a second run converges on the same
  * rows rather than doubling them, and a duplicate that has since been deleted
  * stops being reported.
  *
@@ -5219,8 +5233,9 @@ uint16_t orca_analysis_default_threads(void);
  * `unsupported` files nothing could be said about because they have never been
  * analyzed or never been probed - which is the number that says whether a
  * "no duplicates" answer means anything. `tracks_written` and
- * `releases_written` carry the exact and likely finding counts, `folders_
- * visited` the buckets that hit the per-candidate comparison cap, and
+ * `releases_written` carry the exact and likely finding counts, so `changed`
+ * less both is the identical-audio count; `folders_visited` the buckets that
+ * hit the per-candidate comparison cap, and
  * `files_projected` the fingerprint comparisons performed.
  */
 orca_status orca_library_start_duplicate_scan(

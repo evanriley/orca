@@ -913,7 +913,8 @@ pub const DuplicateGroupView = extern struct {
     similarity: f32,
     same_recording: u8,
     has_similarity: u8,
-    _reserved: [6]u8 = @splat(0),
+    verdict: u8,
+    _reserved: [5]u8 = @splat(0),
     title: StringView,
     artist: StringView,
 };
@@ -2195,7 +2196,7 @@ pub export fn orca_library_query_duplicate_groups(
         return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |group| {
-        var view = duplicateGroupView(group.id, group.same_recording, group.similarity, group.copies, group.bytes_redundant);
+        var view = duplicateGroupView(group.id, group.same_recording, group.similarity, group.verdict, group.copies, group.bytes_redundant);
         view.title = stringView(group.title);
         view.artist = stringView(group.artist);
         visit(context, &view);
@@ -2203,7 +2204,14 @@ pub export fn orca_library_query_duplicate_groups(
     return .ok;
 }
 
-fn duplicateGroupView(id: i64, same_recording: bool, similarity: ?f32, copies: u32, bytes_redundant: u64) DuplicateGroupView {
+fn duplicateGroupView(
+    id: i64,
+    same_recording: bool,
+    similarity: ?f32,
+    verdict: database.DuplicateVerdict,
+    copies: u32,
+    bytes_redundant: u64,
+) DuplicateGroupView {
     return .{
         .id = id,
         .bytes_redundant = bytes_redundant,
@@ -2211,6 +2219,7 @@ fn duplicateGroupView(id: i64, same_recording: bool, similarity: ?f32, copies: u
         .similarity = similarity orelse 0,
         .same_recording = @intFromBool(same_recording),
         .has_similarity = @intFromBool(similarity != null),
+        .verdict = exportHealthIssueKind(verdict.kind()),
         .title = stringView(""),
         .artist = stringView(""),
     };
@@ -2246,6 +2255,7 @@ pub export fn orca_library_query_duplicate_group(
         group_id,
         copies.same_recording,
         copies.similarity,
+        copies.verdict,
         copies.copies,
         copies.bytes_redundant,
     );
@@ -7630,6 +7640,7 @@ pub fn exportHealthIssueKind(kind: database.HealthIssueKind) u8 {
         .likely_duplicate => 10,
         .unreadable_file => 11,
         .recording_mismatch => 12,
+        .identical_audio => 13,
     };
 }
 
@@ -7648,6 +7659,7 @@ pub fn importHealthIssueKind(value: u8) ?database.HealthIssueKind {
         10 => .likely_duplicate,
         11 => .unreadable_file,
         12 => .recording_mismatch,
+        13 => .identical_audio,
         else => null,
     };
 }
@@ -8633,7 +8645,7 @@ test "health actions refuse an unknown kind, a missing file and a null callback,
     const clipping: u8 = exportHealthIssueKind(.clipping);
 
     try std.testing.expectEqual(Status.invalid_argument, orca_library_dismiss_health_issue(runtime, library, file_id, 200));
-    try std.testing.expectEqual(Status.invalid_argument, orca_library_restore_health_issue(runtime, library, file_id, 13));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_restore_health_issue(runtime, library, file_id, 14));
     try std.testing.expectEqual(Status.not_found, orca_library_dismiss_health_issue(runtime, library, file_id + 100, clipping));
     try std.testing.expectEqual(Status.ok, orca_library_restore_health_issue(runtime, library, file_id + 100, clipping));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_query_health_items(runtime, library, 1, 0, null, null));

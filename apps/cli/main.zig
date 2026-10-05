@@ -110,7 +110,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidSampleRate => "--rate must be a sample rate above 0",
         error.PageOutOfRange => "at most 512 ids at a time, and --limit must be 1 to 512",
         error.TracksAndPlaylist => "give either IDS or --playlist=ID, not both",
-        error.UnknownHealthKind => "KIND must be the kind health prints, such as clipping or exact_duplicate",
+        error.UnknownHealthKind => "KIND must be the kind health prints, such as clipping, exact_duplicate, identical_audio or likely_duplicate",
         error.SummaryWithPage => "--summary lists every kind at once; give it no --kind or OFFSET",
         error.LosslessAndLossy => "give either --lossless or --lossy, not both",
         error.SortHasNoLetters => "--letters needs --sort title or --sort artist",
@@ -852,20 +852,24 @@ const help_details =
     \\default is one fewer than the machine's processors.
     \\
     \\duplicates reports every file whose audio the Library also holds
-    \\somewhere else, as health issues that `health` then lists. It compares
-    \\what analyze-library measured -- it opens no files -- so it is fast, and
-    \\it is only as complete as that analysis: the uncomparable count is how
-    \\many files it could say nothing about, and a zero-finding run over a
-    \\library with a large uncomparable count means "not measured", not "no
-    \\duplicates".
+    \\somewhere else, as health issues that `health` then lists, one per file
+    \\and the strongest that holds: exact_duplicate when the same bytes are
+    \\stored twice (a second location, or another file with the same content
+    \\hash), identical_audio when different bytes decode to the same lossless
+    \\audio, and likely_duplicate when fingerprints match or two lossy
+    \\decodes hash alike. It compares what analyze-library measured -- it
+    \\opens no files -- so it is fast, and it is only as complete as that
+    \\analysis: the uncomparable count is how many files it could say nothing
+    \\about, and a zero-finding run over a library with a large uncomparable
+    \\count means "not measured", not "no duplicates".
     \\
     \\health prints one issue per line: file id, severity, kind, the action
     \\that resolves it (match_or_edit, fetch_cover_art, compare_duplicate,
     \\review_correction or reveal_file), path and details. --kind=KIND lists
     \\only issues of that kind, in the same order. --summary prints one line
     \\per kind with an issue: kind, highest severity, count, files and bytes;
-    \\for exact_duplicate and likely_duplicate, bytes counts only the copies
-    \\beyond the one kept. --kind=artwork_problem --albums prints one line per
+    \\for exact_duplicate, identical_audio and likely_duplicate, bytes counts
+    \\only the copies beyond the one kept. --kind=artwork_problem --albums prints one line per
     \\album instead: release id, its worst problem, files=N with one,
     \\size=WIDTHxHEIGHT or size=- and the title, then albums and their count.
     \\health-dismiss hides an issue of a file until the file's bytes change;
@@ -1729,7 +1733,7 @@ fn listDuplicateGroups(context: Context) !void {
             if (group.same_recording) "yes" else "no",
         });
         if (group.similarity) |similarity| try context.stdout.print("{d:.2}", .{similarity}) else try context.stdout.writeByte('-');
-        try context.stdout.print(" bytes_redundant={d}\n", .{group.bytes_redundant});
+        try context.stdout.print(" bytes_redundant={d} verdict={t}\n", .{ group.bytes_redundant, group.verdict });
     }
     const totals = try runtime.libraryDuplicateGroupTotals(library);
     try context.stdout.print("groups={d} bytes={d}\n", .{ totals.groups, totals.bytes });
@@ -1742,7 +1746,8 @@ fn showDuplicateGroup(context: Context, group_id: i64) !void {
     var copies = try runtime.libraryDuplicateGroup(library, context.allocator, group_id);
     defer copies.deinit();
     try context.stdout.print("group={d} same_recording={s} similarity=", .{ group_id, if (copies.same_recording) "yes" else "no" });
-    if (copies.similarity) |similarity| try context.stdout.print("{d:.2}\n", .{similarity}) else try context.stdout.writeAll("-\n");
+    if (copies.similarity) |similarity| try context.stdout.print("{d:.2}", .{similarity}) else try context.stdout.writeByte('-');
+    try context.stdout.print(" verdict={t}\n", .{copies.verdict});
     for (copies.items) |copy| {
         try context.stdout.print("file={d} track=", .{copy.file_id});
         if (copy.track_id) |track_id| try context.stdout.print("{d}", .{track_id}) else try context.stdout.writeByte('-');
@@ -5975,10 +5980,11 @@ fn printDuplicateStats(
     stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
-        "examined={d} exact={d} likely={d} unique={d} unreadable={d} batches={d}\n",
+        "examined={d} exact={d} identical={d} likely={d} unique={d} unreadable={d} batches={d}\n",
         .{
             stats.files_seen,
             stats.tracks_written,
+            stats.changed -| stats.tracks_written -| stats.releases_written,
             stats.releases_written,
             stats.unchanged,
             stats.errors,

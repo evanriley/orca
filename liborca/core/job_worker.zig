@@ -555,6 +555,7 @@ const LiveScanStats = struct {
 const DuplicateStats = struct {
     files_seen: u64,
     exact: u64,
+    identical: u64,
     likely: u64,
     unique: u64,
     uncomparable: u64,
@@ -568,7 +569,7 @@ const DuplicateStats = struct {
     fn scanStats(self: DuplicateStats) ScanStats {
         return .{
             .files_seen = self.files_seen,
-            .changed = self.exact + self.likely,
+            .changed = self.exact + self.identical + self.likely,
             .unchanged = self.unique,
             .unsupported = self.uncomparable,
             .errors = self.errors,
@@ -585,6 +586,7 @@ const DuplicateStats = struct {
 const LiveDuplicateStats = struct {
     files_seen: std.atomic.Value(u64) = .init(0),
     exact: std.atomic.Value(u64) = .init(0),
+    identical: std.atomic.Value(u64) = .init(0),
     likely: std.atomic.Value(u64) = .init(0),
     unique: std.atomic.Value(u64) = .init(0),
     uncomparable: std.atomic.Value(u64) = .init(0),
@@ -598,6 +600,7 @@ const LiveDuplicateStats = struct {
         return .{
             .files_seen = self.files_seen.load(.acquire) + in_flight,
             .exact = self.exact.load(.acquire),
+            .identical = self.identical.load(.acquire),
             .likely = self.likely.load(.acquire),
             .unique = self.unique.load(.acquire),
             .uncomparable = self.uncomparable.load(.acquire),
@@ -1242,6 +1245,7 @@ pub const JobWorker = struct {
         self.progress.store(0, .release);
         _ = stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
         _ = stats.exact.fetchAdd(result.exact, .acq_rel);
+        _ = stats.identical.fetchAdd(result.identical, .acq_rel);
         _ = stats.likely.fetchAdd(result.likely, .acq_rel);
         _ = stats.unique.fetchAdd(result.unique, .acq_rel);
         _ = stats.uncomparable.fetchAdd(result.uncomparable, .acq_rel);

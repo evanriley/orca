@@ -198,6 +198,59 @@ test "two files whose quick hashes collide stay two files and neither is an exac
     try std.testing.expectEqual(@as(usize, 0), exact.items.len);
 }
 
+/// The duplicate kind recorded for the file at the path ending in `suffix`,
+/// or null when it has none.
+fn duplicateKindAt(library_database: *database.LibraryDatabase, suffix: []const u8) !?database.HealthIssueKind {
+    var statement = try library_database.database.prepare(
+        \\SELECT library_health_issues.kind FROM library_health_issues
+        \\JOIN locations ON locations.file_id = library_health_issues.file_id
+        \\WHERE locations.uri LIKE '%' || ?1 AND library_health_issues.kind IN (?2, ?3, ?4);
+    );
+    defer statement.deinit();
+    try statement.bindText(1, suffix);
+    try statement.bindInt64(2, @backingInt(database.HealthIssueKind.exact_duplicate));
+    try statement.bindInt64(3, @backingInt(database.HealthIssueKind.identical_audio));
+    try statement.bindInt64(4, @backingInt(database.HealthIssueKind.likely_duplicate));
+    if (try statement.step() != .row) return null;
+    const kind = std.enums.fromInt(database.HealthIssueKind, statement.columnInt64(0)).?;
+    if (try statement.step() == .row) return error.MoreThanOneDuplicateKind;
+    return kind;
+}
+
+test "a WAV of a FLAC and an ALAC of a FLAC are identical audio, and a QOA of a WAV is at most a likely duplicate" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const fixtures = [_][]const u8{
+        "tagged-reference.wav",
+        "generated-reference.flac",
+        "tagged-reference-alac.m4a",
+        "tagged-reference.flac",
+        "generated-reference.wav",
+        "stereo-reference.qoa",
+    };
+    for (fixtures) |name| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "fixtures/audio/{s}", .{name});
+        defer std.testing.allocator.free(source);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, source, std.testing.allocator, .limited(1 << 22));
+        defer std.testing.allocator.free(bytes);
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+    }
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-duplicate-ladder-fixtures?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryAnalysis(library, .{ .threads = 1 })));
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryDuplicateScan(library, .{})));
+
+    for (fixtures[0..4]) |name| {
+        try std.testing.expectEqual(@as(?database.HealthIssueKind, .identical_audio), try duplicateKindAt(library_database, name));
+    }
+    for (fixtures[4..]) |name| {
+        const kind = try duplicateKindAt(library_database, name);
+        try std.testing.expect(kind == null or kind.? == .likely_duplicate);
+    }
+}
+
 test "a scan Job reports the files its walk will reach as its total" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();

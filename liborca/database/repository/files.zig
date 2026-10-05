@@ -579,10 +579,34 @@ pub const FileRepository = struct {
         return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
     }
 
+    /// The other files recording exactly this full-content hash
+    /// (`content_hash_algorithm` 1), into a caller-owned buffer: the files
+    /// holding the same bytes. A search of `files_content_hash`, bounded like
+    /// `audioHashPeersInto`.
+    pub fn contentHashPeersInto(
+        self: *const FileRepository,
+        buffer: []i64,
+        digest: *const content_hash.Digest,
+        exclude_id: i64,
+    ) !usize {
+        if (buffer.len == 0) return 0;
+        var statement = try self.db.prepare(
+            "SELECT id FROM files WHERE content_hash = ?1 AND content_hash_algorithm = 1" ++
+                " AND id <> ?2 ORDER BY id LIMIT ?3;",
+        );
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        try statement.bindInt64(2, exclude_id);
+        try statement.bindInt64(3, @intCast(buffer.len));
+        var found: usize = 0;
+        while (try statement.step() == .row) : (found += 1) buffer[found] = statement.columnInt64(0);
+        return found;
+    }
+
     /// The other files whose decoded audio hashes to exactly this, into a
     /// caller-owned buffer.
     ///
-    /// This is the exact-duplicate bucket, and it is a search of
+    /// This is the identical-audio bucket, and it is a search of
     /// `files_audio_hash` rather than a comparison against anything. Only a
     /// lossless integer hash (tier 1) makes two files the same audio, whatever
     /// their containers or tags say, so only tier-1 peers are returned; the

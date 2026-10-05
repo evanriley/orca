@@ -187,6 +187,7 @@ fn writeSummary(worker: *const JobWorker, writer: *std.Io.Writer) !void {
             const stats = worker.scanStats();
             try parts.count(stats.files_seen, "file", "files");
             try parts.optional(stats.tracks_written, "exact duplicates");
+            try parts.optional(stats.changed -| stats.tracks_written -| stats.releases_written, "identical-audio duplicates");
             try parts.optional(stats.releases_written, "likely duplicates");
             try parts.optional(stats.unsupported, "not yet analyzed");
         },

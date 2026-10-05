@@ -25,9 +25,12 @@ pub const DuplicateGroup = struct {
     /// play count and rating.
     same_recording: bool,
     /// How alike the least alike copies sound, from 0 to 1; 1 for exact
-    /// copies. Null when a likely duplicate was found before similarities
-    /// were stored.
+    /// copies and identical audio. Null when a likely duplicate was found
+    /// before similarities were stored.
     similarity: ?f32,
+    /// What the duplicate scan proved of every copy: the same bytes, the same
+    /// audio, or matching fingerprints.
+    verdict: database.DuplicateVerdict,
     /// The bytes removing every copy but the suggested one would free.
     bytes_redundant: u64,
 
@@ -85,6 +88,7 @@ pub const DuplicateCopyList = struct {
     items: []DuplicateCopy,
     same_recording: bool,
     similarity: ?f32,
+    verdict: database.DuplicateVerdict,
     copies: u32,
     bytes_redundant: u64,
 
@@ -189,6 +193,7 @@ pub fn libraryDuplicateGroupPage(
             .copies = ranked.copies,
             .same_recording = ranked.same_recording,
             .similarity = members.similarity,
+            .verdict = members.verdict,
             .bytes_redundant = ranked.bytes_redundant,
         });
     }
@@ -260,6 +265,7 @@ pub fn libraryDuplicateGroup(
         .items = try items.toOwnedSlice(allocator),
         .same_recording = ranked.same_recording,
         .similarity = members.similarity,
+        .verdict = members.verdict,
         .copies = ranked.copies,
         .bytes_redundant = ranked.bytes_redundant,
     };
@@ -369,6 +375,7 @@ test "duplicate groups page, total, rank their copies, and leave the view when k
     } else return error.GroupMissing;
     try std.testing.expectEqual(@as(u32, 2), likely.copies);
     try std.testing.expectEqual(@as(?f32, 0.99), likely.similarity);
+    try std.testing.expectEqual(database.DuplicateVerdict.likely_duplicate, likely.verdict);
     const mp3_size = (try library_database.duplicate_groups.file(mp3)).?.size_bytes;
     try std.testing.expectEqual(@as(u64, @intCast(mp3_size)), likely.bytes_redundant);
 
@@ -382,6 +389,7 @@ test "duplicate groups page, total, rank their copies, and leave the view when k
 
     var copies = try owner.libraryDuplicateGroup(library, std.testing.allocator, likely_id);
     defer copies.deinit();
+    try std.testing.expectEqual(database.DuplicateVerdict.likely_duplicate, copies.verdict);
     try std.testing.expectEqual(@as(usize, 2), copies.items.len);
     try std.testing.expectEqual(flac, copies.items[0].file_id);
     try std.testing.expect(copies.items[0].suggested_keep);
@@ -419,4 +427,29 @@ test "duplicate groups page, total, rank their copies, and leave the view when k
     try owner.libraryIgnoreDuplicateGroup(library, @min(opus, wav));
     try std.testing.expectEqual(DuplicateGroupTotals{ .groups = 0, .bytes = 0 }, try owner.libraryDuplicateGroupTotals(library));
     try std.testing.expectError(error.UnknownDuplicateGroup, owner.libraryIgnoreDuplicateGroup(library, @min(opus, wav)));
+}
+
+test "identical-audio findings form a duplicate group that states its verdict and can be ignored" {
+    var owner = OrcaRuntime.init(std.testing.allocator);
+    defer owner.deinit();
+    const library = try scanFixtures(&owner, "file:orca-duplicate-groups-identical?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(&owner, library);
+    const flac = try fixtureFile(library_database, "/tagged-reference.flac");
+    const wav = try fixtureFile(library_database, "/tagged-reference.wav");
+    try library_database.health_issues.replaceFile(flac, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = wav }});
+    try library_database.health_issues.replaceFile(wav, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = flac }});
+
+    var page = try owner.libraryDuplicateGroupPage(library, std.testing.allocator, 10, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 1), page.items.len);
+    try std.testing.expectEqual(database.DuplicateVerdict.identical_audio, page.items[0].verdict);
+    try std.testing.expectEqual(@as(?f32, 1), page.items[0].similarity);
+    var copies = try owner.libraryDuplicateGroup(library, std.testing.allocator, page.items[0].id);
+    defer copies.deinit();
+    try std.testing.expectEqual(database.DuplicateVerdict.identical_audio, copies.verdict);
+    try std.testing.expectEqual(@as(usize, 2), copies.items.len);
+    try std.testing.expectEqual(@min(flac, wav) + @max(flac, wav), copies.items[0].file_id + copies.items[1].file_id);
+
+    try owner.libraryIgnoreDuplicateGroup(library, page.items[0].id);
+    try std.testing.expectEqual(DuplicateGroupTotals{ .groups = 0, .bytes = 0 }, try owner.libraryDuplicateGroupTotals(library));
 }

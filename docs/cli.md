@@ -56,9 +56,9 @@ zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file'
 zig build run -- health-restore DATABASE FILE_ID KIND
 zig build run -- analyze DATABASE AUDIO
 zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-after=MS]
-zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
-zig build run -- duplicates DATABASE --groups [--limit N] [--offset N]   # id, title, artist, copies= same_recording=yes|no similarity=0.99|- bytes_redundant=, then `groups= bytes=`; a group's id is its lowest file id
-zig build run -- duplicates DATABASE --group=ID   # the copies, suggested first: file= track= keep=yes|no locations= playlists= codec= rate= depth= bytes= ... path=
+zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]   # examined= exact= (same bytes) identical= (same lossless audio, other bytes) likely= (fingerprints match) unique= unreadable= batches=, then uncomparable= comparisons= truncated_buckets=; one finding per file, the strongest
+zig build run -- duplicates DATABASE --groups [--limit N] [--offset N]   # id, title, artist, copies= same_recording=yes|no similarity=0.99|- bytes_redundant= verdict=exact_duplicate|identical_audio|likely_duplicate, then `groups= bytes=`; a group's id is its lowest file id
+zig build run -- duplicates DATABASE --group=ID   # group= same_recording= similarity= verdict=, then the copies, suggested first: file= track= keep=yes|no locations= playlists= codec= rate= depth= bytes= ... path=
 zig build run -- merge-duplicate DATABASE KEEP_TRACK_ID FROM_TRACK_ID   # fills KEEP's missing Orca values, user genres, rating and feedback from FROM; KEEP's locks win; no file written
 zig build run -- keep-both DATABASE FILE_ID FILE_ID   # dismisses both files' duplicate issues
 zig build run -- consistency DATABASE [--batch=N] [--cancel-after=MS]   # finds where a Release's Tracks disagree; `releases= issues= batches= cancelled=`, then the open count per category and `open=`

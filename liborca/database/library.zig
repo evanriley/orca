@@ -761,6 +761,18 @@ test "duplicate bytes in the health summary count only the redundant copies, not
     try library.health_issues.replaceFile(also_resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
     try std.testing.expectEqual(@as(u64, 35_000), (try summaryOf(&library, .likely_duplicate)).?.bytes);
 
+    const same_audio = try addSizedHealthFile(&library, "music/same-audio.wav", 50_000);
+    const same_audio_flac = try addSizedHealthFile(&library, "music/same-audio.flac", 20_000);
+    try library.health_issues.replaceFile(same_audio, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = same_audio_flac }});
+    try library.health_issues.replaceFile(same_audio_flac, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = same_audio }});
+    try std.testing.expectEqual(repository.HealthKindSummary{
+        .kind = .identical_audio,
+        .severity = .warning,
+        .count = 2,
+        .files = 2,
+        .bytes = 20_000,
+    }, (try summaryOf(&library, .identical_audio)).?);
+
     const located_twice = try addSizedHealthFile(&library, "music/twice-a.flac", 7_000);
     _ = try library.locations.upsert(.{ .file_id = located_twice, .volume_id = LibraryDatabase.null_volume, .uri = "music/twice-b.flac" });
     _ = try library.locations.upsert(.{ .file_id = located_twice, .volume_id = LibraryDatabase.null_volume, .uri = "music/twice-c.flac", .state = .missing });

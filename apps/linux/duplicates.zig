@@ -380,7 +380,7 @@ fn showSelected(self: *App) void {
     else
         strings.terminated(&subtitle_buffer, if (album.len != 0) album else group.artist));
     var evidence_buffer: [64]u8 = undefined;
-    gtk.gtk_label_set_text(duplicates.evidence.?, evidenceText(&evidence_buffer, list.similarity));
+    gtk.gtk_label_set_text(duplicates.evidence.?, evidenceText(&evidence_buffer, list.verdict, list.similarity));
 
     showTable(self, &list);
 
@@ -391,10 +391,14 @@ fn showSelected(self: *App) void {
     gtk.gtk_widget_set_sensitive(duplicates.keep_both.?, @intFromBool(list.items.len > 1));
 }
 
-fn evidenceText(buffer: []u8, similarity: ?f32) [:0]const u8 {
+fn evidenceText(buffer: []u8, verdict: liborca.DuplicateVerdict, similarity: ?f32) [:0]const u8 {
+    switch (verdict) {
+        .exact_duplicate => return strings.terminated(buffer, "Same file"),
+        .identical_audio => return strings.terminated(buffer, "Identical audio"),
+        .likely_duplicate => {},
+    }
     const value = similarity orelse return strings.terminated(buffer, "Fingerprints match");
-    const percent: u32 = @intFromFloat(@round(std.math.clamp(value, 0, 1) * 100));
-    if (percent >= 100) return strings.terminated(buffer, "Identical audio");
+    const percent: u32 = @intFromFloat(@floor(std.math.clamp(value, 0, 1) * 100));
     return strings.format(buffer, "Fingerprints match · {d}%", .{percent});
 }
 

@@ -357,16 +357,17 @@ defer page.deinit();
 - Health can be shown grouped by kind: `libraryHealthSummary` returns a
   `HealthSummary` of `HealthKindSummary`s, each kind's count, highest
   severity, `files` and `bytes`, and `libraryHealthIssuePageOfKind` pages
-  one kind's issues. For `exact_duplicate` and `likely_duplicate`, `bytes`
-  is what removing the redundant copies would free. See
+  one kind's issues. For `exact_duplicate`, `identical_audio` and
+  `likely_duplicate`, `bytes` is what removing the redundant copies would
+  free. See
   [analysis.md](analysis.md#by-kind).
 - Duplicates are shown as groups. `libraryDuplicateGroupPage(library,
   allocator, limit, offset)` returns a `DuplicateGroupPage` of
-  `DuplicateGroup`s, each named by its lowest file id, and
-  `libraryDuplicateGroupTotals` a `DuplicateGroupTotals`.
-  `libraryDuplicateGroup(library, allocator, id)` returns a
-  `DuplicateCopyList` of `DuplicateCopy`s, the suggested copy first, each
-  with its `TrackDetails`. `libraryKeepBoth(library, file_id,
+  `DuplicateGroup`s, each named by its lowest file id and carrying its
+  `DuplicateVerdict`, and `libraryDuplicateGroupTotals` a
+  `DuplicateGroupTotals`. `libraryDuplicateGroup(library, allocator, id)`
+  returns a `DuplicateCopyList` of `DuplicateCopy`s, the suggested copy
+  first, each with its `TrackDetails`. `libraryKeepBoth(library, file_id,
   other_file_id)` and `libraryIgnoreDuplicateGroup(library, id)` dismiss
   duplicate issues; `libraryMergeDuplicateMetadata(library, keep_track_id,
   from_track_id)` copies what one Track has and the other lacks and returns

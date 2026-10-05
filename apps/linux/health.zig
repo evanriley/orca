@@ -50,13 +50,13 @@ fn info(row: Row) RowInfo {
             .title = "Duplicates",
             .subtitle = "Exact or near-identical recordings",
             .detail = "",
-            .about = "The same recording is in the library more than once, as the same audio or audio that closely resembles it. Review compares the copies side by side; Orca never deletes a file.",
+            .about = "The same recording is in the library more than once, as the same file, the same audio in different bytes, or audio that closely resembles it. Review compares the copies side by side; Orca never deletes a file.",
             .icon = "edit-copy-symbolic",
             .tone = .caution,
             .action = "Review",
             .tooltip = "Compare the copies in Duplicates",
             .unit = "track",
-            .kinds = &.{ .exact_duplicate, .likely_duplicate },
+            .kinds = &.{ .exact_duplicate, .identical_audio, .likely_duplicate },
         },
         .mismatched => .{
             .title = "Mismatched metadata",
@@ -885,7 +885,7 @@ pub fn reload(self: *App) void {
     const summary = self.runtime.libraryHealthSummary(library) catch return self.toast("Could not read the library's health");
     for (summary.items()) |item| {
         by_kind.set(item.kind, item.count);
-        if (item.kind == .exact_duplicate or item.kind == .likely_duplicate) duplicate_bytes += item.bytes;
+        if (std.mem.indexOfScalar(Kind, info(.duplicates).kinds, item.kind) != null) duplicate_bytes += item.bytes;
     }
     var counts: std.EnumArray(Row, u64) = .initFill(0);
     for (std.enums.values(Row)) |row| {

@@ -106,6 +106,7 @@ pub const HealthIssueRepository = repository.HealthIssueRepository;
 pub const DuplicateGroupRepository = repository.DuplicateGroupRepository;
 pub const DuplicateGrouping = repository.DuplicateGrouping;
 pub const DuplicateGroupMembers = repository.DuplicateGroupMembers;
+pub const DuplicateVerdict = repository.DuplicateVerdict;
 pub const DuplicateFile = repository.DuplicateFile;
 pub const DuplicateMergeResult = repository.DuplicateMergeResult;
 pub const DuplicateLabel = repository.DuplicateLabel;

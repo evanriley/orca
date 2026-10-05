@@ -25,6 +25,7 @@ pub const HealthIssueKind = enum(u8) {
     /// audio it never looked at.
     unreadable_file,
     recording_mismatch,
+    identical_audio,
 };
 
 /// What a host offers to resolve an issue.
@@ -39,7 +40,7 @@ pub const HealthAction = enum {
         return switch (kind) {
             .missing_metadata, .missing_track_number, .album_artist_anomaly => .match_or_edit,
             .artwork_problem => if (release_has_mbid) .fetch_cover_art else .match_or_edit,
-            .exact_duplicate, .likely_duplicate => .compare_duplicate,
+            .exact_duplicate, .identical_audio, .likely_duplicate => .compare_duplicate,
             .recording_mismatch => .review_correction,
             .clipping,
             .excessive_silence,
@@ -243,11 +244,12 @@ pub const HealthKindSummary = struct {
     /// The files with such an issue. A file has at most one issue of a kind,
     /// so this equals `count`.
     files: u64,
-    /// The summed size of those files. For `exact_duplicate` and
-    /// `likely_duplicate` it is the size of the redundant copies only, what
-    /// removing them would free: of a kept copy and two duplicates of 10 MB
-    /// each, 20 MB. The kept copy of a group is the lowest-numbered file in
-    /// it, and a second location of one file is a copy of it.
+    /// The summed size of those files. For `exact_duplicate`,
+    /// `identical_audio` and `likely_duplicate` it is the size of the
+    /// redundant copies only, what removing them would free: of a kept copy
+    /// and two duplicates of 10 MB each, 20 MB. The kept copy of a group is
+    /// the lowest-numbered file in it, and a second location of one file is a
+    /// copy of it.
     bytes: u64,
 };
 
@@ -478,7 +480,7 @@ pub const HealthIssueRepository = struct {
             result.len += 1;
         }
         for (result.buffer[0..result.len]) |*entry| switch (entry.kind) {
-            .exact_duplicate, .likely_duplicate => entry.bytes = try self.reclaimable(entry.kind),
+            .exact_duplicate, .identical_audio, .likely_duplicate => entry.bytes = try self.reclaimable(entry.kind),
             else => {},
         };
         return result;

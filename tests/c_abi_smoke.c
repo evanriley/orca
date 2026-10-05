@@ -2084,6 +2084,7 @@ struct health_capture {
     int64_t watch_file_id;
     uint8_t watch_kind;
     uint32_t listed;
+    uint32_t identical_audio;
 };
 
 static int health_action_fits(const orca_health_item_view *item) {
@@ -2096,6 +2097,7 @@ static int health_action_fits(const orca_health_item_view *item) {
         return item->action == ORCA_HEALTH_ACTION_MATCH_OR_EDIT ||
                item->action == ORCA_HEALTH_ACTION_FETCH_COVER_ART;
     case ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE:
+    case ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO:
     case ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE:
         return item->action == ORCA_HEALTH_ACTION_COMPARE_DUPLICATE;
     case ORCA_HEALTH_ISSUE_KIND_RECORDING_MISMATCH:
@@ -2118,6 +2120,9 @@ static void collect_health_item(void *context, const orca_health_item_view *item
         capture->consistent += 1;
     if (item->file_id == capture->watch_file_id && item->kind == capture->watch_kind)
         capture->listed += 1;
+    if (item->kind == ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO &&
+        item->severity == ORCA_HEALTH_SEVERITY_WARNING && item->has_related_file_id)
+        capture->identical_audio += 1;
     capture->count += 1;
 }
 
@@ -2487,6 +2492,7 @@ static int health_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(health_items_collect(runtime, library, &items, 0, 0) == 0);
     SMOKE_CHECK(items.count == total);
     SMOKE_CHECK(items.consistent == items.count);
+    SMOKE_CHECK(items.identical_audio > 0);
     int64_t file_id = items.first_file_id;
     uint8_t kind = items.first_kind;
     SMOKE_CHECK(file_id > 0);
@@ -2545,6 +2551,7 @@ static int health_smoke(orca_runtime *runtime, orca_handle library) {
 struct duplicate_group_capture {
     int count;
     int consistent;
+    int identical_audio;
     orca_duplicate_group_view first;
 };
 
@@ -2552,8 +2559,13 @@ static void collect_duplicate_group(void *context, const orca_duplicate_group_vi
     struct duplicate_group_capture *capture = context;
     if (capture->count == 0) capture->first = *group;
     capture->count += 1;
+    if (group->verdict == ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO) capture->identical_audio += 1;
+    int verdict_fits = group->verdict == ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE ||
+                       ((group->verdict == ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE ||
+                         group->verdict == ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO) &&
+                        group->has_similarity && group->similarity == 1.0f);
     if (group->id > 0 && group->copies >= 2 && group->title.pointer != 0 &&
-        group->artist.pointer != 0 &&
+        group->artist.pointer != 0 && verdict_fits &&
         (!group->has_similarity || (group->similarity >= 0.0f && group->similarity <= 1.0f)))
         capture->consistent += 1;
 }
@@ -2592,6 +2604,7 @@ static int duplicate_smoke(orca_runtime *runtime, orca_handle library) {
                                                     collect_duplicate_group) == ORCA_STATUS_OK);
     SMOKE_CHECK((uint64_t)groups.count == totals.groups);
     SMOKE_CHECK(groups.consistent == groups.count);
+    SMOKE_CHECK(groups.identical_audio > 0);
     SMOKE_CHECK(orca_library_query_duplicate_groups(runtime, library, 0, 0, &groups,
                                                     collect_duplicate_group) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
@@ -2621,6 +2634,7 @@ static int duplicate_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(group.id == groups.first.id && group.copies == groups.first.copies);
     SMOKE_CHECK(group.bytes_redundant == groups.first.bytes_redundant);
     SMOKE_CHECK(group.same_recording == groups.first.same_recording);
+    SMOKE_CHECK(group.verdict == groups.first.verdict);
     SMOKE_CHECK(copies.count >= 2 && copies.count <= 16 && copies.consistent == copies.count);
     SMOKE_CHECK(copies.suggested == 1 && copies.first_suggested == 1);
 
@@ -2641,6 +2655,9 @@ static int duplicate_smoke(orca_runtime *runtime, orca_handle library) {
     for (int index = 0; index < copies.count; index += 1) {
         SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, copies.file_ids[index],
                                                       ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE) ==
+                    ORCA_STATUS_OK);
+        SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, copies.file_ids[index],
+                                                      ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO) ==
                     ORCA_STATUS_OK);
         SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, copies.file_ids[index],
                                                       ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE) ==
@@ -4627,12 +4644,12 @@ int main(int argc, char **argv) {
         return 177;
     if (duplicate_stats.files_seen == 0) return 178;
     /* files_seen accounts for every row exactly once, in exactly one bucket. */
-    if (duplicate_stats.files_seen != duplicate_stats.tracks_written +
-                                          duplicate_stats.releases_written +
-                                          duplicate_stats.unchanged +
-                                          duplicate_stats.unsupported +
-                                          duplicate_stats.errors)
+    if (duplicate_stats.files_seen != duplicate_stats.changed + duplicate_stats.unchanged +
+                                          duplicate_stats.unsupported + duplicate_stats.errors)
         return 179;
+    if (duplicate_stats.changed <=
+        duplicate_stats.tracks_written + duplicate_stats.releases_written)
+        return 616;
     uint64_t issues_after_first = 0;
     if (orca_library_health_issue_count(runtime, library, &issues_after_first) !=
         ORCA_STATUS_OK)

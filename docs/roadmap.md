@@ -255,7 +255,8 @@ names each `Runtime` method the C ABI does not reach and why.
 - AcoustID fingerprints (Chromaprint over libsamplerate), cached per file.
 - Library-wide analysis on a pool of threads, taking each file's AcoustID
   fingerprint in the same decode, and indexed duplicate detection, as
-  cancellable jobs.
+  cancellable jobs. Each duplicate gets the strongest verdict that holds:
+  the same bytes, the same lossless audio, or matching fingerprints.
 - Library health issues, each naming the action that resolves it (match or
   edit tags, fetch cover art, compare duplicates, review a correction, reveal
   the file); a dismissed issue stays hidden until its file's bytes change.

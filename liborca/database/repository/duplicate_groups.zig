@@ -10,12 +10,41 @@ const optionalInt64 = columns.optionalInt64;
 const HealthIssueKind = health.HealthIssueKind;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
+/// What a duplicate link proves, strongest first: the same bytes, the same
+/// audio in different bytes, or audio whose fingerprints match.
+pub const DuplicateVerdict = enum {
+    exact_duplicate,
+    identical_audio,
+    likely_duplicate,
+
+    pub fn of(issue_kind: HealthIssueKind) ?DuplicateVerdict {
+        return switch (issue_kind) {
+            .exact_duplicate => .exact_duplicate,
+            .identical_audio => .identical_audio,
+            .likely_duplicate => .likely_duplicate,
+            else => null,
+        };
+    }
+
+    pub fn kind(self: DuplicateVerdict) HealthIssueKind {
+        return switch (self) {
+            .exact_duplicate => .exact_duplicate,
+            .identical_audio => .identical_audio,
+            .likely_duplicate => .likely_duplicate,
+        };
+    }
+
+    fn weaker(self: DuplicateVerdict, other: DuplicateVerdict) DuplicateVerdict {
+        return @fromBackingInt(@intCast(@max(@backingInt(self), @backingInt(other))));
+    }
+};
+
 /// One visible duplicate issue: `file_id` is a copy of `related_file_id`, or of
 /// itself at a second location when that is null.
 pub const DuplicateLink = struct {
     file_id: i64,
     related_file_id: ?i64,
-    kind: HealthIssueKind,
+    verdict: DuplicateVerdict,
     similarity: ?f32,
 };
 
@@ -24,9 +53,13 @@ pub const DuplicateLink = struct {
 pub const DuplicateGroupMembers = struct {
     id: i64,
     file_ids: []const i64,
-    /// The lowest similarity of any link in the group, exact links counting as
-    /// 1. Null when a likely link has no stored similarity.
+    /// The lowest similarity of any link in the group, exact and identical
+    /// audio links counting as 1. Null when a likely link has no stored
+    /// similarity.
     similarity: ?f32,
+    /// The weakest verdict of any link in the group: what holds for every
+    /// copy in it.
+    verdict: DuplicateVerdict,
 };
 
 /// Every duplicate group, ordered by id. Caller-owned: release with `deinit`.
@@ -141,6 +174,7 @@ pub fn groupLinks(allocator: std.mem.Allocator, links: []const DuplicateLink) !D
             .id = entries[start].root_id,
             .file_ids = file_ids[start..end],
             .similarity = 1,
+            .verdict = .exact_duplicate,
         });
         start = end;
     }
@@ -150,7 +184,8 @@ pub fn groupLinks(allocator: std.mem.Allocator, links: []const DuplicateLink) !D
     for (links) |link| {
         const top = minimum[root(parent, index_of.getIndex(link.file_id).?)];
         const index = std.sort.binarySearch(DuplicateGroupMembers, groups.items, top, DuplicateGrouping.compareId).?;
-        if (link.kind != .likely_duplicate) continue;
+        groups.items[index].verdict = groups.items[index].verdict.weaker(link.verdict);
+        if (link.verdict != .likely_duplicate) continue;
         if (link.similarity) |value| {
             groups.items[index].similarity = @min(groups.items[index].similarity.?, value);
         } else unknown[index] = true;
@@ -191,7 +226,7 @@ const duplicate_links_sql = "SELECT library_health_issues.file_id, library_healt
     "       EXISTS (SELECT 1 FROM files AS related WHERE related.id = library_health_issues.related_file_id),\n" ++
     "       library_health_issues.kind, library_health_issues.similarity\n" ++
     health.visible_issues_sql ++ "\n" ++
-    \\  AND library_health_issues.kind IN (?1, ?2);
+    \\  AND library_health_issues.kind IN (?1, ?2, ?3);
 ;
 
 const duplicate_file_sql =
@@ -214,7 +249,8 @@ pub const DuplicateGroupRepository = struct {
         var statement = try self.db.prepare(duplicate_links_sql);
         defer statement.deinit();
         try statement.bindInt64(1, @backingInt(HealthIssueKind.exact_duplicate));
-        try statement.bindInt64(2, @backingInt(HealthIssueKind.likely_duplicate));
+        try statement.bindInt64(2, @backingInt(HealthIssueKind.identical_audio));
+        try statement.bindInt64(3, @backingInt(HealthIssueKind.likely_duplicate));
         var links: std.ArrayList(DuplicateLink) = .empty;
         defer links.deinit(allocator);
         while (try statement.step() == .row) {
@@ -225,7 +261,7 @@ pub const DuplicateGroupRepository = struct {
             try links.append(allocator, .{
                 .file_id = statement.columnInt64(0),
                 .related_file_id = related,
-                .kind = kind,
+                .verdict = DuplicateVerdict.of(kind) orelse return error.InvalidStoredHealthIssue,
                 .similarity = if (statement.columnIsNull(4)) null else @floatCast(statement.columnDouble(4)),
             });
         }
@@ -328,7 +364,7 @@ pub const DuplicateGroupRepository = struct {
             \\SELECT library_health_issues.file_id, library_health_issues.kind, files.quick_hash, unixepoch()
             \\FROM library_health_issues
             \\JOIN files ON files.id = library_health_issues.file_id
-            \\WHERE library_health_issues.file_id = ?1 AND library_health_issues.kind IN (?2, ?3)
+            \\WHERE library_health_issues.file_id = ?1 AND library_health_issues.kind IN (?2, ?3, ?4)
             \\ON CONFLICT(file_id, kind) DO UPDATE SET
             \\    quick_hash=excluded.quick_hash,
             \\    dismissed_at=excluded.dismissed_at;
@@ -339,7 +375,8 @@ pub const DuplicateGroupRepository = struct {
         for (file_ids) |file_id| {
             try statement.bindInt64(1, file_id);
             try statement.bindInt64(2, @backingInt(HealthIssueKind.exact_duplicate));
-            try statement.bindInt64(3, @backingInt(HealthIssueKind.likely_duplicate));
+            try statement.bindInt64(3, @backingInt(HealthIssueKind.identical_audio));
+            try statement.bindInt64(4, @backingInt(HealthIssueKind.likely_duplicate));
             if (try statement.step() != .done) return error.SqlFailed;
             try statement.reset();
         }
@@ -473,7 +510,7 @@ fn testLink(file_id: i64, related_file_id: ?i64, similarity: ?f32) DuplicateLink
     return .{
         .file_id = file_id,
         .related_file_id = related_file_id,
-        .kind = if (similarity == null and related_file_id != null) .exact_duplicate else .likely_duplicate,
+        .verdict = if (similarity == null and related_file_id != null) .exact_duplicate else .likely_duplicate,
         .similarity = similarity,
     };
 }
@@ -507,8 +544,8 @@ test "a group is named by its lowest file id whatever order its links are read i
 
 test "a second location of one file is a group of that file alone, and an unmeasured likely link has no similarity" {
     const links = [_]DuplicateLink{
-        .{ .file_id = 7, .related_file_id = null, .kind = .exact_duplicate, .similarity = null },
-        .{ .file_id = 2, .related_file_id = 3, .kind = .likely_duplicate, .similarity = null },
+        .{ .file_id = 7, .related_file_id = null, .verdict = .exact_duplicate, .similarity = null },
+        .{ .file_id = 2, .related_file_id = 3, .verdict = .likely_duplicate, .similarity = null },
     };
     var grouping_result = try groupLinks(testing.allocator, &links);
     defer grouping_result.deinit();
@@ -517,6 +554,25 @@ test "a second location of one file is a group of that file alone, and an unmeas
     try testing.expectEqual(@as(?f32, null), grouping_result.groups[0].similarity);
     try testing.expectEqualSlices(i64, &.{7}, grouping_result.groups[1].file_ids);
     try testing.expectEqual(@as(?f32, 1), grouping_result.groups[1].similarity);
+    try testing.expectEqual(DuplicateVerdict.likely_duplicate, grouping_result.groups[0].verdict);
+    try testing.expectEqual(DuplicateVerdict.exact_duplicate, grouping_result.groups[1].verdict);
+}
+
+test "a group's verdict is the weakest of its links" {
+    const links = [_]DuplicateLink{
+        .{ .file_id = 1, .related_file_id = 2, .verdict = .exact_duplicate, .similarity = null },
+        .{ .file_id = 2, .related_file_id = 3, .verdict = .identical_audio, .similarity = null },
+        .{ .file_id = 5, .related_file_id = 6, .verdict = .identical_audio, .similarity = null },
+        .{ .file_id = 6, .related_file_id = 7, .verdict = .likely_duplicate, .similarity = 0.99 },
+        .{ .file_id = 7, .related_file_id = 5, .verdict = .exact_duplicate, .similarity = null },
+    };
+    var grouping_result = try groupLinks(testing.allocator, &links);
+    defer grouping_result.deinit();
+    try testing.expectEqual(@as(usize, 2), grouping_result.groups.len);
+    try testing.expectEqual(DuplicateVerdict.identical_audio, grouping_result.groups[0].verdict);
+    try testing.expectEqual(@as(?f32, 1), grouping_result.groups[0].similarity);
+    try testing.expectEqual(DuplicateVerdict.likely_duplicate, grouping_result.groups[1].verdict);
+    try testing.expectEqual(@as(?f32, 0.99), grouping_result.groups[1].similarity);
 }
 
 test "the suggested copy to keep is lossless first, then higher rate, then deeper, then larger" {

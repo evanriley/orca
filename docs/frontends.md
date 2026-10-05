@@ -1119,8 +1119,9 @@ The window is an `AdwNavigationSplitView`:
   expands a row into a paragraph about it and, for rows backed by health
   kinds, their files (`libraryHealthIssuePageOfKind`, 512 at a time, Show
   more). Counts come from `libraryHealthSummary` unless noted:
-  - Duplicates: `exact_duplicate` and `likely_duplicate`, "Potentially
-    SIZE" from their redundant bytes; Review opens Duplicates.
+  - Duplicates: `exact_duplicate`, `identical_audio` and
+    `likely_duplicate`, "Potentially SIZE" from their redundant bytes;
+    Review opens Duplicates.
   - Mismatched metadata: the open issues of the metadata consistency pass
     (`libraryMetadataIssueStatus`); Review opens Metadata Issues. The row
     stays open while the pass has never run or is out of date.
@@ -1539,8 +1540,9 @@ potentially SIZE. Orca never deletes on its own.` sums
 buttons steps through the groups. The left list holds up to 512 groups of
 `libraryDuplicateGroupPage`, each `TITLE` over `ARTIST · N copies`.
 Selecting one reads `libraryDuplicateGroup` on the main thread and shows
-the title, artist and album, the evidence (`Fingerprints match · 99%`,
-`Identical audio` at 100%), and a card per copy, `Copy A · keep` with
+the title, artist and album, the evidence from the group's `verdict`
+(`Same file`, `Identical audio`, or `Fingerprints match · 99%` with the
+similarity rounded down), and a card per copy, `Copy A · keep` with
 Suggested on the suggested copy; picking another card's radio makes it the
 kept copy. A table compares Path, Format, Size, Duration, Album, Track,
 Date, Loudness, MusicBrainz (Matched or Not matched), Plays · rating, as

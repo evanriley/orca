@@ -2,15 +2,17 @@
 //! person can act on them.
 //!
 //! Comparing every pair is O(n^2) and cannot run at 500,000 files, so
-//! candidates are found through indexes. `library/analysis_pass.zig` writes
-//! `files.audio_hash` — ORAH over the decoded samples, with its tier. Two
-//! files whose lossless integer samples hash identically **are** the same
-//! audio, whatever their containers or tags claim, and that is an index lookup
-//! rather than a comparison. Everything else the fingerprint decides, and it
-//! decides it only inside a bucket small enough to afford:
+//! candidates are found through indexes. Two files recording one full-content
+//! hash **are** the same bytes, and `library/analysis_pass.zig` writes
+//! `files.audio_hash` — ORAH over the decoded samples, with its tier — so two
+//! files whose lossless integer samples hash identically are the same audio,
+//! whatever their containers or tags claim. Both are index lookups rather than
+//! comparisons. Everything else the fingerprint decides, and it decides it
+//! only inside a bucket small enough to afford:
 //!
 //! - **selection** walks `files` by primary key, cursor-resumable, bounded;
-//! - the **exact bucket** is an equality search of `files_audio_hash`;
+//! - the **same-bytes bucket** is an equality search of `files_content_hash`;
+//! - the **same-audio bucket** is an equality search of `files_audio_hash`;
 //! - the **plausible bucket** is a range search of `files_duration`, because
 //!   length is the cheapest necessary condition for two files being the same
 //!   recording and the only one an index can answer.
@@ -20,7 +22,7 @@
 //! `max_bucket_peers` files, with at most two decoded fingerprints resident at
 //! any moment.
 //!
-//! Like every other pass here it writes only what it owns: the two health
+//! Like every other pass here it writes only what it owns: the three health
 //! issue kinds that mean "this audio is in the library twice", rewritten for
 //! every file it examines so a re-run converges rather than accumulating.
 
@@ -47,9 +49,13 @@ pub const max_bucket_peers = 64;
 pub const Result = struct {
     /// Rows examined and carried to a commit.
     files_seen: u64 = 0,
-    /// Files reported as holding audio the Library also holds elsewhere,
-    /// decided without listening to anything.
+    /// Files whose bytes the Library also holds elsewhere: at a second
+    /// location of the file, or in another file recording the same content
+    /// hash.
     exact: u64 = 0,
+    /// Files in different bytes from another whose lossless audio hashes
+    /// equal its own, decided without listening to anything.
+    identical: u64 = 0,
     /// Files whose audio only *resembles* another file's. A weaker claim, and
     /// counted separately because it is the one that will sometimes be wrong.
     likely: u64 = 0,
@@ -72,34 +78,51 @@ pub const Result = struct {
     cancelled: bool = false,
 };
 
+/// The kinds this pass owns, strongest first.
+const owned_kinds = [_]database.HealthIssueKind{ .exact_duplicate, .identical_audio, .likely_duplicate };
+
 /// What one file's examination decided, held until its batch commits.
 ///
-/// At most one finding per file. `exact` outranks `likely` rather than
-/// accompanying it: they are two strengths of the same claim, and telling a
-/// person that a file is both a certain and a probable duplicate of something
-/// helps nobody decide anything.
+/// At most one finding per file, the strongest that holds: same bytes, then
+/// same audio, then resembling audio. They are strengths of one claim, and
+/// telling a person that a file is both a certain and a probable duplicate of
+/// something helps nobody decide anything.
 const Finding = struct {
     file_id: i64,
-    /// Owned, formatted detail text, or null for a file with no finding of
-    /// that kind. A null is as load-bearing as a value: the pass retires the
-    /// stored issue for every kind it did not raise.
-    exact_details: ?[]u8 = null,
-    likely_details: ?[]u8 = null,
+    /// Null for a file with no finding. A null is as load-bearing as a value:
+    /// the pass retires the stored issue for every kind it did not raise.
+    kind: ?database.HealthIssueKind = null,
+    /// Owned, formatted detail text of `kind`.
+    details: ?[]u8 = null,
     /// The other row of the finding, or null when the duplicate is a second
     /// location of this same row.
     related_file_id: ?i64 = null,
-    /// The fingerprint score behind `likely_details`.
+    /// The fingerprint score behind a `likely_duplicate`.
     similarity: ?f32 = null,
 
     fn deinit(self: Finding, allocator: std.mem.Allocator) void {
-        if (self.exact_details) |details| allocator.free(details);
-        if (self.likely_details) |details| allocator.free(details);
+        if (self.details) |details| allocator.free(details);
+    }
+
+    fn issue(self: Finding, kind: database.HealthIssueKind) ?database.HealthIssueInput {
+        if (self.kind != kind) return null;
+        return .{
+            .kind = kind,
+            .severity = if (kind == .likely_duplicate) .information else .warning,
+            .details = self.details orelse "",
+            .related_file_id = self.related_file_id,
+            .similarity = self.similarity,
+        };
     }
 };
 
+/// What another file was found to share with the one examined; `resembles`
+/// carries the fingerprint score.
+const Evidence = union(enum) { same_bytes, same_audio, resembles: f32 };
+
 /// Which counter a file's examination lands in. Disjoint by construction, so
 /// the outcomes always add up to `files_seen`.
-const Outcome = enum { exact, likely, unique, uncomparable, failed };
+const Outcome = enum { exact, identical, likely, unique, uncomparable, failed };
 
 pub const DuplicateScan = struct {
     allocator: std.mem.Allocator,
@@ -189,6 +212,7 @@ pub const DuplicateScan = struct {
                 errdefer finding.deinit(self.allocator);
                 switch (try self.examine(candidate, &finding, &result)) {
                     .exact => result.exact += 1,
+                    .identical => result.identical += 1,
                     .likely => result.likely += 1,
                     .unique => result.unique += 1,
                     .uncomparable => result.uncomparable += 1,
@@ -224,10 +248,8 @@ pub const DuplicateScan = struct {
         finding: *Finding,
         result: *Result,
     ) !Outcome {
-        if (try self.exactDetails(candidate, &finding.related_file_id)) |details| {
-            finding.exact_details = details;
-            return .exact;
-        }
+        if (try self.sameBytes(candidate, finding)) return .exact;
+        if (try self.sameAudio(candidate, finding)) return .identical;
         const audio_hash = candidate.audio_hash orelse return .uncomparable;
         const duration = candidate.duration_ms orelse return .uncomparable;
         const identity = candidate.source_identity orelse return .uncomparable;
@@ -253,8 +275,8 @@ pub const DuplicateScan = struct {
         for (peers[0..found]) |peer| {
             // A peer with no decoded-audio hash is one no analysis has
             // measured, so it has no fingerprint to compare either; and a peer
-            // with *this* lossless hash is already accounted for by the exact
-            // bucket, which a comparison could only agree with more
+            // with *this* lossless hash is already accounted for by the
+            // same-audio bucket, which a comparison could only agree with more
             // expensively. Between them these two skips are what leaves
             // `likely_recording` as the only verdict this loop can reach.
             const peer_hash = peer.audio_hash orelse continue;
@@ -289,54 +311,87 @@ pub const DuplicateScan = struct {
             }
         }
         const matched = best_peer orelse return .unique;
-        const path = try self.pathOf(matched);
-        defer self.allocator.free(path);
-        finding.likely_details = try std.fmt.allocPrint(
-            self.allocator,
-            analysis.health.likely_duplicate_details,
-            .{ path, 100 * best_score },
-        );
-        finding.related_file_id = matched;
-        finding.similarity = best_score;
+        try self.record(finding, .{ .resembles = best_score }, matched);
         return .likely;
     }
 
-    /// The path of something that holds this file's audio as well, or null.
+    /// Whether the Library holds this file's bytes somewhere else, recorded
+    /// into `finding` when it does.
     ///
-    /// Two sources, in order of how sure they are. A second *present location*
-    /// of the same `files` row is a byte-identical copy the scanner's identity
-    /// cascade already resolved to one row, so it never becomes a second row
-    /// and could never be found by comparing rows. An equal lossless
-    /// `audio_hash` is a different row whose integer samples are the same
-    /// audio; an equal hash of decoded float samples is not, because it says
-    /// only that one decoder rendered two lossy sources alike.
-    fn exactDetails(
+    /// A second *present location* of the same `files` row is a copy the
+    /// scanner's identity cascade proved byte-identical and resolved to one
+    /// row, so it never becomes a second row and could never be found by
+    /// comparing rows. Another row recording the same full-content hash holds
+    /// the same bytes too: two copies changed alike in one scan batch end as
+    /// two rows.
+    fn sameBytes(
         self: *DuplicateScan,
         candidate: database.repository.DuplicateCandidate,
-        related_file_id: *?i64,
-    ) !?[]u8 {
+        finding: *Finding,
+    ) !bool {
         if (try self.locations.secondPresentPath(self.allocator, candidate.id)) |copy| {
             defer self.allocator.free(copy);
-            return try std.fmt.allocPrint(
+            finding.details = try std.fmt.allocPrint(
                 self.allocator,
                 analysis.health.exact_duplicate_details,
                 .{copy},
             );
+            finding.kind = .exact_duplicate;
+            return true;
         }
-        const audio_hash = candidate.audio_hash orelse return null;
-        if (candidate.audio_hash_tier != lossless_tier) return null;
-        var peers: [max_bucket_peers]i64 = undefined;
-        const found = try self.files.audioHashPeersInto(&peers, &audio_hash, candidate.id);
-        if (found == 0) return null;
-        const path = try self.pathOf(peers[0]);
+        const digest = candidate.source_identity orelse return false;
+        var peers: [1]i64 = undefined;
+        if (try self.files.contentHashPeersInto(&peers, &digest, candidate.id) == 0) return false;
+        try self.record(finding, .same_bytes, peers[0]);
+        return true;
+    }
+
+    /// Whether another row's lossless `audio_hash` equals this file's, which
+    /// makes their integer samples the same audio in different bytes. An equal
+    /// hash of decoded float samples is not, because it says only that one
+    /// decoder rendered two lossy sources alike.
+    fn sameAudio(
+        self: *DuplicateScan,
+        candidate: database.repository.DuplicateCandidate,
+        finding: *Finding,
+    ) !bool {
+        const audio_hash = candidate.audio_hash orelse return false;
+        if (candidate.audio_hash_tier != lossless_tier) return false;
+        var peers: [1]i64 = undefined;
+        if (try self.files.audioHashPeersInto(&peers, &audio_hash, candidate.id) == 0) return false;
+        try self.record(finding, .same_audio, peers[0]);
+        return true;
+    }
+
+    /// Records into `finding` what `related_file_id` was found to share with
+    /// the file.
+    fn record(
+        self: *DuplicateScan,
+        finding: *Finding,
+        evidence: Evidence,
+        related_file_id: i64,
+    ) !void {
+        const path = try self.pathOf(related_file_id);
         defer self.allocator.free(path);
-        const details = try std.fmt.allocPrint(
-            self.allocator,
-            analysis.health.exact_duplicate_details,
-            .{path},
-        );
-        related_file_id.* = peers[0];
-        return details;
+        finding.details = switch (evidence) {
+            .same_bytes => try std.fmt.allocPrint(self.allocator, analysis.health.exact_duplicate_details, .{path}),
+            .same_audio => try std.fmt.allocPrint(self.allocator, analysis.health.identical_audio_details, .{path}),
+            .resembles => |score| try std.fmt.allocPrint(
+                self.allocator,
+                analysis.health.likely_duplicate_details,
+                .{ path, 100 * score },
+            ),
+        };
+        finding.kind = switch (evidence) {
+            .same_bytes => .exact_duplicate,
+            .same_audio => .identical_audio,
+            .resembles => .likely_duplicate,
+        };
+        finding.related_file_id = related_file_id;
+        finding.similarity = switch (evidence) {
+            .resembles => |score| score,
+            .same_bytes, .same_audio => null,
+        };
     }
 
     /// How a peer is named to a person. A file with no location on any known
@@ -373,8 +428,8 @@ pub const DuplicateScan = struct {
 
     /// One bounded commit per batch, holding the Library's one write lane.
     ///
-    /// Every examined file has both of this pass's kinds rewritten, present or
-    /// absent. That is the replace-by-file semantic, narrowed to the two kinds
+    /// Every examined file has each of this pass's kinds rewritten, present or
+    /// absent. That is the replace-by-file semantic, narrowed to the kinds
     /// this pass owns: `replaceFile` would also erase the corruption and
     /// metadata findings other passes made, and an insert-only pass would let
     /// a duplicate that has since been deleted keep its report for ever.
@@ -386,27 +441,7 @@ pub const DuplicateScan = struct {
         try self.database_handle.exec("BEGIN IMMEDIATE;");
         errdefer self.database_handle.exec("ROLLBACK;") catch {};
         for (findings) |finding| {
-            if (finding.exact_details) |details| {
-                try self.health_issues.recordLocked(finding.file_id, .{
-                    .kind = .exact_duplicate,
-                    .severity = .warning,
-                    .details = details,
-                    .related_file_id = finding.related_file_id,
-                });
-            } else {
-                try self.health_issues.clearLocked(finding.file_id, .exact_duplicate);
-            }
-            if (finding.likely_details) |details| {
-                try self.health_issues.recordLocked(finding.file_id, .{
-                    .kind = .likely_duplicate,
-                    .severity = .information,
-                    .details = details,
-                    .related_file_id = finding.related_file_id,
-                    .similarity = finding.similarity,
-                });
-            } else {
-                try self.health_issues.clearLocked(finding.file_id, .likely_duplicate);
-            }
+            for (owned_kinds) |kind| try self.health_issues.settleLocked(finding.file_id, kind, finding.issue(kind));
         }
         try self.database_handle.exec("COMMIT;");
     }
@@ -465,6 +500,20 @@ const Fixture = struct {
         samples: []const f32,
         tier: analysis.fingerprint.AudioHashTier,
     ) !i64 {
+        const identity: content_hash.Digest = @splat(self.next_identity);
+        self.next_identity += 1;
+        return self.recordMeasuredBytes(path, samples, tier, identity);
+    }
+
+    /// A measured row whose bytes hash to `identity`, so two rows given one
+    /// identity record the same content hash.
+    fn recordMeasuredBytes(
+        self: *Fixture,
+        path: []const u8,
+        samples: []const f32,
+        tier: analysis.fingerprint.AudioHashTier,
+        identity: content_hash.Digest,
+    ) !i64 {
         var analyzer = try analysis.fingerprint.Analyzer.init(testing.allocator, sample_rate, 1, tier);
         defer analyzer.deinit();
         switch (tier) {
@@ -482,8 +531,6 @@ const Fixture = struct {
         const measured = try analyzer.finish();
         defer measured.deinit();
 
-        const identity: content_hash.Digest = @splat(self.next_identity);
-        self.next_identity += 1;
         const file_id = try self.library.files.create(.{
             .audio_format = 1,
             .quick_hash = &identity,
@@ -569,8 +616,8 @@ fn planOf(fixture: *Fixture, sql: [:0]const u8) ![]u8 {
 }
 
 test "selecting candidates and looking up either bucket are index searches, not scans" {
-    // Selection walks the primary key, the certain bucket is an equality search
-    // of `files_audio_hash`, and the plausible bucket is a range search of
+    // Selection walks the primary key, the two certain buckets are equality
+    // searches of `files_content_hash` and `files_audio_hash`, and the plausible bucket is a range search of
     // `files_duration`. A paraphrase of any of the three would return the same
     // rows, silently, by reading the whole table for every candidate.
     var fixture = try Fixture.init("file:orca-duplicate-plan?mode=memory&cache=shared");
@@ -586,14 +633,23 @@ test "selecting candidates and looking up either bucket are index searches, not 
     try testing.expect(std.mem.indexOf(u8, selection, "SCAN files") == null);
     try testing.expect(std.mem.indexOf(u8, selection, "SEARCH files") != null);
 
-    const exact_bucket = try planOf(
+    const same_bytes_bucket = try planOf(
+        &fixture,
+        "EXPLAIN QUERY PLAN SELECT id FROM files WHERE content_hash = ?1 AND content_hash_algorithm = 1" ++
+            " AND id <> ?2 ORDER BY id LIMIT ?3;",
+    );
+    defer testing.allocator.free(same_bytes_bucket);
+    try testing.expect(std.mem.indexOf(u8, same_bytes_bucket, "SCAN files") == null);
+    try testing.expect(std.mem.indexOf(u8, same_bytes_bucket, "files_content_hash") != null);
+
+    const same_audio_bucket = try planOf(
         &fixture,
         "EXPLAIN QUERY PLAN SELECT id FROM files WHERE audio_hash = ?1 AND id <> ?2" ++
             " AND audio_hash_tier = 1 ORDER BY id LIMIT ?3;",
     );
-    defer testing.allocator.free(exact_bucket);
-    try testing.expect(std.mem.indexOf(u8, exact_bucket, "SCAN files") == null);
-    try testing.expect(std.mem.indexOf(u8, exact_bucket, "files_audio_hash") != null);
+    defer testing.allocator.free(same_audio_bucket);
+    try testing.expect(std.mem.indexOf(u8, same_audio_bucket, "SCAN files") == null);
+    try testing.expect(std.mem.indexOf(u8, same_audio_bucket, "files_audio_hash") != null);
 
     const plausible_bucket = try planOf(
         &fixture,
@@ -607,8 +663,35 @@ test "selecting candidates and looking up either bucket are index searches, not 
     try testing.expect(std.mem.indexOf(u8, plausible_bucket, "files_duration") != null);
 }
 
-test "two files whose lossless audio hashes alike are reported as exact duplicates" {
-    var fixture = try Fixture.init("file:orca-duplicate-exact?mode=memory&cache=shared");
+test "two files recording one content hash are exact duplicates and nothing weaker" {
+    var fixture = try Fixture.init("file:orca-duplicate-same-bytes?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const samples = try Fixture.tone(3, 1, 0.6);
+    defer testing.allocator.free(samples);
+    const bytes: content_hash.Digest = @splat(0xa5);
+    const first = try fixture.recordMeasuredBytes("/music/album/track.flac", samples, .lossless_integer, bytes);
+    const second = try fixture.recordMeasuredBytes("/music/backup/track.flac", samples, .lossless_integer, bytes);
+
+    var pass = fixture.scan();
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 2), result.files_seen);
+    try testing.expectEqual(@as(u64, 2), result.exact);
+    try testing.expectEqual(@as(u64, 0), result.identical + result.likely);
+    // Both sides are told, because either is the one a person might delete.
+    const forward = (try fixture.finding(first, .exact_duplicate)).?;
+    defer testing.allocator.free(forward);
+    try testing.expect(std.mem.endsWith(u8, forward, "/music/backup/track.flac"));
+    const backward = (try fixture.finding(second, .exact_duplicate)).?;
+    defer testing.allocator.free(backward);
+    try testing.expect(std.mem.endsWith(u8, backward, "/music/album/track.flac"));
+    for ([_]i64{ first, second }) |file_id| {
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .identical_audio));
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .likely_duplicate));
+    }
+}
+
+test "two files in different bytes whose lossless audio hashes alike are identical audio, not exact duplicates" {
+    var fixture = try Fixture.init("file:orca-duplicate-identical?mode=memory&cache=shared");
     defer fixture.deinit();
     const samples = try Fixture.tone(3, 1, 0.6);
     defer testing.allocator.free(samples);
@@ -618,15 +701,74 @@ test "two files whose lossless audio hashes alike are reported as exact duplicat
     var pass = fixture.scan();
     const result = try pass.run();
     try testing.expectEqual(@as(u64, 2), result.files_seen);
-    try testing.expectEqual(@as(u64, 2), result.exact);
-    try testing.expectEqual(@as(u64, 0), result.likely);
-    // Both sides are told, because either is the one a person might delete.
-    const forward = (try fixture.finding(first, .exact_duplicate)).?;
+    try testing.expectEqual(@as(u64, 2), result.identical);
+    try testing.expectEqual(@as(u64, 0), result.exact + result.likely);
+    const forward = (try fixture.finding(first, .identical_audio)).?;
     defer testing.allocator.free(forward);
-    try testing.expect(std.mem.endsWith(u8, forward, "/music/rip/track.wav"));
-    const backward = (try fixture.finding(second, .exact_duplicate)).?;
+    try testing.expect(std.mem.indexOf(u8, forward, "/music/rip/track.wav") != null);
+    const backward = (try fixture.finding(second, .identical_audio)).?;
     defer testing.allocator.free(backward);
-    try testing.expect(std.mem.endsWith(u8, backward, "/music/album/track.flac"));
+    try testing.expect(std.mem.indexOf(u8, backward, "/music/album/track.flac") != null);
+    for ([_]i64{ first, second }) |file_id| {
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .exact_duplicate));
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .likely_duplicate));
+    }
+    var page = try fixture.library.health_issues.page(testing.allocator, 256, 0);
+    defer page.deinit();
+    for (page.items) |issue| {
+        try testing.expectEqual(database.HealthSeverity.warning, issue.severity);
+        try testing.expectEqual(database.HealthAction.compare_duplicate, issue.action);
+    }
+}
+
+test "an exact duplicate whose peer changes to other bytes of the same audio becomes identical audio" {
+    var fixture = try Fixture.init("file:orca-duplicate-downgrade?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const samples = try Fixture.tone(3, 1, 0.6);
+    defer testing.allocator.free(samples);
+    const bytes: content_hash.Digest = @splat(0xa5);
+    const kept = try fixture.recordMeasuredBytes("/music/one.flac", samples, .lossless_integer, bytes);
+    const retagged = try fixture.recordMeasuredBytes("/music/two.flac", samples, .lossless_integer, bytes);
+    var pass = fixture.scan();
+    _ = try pass.run();
+    const before = (try fixture.finding(kept, .exact_duplicate)).?;
+    testing.allocator.free(before);
+
+    var update = try fixture.library.database.prepare("UPDATE files SET content_hash = ?2 WHERE id = ?1;");
+    defer update.deinit();
+    const other_bytes: content_hash.Digest = @splat(0x5a);
+    try update.bindInt64(1, retagged);
+    try update.bindBlob(2, &other_bytes);
+    try testing.expectEqual(database.sqlite.Step.done, try update.step());
+
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 2), result.identical);
+    try testing.expectEqual(@as(u64, 0), result.exact + result.likely);
+    for ([_]i64{ kept, retagged }) |file_id| {
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .exact_duplicate));
+        const details = (try fixture.finding(file_id, .identical_audio)).?;
+        testing.allocator.free(details);
+    }
+}
+
+test "a dismissed identical-audio finding stays dismissed across another duplicate scan" {
+    var fixture = try Fixture.init("file:orca-duplicate-dismiss?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const samples = try Fixture.tone(3, 1, 0.6);
+    defer testing.allocator.free(samples);
+    const first = try fixture.recordMeasured("/music/one.flac", samples);
+    const second = try fixture.recordMeasured("/music/one.wav", samples);
+    var pass = fixture.scan();
+    _ = try pass.run();
+    try fixture.library.health_issues.dismiss(first, .identical_audio);
+
+    _ = try pass.run();
+    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(first, .identical_audio));
+    const kept = (try fixture.finding(second, .identical_audio)).?;
+    testing.allocator.free(kept);
+    try fixture.library.health_issues.restore(first, .identical_audio);
+    const restored = (try fixture.finding(first, .identical_audio)).?;
+    testing.allocator.free(restored);
 }
 
 test "two lossy files whose decoded audio hashes alike are likely, not exact, duplicates" {
@@ -639,16 +781,18 @@ test "two lossy files whose decoded audio hashes alike are likely, not exact, du
 
     var pass = fixture.scan();
     const result = try pass.run();
-    try testing.expectEqual(@as(u64, 0), result.exact);
+    try testing.expectEqual(@as(u64, 0), result.exact + result.identical);
     try testing.expectEqual(@as(u64, 2), result.likely);
-    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(first, .exact_duplicate));
-    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(second, .exact_duplicate));
+    for ([_]i64{ first, second }) |file_id| {
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .exact_duplicate));
+        try testing.expectEqual(@as(?[]u8, null), try fixture.finding(file_id, .identical_audio));
+    }
     const details = (try fixture.finding(first, .likely_duplicate)).?;
     defer testing.allocator.free(details);
     try testing.expect(std.mem.indexOf(u8, details, "/music/one-copy.mp3") != null);
 }
 
-test "each exact duplicate names the other file, and keeps its finding when that file is deleted" {
+test "each identical-audio finding names the other file, and keeps its finding when that file is deleted" {
     var fixture = try Fixture.init("file:orca-duplicate-related?mode=memory&cache=shared");
     defer fixture.deinit();
     const samples = try Fixture.tone(3, 1, 0.6);
@@ -720,7 +864,7 @@ test "two different recordings of the same length are not reported as duplicates
     try testing.expectEqual(@as(u64, 2), result.files_seen);
     try testing.expectEqual(@as(u64, 2), result.unique);
     try testing.expectEqual(@as(u64, 2), result.comparisons);
-    try testing.expectEqual(@as(u64, 0), result.exact + result.likely);
+    try testing.expectEqual(@as(u64, 0), result.exact + result.identical + result.likely);
     try testing.expectEqual(@as(?[]u8, null), try fixture.finding(first, .likely_duplicate));
     try testing.expectEqual(@as(?[]u8, null), try fixture.finding(second, .likely_duplicate));
 }
@@ -741,8 +885,9 @@ test "audio that only resembles another file is reported as likely rather than e
     var pass = fixture.scan();
     const result = try pass.run();
     try testing.expectEqual(@as(u64, 2), result.likely);
-    try testing.expectEqual(@as(u64, 0), result.exact);
+    try testing.expectEqual(@as(u64, 0), result.exact + result.identical);
     try testing.expectEqual(@as(?[]u8, null), try fixture.finding(first, .exact_duplicate));
+    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(first, .identical_audio));
     const details = (try fixture.finding(first, .likely_duplicate)).?;
     defer testing.allocator.free(details);
     try testing.expect(std.mem.indexOf(u8, details, "/music/one.mp3") != null);
@@ -788,7 +933,7 @@ test "a library nothing has analyzed reports what it could not compare" {
     try testing.expectEqual(@as(u64, 2), result.files_seen);
     try testing.expectEqual(@as(u64, 2), result.uncomparable);
     try testing.expectEqual(@as(u64, 0), result.unique);
-    try testing.expectEqual(@as(u64, 0), result.exact + result.likely);
+    try testing.expectEqual(@as(u64, 0), result.exact + result.identical + result.likely);
     try testing.expectEqual(@as(u64, 0), try fixture.library.health_issues.count());
 }
 
@@ -804,7 +949,8 @@ test "running the duplicate scan twice records the same findings, not twice as m
     const first = try pass.run();
     const after_first = try fixture.library.health_issues.count();
     const second = try pass.run();
-    try testing.expectEqual(first.exact, second.exact);
+    try testing.expectEqual(@as(u64, 2), first.identical);
+    try testing.expectEqual(first.identical, second.identical);
     try testing.expectEqual(@as(u64, 2), after_first);
     try testing.expectEqual(after_first, try fixture.library.health_issues.count());
 }
@@ -819,7 +965,7 @@ test "a duplicate that has gone away stops being reported" {
 
     var pass = fixture.scan();
     _ = try pass.run();
-    const before = (try fixture.finding(kept, .exact_duplicate)).?;
+    const before = (try fixture.finding(kept, .identical_audio)).?;
     testing.allocator.free(before);
 
     var delete = try fixture.library.database.prepare("DELETE FROM files WHERE id=?1;");
@@ -828,7 +974,7 @@ test "a duplicate that has gone away stops being reported" {
     try testing.expectEqual(database.sqlite.Step.done, try delete.step());
 
     _ = try pass.run();
-    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(kept, .exact_duplicate));
+    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(kept, .identical_audio));
 }
 
 test "an interrupted duplicate scan commits what it examined and resumes at the rest" {

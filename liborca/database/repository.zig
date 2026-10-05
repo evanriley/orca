@@ -77,6 +77,7 @@ pub const DuplicatePeer = duplicates.DuplicatePeer;
 pub const DuplicateCandidatePage = duplicates.DuplicateCandidatePage;
 pub const DuplicateLink = duplicate_groups.DuplicateLink;
 pub const DuplicateGroupMembers = duplicate_groups.DuplicateGroupMembers;
+pub const DuplicateVerdict = duplicate_groups.DuplicateVerdict;
 pub const DuplicateGrouping = duplicate_groups.DuplicateGrouping;
 pub const DuplicateFile = duplicate_groups.DuplicateFile;
 pub const DuplicateMergeResult = duplicate_groups.DuplicateMergeResult;

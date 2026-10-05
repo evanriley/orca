@@ -3,10 +3,11 @@ const database = @import("../database/root.zig");
 
 /// The one wording for each duplicate finding.
 ///
-/// Shared with `library/duplicate_pass.zig`, which is what produces these two
-/// kinds at library scale. Two spellings would drift, and `orca-cli health`
+/// Shared with `library/duplicate_pass.zig`, which is what produces these
+/// three kinds at library scale. Two spellings would drift, and `orca-cli health`
 /// would describe the same finding two ways depending on which pass filed it.
 pub const exact_duplicate_details = "content also appears at {s}";
+pub const identical_audio_details = "audio also appears at {s}, in different bytes";
 pub const likely_duplicate_details = "audio resembles {s} ({d:.1}% match)";
 
 /// Room for the longest formatted details a rule here produces.

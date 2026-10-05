@@ -34,6 +34,13 @@ A scan re-finds a file through a cascade, cheapest first:
    no hash. Only equal tier-1 hashes are the same audio (see
    [analysis.md](analysis.md#the-audio-hash)).
 
+The duplicate pass reports from the same ladder and claims only what each
+rung proves: a second present location or an equal content hash is
+`exact_duplicate`, the same bytes; equal tier-1 audio hashes in different
+bytes are `identical_audio`; equal tier-2 hashes or matching fingerprints are
+`likely_duplicate` (see
+[analysis.md](analysis.md#what-the-three-findings-mean)).
+
 **Tier 3 nominates; the content hash confirms.** Files of one size and the same
 first and last 64 KiB can differ in the middle, so a quick hash alone never
 joins a path to a file. A nominee — a file recording the path's quick hash — is
@@ -122,7 +129,8 @@ Not handled yet:
 
 - A changed path whose new bytes equal another file's stays on its own file,
   so two files can share a `quick_hash`.
-- Two copies changed in the same way end as two files with equal hashes.
+- Two copies changed in the same way end as two files with equal hashes. The
+  duplicate pass reports them as `exact_duplicate`, but they are not joined.
 - A tag write writes one location of a file, not every copy of it.
 - An edit that keeps a path's inode, size and mtime is not seen: the scan's
   unchanged fast path skips it, and nothing re-reads it.

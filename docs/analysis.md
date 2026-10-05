@@ -351,29 +351,39 @@ measured and stored, so a run costs indexed lookups and stored-fingerprint
 comparisons rather than decodes, and asking the question a second time does not
 mean measuring the library a second time.
 
-### What the two findings mean
+### What the three findings mean
 
-- **`exact_duplicate`** — Orca holds this audio at more than one place, and a
-  person can act on it without listening to anything. Two sources, and the
-  second one is not optional: a *byte-identical copy is not a second `files`
-  row*, because the scanner's identity cascade resolves it by quick hash,
-  confirmed by content hash, to the row that already exists. The Library
-  models it as one file at two present locations, so no amount of comparing
-  rows could ever find it. A copy whose bytes change leaves for a file of its
-  own, so it is no longer reported as a copy of the file it left (see
-  [database.md](database.md#identity)).
-  1. one `files` row with a second `present` location, or
-  2. two `files` rows whose `files.audio_hash` is byte-identical and of tier
-     1, lossless integer samples (see [the audio hash](#the-audio-hash)). Same
-     audio, whatever the container or the tags claim. Equal tier-2 hashes are
-     reported as `likely_duplicate` instead.
-- **`likely_duplicate`** — the audio only *resembles* another file's, above a
-  similarity threshold, and the claim will sometimes be wrong. It is worth
-  making because it catches the case the exact test structurally cannot: a
-  lossy transcode of the same master decodes to different samples and so
-  hashes differently, while remaining the same recording twice on disk. The
-  message carries the match percentage, because a claim that can be wrong
-  should travel with the number behind it.
+Each finding states only what was proven. A file gets the strongest that
+holds, and at most one.
+
+- **`exact_duplicate`** (warning) — the same bytes are stored more than once,
+  and a person can act on it without listening to anything. It rests on the
+  full-content BLAKE3-256 hash, never on the quick hash or the audio:
+  1. one `files` row with a second `present` location. A byte-identical copy
+     is not a second `files` row, because the scanner's identity cascade
+     resolves it by quick hash, confirmed by content hash, to the row that
+     already exists; the Library models it as one file at two present
+     locations, so no amount of comparing rows could ever find it. A copy
+     whose bytes change leaves for a file of its own (see
+     [database.md](database.md#identity)). Or
+  2. two `files` rows recording the same `files.content_hash` with
+     `content_hash_algorithm` 1, such as two copies changed the same way in
+     one scan batch.
+- **`identical_audio`** (warning) — different bytes, the same audio: two
+  `files` rows whose `files.audio_hash` is equal and of tier 1, lossless
+  integer samples (see [the audio hash](#the-audio-hash)). A WAV and the FLAC
+  made from it, or an ALAC and a FLAC of one master, whatever the container,
+  the width or the tags claim. It is a warning like `exact_duplicate` because
+  it is as certain: keeping either copy loses no audio. Equal tier-2 hashes
+  are reported as `likely_duplicate` instead.
+- **`likely_duplicate`** (information) — the audio only *resembles* another
+  file's, above a similarity threshold, or two lossy or float decodes hash
+  alike, and the claim will sometimes be wrong. It is worth making because it
+  catches the case the certain tests structurally cannot: a lossy transcode of
+  the same master decodes to different samples and so hashes differently,
+  while remaining the same recording twice on disk. The message carries the
+  match percentage, because a claim that can be wrong should travel with the
+  number behind it.
 
 The threshold is **0.985**, and it is measured rather than chosen; the
 figures behind it are on `likely_threshold` in
@@ -390,19 +400,22 @@ the pass misses a known transcode, this is the number to revisit; between about
 0.96 and 0.985 the fingerprint stops separating a transcode from an unrelated
 track of the same length.
 
-`exact` outranks `likely` rather than accompanying it. They are two strengths
-of one claim, and telling somebody a file is both certainly and probably a
-duplicate of something helps them decide nothing.
+`exact` outranks `identical` and `identical` outranks `likely` rather than
+accompanying them. They are strengths of one claim, and telling somebody a
+file is both certainly and probably a duplicate of something helps them
+decide nothing.
 
-### The three indexed queries
+### The four indexed queries
 
 | question | query | plan |
 | --- | --- | --- |
 | which file next | `files.id > ?` | `SEARCH files USING INTEGER PRIMARY KEY (rowid>?)` |
-| certain bucket | `audio_hash = ? AND audio_hash_tier = 1` | `SEARCH files USING INDEX files_audio_hash (audio_hash=?)` |
+| same-bytes bucket | `content_hash = ? AND content_hash_algorithm = 1` | `SEARCH files USING INDEX files_content_hash (content_hash=?)` |
+| same-audio bucket | `audio_hash = ? AND audio_hash_tier = 1` | `SEARCH files USING INDEX files_audio_hash (audio_hash=?)` |
 | plausible bucket | `duration_ms BETWEEN ? AND ?` | `SEARCH files USING INDEX files_duration (duration_ms>? AND duration_ms<?)` |
 
-None of the three is a scan. `files_audio_hash` serves the certain bucket and
+None of the four is a scan. `files_content_hash` serves the same-bytes
+bucket, `files_audio_hash` the same-audio bucket and
 `files_duration ON files(duration_ms, id)` (migration 13) the plausible one.
 
 Duration is the bucket key for the plausible half because length is the
@@ -450,9 +463,11 @@ finding — the same argument the analysis pass makes about absent files.
 
 ### Re-running
 
-Every examined file has **both** of this pass's kinds rewritten, present or
-absent. That is `library_health_issues`' replace-by-file semantic narrowed to
-the two kinds this pass owns: `replaceFile` would also erase the corruption and
+Every examined file has **all three** of this pass's kinds rewritten, present
+or absent, so a file whose copy now holds other bytes of the same audio loses
+its `exact_duplicate` as it gains `identical_audio`. That is
+`library_health_issues`' replace-by-file semantic narrowed to the three kinds
+this pass owns: `replaceFile` would also erase the corruption and
 metadata findings other passes made, and an insert-only pass would let a
 duplicate that has since been deleted keep its report for ever. Recording is an
 upsert on `(file_id, kind)`, so a second run converges on the same rows rather
@@ -505,20 +520,21 @@ which refuses version 1). `fingerprint_algorithm_version` 3 marks the change, so
 every file measured under an earlier version is selected and measured again,
 and migration 57 clears every hash stored without a tier.
 
-### The exact test and decoding
+### The identical-audio test and decoding
 
-The exact test holds because a tier-1 `files.audio_hash` is a function of the
-audio: the lossless decoders return the integers the file encodes, and FLAC
-decodes bit-exactly through libFLAC (see [codecs.md](codecs.md#flac)). Two
-lossless files holding identical PCM at the same rate and channel count hash
-identically whatever their container, width or encoder settings, and are
-reported as `exact_duplicate`.
+The identical-audio test holds because a tier-1 `files.audio_hash` is a
+function of the audio: the lossless decoders return the integers the file
+encodes, and FLAC decodes bit-exactly through libFLAC (see
+[codecs.md](codecs.md#flac)). Two lossless files holding identical PCM at the
+same rate and channel count hash identically whatever their container, width
+or encoder settings, and are reported as `identical_audio`. Equal audio says
+nothing about equal bytes, so only the content hash makes `exact_duplicate`.
 
 ### Groups
 
 `Runtime.libraryDuplicateGroupPage` (`orca-cli duplicates DATABASE
---groups`) joins the visible `exact_duplicate` and `likely_duplicate` issues
-into groups: files linked by an issue, directly or through another file, are
+--groups`) joins the visible `exact_duplicate`, `identical_audio` and
+`likely_duplicate` issues into groups: files linked by an issue, directly or through another file, are
 one group, and a file held at several present locations is a group on its
 own. A group's id is its lowest file id, so it is the same on every read
 while its issues are unchanged; grouping runs over the visible issues on each
@@ -528,11 +544,15 @@ out.
 `DuplicateGroup` carries the suggested copy's title and artist, `copies`
 (each further location of a file counting as one), `same_recording` (every
 file is an encoding of one recording, so the copies share one play count and
-rating), `similarity` and `bytes_redundant`, what removing every copy but the
-suggested one frees. `similarity` is the lowest score among the group's
-`likely_duplicate` links, 1 for exact links, read from
-`library_health_issues.similarity`; it is null when a link was recorded
-before that column existed. `libraryDuplicateGroupTotals` sums the groups
+rating), `similarity`, `verdict` and `bytes_redundant`, what removing every
+copy but the suggested one frees. `similarity` is the lowest score among the
+group's `likely_duplicate` links, 1 for exact and identical-audio links, read
+from `library_health_issues.similarity`; it is null when a link was recorded
+before that column existed. `verdict`, a `DuplicateVerdict`, is the weakest
+kind among the group's links, so it states what holds for every copy: a
+group joined by one `exact_duplicate` and one `likely_duplicate` link is
+`likely_duplicate`. The C ABI carries it as an `orca_health_issue_kind` in
+`orca_duplicate_group_view.verdict`. `libraryDuplicateGroupTotals` sums the groups
 and their bytes. Those bytes can differ from the duplicate bytes of
 [By kind](#by-kind), which counts the lowest-numbered file as the kept copy
 rather than the suggested one.
@@ -697,16 +717,17 @@ calls it. The rules and their wording live in `analysis/health.zig`.
 | `corrupt_audio` | error | analysis pass | the file opened and would not decode |
 | `exact_duplicate` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
 | `likely_duplicate` | information | duplicate pass | see [Duplicate detection](#duplicate-detection) |
+| `identical_audio` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
 | `unreadable_file` | warning | property backfill | the file could not be opened or its header would not read |
 | `recording_mismatch` | warning | verification | AcoustID hears another recording and a correction was proposed; the details name the recording heard and its score |
 
 A file not analysed yet has no row: the analysis job's own count of files still
 owing work says that.
 
-`exact_duplicate` and `likely_duplicate` name the other file in
-`related_file_id`, which becomes null when that file is deleted; the issue
-stays. Copies with identical bytes are one file with two locations, so their
-`exact_duplicate` has no related file.
+`exact_duplicate`, `identical_audio` and `likely_duplicate` name the other
+file in `related_file_id`, which becomes null when that file is deleted; the
+issue stays. A copy at a second location of one file has no other file, so
+that `exact_duplicate` has no related file.
 
 `recording_mismatch` is raised by `recordVerifications` in the transaction
 that stores the verification, only when the outcome is `disagrees` and the
@@ -748,9 +769,9 @@ severity first and then in kind order. The counts sum to
 `libraryHealthIssueCount`, and an empty Library has an empty summary. A
 file has at most one issue of a kind, so `files` equals the count.
 
-For `exact_duplicate` and `likely_duplicate`, `bytes` is what removing the
-redundant copies would free, not the size of every file in the group: a
-kept copy and two duplicates of 10 MB each report 20 MB. The kept copy is
+For `exact_duplicate`, `identical_audio` and `likely_duplicate`, `bytes` is
+what removing the redundant copies would free, not the size of every file
+in the group: a kept copy and two duplicates of 10 MB each report 20 MB. The kept copy is
 the lowest-numbered file of a group: a file counts when a lower-numbered
 file is linked to it by an issue of the same kind, as its related file or
 naming it as theirs. A duplicate held as a second location of one file row
@@ -783,7 +804,7 @@ format, size and length, and whether every location is missing, for
 | --- | --- |
 | `match_or_edit` | `missing_metadata`, `missing_track_number`, `album_artist_anomaly`; `artwork_problem` when the Release has no MusicBrainz release ID |
 | `fetch_cover_art` | `artwork_problem` when the Release has a MusicBrainz release ID, tagged or named by its accepted matches |
-| `compare_duplicate` | `exact_duplicate`, `likely_duplicate` |
+| `compare_duplicate` | `exact_duplicate`, `identical_audio`, `likely_duplicate` |
 | `review_correction` | `recording_mismatch` |
 | `reveal_file` | every other kind |
 

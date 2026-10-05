@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Identical audio is its own duplicate verdict.** The duplicate scan
+  reports `identical_audio` (`ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO = 13`,
+  a warning) when different bytes decode to the same lossless audio.
+  Duplicate groups carry the verdict every copy shares
+  (`DuplicateVerdict`, `orca_duplicate_group_view.verdict`), and
+  `orca-cli duplicates` prints `identical=` and `verdict=`.
 - **Publication documents.** `SECURITY.md` (supported versions and private
   vulnerability reporting), `CONTRIBUTING.md`, and `docs/privacy.md`, which
   lists each outside service Orca contacts, what triggers a request, what
@@ -1139,6 +1145,11 @@
 
 ### Changed
 
+- **`exact_duplicate` means the same bytes.** It is reported for a second
+  location of a file or another file with the same full-content hash, and no
+  longer for equal lossless audio, which is `identical_audio`. Duplicate scan
+  stats keep exact copies in `tracks_written` and likely ones in
+  `releases_written`; identical-audio files count only in `changed`.
 - **`orca-gtk`'s side panels keep their width.** Every inspector panel
   (track, album, artist, playlist, lyrics and Signal Path) is 388 px wide,
   so switching between them no longer shifts the page; the navigation
@@ -1536,6 +1547,9 @@
 
 ### Fixed
 
+- **`orca-gtk` no longer calls a 100% fingerprint match "Identical
+  audio".** The Duplicates page states the group's verdict: Same file,
+  Identical audio, or Fingerprints match with the percentage rounded down.
 - **A change in the middle of a file is seen.** An edit that kept a file's
   size and its first and last 64 KiB kept its quick hash, so its loudness,
   ReplayGain, fingerprints and audio hash still counted for the old bytes,
