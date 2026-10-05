@@ -216,6 +216,7 @@ pub extern fn adw_toolbar_view_add_top_bar(view: *ToolbarView, widget: *gtk.Widg
 pub extern fn adw_toolbar_view_add_bottom_bar(view: *ToolbarView, widget: *gtk.Widget) void;
 pub extern fn adw_toolbar_view_set_bottom_bar_style(view: *ToolbarView, style: c_int) void;
 pub extern fn adw_toolbar_view_set_extend_content_to_top_edge(view: *ToolbarView, extend: gtk.gboolean) void;
+pub extern fn adw_toolbar_view_get_top_bar_height(view: *ToolbarView) c_int;
 
 pub extern fn adw_header_bar_new() *gtk.Widget;
 pub extern fn adw_header_bar_pack_start(bar: *HeaderBar, child: *gtk.Widget) void;

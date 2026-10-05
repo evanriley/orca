@@ -98,14 +98,6 @@
   --orca-space-48: 48px;
   --orca-page-padding: 32px;
 
-  --orca-radius-control: 6px;
-  --orca-radius-button: 8px;
-  --orca-radius-row: 7px;
-  --orca-radius-art: 8px;
-  --orca-radius-popover: 12px;
-  --orca-radius-dialog: 16px;
-  --orca-transition: 180ms ease-out;
-
   --window-bg-color: @orca_bg_main;
   --window-fg-color: @orca_text;
   --view-bg-color: @orca_bg_main;
@@ -292,7 +284,7 @@ button.chip:checked,
 button.btn-primary {
   min-height: 34px;
   padding: 0 14px;
-  border-radius: var(--orca-radius-button);
+  border-radius: 8px;
   background-color: @orca_accent;
   color: @orca_on_accent;
   font-size: 13px;
@@ -306,7 +298,7 @@ button.btn-primary:hover {
 button.btn-secondary {
   min-height: 34px;
   padding: 0 14px;
-  border-radius: var(--orca-radius-button);
+  border-radius: 8px;
   background-color: transparent;
   box-shadow: inset 0 0 0 1px @orca_border_strong;
   color: @orca_text;
@@ -319,8 +311,8 @@ button.btn-secondary:hover {
 }
 
 .row {
-  border-radius: var(--orca-radius-row);
-  transition: background-color var(--orca-transition);
+  border-radius: 7px;
+  transition: background-color 180ms ease-out;
 }
 
 .row:hover {
@@ -334,13 +326,13 @@ button.btn-secondary:hover {
 
 .popover,
 popover.background > contents {
-  border-radius: var(--orca-radius-popover);
+  border-radius: 12px;
   background-color: @orca_bg_popover;
   box-shadow: var(--orca-elevation);
 }
 
 .frosted {
-  border-radius: var(--orca-radius-popover);
+  border-radius: 12px;
   background-color: @orca_frosted;
   box-shadow: 0 0 0 1px @orca_frosted_ring, 0 24px 60px @orca_shadow;
 }
@@ -351,7 +343,7 @@ popover.background > contents {
 
 dialog > .dialog-contents,
 .dialog {
-  border-radius: var(--orca-radius-dialog);
+  border-radius: 16px;
 }
 
 /* Spacing and radius utilities */
@@ -376,12 +368,12 @@ dialog > .dialog-contents,
   padding-right: var(--orca-page-padding);
 }
 
-.radius-control { border-radius: var(--orca-radius-control); }
-.radius-button { border-radius: var(--orca-radius-button); }
-.radius-row { border-radius: var(--orca-radius-row); }
-.radius-art { border-radius: var(--orca-radius-art); }
-.radius-popover { border-radius: var(--orca-radius-popover); }
-.radius-dialog { border-radius: var(--orca-radius-dialog); }
+.radius-control { border-radius: 6px; }
+.radius-button { border-radius: 8px; }
+.radius-row { border-radius: 7px; }
+.radius-art { border-radius: 8px; }
+.radius-popover { border-radius: 12px; }
+.radius-dialog { border-radius: 16px; }
 .radius-round { border-radius: 9999px; }
 
 
@@ -392,8 +384,8 @@ entry,
 spinbutton,
 dropdown > button,
 combobox > box > button {
-  border-radius: var(--orca-radius-control);
-  transition: background-color var(--orca-transition), color var(--orca-transition), opacity var(--orca-transition),
+  border-radius: 6px;
+  transition: background-color 180ms ease-out, color 180ms ease-out, opacity 180ms ease-out,
     outline-color 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94), outline-width 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
     outline-offset 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
@@ -404,7 +396,7 @@ button.pill {
 }
 
 popover > contents {
-  border-radius: var(--orca-radius-popover);
+  border-radius: 12px;
 }
 
 .navigation-sidebar > row,
@@ -412,7 +404,7 @@ listview > row,
 list > row,
 gridview > child,
 flowbox > flowboxchild {
-  transition: background-color var(--orca-transition);
+  transition: background-color 180ms ease-out;
 }
 
 .navigation-sidebar > row {
@@ -690,7 +682,7 @@ button.search-chip:checked {
   border-radius: 12px;
   background-color: mix(@orca_bg_raised_2, @orca_bg_selected, 0.4);
   box-shadow: inset 0 0 0 1.5px @orca_accent_ring;
-  transition: box-shadow var(--orca-transition);
+  transition: box-shadow 180ms ease-out;
 }
 
 .search-top-card.selected {
@@ -729,7 +721,7 @@ button.search-chip:checked {
   min-height: 40px;
   padding: 6px 8px;
   border-radius: 8px;
-  transition: background-color var(--orca-transition);
+  transition: background-color 180ms ease-out;
 }
 
 .search-row:hover {
@@ -799,7 +791,7 @@ flowbox.search-albums > flowboxchild {
 
 .search-tile-art.cover {
   border-radius: 7px;
-  transition: box-shadow var(--orca-transition);
+  transition: box-shadow 180ms ease-out;
 }
 
 .search-tile:hover .search-tile-art,
@@ -881,7 +873,7 @@ entry.palette-entry {
 .palette-row {
   padding: 8px 12px 7px 12px;
   border-radius: 8px;
-  transition: background-color var(--orca-transition);
+  transition: background-color 180ms ease-out;
 }
 
 .palette-row:hover {
@@ -988,7 +980,7 @@ label.breadcrumb-parent {
 }
 
 .cover {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   background-color: @orca_bg_raised_2;
 }
 
@@ -1706,7 +1698,7 @@ menubutton.btn-menu > button {
   min-width: 0;
   min-height: 34px;
   padding: 0 14px;
-  border-radius: var(--orca-radius-button);
+  border-radius: 8px;
   background-color: transparent;
   box-shadow: inset 0 0 0 1px @orca_border_strong;
   color: @orca_text;
@@ -1793,18 +1785,18 @@ dropdown.sort-dropdown > button:hover {
 }
 
 .album-cover {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
 }
 
 .album-cover-frame {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   outline: 2px solid transparent;
   outline-offset: 0;
-  transition: outline-color var(--orca-transition);
+  transition: outline-color 180ms ease-out;
 }
 
 .tile-dim {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   background-color: @orca_art_dim;
 }
 
@@ -1823,7 +1815,7 @@ dropdown.sort-dropdown > button:hover {
 
 .tile-action {
   opacity: 0;
-  transition: opacity var(--orca-transition), background-color var(--orca-transition);
+  transition: opacity 180ms ease-out, background-color 180ms ease-out;
 }
 
 .album-grid > child:hover .tile-action,
@@ -1856,7 +1848,7 @@ button.tile-more {
 }
 
 .hero-cover {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   box-shadow: var(--orca-art-shadow);
 }
 
@@ -2069,7 +2061,7 @@ menubutton.facet-sort > button:checked {
 }
 
 .section-hover-dim {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   outline: 2px solid @orca_text;
   background-color: @orca_art_dim;
 }
@@ -2126,7 +2118,7 @@ button.section-hover-more {
 }
 
 .narrow .album-detail {
-  margin: 16px 16px 28px 16px;
+  margin: 64px 16px 28px 16px;
 }
 
 
@@ -2398,7 +2390,7 @@ button.album-artist {
 /* Album page and track inspector */
 
 .album-detail {
-  margin: 24px 32px 48px 32px;
+  margin: 72px 32px 48px 32px;
 }
 
 .album-detail .hero-cover {
@@ -2611,23 +2603,11 @@ button.album-artist {
   padding: 50px 16px 20px 16px;
 }
 
-toolbarview.over-page .library-search > entry {
+headerbar.page-header.over-page .library-search > entry {
   background-color: color-mix(in srgb, @orca_bg_raised_2 80%, transparent);
 }
 
-toolbarview.over-page .album-detail,
-toolbarview.over-page .artist-page,
-toolbarview.over-page .playlist-hero {
-  margin-top: 72px;
-}
-
-.narrow toolbarview.over-page .album-detail,
-.narrow toolbarview.over-page .artist-page,
-.narrow toolbarview.over-page .playlist-hero {
-  margin-top: 64px;
-}
-
-toolbarview.over-scrolled headerbar.page-header {
+headerbar.page-header.over-scrolled {
   background-image: linear-gradient(to bottom, @orca_bg_main 70%, transparent);
 }
 
@@ -3034,7 +3014,7 @@ button.now-full-album image {
   box-shadow: inset 0 0 0 1px @orca_border_strong;
   outline: 2px solid transparent;
   outline-offset: 0;
-  transition: outline-color var(--orca-transition);
+  transition: outline-color 180ms ease-out;
 }
 
 .artist-grid > child:hover .artist-photo,
@@ -3068,11 +3048,11 @@ button.now-full-album image {
 }
 
 .artist-page {
-  margin: 24px 32px 48px 32px;
+  margin: 72px 32px 48px 32px;
 }
 
 .narrow .artist-page {
-  margin: 16px 16px 28px 16px;
+  margin: 64px 16px 28px 16px;
 }
 
 .cover.artist-hero-photo {
@@ -3283,7 +3263,7 @@ list.artist-tracks .artist-track {
 
 .elsewhere-tile {
   opacity: 0.6;
-  transition: opacity var(--orca-transition);
+  transition: opacity 180ms ease-out;
 }
 
 .artist-elsewhere > flowboxchild:hover .elsewhere-tile,
@@ -4043,7 +4023,7 @@ button.playlist-tab:focus-visible {
 }
 
 .playlist-cover-frame {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   outline: 2px solid transparent;
   outline-offset: 0;
 }
@@ -4105,7 +4085,7 @@ button.playlist-tab:focus-visible {
 }
 
 .playlist-art {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   background-color: @orca_bg_raised_2;
 }
 
@@ -4119,14 +4099,14 @@ button.playlist-tab:focus-visible {
   color: @orca_text_3;
   background-color: @orca_bg_raised_2;
   box-shadow: inset 0 0 0 1px @orca_border;
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
 }
 
 .smart-tile {
   color: @orca_text_2;
   background-color: @orca_bg_raised_2;
   box-shadow: inset 0 0 0 1px @orca_border;
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
 }
 
 listview.playlist-list {
@@ -4149,11 +4129,11 @@ listview.playlist-list {
 }
 
 .playlist-hero {
-  margin: 24px 36px 20px 36px;
+  margin: 72px 36px 20px 36px;
 }
 
 .narrow .playlist-hero {
-  margin: 16px 16px 12px 16px;
+  margin: 64px 16px 12px 16px;
 }
 
 .playlist-tracks {
@@ -4183,7 +4163,7 @@ listview.playlist-list {
 }
 
 .playlist-mosaic {
-  border-radius: var(--orca-radius-art);
+  border-radius: 8px;
   background-color: @orca_bg_raised_2;
 }
 
@@ -5098,7 +5078,7 @@ image.match-differs {
 }
 
 list.boxed-list.match-list {
-  border-radius: var(--orca-radius-popover);
+  border-radius: 12px;
   background-color: @orca_bg_raised_2;
   box-shadow: inset 0 0 0 1px @orca_border;
 }
@@ -5563,7 +5543,7 @@ switch.settings-fixed:disabled > slider {
 }
 
 .settings-card list.boxed-list {
-  border-radius: var(--orca-radius-control);
+  border-radius: 6px;
   background-color: @orca_bg_raised_2;
   box-shadow: inset 0 0 0 1px @orca_border;
 }

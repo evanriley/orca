@@ -1463,6 +1463,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), offline.build(self));
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), pages);
     self.top_bar.view = gtk.cast(adw.ToolbarView, framed);
+    page_ui.coverContent(self, self.top_bar.view.?);
     gtk.gtk_widget_set_hexpand(framed, gtk.true_);
     adw.adw_overlay_split_view_set_content(inspected_view, palette.wrapSearch(self, framed));
     details.build(self, inspected_view);

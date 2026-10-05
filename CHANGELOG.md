@@ -1470,6 +1470,16 @@
 
 ### Fixed
 
+- **Page changes no longer stutter.** In orca-gtk, opening Now Playing, an
+  album, an artist or a playlist, going Back from one, and scrolling an
+  album page past its top each froze the window for about a quarter of a
+  second, because the top bar's switch between sitting above the page and
+  floating over it restyled every page, hidden ones included. The content
+  now always extends under the bar, pages that sit below it take the bar's
+  height as a top margin, and the bar's look over a backdrop is styled on
+  the bar alone. Styles also no longer read the corner radii and transition
+  timing through custom properties, which GTK re-parsed for each widget.
+
 - **Pages fill wide windows.** In orca-gtk, Library Health, Matches, Match
   Review, Write to Files, Activity, Queue, Scan and the album and artist
   pages now fill the window to its gutters, with or without the inspector
