@@ -370,12 +370,11 @@ removed.
   replaced by one baseline schema, and a Library from an earlier release is
   refused with a message to create it again. Checked by opening a fresh
   Library and a 0.8.1 one.
-- Publication. Fixture and asset licence records; SECURITY, CONTRIBUTING and a
-  privacy note on provider traffic; a README preview warning with a platform
-  matrix; and the GitHub items: the `required` CI job passing on GitHub and
-  made required by branch protection, Dependabot and pinact for pinned
-  actions, the provider User-Agent contact switched to the repository URL, and
-  the README's flake snippets checked from outside the repository.
+- Publication. The GitHub items: the `required` CI job passing on GitHub and
+  made required by branch protection, private vulnerability reporting turned
+  on for `SECURITY.md`, Dependabot and pinact for pinned actions, the provider
+  User-Agent contact switched to the repository URL, and the README's flake
+  snippets checked from outside the repository.
 
 ### Before 1.0
 

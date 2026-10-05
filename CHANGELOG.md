@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Publication documents.** `SECURITY.md` (supported versions and private
+  vulnerability reporting), `CONTRIBUTING.md`, and `docs/privacy.md`, which
+  lists each outside service Orca contacts, what triggers a request, what
+  leaves the machine and what identifies the user. The README gains a preview
+  notice and a platform matrix, and no longer names a personal address as the
+  default provider contact.
 - **The orca-gtk redesign.** `orca-gtk` is rebuilt page by page to a new
   design: Albums, Artists, Tracks, Genres, Folders, Loved, Playlists, Now
   Playing and Queue; Library Health with Duplicates, Audio Problems,

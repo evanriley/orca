@@ -2,11 +2,46 @@
 
 Orca is a local-files-first music player and library-maintenance application.
 Its engine, `liborca`, is a Zig library for everything music-related, and the
-native frontends are thin clients of it. The project is pre-release; the
-[roadmap](docs/roadmap.md) lists what works today.
+native frontends are thin clients of it. The [roadmap](docs/roadmap.md) lists
+what works today.
 
 The [architecture overview](docs/architecture.md) describes the design and
 links each subsystem's contract.
+
+## Preview status
+
+Orca is a 0.x preview. Before 1.0, a release bumps the minor version when it
+contains a breaking change to the Zig API, the C ABI or the Library schema,
+and the patch version otherwise ([Releases](docs/roadmap.md#releases)).
+Features are frozen until 1.0; the work now is fixes and the
+[release gates](docs/roadmap.md#release-gates).
+
+Orca changes music files only through an approved, journaled plan; tag writes
+are the only kind reachable today. See
+[Metadata and file mutation](docs/metadata.md).
+
+### Platforms
+
+| Platform | Built | Audio output | Application |
+| --- | --- | --- | --- |
+| x86_64-linux | `liborca`, `orca-cli`, `orca-gtk` | PipeWire | `orca-gtk` |
+| aarch64-darwin | `liborca`, `orca-cli` | none | none |
+| anything else | not built | none | none |
+
+- aarch64-darwin has no audio output, so `orca-cli` cannot play there. There
+  is no macOS app or filesystem watcher; both are on the roadmap's
+  [Later](docs/roadmap.md#later) list. CI cross-compiles only the static
+  `liborca` for macOS (`zig build lib -Dtarget=aarch64-macos`) and does not
+  run Orca there.
+- The Nix flake and package declare exactly `x86_64-linux` and
+  `aarch64-darwin`.
+
+### Privacy and security
+
+Orca contacts outside services only for features you start or switch on, and
+sends no telemetry. [Privacy](docs/privacy.md) lists each service, what it
+receives and when. Report vulnerabilities as [SECURITY.md](SECURITY.md)
+describes, and read [CONTRIBUTING.md](CONTRIBUTING.md) before sending changes.
 
 ## Install with Nix
 
@@ -18,7 +53,7 @@ the desktop entry and the icons.
 Run it without installing:
 
 ```sh
-nix run github:evanriley/orca   # orca-gtk; orca-cli on macOS
+nix run github:evanriley/orca   # orca-gtk on Linux; orca-cli on macOS
 nix run github:evanriley/orca#orca-cli -- --version
 ```
 
@@ -142,11 +177,12 @@ shared `liborca` (`liborca.so.0`), the foreign-client header at
 `include/orca/orca.h`, and `lib/pkgconfig/orca.pc`.
 
 `orca-cli` and `orca-gtk` identify themselves to MusicBrainz, AcoustID and
-ListenBrainz with the contact given by `-Dprovider-contact=CONTACT` (default
-`evan@evanriley.com`).
+ListenBrainz with the contact given by `-Dprovider-contact=CONTACT`; the
+default is set in `build.zig`.
 
 Online identification and scrobbling are optional. Provider traffic passes
-through one rate-limited, retrying HTTP boundary; credentials are supplied by
+through one rate-limited HTTP boundary, described in
+[Privacy](docs/privacy.md); credentials are supplied by
 platform secure-storage adapters and are never stored in an Orca library.
 Provider matches remain reviewable proposals until explicitly accepted, and
 acceptance updates Orca metadata without writing media files.
