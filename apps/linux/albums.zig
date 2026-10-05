@@ -661,7 +661,7 @@ pub fn relist(self: *App) void {
         showListing(self, 0);
     } else {
         if (self.albums_count != 0) {
-            if (self.albums_body) |body| gtk.gtk_stack_set_visible_child_name(body, bodyChild(self, self.albums_count));
+            if (self.albums_body) |body| page_ui.showChild(body, bodyChild(self, self.albums_count));
         }
         showSectionChrome(self, false);
     }
@@ -691,7 +691,7 @@ fn showListing(self: *App, total: u64) void {
         adw.adw_status_page_set_title(empty, text.title);
         adw.adw_status_page_set_description(empty, text.description);
     }
-    if (self.albums_body) |body| gtk.gtk_stack_set_visible_child_name(body, bodyChild(self, total));
+    if (self.albums_body) |body| page_ui.showChild(body, bodyChild(self, total));
     showSectionChrome(self, total != 0);
 }
 
@@ -1375,7 +1375,7 @@ fn showLayout(self: *App) void {
     const body = self.albums_body orelse return;
     const visible = gtk.gtk_stack_get_visible_child_name(body) orelse return;
     if (std.mem.eql(u8, std.mem.span(visible), "empty")) return;
-    gtk.gtk_stack_set_visible_child_name(body, bodyChild(self, 1));
+    page_ui.showChild(body, bodyChild(self, 1));
 }
 
 fn layoutToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1455,6 +1455,7 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.albums_body.?, list_scroller, "list");
     _ = gtk.gtk_stack_add_named(self.albums_body.?, empty, "empty");
     _ = gtk.gtk_stack_add_named(self.albums_body.?, newSections(self), "sections");
+    page_ui.styleShownChildOnly(self.albums_body.?);
     gtk.gtk_widget_set_vexpand(body, gtk.true_);
     const chips = newChips(self);
     self.album_sections.chip_bar = chips;

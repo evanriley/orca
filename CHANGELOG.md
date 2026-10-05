@@ -1470,6 +1470,14 @@
 
 ### Fixed
 
+- **Hover and scrolling no longer restyle hidden pages.** orca-gtk kept
+  every page it had built, and the views Albums, Artists, Tracks and Loved
+  were not showing, visible to GTK's style system while they were off
+  screen, so restyling the window walked them as well. A page or view that
+  is not shown is now hidden once the crossfade to the new one ends, and
+  shown again when it is selected, keeping its scroll position, selection
+  and focus. Pages not yet visited are styled one per frame once the window
+  is idle, so a first visit is no slower than before.
 - **Settings opens at once.** orca-gtk's Settings page rebuilt all eight
   tabs on every visit, about 60 ms each time. It now builds each tab the
   first time it is selected and keeps it, along with the selected tab.

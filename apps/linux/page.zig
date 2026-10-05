@@ -477,6 +477,62 @@ pub fn visibleScroll(body: ?*gtk.Stack) ?Scroll {
     return scrollOf(gtk.gtk_stack_get_child_by_name(stack, name) orelse return null);
 }
 
+pub fn styleShownChildOnly(stack: *gtk.Stack) void {
+    _ = gtk.signalConnect(stack, "notify::transition-running", gtk.callback(stackTransitionChanged), null);
+    hideUnshownChildren(stack);
+    _ = gtk.g_idle_add_full(gtk.PRIORITY_LOW, startStylingUnshownChildren, gtk.g_object_ref(stack), gtk.g_object_unref);
+}
+
+fn startStylingUnshownChildren(stack: ?*anyopaque) callconv(.c) gtk.gboolean {
+    _ = gtk.gtk_widget_add_tick_callback(gtk.cast(gtk.Widget, stack.?), styleNextUnshownChild, null, null);
+    return gtk.SOURCE_REMOVE;
+}
+
+const styling_key = "orca-styling-unshown-child";
+const styling_started_key = "orca-styling-started";
+
+fn styleNextUnshownChild(widget: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const stack = gtk.cast(gtk.Stack, widget.?);
+    if (gtk.g_object_get_data(stack, styling_started_key) == null) {
+        gtk.g_object_set_data(stack, styling_started_key, stack);
+        return gtk.SOURCE_CONTINUE;
+    }
+    const styled: ?*gtk.Widget = @ptrCast(@alignCast(gtk.g_object_get_data(stack, styling_key)));
+    var next = if (styled) |child| next: {
+        if (child != gtk.gtk_stack_get_visible_child(stack) and gtk.gtk_stack_get_transition_running(stack) == 0)
+            gtk.gtk_widget_set_visible(child, gtk.false_);
+        break :next gtk.gtk_widget_get_next_sibling(child);
+    } else gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, stack));
+    while (next) |child| : (next = gtk.gtk_widget_get_next_sibling(child)) {
+        if (gtk.gtk_widget_get_visible(child) == 0) break;
+    }
+    gtk.g_object_set_data(stack, styling_key, next);
+    const child = next orelse return gtk.SOURCE_REMOVE;
+    gtk.gtk_widget_set_visible(child, gtk.true_);
+    return gtk.SOURCE_CONTINUE;
+}
+
+// gtk_stack_set_visible_child_name ignores a hidden child, so a stack set up with styleShownChildOnly would never switch.
+pub fn showChild(stack: *gtk.Stack, name: [*:0]const u8) void {
+    const child = gtk.gtk_stack_get_child_by_name(stack, name) orelse return;
+    gtk.gtk_widget_set_visible(child, gtk.true_);
+    gtk.gtk_stack_set_visible_child(stack, child);
+    hideUnshownChildren(stack);
+}
+
+fn stackTransitionChanged(stack: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    hideUnshownChildren(gtk.cast(gtk.Stack, stack.?));
+}
+
+fn hideUnshownChildren(stack: *gtk.Stack) void {
+    if (gtk.gtk_stack_get_transition_running(stack) != 0) return;
+    const shown = gtk.gtk_stack_get_visible_child(stack);
+    var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, stack));
+    while (child) |widget| : (child = gtk.gtk_widget_get_next_sibling(widget)) {
+        if (widget != shown) gtk.gtk_widget_set_visible(widget, gtk.false_);
+    }
+}
+
 const PendingScroll = struct {
     allocator: std.mem.Allocator,
     scroll: Scroll,

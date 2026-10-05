@@ -421,6 +421,13 @@ pub extern fn g_timeout_add(
     data: ?*anyopaque,
 ) c_uint;
 pub extern fn g_source_remove(tag: c_uint) gboolean;
+pub const PRIORITY_LOW: c_int = 300;
+pub extern fn g_idle_add_full(
+    priority: c_int,
+    function: *const fn (?*anyopaque) callconv(.c) gboolean,
+    data: ?*anyopaque,
+    notify: ?*const fn (?*anyopaque) callconv(.c) void,
+) c_uint;
 pub const IO_IN: c_uint = 1;
 pub extern fn g_unix_fd_add(
     fd: c_int,
@@ -735,6 +742,9 @@ pub extern fn gtk_stack_set_visible_child_name(stack: *Stack, name: [*:0]const u
 pub extern fn gtk_stack_set_transition_type(stack: *Stack, transition: c_int) void;
 pub extern fn gtk_stack_get_child_by_name(stack: *Stack, name: [*:0]const u8) ?*Widget;
 pub extern fn gtk_stack_get_visible_child_name(stack: *Stack) ?[*:0]const u8;
+pub extern fn gtk_stack_get_visible_child(stack: *Stack) ?*Widget;
+pub extern fn gtk_stack_set_visible_child(stack: *Stack, child: *Widget) void;
+pub extern fn gtk_stack_get_transition_running(stack: *Stack) gboolean;
 pub extern fn gtk_grid_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 pub extern fn gtk_grid_view_set_max_columns(view: *GridView, columns: c_uint) void;
 pub extern fn gtk_grid_view_set_min_columns(view: *GridView, columns: c_uint) void;

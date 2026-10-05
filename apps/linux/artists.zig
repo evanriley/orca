@@ -267,7 +267,7 @@ pub fn reload(self: *App) void {
         adw.adw_status_page_set_description(empty, if (searching) "Try another search." else "Add a music folder in Settings › Library.");
     }
     if (self.artists_body) |body|
-        gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else @tagName(self.artist_layout));
+        page_ui.showChild(body, if (total == 0) "empty" else @tagName(self.artist_layout));
     loadNextPage(self);
 }
 
@@ -498,7 +498,7 @@ fn showLayout(self: *App) void {
     const body = self.artists_body orelse return;
     const visible = gtk.gtk_stack_get_visible_child_name(body) orelse return;
     if (std.mem.eql(u8, std.mem.span(visible), "empty")) return;
-    gtk.gtk_stack_set_visible_child_name(body, @tagName(self.artist_layout));
+    page_ui.showChild(body, @tagName(self.artist_layout));
 }
 
 fn sortChanged(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -573,6 +573,7 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.artists_body.?, withFallbackNote(grid_scroller), "grid");
     _ = gtk.gtk_stack_add_named(self.artists_body.?, withFallbackNote(list_scroller), "list");
     _ = gtk.gtk_stack_add_named(self.artists_body.?, empty, "empty");
+    page_ui.styleShownChildOnly(self.artists_body.?);
     gtk.gtk_widget_set_vexpand(body, gtk.true_);
 
     const title = page_ui.title("Artists");
@@ -595,7 +596,7 @@ pub fn build(self: *App) *gtk.Widget {
     title.add(newRoleControl(self));
     title.add(newLayoutSwitch(self));
     syncControls(self);
-    gtk.gtk_stack_set_visible_child_name(self.artists_body.?, @tagName(self.artist_layout));
+    page_ui.showChild(self.artists_body.?, @tagName(self.artist_layout));
     const view = page_ui.withTitle(title, body);
 
     const navigation = adw.adw_navigation_view_new();

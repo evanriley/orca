@@ -958,7 +958,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page != self.current_page) clearSearch(self);
     if (self.current_page == .settings and page != .settings) preferences.leave(self);
     self.current_page = page;
-    if (self.pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, page.name());
+    if (self.pages) |pages| page_ui.showChild(pages, page.name());
     if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     syncSidebarSelection(self);
     if (page == .loved) loved.reload(self);
@@ -1228,6 +1228,7 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, split, "list");
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, buildWelcome(self), "welcome");
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, no_results, "no-results");
+    page_ui.styleShownChildOnly(self.tracks_body.?);
 
     const title = page_ui.title("Tracks");
     gtk.gtk_widget_add_css_class(title.widget, "tracks-title");
@@ -1451,6 +1452,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, playlists.build(self), Page.playlists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, preferences.build(self), Page.settings.name());
+    page_ui.styleShownChildOnly(self.pages.?);
 
     watchSections(self);
     const inspected = adw.adw_overlay_split_view_new();

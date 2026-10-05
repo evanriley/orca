@@ -753,12 +753,12 @@ pub const App = struct {
         const searching = self.query.value.len != 0;
         const scoped = self.browse.artist_id != null or self.browse.release_id != null;
         if (self.track_count != 0 or scoped) {
-            gtk.gtk_stack_set_visible_child_name(body, "list");
+            page_ui.showChild(body, "list");
         } else if (searching or self.track_filters.active()) {
-            gtk.gtk_stack_set_visible_child_name(body, "no-results");
+            page_ui.showChild(body, "no-results");
         } else {
             self.updateWelcome();
-            gtk.gtk_stack_set_visible_child_name(body, "welcome");
+            page_ui.showChild(body, "welcome");
         }
     }
 

@@ -158,7 +158,7 @@ fn reloadAlbums(self: *App) void {
     const library = self.library orelse return;
     const total = self.runtime.libraryReleaseCountMatching(library, .{ .loved_only = true, .text = self.loved.filter.value }) catch 0;
     showEmpty(self, .albums);
-    if (self.loved.albums_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "grid");
+    if (self.loved.albums_body) |body| page_ui.showChild(body, if (total == 0) "empty" else "grid");
     loadNextAlbums(self);
 }
 
@@ -193,7 +193,7 @@ fn reloadTracks(self: *App) void {
     const library = self.library orelse return;
     const total = if (self.runtime.libraryTrackQueryTotals(library, self.loved.filter.value, .{ .loved_only = true })) |totals| totals.count else |_| 0;
     showEmpty(self, .tracks);
-    if (self.loved.tracks_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
+    if (self.loved.tracks_body) |body| page_ui.showChild(body, if (total == 0) "empty" else "list");
     loadNextTracks(self);
 }
 
@@ -247,7 +247,7 @@ fn reloadArtists(self: *App) void {
     const library = self.library orelse return;
     const total = self.runtime.libraryArtistCountMatching(library, .{ .loved_only = true, .filter = self.loved.filter.value }) catch 0;
     showEmpty(self, .artists);
-    if (self.loved.artists_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "grid");
+    if (self.loved.artists_body) |body| page_ui.showChild(body, if (total == 0) "empty" else "grid");
     loadNextArtists(self);
 }
 
@@ -423,6 +423,7 @@ fn bodyFor(slot: *?*gtk.Stack, content: *gtk.Widget, content_name: [*:0]const u8
     slot.* = gtk.cast(gtk.Stack, body);
     _ = gtk.gtk_stack_add_named(slot.*.?, content, content_name);
     _ = gtk.gtk_stack_add_named(slot.*.?, empty, "empty");
+    page_ui.styleShownChildOnly(slot.*.?);
     return body;
 }
 
