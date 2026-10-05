@@ -39,8 +39,10 @@
 @define-color orca_shadow rgb(0 0 0 / 0.55);
 @define-color orca_shadow_soft rgb(0 0 0 / 0.4);
 @define-color orca_frosted alpha(@orca_bg_raised_2, 0.77);
+@define-color orca_frosted_main alpha(@orca_bg_main, 0.77);
 @define-color orca_frosted_ring alpha(@orca_text, 0.08);
 @define-color orca_scrim alpha(@orca_bg_window, 0.48);
+@define-color orca_palette_scrim alpha(@orca_bg_window, 0.78);
 @define-color orca_art_overlay alpha(@orca_bg_window, 0.72);
 @define-color orca_art_dim alpha(@orca_bg_window, 0.35);
 @define-color orca_now_row #202832;
@@ -600,7 +602,24 @@ headerbar.page-header button.history-button:disabled {
 /* Search and the command palette */
 
 .search-view {
+  background-color: @orca_frosted_main;
+}
+
+.search-frost {
   background-color: @orca_bg_main;
+}
+
+.frost {
+  opacity: 0;
+  transition: opacity 200ms ease-out;
+}
+
+.frost.ready {
+  opacity: 1;
+}
+
+.palette .frost-dim {
+  background-color: @orca_palette_scrim;
 }
 
 .search-top {
@@ -819,13 +838,19 @@ flowbox.search-albums > flowboxchild {
 }
 
 .palette-scrim {
-  background-color: alpha(@orca_bg_window, 0.78);
+  background-color: @orca_palette_scrim;
 }
 
 .palette {
   border-radius: 14px;
-  background-color: alpha(@orca_bg_raised_2, 0.96);
-  box-shadow: inset 0 0 0 1px @orca_frosted_ring, 0 30px 80px @orca_shadow;
+  background-color: @orca_bg_raised_2;
+  box-shadow: 0 30px 80px @orca_shadow;
+}
+
+.palette-surface {
+  border-radius: 14px;
+  background-color: @orca_frosted;
+  box-shadow: inset 0 0 0 1px @orca_frosted_ring;
 }
 
 .palette-header {

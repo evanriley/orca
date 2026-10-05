@@ -128,11 +128,8 @@ fn blurredBackdrop(allocator: std.mem.Allocator, sources: []const *gtk.GdkTextur
             downscaleTexture(allocator, sources[cell % sources.len], pixels[origin..], width, half, half) catch return null;
         }
     }
-    for (0..backdrop_blur_passes) |_| {
-        boxBlur(pixels, scratch, width, height, 1, width);
-        boxBlur(scratch, pixels, height, width, width, 1);
-    }
-    saturate(pixels);
+    blur(pixels, scratch, width, height, backdrop_blur_radius, backdrop_blur_passes);
+    saturate(pixels, backdrop_saturation_percent);
 
     const bytes = gtk.g_bytes_new(pixels.ptr, pixels.len * 4);
     defer gtk.g_bytes_unref(bytes);
@@ -175,14 +172,21 @@ fn downscale(source: []const u8, source_width: usize, source_height: usize, targ
     }
 }
 
-fn boxBlur(source: []const [4]u8, target: [][4]u8, length: usize, lines: usize, step: usize, line_step: usize) void {
-    const window: u32 = backdrop_blur_radius * 2 + 1;
+pub fn blur(pixels: [][4]u8, scratch: [][4]u8, width: usize, height: usize, radius: usize, passes: usize) void {
+    for (0..passes) |_| {
+        boxBlur(pixels, scratch, width, height, 1, width, radius);
+        boxBlur(scratch, pixels, height, width, width, 1, radius);
+    }
+}
+
+fn boxBlur(source: []const [4]u8, target: [][4]u8, length: usize, lines: usize, step: usize, line_step: usize, radius: usize) void {
+    const window: u32 = @intCast(radius * 2 + 1);
     for (0..lines) |line| {
         const start = line * line_step;
         for (0..length) |position| {
             var sums: [4]u32 = @splat(0);
             for (0..window) |offset| {
-                const sample = std.math.clamp(position + offset, backdrop_blur_radius, length - 1 + backdrop_blur_radius) - backdrop_blur_radius;
+                const sample = std.math.clamp(position + offset, radius, length - 1 + radius) - radius;
                 for (&sums, source[start + sample * step]) |*sum, channel| sum.* += channel;
             }
             for (&target[start + position * step], sums) |*channel, sum| channel.* = @intCast(sum / window);
@@ -191,12 +195,12 @@ fn boxBlur(source: []const [4]u8, target: [][4]u8, length: usize, lines: usize, 
 }
 
 /// Pixels are premultiplied B, G, R, A.
-fn saturate(pixels: [][4]u8) void {
+pub fn saturate(pixels: [][4]u8, percent: i32) void {
     for (pixels) |*pixel| {
         const luma: i32 = (@as(i32, pixel[2]) * 54 + @as(i32, pixel[1]) * 183 + @as(i32, pixel[0]) * 19) >> 8;
         const alpha: i32 = pixel[3];
         for (pixel[0..3]) |*channel| {
-            const boosted = luma + @divTrunc((@as(i32, channel.*) - luma) * backdrop_saturation_percent, 100);
+            const boosted = luma + @divTrunc((@as(i32, channel.*) - luma) * percent, 100);
             channel.* = @intCast(std.math.clamp(boosted, 0, alpha));
         }
     }

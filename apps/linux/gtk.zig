@@ -191,6 +191,7 @@ pub const BUS_TYPE_SESSION: c_int = 2;
 pub const BUS_NAME_OWNER_FLAGS_NONE: c_uint = 0;
 
 pub const OVERFLOW_HIDDEN: c_int = 1;
+pub const CONTENT_FIT_FILL: c_int = 0;
 pub const CONTENT_FIT_COVER: c_int = 2;
 pub const CONNECT_SWAPPED: c_uint = 2;
 pub const POLICY_AUTOMATIC: c_int = 1;
@@ -1110,6 +1111,18 @@ pub extern fn gtk_drag_source_set_icon(source: *EventController, paintable: ?*Gd
 pub extern fn gtk_drop_target_new(g_type: GType, actions: c_int) *EventController;
 pub extern fn gdk_content_provider_new_for_value(value: *const GValue) *GObject;
 pub extern fn gtk_widget_paintable_new(widget: ?*Widget) *GdkPaintable;
+pub const Snapshot = opaque {};
+pub const RenderNode = opaque {};
+pub const Renderer = opaque {};
+pub const Native = opaque {};
+pub extern fn gtk_snapshot_new() *Snapshot;
+pub extern fn gtk_snapshot_scale(snapshot: *Snapshot, factor_x: f32, factor_y: f32) void;
+pub extern fn gtk_snapshot_free_to_node(snapshot: *Snapshot) ?*RenderNode;
+pub extern fn gdk_paintable_snapshot(paintable: *GdkPaintable, snapshot: *Snapshot, width: f64, height: f64) void;
+pub extern fn gsk_render_node_unref(node: *RenderNode) void;
+pub extern fn gtk_widget_get_native(widget: *Widget) ?*Native;
+pub extern fn gtk_native_get_renderer(native: *Native) ?*Renderer;
+pub extern fn gsk_renderer_render_texture(renderer: *Renderer, root: *RenderNode, viewport: ?*const Rect) *GdkTexture;
 pub extern fn gtk_event_controller_scroll_new(flags: c_int) *EventController;
 pub extern fn gtk_event_controller_scroll_get_unit(controller: *EventController) c_int;
 pub extern fn gtk_event_controller_set_propagation_phase(

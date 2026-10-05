@@ -8,6 +8,7 @@ const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const app = @import("app.zig");
 const art = @import("art.zig");
+const frost = @import("frost.zig");
 const strings = @import("strings.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
@@ -98,6 +99,7 @@ const Palette = struct {
     entry: ?*gtk.Widget = null,
     list: ?*gtk.Box = null,
     scroller: ?*gtk.ScrolledWindow = null,
+    frost: frost.Frost = .{},
     picker: Picker = .{},
     open: bool = false,
     refocus: ?*gtk.Widget = null,
@@ -114,6 +116,8 @@ const Search = struct {
     chips: ?*gtk.Widget = null,
     chip_buttons: [chip_kinds.len]?*gtk.Widget = @splat(null),
     scroller: ?*gtk.ScrolledWindow = null,
+    frosted: ?*gtk.Widget = null,
+    frost: frost.Frost = .{},
     kind: ?SearchKind = null,
     results: ?liborca.SearchResults = null,
     picker: Picker = .{},
@@ -396,8 +400,8 @@ pub fn forgetLibrary(self: *App) void {
 pub fn wrapWindow(self: *App, content: *gtk.Widget) *gtk.Widget {
     const overlay = gtk.gtk_overlay_new();
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, overlay), content);
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, overlay), buildPalette(self));
     self.palette.palette.covered = content;
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, overlay), buildPalette(self));
     return overlay;
 }
 
@@ -420,9 +424,15 @@ fn buildPalette(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(press, "released", gtk.callback(scrimClicked), self);
     gtk.gtk_widget_add_controller(layer, press);
 
-    const dialog = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    const dialog = gtk.gtk_overlay_new();
     gtk.gtk_widget_add_css_class(dialog, "palette");
     gtk.gtk_widget_set_overflow(dialog, gtk.OVERFLOW_HIDDEN);
+    _ = gtk.signalConnect(dialog, "get-child-position", gtk.callback(placeFrost), self);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, dialog), frost.newLayer(&palette.frost, palette.covered.?));
+    const surface = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(surface, "palette-surface");
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, dialog), surface);
+    gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, dialog), surface, gtk.true_);
 
     const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(header, "palette-header");
@@ -467,9 +477,9 @@ fn buildPalette(self: *App) *gtk.Widget {
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, tip), gtk.ELLIPSIZE_END);
     gtk.gtk_box_append(gtk.cast(gtk.Box, footer), tip);
 
-    gtk.gtk_box_append(gtk.cast(gtk.Box, dialog), header);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, dialog), scroller);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, dialog), footer);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, surface), header);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, surface), scroller);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, surface), footer);
 
     const clamp = adw.adw_clamp_new();
     adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), palette_width);
@@ -489,6 +499,22 @@ fn buildPalette(self: *App) *gtk.Widget {
     return layer;
 }
 
+fn placeFrost(overlay: ?*anyopaque, child: ?*anyopaque, allocation: *gtk.Rectangle, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const palette = &state(data).palette.palette;
+    const layer = palette.frost.layer orelse return gtk.false_;
+    const covered = palette.covered orelse return gtk.false_;
+    if (child != @as(?*anyopaque, layer)) return gtk.false_;
+    var bounds: gtk.Rect = .{};
+    if (gtk.gtk_widget_compute_bounds(gtk.cast(gtk.Widget, overlay.?), covered, &bounds) == 0) return gtk.false_;
+    allocation.* = .{
+        .x = -@as(c_int, @intFromFloat(@round(bounds.x))),
+        .y = -@as(c_int, @intFromFloat(@round(bounds.y))),
+        .width = gtk.gtk_widget_get_width(covered),
+        .height = gtk.gtk_widget_get_height(covered),
+    };
+    return gtk.true_;
+}
+
 fn openPalette(self: *App, text: []const u8) void {
     const palette = &self.palette.palette;
     const layer = palette.layer orelse return;
@@ -497,6 +523,7 @@ fn openPalette(self: *App, text: []const u8) void {
         palette.open = true;
         keepFocus(&palette.refocus, self);
         if (palette.covered) |covered| cover(covered, true);
+        frost.capture(&palette.frost);
         gtk.gtk_widget_set_visible(layer, gtk.true_);
     }
     setText(self, entry, text);
@@ -511,6 +538,7 @@ fn closePalette(self: *App, restore: bool) void {
     palette.open = false;
     if (palette.covered) |covered| cover(covered, false);
     if (palette.layer) |layer| gtk.gtk_widget_set_visible(layer, gtk.false_);
+    frost.release(&palette.frost);
     palette.picker.clear();
     if (palette.list) |list| removeChildren(list);
     if (palette.entry) |entry| setText(self, entry, "");
@@ -751,8 +779,17 @@ fn activatePalette(self: *App, index: usize, how: Activation) void {
 pub fn wrapSearch(self: *App, content: *gtk.Widget) *gtk.Widget {
     const overlay = gtk.gtk_overlay_new();
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, overlay), content);
+    const search = &self.palette.search;
+    search.covered = content;
+    const frosted = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(frosted, "search-frost");
+    gtk.gtk_widget_set_visible(frosted, gtk.false_);
+    const layer = frost.newLayer(&search.frost, content);
+    gtk.gtk_widget_set_vexpand(layer, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, frosted), layer);
+    search.frosted = frosted;
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, overlay), frosted);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, overlay), buildSearch(self));
-    self.palette.search.covered = content;
     return overlay;
 }
 
@@ -848,6 +885,8 @@ fn openSearch(self: *App, text: []const u8) void {
         search.open = true;
         keepFocus(&search.refocus, self);
         if (search.covered) |covered| cover(covered, true);
+        frost.capture(&search.frost);
+        if (search.frosted) |frosted| gtk.gtk_widget_set_visible(frosted, gtk.true_);
         gtk.gtk_widget_set_visible(layer, gtk.true_);
     }
     search.kind = null;
@@ -867,6 +906,8 @@ fn closeSearch(self: *App, restore: bool) void {
     search.cancelTimer();
     if (search.covered) |covered| cover(covered, false);
     if (search.layer) |layer| gtk.gtk_widget_set_visible(layer, gtk.false_);
+    if (search.frosted) |frosted| gtk.gtk_widget_set_visible(frosted, gtk.false_);
+    frost.release(&search.frost);
     clearResults(self);
     search.searched = false;
     if (search.entry) |entry| setText(self, entry, "");

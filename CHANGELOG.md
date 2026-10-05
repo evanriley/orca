@@ -1112,6 +1112,11 @@
 
 ### Changed
 
+- **The command palette and search are frosted.** Opening either takes one
+  snapshot of the window behind it, blurs and saturates it at a quarter
+  scale on a worker thread with the cover backdrop's blur, and shows it
+  under the overlay's tinted fill, fading in once ready; the snapshot stays
+  still while the overlay is open and is dropped when it closes.
 - **orca-gtk's Signal Path inspector follows the redesign.** A header with
   "How this track gets from file to output.", a verdict card over the chain,
   and stages on a rail that leave out what does not apply: Source,
