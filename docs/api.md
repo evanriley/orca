@@ -154,9 +154,10 @@ defer page.deinit();
   directory is `error.InvalidLibraryRoot`; one nested with another root, its
   files, or the root's old directory while that still exists
   `error.RootPathOverlaps`; an unknown root `error.UnknownRoot`; a running
-  library job `error.LibraryJobRunning`; a held journal lock or an unfinished
-  tag write under the root `error.MutationInProgress`; and one under the root
-  awaiting reconciliation `error.MutationNeedsReconciliation`.
+  library job `error.LibraryJobRunning`; a walk of the Library in another
+  runtime or process `error.LibraryScanRunning`; a held journal lock or an
+  unfinished tag write under the root `error.MutationInProgress`; and one
+  under the root awaiting reconciliation `error.MutationNeedsReconciliation`.
   `libraryMissingFileCount(library)` counts the Tracks whose preferred file
   has no present location. Each `LibraryRoot` also carries `volume`, the
   label or stable key of the volume it is bound to, and `last_seen_at`, when

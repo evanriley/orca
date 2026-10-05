@@ -1560,6 +1560,10 @@ once queue history records the Track as played to its end. See
   recovery and by each tag write, undo and prune, which recover first. An open
   that cannot take it defers recovery to the next holder, and refuses with
   `error.MutationInProgress` when a migration is due. See [metadata.md](metadata.md#the-journal-lock).
+- One scan or reconcile at a time walks a Library, across processes: the
+  holder of an exclusive `flock` on `<database>.orca-scan.lock`. A walk that
+  cannot take it is refused with `error.LibraryScanRunning`. See
+  [storage.md](storage.md#one-walk-at-a-time).
 - Prepared batch statements are reused within one transaction.
 - On Linux, liborca switches SQLite's `unix` VFS from POSIX record locks to
   open file description (OFD) locks before its first connection opens. A

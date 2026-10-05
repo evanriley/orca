@@ -68,7 +68,7 @@ typedef enum orca_status {
     /* No such Track, root, or file behind a Track. */
     ORCA_STATUS_NOT_FOUND = 6,
     /* A bounded queue is full, a job holds the Library, or another process
-     * holds its mutation journal. Backpressure, not failure. */
+     * holds its mutation journal or is walking it. Backpressure, not failure. */
     ORCA_STATUS_BUSY = 7,
     /* No codec can read those bytes, or no backend can open that device. */
     ORCA_STATUS_UNSUPPORTED = 8,
@@ -4096,8 +4096,9 @@ orca_status orca_library_remove_root(
  * it in `job`. INVALID_ARGUMENT when `path` is not a readable directory, is
  * inside or holds another root or files of another root, or is inside or
  * holds the root's old folder while that still exists; NOT_FOUND for an
- * unknown root; BUSY while a job is running on the library, a tag write holds
- * the library's journal, or one under the root is unfinished;
+ * unknown root; BUSY while a job is running on the library, another runtime
+ * or process is walking it, a tag write holds the library's journal, or one
+ * under the root is unfinished;
  * NEEDS_RECONCILIATION when one under the root needs reconciliation. */
 orca_status orca_library_relocate_root(
     orca_runtime *runtime,

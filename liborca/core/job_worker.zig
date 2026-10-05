@@ -892,6 +892,9 @@ pub const JobWorker = struct {
     published: ?PublishedProgress = null,
     /// Written by the worker just before it finishes; read only after.
     tag_write_failure: ?TagWriteFailure = null,
+    /// Released before `registration.finish`: a walk started once this Job
+    /// is final must find the lock free, even in this process.
+    walk_lock: ?library_pass.WalkLock = null,
     /// Raised after `finish`, which is safe only because the control lane
     /// joins the thread, not merely waits for `finish`, before it frees this
     /// struct or the runtime.
@@ -905,6 +908,10 @@ pub const JobWorker = struct {
                     stats.stage.store(.done, .release);
                 },
                 else => {},
+            }
+            if (self.walk_lock) |*lock| {
+                lock.release(self.threaded.io());
+                self.walk_lock = null;
             }
             self.threaded.deinit();
             self.registration.finish();
@@ -1724,7 +1731,7 @@ pub const JobWorker = struct {
     ) !void {
         self.progress.store(0, .release);
         try self.requireRecordedVolume(io, root);
-        const scan_run = try self.database.scan_runs.begin(root.id);
+        const scan_run = try self.beginScanRun(root.id);
         var run_finished = false;
         errdefer if (!run_finished) self.failScanRun(scan_run.id, .{});
         var pass: library_pass.Projection = .{
@@ -1751,6 +1758,12 @@ pub const JobWorker = struct {
         );
         self.noteScan(result);
         _ = self.stats.scan.marked_missing.fetchAdd(marked_missing, .acq_rel);
+    }
+
+    fn beginScanRun(self: *JobWorker, root_id: i64) !database.repository.ScanRun {
+        // Only under the walk lock: without it a running run may be another runtime's live walk.
+        if (self.walk_lock != null) _ = try self.database.scan_runs.failStaleRuns(root_id);
+        return self.database.scan_runs.begin(root_id);
     }
 
     fn failScanRun(self: *JobWorker, run_id: i64, counters: database.repository.ScanCounters) void {
@@ -1786,7 +1799,7 @@ pub const JobWorker = struct {
         @memset(walked, false);
         var totals: library_pass.scanner.Result = .{};
         var walk_failed = false;
-        const scan_run = try self.database.scan_runs.begin(root.id);
+        const scan_run = try self.beginScanRun(root.id);
         var run_finished = false;
         errdefer if (!run_finished) self.failScanRun(scan_run.id, scanCounters(totals));
         var pass: library_pass.Projection = .{

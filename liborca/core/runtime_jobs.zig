@@ -107,6 +107,28 @@ pub fn startLibraryReconcile(
     return startJobWorker(self, library, .{ .reconcile = pending });
 }
 
+/// Hands `walk_lock`, claimed before the caller changed the Library, to the
+/// reconcile's worker, or releases it when the reconcile must wait for the
+/// Library's slot. On error the caller still holds it.
+pub fn startClaimedReconcile(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: ReconcileRequest,
+    walk_lock: *?library_pass.WalkLock,
+) !JobHandle {
+    const pending = try job_worker.PendingReconcile.create(self.allocator, request);
+    errdefer pending.destroy();
+    const job_request: job_worker.Request = .{ .reconcile = pending };
+    if (mustWait(self, library)) {
+        releaseWalk(self, walk_lock);
+        return queueJob(self, library, job_request);
+    }
+    const library_database = try runtime.libraryDatabase(self, library);
+    const job_handle = try spawnClaimedJobWorker(self, library, library_database, job_request, .host, walk_lock);
+    runtime_watch.hostJobStarted(self, library, job_handle, job_request);
+    return job_handle;
+}
+
 pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
     return startJobWorker(self, library, .projection);
 }
@@ -470,8 +492,9 @@ fn startWaitingJob(self: *OrcaRuntime, entry: WaitingJob) !void {
         .scan, .reconcile, .mutation => runtime_watch.preemptAutoReconcile(self, entry.library),
         else => {},
     }
-    if (walksLibrary(entry.request.kind()) and walkRunning(self, entry.library)) return error.LibraryScanRunning;
-    try spawnWorkerForJob(self, entry.job, entry.library, library_database, entry.request, .host);
+    var walk_lock = try claimWalk(self, entry.library, library_database, entry.request.kind());
+    errdefer releaseWalk(self, &walk_lock);
+    try spawnWorkerForJob(self, entry.job, entry.library, library_database, entry.request, .host, walk_lock);
     runtime_watch.hostJobStarted(self, entry.library, entry.job, entry.request);
 }
 
@@ -780,6 +803,22 @@ fn walkRunning(self: *const OrcaRuntime, library: LibraryHandle) bool {
     return false;
 }
 
+pub fn claimWalk(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    library_database: *const database.LibraryDatabase,
+    kind: job.Kind,
+) !?library_pass.WalkLock {
+    if (!walksLibrary(kind)) return null;
+    if (walkRunning(self, library)) return error.LibraryScanRunning;
+    return library_pass.WalkLock.acquireForWalk(self.control_threaded.io(), library_database.walk_lock_path);
+}
+
+pub fn releaseWalk(self: *OrcaRuntime, walk_lock: *?library_pass.WalkLock) void {
+    if (walk_lock.*) |*lock| lock.release(self.control_threaded.io());
+    walk_lock.* = null;
+}
+
 pub fn acoustIdSetup(self: *const OrcaRuntime) job_worker.AcoustIdSetup {
     return .{
         .server = self.acoustid_server,
@@ -819,10 +858,23 @@ pub fn spawnJobWorker(
     try runtime.requireRunning(self);
     try checkBatchSize(request);
     const library_database = try runtime.libraryDatabase(self, library);
-    if (walksLibrary(request.kind()) and walkRunning(self, library)) return error.LibraryScanRunning;
+    var walk_lock = try claimWalk(self, library, library_database, request.kind());
+    errdefer releaseWalk(self, &walk_lock);
+    return spawnClaimedJobWorker(self, library, library_database, request, origin, &walk_lock);
+}
+
+fn spawnClaimedJobWorker(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    library_database: *database.LibraryDatabase,
+    request: job_worker.Request,
+    origin: job_worker.Origin,
+    walk_lock: *?library_pass.WalkLock,
+) !JobHandle {
     const job_handle = try self.jobs.create(request.kind(), try plannedUnits(self, library_database, request));
     errdefer self.jobs.finish(job_handle, .failed) catch {};
-    try spawnWorkerForJob(self, job_handle, library, library_database, request, origin);
+    try spawnWorkerForJob(self, job_handle, library, library_database, request, origin, walk_lock.*);
+    walk_lock.* = null;
     return job_handle;
 }
 
@@ -864,6 +916,7 @@ fn spawnWorkerForJob(
     library_database: *database.LibraryDatabase,
     request: job_worker.Request,
     origin: job_worker.Origin,
+    walk_lock: ?library_pass.WalkLock,
 ) !void {
     pruneRetiredJobWorkers(self);
     const worker = try self.allocator.create(JobWorker);
@@ -887,6 +940,7 @@ fn spawnWorkerForJob(
         .origin = origin,
         .stats = .init(request),
         .host_signal = &self.host_signal,
+        .walk_lock = walk_lock,
     };
     worker.token.io = worker.threaded.io();
     registration.waker = .{ .context = &worker.token, .wake_fn = JobWorker.wakeFromPause };

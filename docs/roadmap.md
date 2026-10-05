@@ -347,10 +347,6 @@ removed.
   44.1 and 48 kHz, or as mono and stereo, hash equal, and 32-bit PCM values
   below float32 precision collapse. Checked by hashing such pairs and
   requiring different results.
-- Concurrent scans of one Library from two runtimes or processes cannot mark a
-  present file missing. Stamps no longer go backwards, but the one-walk guard
-  is per runtime, so two walks still interleave. Checked by a test running
-  two scans at once.
 - A file the scan fails to open, for a permission, descriptor or I/O error,
   keeps its availability instead of being swept missing. Checked by a scan
   over an unreadable file.

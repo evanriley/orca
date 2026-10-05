@@ -165,10 +165,12 @@ pub fn libraryRelocateRoot(
     runtime_watch.preemptAutoReconcile(self, library);
     runtime_maintenance.preemptUnit(self, library);
     if (runtime_jobs.libraryJobRunning(self, library)) return error.LibraryJobRunning;
+    var walk_lock = try runtime_jobs.claimWalk(self, library, library_database, .reconcile);
+    errdefer runtime_jobs.releaseWalk(self, &walk_lock);
     const binding = try library_database.relocateRoot(io, root_id, path, .{ .allow_persist = true });
     runtime_watch.rootRemoved(self, library, root_id);
     runtime_watch.rootAdded(self, library, binding, path);
-    return runtime_jobs.startLibraryReconcile(self, library, .{ .root_id = root_id, .scope = .whole_root });
+    return runtime_jobs.startClaimedReconcile(self, library, .{ .root_id = root_id, .scope = .whole_root }, &walk_lock);
 }
 
 pub fn libraryRootPage(

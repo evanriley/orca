@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const job_worker = @import("job_worker.zig");
+const library_pass = @import("../library/root.zig");
 const runtime_module = @import("runtime.zig");
 const runtime_tests = @import("runtime_tests.zig");
 
@@ -421,6 +422,34 @@ test "a tag write under a watched root causes one reconcile, which changes nothi
     }
     try std.testing.expectEqual(@as(u32, 1), reconciles);
     try std.testing.expectEqual(@as(u32, 0), fixture.library_changed);
+}
+
+test "an automatic reconcile refused while another process walks the library keeps its changes and runs once that walk ends" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var fixture: WatchFixture = undefined;
+    try fixture.init(.file_outside_root, fast);
+    defer fixture.deinit();
+    const lock_path = (try libraryDatabase(&fixture.runtime, fixture.library)).walk_lock_path.?;
+    var foreign = (try library_pass.WalkLock.tryAcquire(io, lock_path)).?;
+    var foreign_held = true;
+    defer if (foreign_held) foreign.release(io);
+
+    try fixture.temporary.dir.createDirPath(io, "B");
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "B/two.m4a");
+    _ = try fixture.awaitStatus("reconcile_pending", true);
+    try fixture.expectNoReconcile(4 * fast.quiet_ms);
+    const status = try fixture.runtime.libraryWatchStatus(fixture.library);
+    try std.testing.expect(status.reconcile_pending);
+    try std.testing.expect(!status.reconcile_running);
+    try std.testing.expectEqual(@as(?database.LocationState, null), try fixture.locationState("B/two.m4a"));
+    try std.testing.expect(fixture.runtime.nextPumpTimeoutMs().? <= fast.quiet_ms);
+
+    foreign.release(io);
+    foreign_held = false;
+    const finished = try fixture.awaitLocation("B/two.m4a", .present);
+    try std.testing.expectEqual(fixture.root_id, finished.root_id);
+    try std.testing.expectEqual(@as(u64, 1), finished.stats.changed);
+    try std.testing.expect(!(try fixture.runtime.libraryWatchStatus(fixture.library)).reconcile_pending);
 }
 
 test "more changed directories than a root holds apart are reconciled as the whole root, once" {

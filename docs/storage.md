@@ -102,7 +102,7 @@ the old tags:
 
 It also skips the Library's own files, matched by name anywhere under the
 root as the watcher matches them: the database and its `-wal`, `-shm`,
-`-journal` and `.orca-journal.lock` files, the volume marker
+`-journal`, `.orca-journal.lock` and `.orca-scan.lock` files, the volume marker
 `.orca-volume-id`, and the backup directory `<database>.orca-backups`, which
 it does not walk into. [Tag-write files](metadata.md#tag-write-files) covers
 the backup layout and the disk space backups and undo need.
@@ -203,16 +203,38 @@ DATABASE ROOT_ID [DIR...]` runs it.
   on the `(volume_id, uri)` unique index, so a sibling such as `A/Newer` is
   never swept for `A/New`, and the sweep reads only that directory's rows.
 
+`ScanStats.marked_missing` counts the locations a scan or reconcile marked
+`missing`.
+
+## One walk at a time
+
 A runtime never runs two walks of a Library at once. A host scan or
 reconcile started while another host Job holds the Library's slot waits for
 it (see [control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue)),
 a host walk stops the watcher's reconcile before it starts, and a walk that
 would still run beside another is refused with `error.LibraryScanRunning`
-(`ORCA_STATUS_BUSY` through the C ABI). The check covers jobs in one runtime
-only; two processes scanning the same database are not coordinated.
+(`ORCA_STATUS_BUSY` through the C ABI).
 
-`ScanStats.marked_missing` counts the locations a scan or reconcile marked
-`missing`.
+The same holds across runtimes and processes that open one database file. A
+scan or reconcile holds an exclusive `flock` on `<database>.orca-scan.lock`
+from before its scan run begins until its sweep and the run's end, and
+releases it however the walk ends: completed, failed or cancelled. The
+operating system drops the lock of a process that exits, crashed or not. The
+control lane takes the lock as it starts the walk's worker, without waiting:
+while another runtime or process holds it, the walk is refused at once with
+`error.LibraryScanRunning`, adds no scan run and changes no location. Walks in
+different processes do not queue for each other. A host Job that waited for
+its Library's slot and then meets a held lock ends `failed`; the watcher keeps
+a refused reconcile's changes and tries again after `WatchOptions.quiet_ms`.
+The walk lock is separate from the
+[journal lock](metadata.md#the-journal-lock), so a walk and a tag write never
+wait for each other.
+
+Holding the lock, a walk first ends every run of its root still `running` as
+`failed`. Such a run belongs to no live walk: its walker ended without
+finishing it, as a crashed process does. A Library with no database file,
+such as an in-memory one, has no lock file; its walks are coordinated only
+within its runtime, and they leave other runs as they are.
 
 ## Volume check before a walk
 
@@ -285,9 +307,14 @@ Before it changes anything, the relocate refuses with
 - a path nested with the old one at which a moved location or folder image
   would land on another of the root's.
 
-A refusal leaves no new volume row behind. The reconcile job it starts then
-walks the new path, so files that changed or went away while the root was
-elsewhere are noticed.
+A refusal leaves no new volume row behind. Before it changes anything, the
+relocate also takes the Library's [walk lock](#one-walk-at-a-time): while
+another runtime or process walks the Library, it is refused with
+`error.LibraryScanRunning` and changes nothing. The reconcile job it starts
+holds that lock from then on and walks the new path, so files that changed or
+went away while the root was elsewhere are noticed and no other walk runs in
+between. While the Library's jobs are paused, the reconcile waits without the
+lock and takes it again when it starts.
 
 ## Repairing properties without a walk
 
@@ -426,7 +453,10 @@ reconcile still finds anything no event reported.
    first cancels and joins a running automatic reconcile, without a
    `job_finished` event, and its root waits again as a whole root. A host's
    scan of a whole root takes over the root's waiting changes, and returns
-   them as the whole root if it does not succeed.
+   them as the whole root if it does not succeed. A reconcile refused because
+   another runtime or process holds the Library's
+   [walk lock](#one-walk-at-a-time) leaves its root's changes
+   waiting and is tried again after `WatchOptions.quiet_ms`.
 4. Every arm marks its root dirty as a whole and publishes it at once:
    nothing that changed while the root was unwatched produced an event. This
    is also how a Library catches up after a drain rebuilds its watcher.
@@ -449,7 +479,8 @@ reconcile still finds anything no event reported.
    directories per root and a 64 KiB read buffer.
 8. Orca's own files never dirty anything: tag-write temporaries
    (`isOrcaTemporaryName`), the volume marker `.orca-volume-id`, the database
-   file and its `-wal`, `-shm` and `-journal` files, and the backup directory,
+   file and its `-wal`, `-shm`, `-journal`, `.orca-journal.lock` and
+   `.orca-scan.lock` files, and the backup directory,
    which is neither watched nor walked into. These names are matched anywhere
    under a root. A tag write still dirties its file's directory once, when the
    staged copy is renamed over the file; the reconcile that follows finds the

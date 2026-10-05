@@ -1504,6 +1504,15 @@
 
 ### Fixed
 
+- **Scans in two processes no longer interleave.** A scan, reconcile or root
+  relocation holds an exclusive lock on `<database>.orca-scan.lock` until its
+  walk has swept. A walk in another runtime or process is refused at once with
+  `error.LibraryScanRunning` (`ORCA_STATUS_BUSY`) instead of running beside it
+  and sweeping a present file missing. Holding the lock, a walk first fails
+  any run of its root that a crashed walker left `running`. The watcher keeps
+  the changes of a refused reconcile and tries again after `quiet_ms`. The
+  GTK app says the library is already being scanned instead of a generic
+  failure.
 - **Track ids follow their song.** Projection claims each Track by its file,
   then by its recording, and seats it by id, so files that swap, rotate or
   shift track numbers, as Match Album corrections do, keep their Tracks with

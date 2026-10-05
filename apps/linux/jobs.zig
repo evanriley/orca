@@ -70,6 +70,7 @@ pub fn matchingTrack(self: *const App, track_id: i64, verify: bool) bool {
 fn queueRefusal(err: anyerror, fallback: [:0]const u8) [:0]const u8 {
     return switch (err) {
         error.JobQueueFull => "Too many tasks are waiting; try again when some have finished",
+        error.LibraryScanRunning => "This library is already being scanned; try again when it finishes",
         else => fallback,
     };
 }
@@ -79,7 +80,7 @@ pub fn retry(self: *App, history_id: i64) void {
     const library = self.library orelse return;
     const job = self.runtime.jobRetry(library, history_id) catch |err| return self.toast(switch (err) {
         error.JobNotRetryable, error.UnknownJobHistory => "This task cannot be run again",
-        error.JobQueueFull => queueRefusal(err, ""),
+        error.JobQueueFull, error.LibraryScanRunning => queueRefusal(err, ""),
         else => matchingRefusal(err),
     });
     const snapshot = self.runtime.jobSnapshotSynced(job) catch return activity.refresh(self);

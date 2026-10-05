@@ -36,7 +36,8 @@ The boundary covers the whole engine, not a fragment of it:
   path that is not a readable directory, or is nested with another root, its
   files or the root's old directory while that still exists, is
   `ORCA_STATUS_INVALID_ARGUMENT`, an unknown root `ORCA_STATUS_NOT_FOUND`, a
-  held journal or an unfinished tag write under the root `ORCA_STATUS_BUSY`,
+  held journal, a walk of the Library in another runtime or process, or an
+  unfinished tag write under the root `ORCA_STATUS_BUSY`,
   and one awaiting reconciliation `ORCA_STATUS_NEEDS_RECONCILIATION`.
   `orca_library_missing_file_count` counts the Tracks with no present file.
 - **Folders.** `orca_library_query_folder` pages one folder of a root as

@@ -4164,12 +4164,26 @@ test "a root cannot be removed while a job runs on its library, and afterwards i
 /// scanned once in full.
 const ReconcileFixture = struct {
     temporary: std.testing.TmpDir,
+    data: ?std.testing.TmpDir,
     runtime: OrcaRuntime,
     root: []u8,
     library: LibraryHandle,
     root_id: i64,
 
     fn init(self: *ReconcileFixture, name: [:0]const u8) !void {
+        self.data = null;
+        return self.initAt(name);
+    }
+
+    fn initFile(self: *ReconcileFixture) !void {
+        self.data = std.testing.tmpDir(.{});
+        errdefer self.data.?.cleanup();
+        const path = try tempDatabasePath(&self.data.?);
+        defer std.testing.allocator.free(path);
+        return self.initAt(path);
+    }
+
+    fn initAt(self: *ReconcileFixture, name: [:0]const u8) !void {
         self.temporary = std.testing.tmpDir(.{});
         errdefer self.temporary.cleanup();
         try self.temporary.dir.createDirPath(std.testing.io, "A");
@@ -4189,6 +4203,21 @@ const ReconcileFixture = struct {
         self.runtime.deinit();
         std.testing.allocator.free(self.root);
         self.temporary.cleanup();
+        if (self.data) |*data| data.cleanup();
+    }
+
+    fn databasePath(self: *ReconcileFixture) ![:0]u8 {
+        return tempDatabasePath(&self.data.?);
+    }
+
+    fn walkLockPath(self: *ReconcileFixture) ![]const u8 {
+        return (try libraryDatabase(&self.runtime, self.library)).walk_lock_path.?;
+    }
+
+    fn expectWalkLockFree(self: *ReconcileFixture) !void {
+        var lock = try library_pass.WalkLock.tryAcquire(std.testing.io, try self.walkLockPath()) orelse
+            return error.WalkLockHeld;
+        lock.release(std.testing.io);
     }
 
     fn reconcile(self: *ReconcileFixture, subtrees: []const []const u8) !struct { state: job.State, stats: runtime_module.ScanStats } {
@@ -4219,6 +4248,15 @@ const ReconcileFixture = struct {
 
     fn locationCount(self: *ReconcileFixture) !u64 {
         return (try libraryDatabase(&self.runtime, self.library)).locations.count();
+    }
+
+    fn scanRunTotal(self: *ReconcileFixture) !i64 {
+        const library_database = try libraryDatabase(&self.runtime, self.library);
+        var statement = try library_database.database.prepare("SELECT count(*) FROM scan_runs WHERE root_id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, self.root_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
     }
 
     fn scanRunCount(self: *ReconcileFixture, state: database.ScanRunState) !i64 {
@@ -4418,6 +4456,156 @@ test "a scan cancelled once its run has begun marks nothing missing and leaves n
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
     try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.cancelled));
     try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+}
+
+test "a walk in a second runtime is refused while the first walks the library's database file, and runs once it has finished" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.initFile();
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+    const database_path = try fixture.databasePath();
+    defer std.testing.allocator.free(database_path);
+    var second = OrcaRuntime.init(std.testing.allocator);
+    defer second.deinit();
+    const second_library = try second.openLibrary(std.testing.io, database_path);
+    const runs_before = try fixture.scanRunTotal();
+    const write_lane = (try libraryDatabase(&fixture.runtime, fixture.library)).write_lane;
+
+    write_lane.acquire();
+    const first_scan = held: {
+        errdefer write_lane.release();
+        const handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+        try std.testing.expectError(error.LibraryScanRunning, second.startLibraryScan(second_library, .{ .root_id = fixture.root_id }));
+        try std.testing.expectError(error.LibraryScanRunning, second.startLibraryReconcile(second_library, .{
+            .root_id = fixture.root_id,
+            .scope = .{ .subtrees = &.{"B"} },
+        }));
+        try std.testing.expectEqual(runs_before, try fixture.scanRunTotal());
+        try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+        try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+        break :held handle;
+    };
+    write_lane.release();
+
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, first_scan));
+    try std.testing.expectEqual(runs_before + 1, try fixture.scanRunTotal());
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&second, try second.startLibraryScan(second_library, .{ .root_id = fixture.root_id })));
+    try std.testing.expectEqual(runs_before + 2, try fixture.scanRunTotal());
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+    try std.testing.expectEqual(job.State.succeeded, (try fixture.reconcile(&.{"A"})).state);
+}
+
+test "a scan or reconcile fails the run a crashed walker left running and then completes its own" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.initFile();
+    defer fixture.deinit();
+    const library_database = try libraryDatabase(&fixture.runtime, fixture.library);
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+
+    _ = try library_database.scan_runs.begin(fixture.root_id);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id })));
+    try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.failed));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
+
+    _ = try library_database.scan_runs.begin(fixture.root_id);
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/one.flac");
+    try std.testing.expectEqual(job.State.succeeded, (try fixture.reconcile(&.{"A"})).state);
+    try std.testing.expectEqual(@as(i64, 2), try fixture.scanRunCount(.failed));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/one.flac")).?.state);
+}
+
+test "a walk that fails because its root is gone releases the walk lock" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.initFile();
+    defer fixture.deinit();
+    try fixture.removeRootDirectory();
+
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&fixture.runtime, try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id })));
+    try fixture.expectWalkLockFree();
+    try std.testing.expectEqual(job.State.failed, (try fixture.reconcile(&.{"A"})).state);
+    try fixture.expectWalkLockFree();
+}
+
+test "a cancelled walk releases the walk lock" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.initFile();
+    defer fixture.deinit();
+    const write_lane = (try libraryDatabase(&fixture.runtime, fixture.library)).write_lane;
+
+    write_lane.acquire();
+    const job_handle = held: {
+        errdefer write_lane.release();
+        const handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+        try std.testing.expect(try library_pass.WalkLock.tryAcquire(std.testing.io, try fixture.walkLockPath()) == null);
+        while (write_lane.mutex.state.load(.acquire) != .contended) std.Thread.yield() catch {};
+        try fixture.runtime.cancelJob(handle);
+        break :held handle;
+    };
+    write_lane.release();
+
+    try std.testing.expectEqual(job.State.cancelled, try awaitJob(&fixture.runtime, job_handle));
+    try fixture.expectWalkLockFree();
+}
+
+test "a root relocated while another process walks the library is refused and commits nothing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.initFile();
+    defer fixture.deinit();
+    var elsewhere = std.testing.tmpDir(.{});
+    defer elsewhere.cleanup();
+    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{elsewhere.sub_path});
+    defer std.testing.allocator.free(moved);
+    const jobs_before = fixture.runtime.jobs.jobs.count();
+
+    {
+        var foreign = (try library_pass.WalkLock.tryAcquire(std.testing.io, try fixture.walkLockPath())).?;
+        defer foreign.release(std.testing.io);
+        try std.testing.expectError(
+            error.LibraryScanRunning,
+            fixture.runtime.libraryRelocateRoot(fixture.library, std.testing.io, fixture.root_id, moved),
+        );
+    }
+    try std.testing.expectEqual(jobs_before, fixture.runtime.jobs.jobs.count());
+    {
+        var roots = try fixture.runtime.libraryRootPage(fixture.library, 8, 0);
+        defer roots.deinit();
+        try std.testing.expectEqualStrings(fixture.root, roots.items[0].path);
+    }
+    try fixture.expectWalkLockFree();
+
+    const relocation = try fixture.runtime.libraryRelocateRoot(fixture.library, std.testing.io, fixture.root_id, moved);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, relocation));
+    {
+        var roots = try fixture.runtime.libraryRootPage(fixture.library, 8, 0);
+        defer roots.deinit();
+        try std.testing.expectEqualStrings(moved, roots.items[0].path);
+    }
+    try fixture.expectWalkLockFree();
+}
+
+test "a root relocated while the library's jobs are paused frees the walk lock until its reconcile starts" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.initFile();
+    defer fixture.deinit();
+    var elsewhere = std.testing.tmpDir(.{});
+    defer elsewhere.cleanup();
+    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{elsewhere.sub_path});
+    defer std.testing.allocator.free(moved);
+
+    try fixture.runtime.pauseAll(fixture.library);
+    const relocation = try fixture.runtime.libraryRelocateRoot(fixture.library, std.testing.io, fixture.root_id, moved);
+    try std.testing.expectEqual(job.State.waiting, (try fixture.runtime.jobSnapshotSynced(relocation)).state);
+    try fixture.expectWalkLockFree();
+    try std.testing.expectEqual(@as(u64, 0), try fixture.runtime.libraryMissingFileCount(fixture.library));
+
+    try fixture.runtime.resumeAll(fixture.library);
+    fixture.runtime.pump();
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, relocation));
+    try std.testing.expectEqual(@as(u64, 2), try fixture.runtime.libraryMissingFileCount(fixture.library));
+    try fixture.expectWalkLockFree();
 }
 
 test "a second scan or reconcile of a library waits for the one that runs and then runs in turn" {

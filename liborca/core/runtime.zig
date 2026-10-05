@@ -2596,7 +2596,8 @@ pub const OrcaRuntime = struct {
     /// Moves root `root_id` to `path`, a readable directory, bound to the
     /// volume it is on now, keeping the root's id and every File, Track and
     /// location under it, then starts a whole-root reconcile Job. Refused
-    /// while any job on the Library runs.
+    /// while any job on the Library runs, or while another runtime or process
+    /// walks it.
     pub fn libraryRelocateRoot(
         self: *OrcaRuntime,
         library: LibraryHandle,

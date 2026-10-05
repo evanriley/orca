@@ -5,6 +5,7 @@ const job_worker = @import("job_worker.zig");
 const library_pass = @import("../library/root.zig");
 const runtime = @import("runtime.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
+const runtime_listens = @import("runtime_listens.zig");
 const work = @import("work.zig");
 
 const hints = library_pass.watch_hints;
@@ -17,7 +18,9 @@ const LibraryObject = runtime.LibraryObject;
 const OrcaRuntime = runtime.OrcaRuntime;
 
 pub const WatchOptions = struct {
-    /// A root's changes are reconciled once it has been quiet this long.
+    /// A root's changes are reconciled once it has been quiet this long. A
+    /// reconcile refused because another runtime or process is walking the
+    /// Library is tried again after this long.
     quiet_ms: u32 = 2000,
     /// ...or once this long has passed since its first unreconciled change.
     max_delay_ms: u32 = 30_000,
@@ -85,6 +88,8 @@ pub const LibraryWatch = struct {
     pending: std.ArrayList(PendingRoot) = .empty,
     covered: std.ArrayList(CoveredRoot) = .empty,
     active: ?ActiveReconcile = null,
+    retry_ms: u32,
+    retry_at_ms: ?i64 = null,
 
     /// After the watcher's thread has been joined.
     fn destroy(self: *LibraryWatch, allocator: std.mem.Allocator) void {
@@ -268,6 +273,7 @@ fn startWatch(
         .watcher = watcher,
         .work_handle = work_handle,
         .roots = watched,
+        .retry_ms = options.quiet_ms,
     };
     return library_watch;
 }
@@ -476,32 +482,51 @@ fn reconcileHeldBack(self: *const OrcaRuntime, library: LibraryHandle) bool {
 fn startPendingReconcile(self: *OrcaRuntime, library_watch: *LibraryWatch) void {
     if (library_watch.active != null or library_watch.pending.items.len == 0) return;
     if (reconcileHeldBack(self, library_watch.library)) return;
-    var next = library_watch.pending.orderedRemove(0);
-    defer next.dirty.deinit(self.allocator);
-    const pending = job_worker.PendingReconcile.create(self.allocator, .{
-        .root_id = next.root_id,
-        .scope = if (next.dirty.whole_root) .whole_root else .{ .subtrees = next.dirty.directories.items },
-    }) catch return;
-    const job_handle = runtime_jobs.spawnJobWorker(self, library_watch.library, .{ .reconcile = pending }, .watcher) catch {
-        pending.destroy();
+    const now_ms = runtime_listens.sampleTime(self).mono_ms;
+    if (library_watch.retry_at_ms) |retry_at_ms| if (now_ms < retry_at_ms) return;
+    const job_handle = spawnReconcile(self, library_watch.library, &library_watch.pending.items[0]) catch |err| {
+        if (err == error.LibraryScanRunning) {
+            library_watch.retry_at_ms = now_ms + library_watch.retry_ms;
+        } else {
+            var dropped = library_watch.pending.orderedRemove(0);
+            dropped.dirty.deinit(self.allocator);
+        }
         return;
     };
-    library_watch.active = .{ .job = job_handle, .root_id = next.root_id };
+    library_watch.retry_at_ms = null;
+    var started = library_watch.pending.orderedRemove(0);
+    started.dirty.deinit(self.allocator);
+    library_watch.active = .{ .job = job_handle, .root_id = started.root_id };
+}
+
+fn spawnReconcile(self: *OrcaRuntime, library: LibraryHandle, next: *const PendingRoot) !JobHandle {
+    const pending = try job_worker.PendingReconcile.create(self.allocator, .{
+        .root_id = next.root_id,
+        .scope = if (next.dirty.whole_root) .whole_root else .{ .subtrees = next.dirty.directories.items },
+    });
+    errdefer pending.destroy();
+    return runtime_jobs.spawnJobWorker(self, library, .{ .reconcile = pending }, .watcher);
 }
 
 /// Zero while a watcher's hints wait to be taken, or while a Library's
-/// waiting changes could start a reconcile now; null otherwise. A reconcile
-/// held back by a running job is covered by that job's own pump timeout, and
-/// one held back by `pauseAll` waits for `resumeAll`.
+/// waiting changes could start a reconcile now; the time left before a
+/// reconcile another walker refused is tried again; null otherwise.
+/// A reconcile held back by a running job is covered by that job's own pump
+/// timeout, and one held back by `pauseAll` waits for `resumeAll`.
 pub fn watchPumpDueMs(self: *OrcaRuntime) ?u64 {
+    var due: ?u64 = null;
     for (self.libraries.slots.items) |*slot| {
         const object_value = if (slot.value) |*value| value else continue;
         const library_watch = object_value.watch orelse continue;
         if (library_watch.watcher.hintsQueued()) return 0;
-        if (library_watch.active == null and library_watch.pending.items.len != 0 and
-            !reconcileHeldBack(self, library_watch.library)) return 0;
+        if (library_watch.active != null or library_watch.pending.items.len == 0 or
+            reconcileHeldBack(self, library_watch.library)) continue;
+        const retry_at_ms = library_watch.retry_at_ms orelse return 0;
+        const remaining: u64 = @intCast(@max(retry_at_ms - runtime_listens.sampleTime(self).mono_ms, 0));
+        if (remaining == 0) return 0;
+        due = if (due) |current| @min(current, remaining) else remaining;
     }
-    return null;
+    return due;
 }
 
 /// Control lane, immediately after `work_registry.drain()`: every watcher

@@ -15,6 +15,7 @@ pub const scanner = @import("scanner.zig");
 pub const smart_playlist = @import("smart_playlist.zig");
 pub const tag_reader = @import("tag_reader.zig");
 pub const volume_check = @import("volume_check.zig");
+pub const walk_lock = @import("walk_lock.zig");
 pub const watch = @import("watch.zig");
 pub const watch_hints = @import("watch_hints.zig");
 pub const watch_linux = if (builtin.os.tag == .linux) @import("watch_linux.zig") else struct {};
@@ -33,6 +34,7 @@ pub const PropertyBackfill = property_backfill.PropertyBackfill;
 pub const ConsistencyPass = consistency_pass.ConsistencyPass;
 pub const Scanner = scanner.Scanner;
 pub const Tags = tag_reader.Tags;
+pub const WalkLock = walk_lock.WalkLock;
 
 test {
     _ = @import("acoustid_submission.zig");
@@ -50,6 +52,7 @@ test {
     _ = @import("smart_playlist.zig");
     _ = @import("tag_reader.zig");
     _ = @import("volume_check.zig");
+    _ = @import("walk_lock.zig");
     _ = @import("watch.zig");
     _ = @import("watch_hints.zig");
     if (builtin.os.tag == .linux) _ = @import("watch_linux.zig");
