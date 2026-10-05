@@ -1494,6 +1494,12 @@
 
 ### Fixed
 
+- **A failed scan ends failed and sweeps nothing.** A scan or reconcile
+  whose walk fails, on a root directory that is gone or a folder that cannot
+  be opened, finishes its scan run `failed` instead of leaving it `running`,
+  and a failed whole-root scan marks nothing missing. Location and folder
+  image stamps never go backwards within a root, so a walk that began
+  earlier cannot make a later walk's sweep mark present files missing.
 - **A chosen output device fails closed.** An output opened for a device
   other than 0 sets `node.dont-fallback` and `node.dont-reconnect`, and its
   open waits up to 2 s for a link. A device that is missing at open, or

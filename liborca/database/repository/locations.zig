@@ -328,6 +328,7 @@ pub const LocationRepository = struct {
     }
 
     pub fn upsertLocked(self: *LocationRepository, input: LocationUpsert) !i64 {
+        // Generations count per root: a stamp is raised within its root and replaced when the root changes.
         var statement = try self.db.prepare(
             \\INSERT INTO locations(
             \\    file_id, volume_id, root_id, uri, native_device, native_inode,
@@ -342,7 +343,9 @@ pub const LocationRepository = struct {
             \\    modified_ns=excluded.modified_ns,
             \\    state=excluded.state,
             \\    missing_since=NULL,
-            \\    last_seen_generation=excluded.last_seen_generation
+            \\    last_seen_generation=CASE WHEN COALESCE(excluded.root_id, locations.root_id) IS locations.root_id
+            \\        THEN max(locations.last_seen_generation, excluded.last_seen_generation)
+            \\        ELSE excluded.last_seen_generation END
             \\RETURNING id;
         );
         defer statement.deinit();
@@ -472,7 +475,7 @@ pub const LocationRepository = struct {
     ) !void {
         if (ids.len == 0) return;
         var statement = try self.db.prepare(
-            \\UPDATE locations SET last_seen_generation=?2 WHERE id=?1;
+            \\UPDATE locations SET last_seen_generation=max(last_seen_generation, ?2) WHERE id=?1;
         );
         defer statement.deinit();
         for (ids) |id| {
@@ -890,7 +893,7 @@ pub const LocationRepository = struct {
     /// Caller holds the write lane.
     pub fn markImagesSeenLocked(self: *LocationRepository, ids: []const i64, generation: i64) !void {
         if (ids.len == 0) return;
-        var statement = try self.db.prepare("UPDATE folder_images SET last_seen_generation=?2 WHERE id=?1;");
+        var statement = try self.db.prepare("UPDATE folder_images SET last_seen_generation=max(last_seen_generation, ?2) WHERE id=?1;");
         defer statement.deinit();
         for (ids) |id| {
             try statement.reset();
@@ -902,6 +905,7 @@ pub const LocationRepository = struct {
 
     /// Caller holds the write lane.
     pub fn upsertImageLocked(self: *LocationRepository, input: FolderImageUpsert) !void {
+        // Generations count per root: a stamp is raised within its root and replaced when the root changes.
         var statement = try self.db.prepare(
             \\INSERT INTO folder_images(
             \\    volume_id, root_id, uri, mime, role, size_bytes, modified_ns, last_seen_generation,
@@ -913,7 +917,9 @@ pub const LocationRepository = struct {
             \\    role=excluded.role,
             \\    size_bytes=excluded.size_bytes,
             \\    modified_ns=excluded.modified_ns,
-            \\    last_seen_generation=excluded.last_seen_generation,
+            \\    last_seen_generation=CASE WHEN COALESCE(excluded.root_id, folder_images.root_id) IS folder_images.root_id
+            \\        THEN max(folder_images.last_seen_generation, excluded.last_seen_generation)
+            \\        ELSE excluded.last_seen_generation END,
             \\    width=excluded.width,
             \\    height=excluded.height,
             \\    hash=excluded.hash;
@@ -1568,4 +1574,89 @@ test "a sweep that forgets a front image or loses a Release's files clears the R
     try std.testing.expectEqual(@as(u64, 2), try library.files.markMissingBelowGenerationUnder(2, 1, 3, "/m/Here"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 1;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT has_folder_cover FROM releases WHERE id = 2;"));
+}
+
+fn testImageUpsert(root_id: ?i64, uri: []const u8, generation: i64) FolderImageUpsert {
+    return .{
+        .volume_id = 2,
+        .root_id = root_id,
+        .uri = uri,
+        .mime = "image/jpeg",
+        .role = .front,
+        .size_bytes = 10,
+        .modified_ns = 20,
+        .last_seen_generation = generation,
+    };
+}
+
+const test_location_generation = "SELECT last_seen_generation FROM locations WHERE uri='/m/a.flac';";
+const test_image_generation = "SELECT last_seen_generation FROM folder_images WHERE uri='/m/cover.jpg';";
+
+fn insertTestLocation(library: anytype, root_id: ?i64, generation: i64) !i64 {
+    return library.locations.upsert(.{ .file_id = 1, .volume_id = 2, .root_id = root_id, .uri = "/m/a.flac", .last_seen_generation = generation });
+}
+
+test "an upsert with a lower generation never lowers a location's stamp in its root" {
+    var library = try openFolderTestLibrary("monotonic-location-upsert");
+    defer library.close();
+    try library.database.exec("INSERT INTO files(id) VALUES (1);");
+    _ = try insertTestLocation(&library, 1, 5);
+    _ = try insertTestLocation(&library, 1, 3);
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, test_location_generation));
+    _ = try insertTestLocation(&library, null, 2);
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, test_location_generation));
+    _ = try insertTestLocation(&library, 1, 6);
+    try std.testing.expectEqual(@as(i64, 6), try scalar(library.database, test_location_generation));
+}
+
+test "marking a location seen with a lower generation never lowers its stamp" {
+    var library = try openFolderTestLibrary("monotonic-location-seen");
+    defer library.close();
+    try library.database.exec("INSERT INTO files(id) VALUES (1);");
+    const location_id = try insertTestLocation(&library, 1, 5);
+    try library.locations.markSeenLocked(&.{location_id}, 4);
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, test_location_generation));
+    try library.locations.markSeenLocked(&.{location_id}, 6);
+    try std.testing.expectEqual(@as(i64, 6), try scalar(library.database, test_location_generation));
+}
+
+test "an image upsert with a lower generation never lowers the image's stamp in its root" {
+    var library = try openFolderTestLibrary("monotonic-image-upsert");
+    defer library.close();
+    try library.locations.upsertImageLocked(testImageUpsert(1, "/m/cover.jpg", 5));
+    try library.locations.upsertImageLocked(testImageUpsert(1, "/m/cover.jpg", 3));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, test_image_generation));
+    try library.locations.upsertImageLocked(testImageUpsert(null, "/m/cover.jpg", 2));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, test_image_generation));
+    try library.locations.upsertImageLocked(testImageUpsert(1, "/m/cover.jpg", 6));
+    try std.testing.expectEqual(@as(i64, 6), try scalar(library.database, test_image_generation));
+}
+
+test "marking an image seen with a lower generation never lowers its stamp" {
+    var library = try openFolderTestLibrary("monotonic-image-seen");
+    defer library.close();
+    try library.locations.upsertImageLocked(testImageUpsert(1, "/m/cover.jpg", 5));
+    const image_id = try scalar(library.database, "SELECT id FROM folder_images WHERE uri='/m/cover.jpg';");
+    try library.locations.markImagesSeenLocked(&.{image_id}, 4);
+    try std.testing.expectEqual(@as(i64, 5), try scalar(library.database, test_image_generation));
+    try library.locations.markImagesSeenLocked(&.{image_id}, 7);
+    try std.testing.expectEqual(@as(i64, 7), try scalar(library.database, test_image_generation));
+}
+
+test "a location or an image claimed by another root takes that root's generation" {
+    var library = try openFolderTestLibrary("stamps-across-roots");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO library_roots(id, volume_id, path) VALUES (3, 2, '/m/nested');
+        \\INSERT INTO files(id) VALUES (1);
+    );
+    _ = try library.locations.upsert(.{ .file_id = 1, .volume_id = 2, .root_id = 1, .uri = "/m/nested/a.flac", .last_seen_generation = 9 });
+    _ = try library.locations.upsert(.{ .file_id = 1, .volume_id = 2, .root_id = 3, .uri = "/m/nested/a.flac", .last_seen_generation = 1 });
+    try std.testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT root_id FROM locations WHERE uri='/m/nested/a.flac';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT last_seen_generation FROM locations WHERE uri='/m/nested/a.flac';"));
+
+    try library.locations.upsertImageLocked(testImageUpsert(1, "/m/nested/cover.jpg", 9));
+    try library.locations.upsertImageLocked(testImageUpsert(3, "/m/nested/cover.jpg", 1));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT root_id FROM folder_images WHERE uri='/m/nested/cover.jpg';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT last_seen_generation FROM folder_images WHERE uri='/m/nested/cover.jpg';"));
 }

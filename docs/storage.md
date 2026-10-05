@@ -113,6 +113,24 @@ identities are skipped, so no traversal-order checkpoint is required.
 [Watching roots](#watching-roots) drives the same reconciliation from
 filesystem events.
 
+Each walk of a root opens a scan run (`scan_runs`) with the root's next
+generation and stamps every location and folder image it reaches with it.
+Only a run that ends `completed` sweeps: it marks the locations it did not
+reach `missing` and forgets the folder images it did not reach. A cancelled
+run ends `cancelled`, and a walk that errors, for example because the root's
+directory is gone or a subdirectory cannot be opened, ends its run `failed`
+and fails the Job; neither sweeps anything. The one exception is a subtree
+reconcile whose walk of one directory fails: its run ends `failed`, and it
+still sweeps the directories whose walks completed (see
+[Folder-scoped reconciliation](#folder-scoped-reconciliation)).
+
+Stamps never go backwards. Within a root, a stamp keeps the higher of its
+stored generation and the one being written, so a walk that began earlier
+cannot lower a stamp a later walk wrote; a lowered stamp would make the later
+walk's sweep mark a present file `missing`. Generations count per root, so a
+location or image that another root's walk reaches, as a nested root's walk
+does, takes that root's generation.
+
 A running scan or reconcile reports where it is through `ScanStats`:
 
 - `stage` is `discover` while the Job counts the files its walks will reach,
@@ -190,11 +208,8 @@ reconcile started while another host Job holds the Library's slot waits for
 it (see [control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue)),
 a host walk stops the watcher's reconcile before it starts, and a walk that
 would still run beside another is refused with `error.LibraryScanRunning`
-(`ORCA_STATUS_BUSY` through the C ABI). Each walk stamps the locations it
-reaches with its own generation, so a second walk could overwrite the first
-walk's stamp and the first walk's sweep would then mark present files
-`missing`. The check covers jobs in one runtime only; two processes scanning
-the same database are not coordinated.
+(`ORCA_STATUS_BUSY` through the C ABI). The check covers jobs in one runtime
+only; two processes scanning the same database are not coordinated.
 
 `ScanStats.marked_missing` counts the locations a scan or reconcile marked
 `missing`.

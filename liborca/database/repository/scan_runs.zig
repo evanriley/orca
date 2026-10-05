@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 
 const WriteLane = @import("write_lane.zig").WriteLane;
+const scalar = @import("../columns.zig").scalar;
 
 pub const ScanRunState = enum {
     running,
@@ -93,6 +94,19 @@ pub const ScanRunRepository = struct {
         return self.finish(run_id, .cancelled, counters);
     }
 
+    pub fn failStaleRuns(self: *ScanRunRepository, root_id: i64) !u64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE scan_runs SET state='failed', finished_at=unixepoch()
+            \\WHERE root_id=?1 AND state='running';
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes();
+    }
+
     pub fn outcome(self: *const ScanRunRepository, run_id: i64) !ScanRunState {
         var statement = try self.db.prepare("SELECT state FROM scan_runs WHERE id=?1;");
         defer statement.deinit();
@@ -102,3 +116,28 @@ pub const ScanRunRepository = struct {
             error.InvalidStoredScanRunState;
     }
 };
+
+test "failing stale runs finishes only that root's running runs as failed" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-stale-scan-runs?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO volumes(id, stable_key) VALUES (2, 'music');
+        \\INSERT INTO library_roots(id, volume_id, path) VALUES (1, 2, '/m'), (2, 2, '/other');
+    );
+    const completed = try library.scan_runs.begin(1);
+    try library.scan_runs.finish(completed.id, .completed, .{});
+    const abandoned = try library.scan_runs.begin(1);
+    const other_root = try library.scan_runs.begin(2);
+
+    try std.testing.expectEqual(@as(u64, 1), try library.scan_runs.failStaleRuns(1));
+    try std.testing.expectEqual(ScanRunState.failed, try library.scan_runs.outcome(abandoned.id));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM scan_runs WHERE root_id=1 AND state='failed' AND finished_at IS NOT NULL;"));
+    try std.testing.expectEqual(ScanRunState.completed, try library.scan_runs.outcome(completed.id));
+    try std.testing.expectEqual(ScanRunState.running, try library.scan_runs.outcome(other_root.id));
+    try std.testing.expectEqual(@as(u64, 0), try library.scan_runs.failStaleRuns(1));
+    try std.testing.expectError(error.StaleScanRun, library.scan_runs.finish(abandoned.id, .completed, .{}));
+}

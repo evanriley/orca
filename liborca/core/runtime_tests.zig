@@ -4219,6 +4219,22 @@ const ReconcileFixture = struct {
     fn locationCount(self: *ReconcileFixture) !u64 {
         return (try libraryDatabase(&self.runtime, self.library)).locations.count();
     }
+
+    fn scanRunCount(self: *ReconcileFixture, state: database.ScanRunState) !i64 {
+        const library_database = try libraryDatabase(&self.runtime, self.library);
+        var statement = try library_database.database.prepare(
+            "SELECT count(*) FROM scan_runs WHERE root_id=?1 AND state=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, self.root_id);
+        try statement.bindText(2, state.text());
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    fn removeRootDirectory(self: *ReconcileFixture) !void {
+        try self.temporary.parent_dir.deleteTree(std.testing.io, &self.temporary.sub_path);
+    }
 };
 
 const StoredLocation = struct {
@@ -4323,6 +4339,84 @@ test "an unreadable subdirectory fails the reconcile and sweeps nothing under it
     try std.testing.expectEqual(@as(u64, 1), outcome.stats.marked_missing);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
     try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.failed));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+}
+
+test "a scan whose walk fails on an unreadable subdirectory fails its run and marks nothing missing" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-unreadable?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/locked");
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .default_dir, .{}) catch {};
+
+    const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&fixture.runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.runtime.jobScanStats(job_handle)).marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.failed));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+}
+
+test "a scan whose root directory is gone fails its run and marks nothing missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-root-gone?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.removeRootDirectory();
+
+    const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&fixture.runtime, job_handle));
+    const stats = try fixture.runtime.jobScanStats(job_handle);
+    try std.testing.expect(!stats.volume_changed);
+    try std.testing.expectEqual(@as(u64, 0), stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.failed));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+}
+
+test "a scan of a root recorded under its own volume key whose directory is gone fails and marks nothing missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-own-key-root-gone?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try recordRootOnOwnVolumeKey(&fixture.runtime, fixture.library, fixture.root_id);
+    try fixture.removeRootDirectory();
+
+    const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&fixture.runtime, job_handle));
+    const stats = try fixture.runtime.jobScanStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 0), stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, if (stats.volume_changed) 0 else 1), try fixture.scanRunCount(.failed));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
+}
+
+test "a scan cancelled once its run has begun marks nothing missing and leaves no run running" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-cancel-run?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+    const write_lane = (try libraryDatabase(&fixture.runtime, fixture.library)).write_lane;
+
+    write_lane.acquire();
+    const job_handle = held: {
+        errdefer write_lane.release();
+        const handle = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+        while (write_lane.mutex.state.load(.acquire) != .contended) std.Thread.yield() catch {};
+        try fixture.runtime.cancelJob(handle);
+        break :held handle;
+    };
+    write_lane.release();
+
+    try std.testing.expectEqual(job.State.cancelled, try awaitJob(&fixture.runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.runtime.jobScanStats(job_handle)).marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+    try std.testing.expectEqual(@as(i64, 1), try fixture.scanRunCount(.cancelled));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
 }
 
 test "a second scan or reconcile of a library waits for the one that runs and then runs in turn" {
@@ -4378,6 +4472,17 @@ pub fn recordRootOnAnotherVolume(runtime: *OrcaRuntime, library: LibraryHandle, 
     if (try statement.step() != .done) return error.SqlFailed;
 }
 
+fn recordRootOnOwnVolumeKey(runtime: *OrcaRuntime, library: LibraryHandle, root_id: i64) !void {
+    const library_database = try libraryDatabase(runtime, library);
+    var statement = try library_database.database.prepare(
+        "UPDATE volumes SET stable_key=?2 || ?1 WHERE id=(SELECT volume_id FROM library_roots WHERE id=?1);",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, root_id);
+    try statement.bindText(2, database.LibraryDatabase.root_volume_key_prefix);
+    if (try statement.step() != .done) return error.SqlFailed;
+}
+
 test "a scan of a root no longer on its recorded volume fails and marks nothing missing" {
     var fixture: ReconcileFixture = undefined;
     try fixture.init("file:orca-scan-other-volume?mode=memory&cache=shared");
@@ -4393,6 +4498,7 @@ test "a scan of a root no longer on its recorded volume fails and marks nothing 
     try std.testing.expectEqual(@as(u64, 0), stats.marked_missing);
     try std.testing.expect(stats.volume_changed);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
 }
 
 test "a subtree reconcile of a root no longer on its recorded volume fails and marks nothing missing" {
@@ -4408,6 +4514,7 @@ test "a subtree reconcile of a root no longer on its recorded volume fails and m
     try std.testing.expectEqual(@as(u64, 0), outcome.stats.marked_missing);
     try std.testing.expect(outcome.stats.volume_changed);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(@as(i64, 0), try fixture.scanRunCount(.running));
 }
 
 test "a rating and a playlist entry follow a track that a library edit moves to another album" {

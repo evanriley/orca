@@ -1725,6 +1725,8 @@ pub const JobWorker = struct {
         self.progress.store(0, .release);
         try self.requireRecordedVolume(io, root);
         const scan_run = try self.database.scan_runs.begin(root.id);
+        var run_finished = false;
+        errdefer if (!run_finished) self.failScanRun(scan_run.id, .{});
         var pass: library_pass.Projection = .{
             .allocator = self.allocator,
             .library = self.database,
@@ -1740,6 +1742,7 @@ pub const JobWorker = struct {
             if (result.cancelled) .cancelled else .completed,
             scanCounters(result),
         );
+        run_finished = true;
         // Never on a cancelled run: a partial walk must not mark the files it
         // did not reach as missing.
         const marked_missing = if (result.cancelled) 0 else try self.database.files.markMissingBelowGeneration(
@@ -1748,6 +1751,10 @@ pub const JobWorker = struct {
         );
         self.noteScan(result);
         _ = self.stats.scan.marked_missing.fetchAdd(marked_missing, .acq_rel);
+    }
+
+    fn failScanRun(self: *JobWorker, run_id: i64, counters: database.repository.ScanCounters) void {
+        self.database.scan_runs.finish(run_id, .failed, counters) catch {};
     }
 
     /// A root whose path now resolves to another volume, as the mount point
@@ -1777,7 +1784,11 @@ pub const JobWorker = struct {
         const walked = try self.allocator.alloc(bool, subtrees.len);
         defer self.allocator.free(walked);
         @memset(walked, false);
+        var totals: library_pass.scanner.Result = .{};
+        var walk_failed = false;
         const scan_run = try self.database.scan_runs.begin(root.id);
+        var run_finished = false;
+        errdefer if (!run_finished) self.failScanRun(scan_run.id, scanCounters(totals));
         var pass: library_pass.Projection = .{
             .allocator = self.allocator,
             .library = self.database,
@@ -1786,8 +1797,6 @@ pub const JobWorker = struct {
         var scanner = self.rootScanner(io, root, scan_run.generation, batch_size, &pass);
         defer scanner.deinit();
         stats.stage.store(.read_tags, .release);
-        var totals: library_pass.scanner.Result = .{};
-        var walk_failed = false;
         for (subtrees, walked) |subtree, *completed| {
             if (self.cancelled()) {
                 totals.cancelled = true;
@@ -1811,6 +1820,7 @@ pub const JobWorker = struct {
             if (totals.cancelled) .cancelled else if (walk_failed) .failed else .completed,
             scanCounters(totals),
         );
+        run_finished = true;
         if (!totals.cancelled) {
             for (subtrees, walked) |subtree, completed| {
                 if (!completed) continue;
