@@ -5,6 +5,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const art = @import("art.zig");
+const page_ui = @import("page.zig");
 const jobs = @import("jobs.zig");
 const settings = @import("settings.zig");
 const watching = @import("watching.zig");
@@ -749,7 +750,9 @@ pub fn buildScan(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
     gtk.gtk_widget_add_css_class(scroller, "scan-page");
-    return scroller;
+    const bin = page_ui.breakpointBin(scroller);
+    page_ui.stackBelow(bin, "max-width: 920px", &.{stages}, &.{});
+    return bin;
 }
 
 fn resetScanPage(self: *App) void {

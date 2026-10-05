@@ -283,12 +283,15 @@ pub fn build(self: *App) *gtk.Widget {
     const split = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(split, "changes-split");
     gtk.gtk_widget_set_vexpand(split, gtk.true_);
-    append(split, &.{ list_scroller, buildDetail(self) });
+    const detail = buildDetail(self);
+    append(split, &.{ list_scroller, detail });
 
     const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(column, "changes-page");
     append(column, &.{ title.widget, split });
-    return column;
+    const bin = page_ui.breakpointBin(column);
+    page_ui.stackBelow(bin, "max-width: 880px", &.{split}, &.{ list_scroller, detail });
+    return bin;
 }
 
 fn buildTrail(self: *App) void {

@@ -2686,11 +2686,17 @@ fn aboutHeader(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, text), wordmark);
     gtk.gtk_box_append(gtk.cast(gtk.Box, text), meta);
     gtk.gtk_box_append(gtk.cast(gtk.Box, header), text);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, header), aboutButton("Open Logs", "orca-file-symbolic", gtk.callback(openLogsClicked), self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, header), aboutButton("Licenses", null, gtk.callback(licensesClicked), self));
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_set_halign(actions, gtk.ALIGN_START);
+    gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), aboutButton("Open Logs", "orca-file-symbolic", gtk.callback(openLogsClicked), self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), aboutButton("Licenses", null, gtk.callback(licensesClicked), self));
     const copy = aboutButton("Copy Diagnostics", "edit-copy-symbolic", gtk.callback(copyDiagnosticsClicked), self);
     gtk.gtk_widget_add_css_class(copy, "suggested-action");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, header), copy);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), copy);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), actions);
+    self.settings_page.about_header = header;
+    stackAboutHeader(self);
     return header;
 }
 
@@ -2969,6 +2975,13 @@ pub fn setNarrow(self: *App) void {
         gtk.gtk_widget_set_visible(label, @intFromBool(!icons));
     }
     stackEqualizerHeader(self);
+    stackAboutHeader(self);
+}
+
+fn stackAboutHeader(self: *App) void {
+    const header = self.settings_page.about_header orelse return;
+    const orientation = if (iconTabs(self)) gtk.ORIENTATION_VERTICAL else gtk.ORIENTATION_HORIZONTAL;
+    gtk.gtk_orientable_set_orientation(gtk.cast(gtk.Orientable, header), orientation);
 }
 
 fn stackEqualizerHeader(self: *App) void {
@@ -3133,6 +3146,7 @@ pub fn show(self: *App) void {
     const views = adw.adw_view_stack_new();
     const stack = gtk.cast(adw.ViewStack, views);
     page.tabs = stack;
+    adw.adw_view_stack_set_hhomogeneous(stack, gtk.false_);
     for (std.enums.values(app.SettingsTab)) |which| {
         const content = switch (which) {
             .general => generalTab(self),

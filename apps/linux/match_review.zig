@@ -736,8 +736,9 @@ pub fn build(self: *App) *gtk.Widget {
     review.message = gtk.cast(gtk.Label, message);
     gtk.gtk_widget_set_visible(message, gtk.false_);
 
+    const header = buildHeader(self);
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    append(content, &.{ buildHeader(self), sections });
+    append(content, &.{ header, sections });
     review.content = content;
 
     const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -751,5 +752,8 @@ pub fn build(self: *App) *gtk.Widget {
     review.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(scrollerDestroyed), self);
     review.built = true;
-    return scroller;
+    const bin = page_ui.breakpointBin(scroller);
+    page_ui.stackBelow(bin, "max-width: 1140px", &.{sections}, &.{});
+    page_ui.stackBelow(bin, "max-width: 750px", &.{ sections, header }, &.{});
+    return bin;
 }

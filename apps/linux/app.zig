@@ -178,6 +178,7 @@ pub const SettingsPage = struct {
     filter_hidden: [settings_filter_capacity]*gtk.Widget = undefined,
     filter_hidden_len: usize = 0,
     subtitle: ?*gtk.Label = null,
+    about_header: ?*gtk.Widget = null,
     folder_slot: ?*gtk.Box = null,
     measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,

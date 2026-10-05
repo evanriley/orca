@@ -177,6 +177,7 @@ pub extern fn adw_view_stack_add_titled_with_icon(
     icon_name: [*:0]const u8,
 ) ?*anyopaque;
 pub extern fn adw_view_stack_set_visible_child_name(stack: *ViewStack, name: [*:0]const u8) void;
+pub extern fn adw_view_stack_set_hhomogeneous(stack: *ViewStack, hhomogeneous: gtk.gboolean) void;
 pub extern fn adw_view_switcher_new() *gtk.Widget;
 pub extern fn adw_view_switcher_set_stack(switcher: *ViewSwitcher, stack: ?*ViewStack) void;
 pub extern fn adw_view_switcher_set_policy(switcher: *ViewSwitcher, policy: c_int) void;

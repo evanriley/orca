@@ -176,6 +176,33 @@ pub fn build(self: *App) *gtk.Widget {
     return bar;
 }
 
+pub fn breakpointBin(child: *gtk.Widget) *gtk.Widget {
+    const bin = adw.adw_breakpoint_bin_new();
+    gtk.gtk_widget_set_size_request(bin, 1, 1);
+    adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), child);
+    return bin;
+}
+
+pub fn stackBelow(bin: *gtk.Widget, condition: [*:0]const u8, stacked: []const *gtk.Widget, expanded: []const *gtk.Widget) void {
+    const parsed = adw.adw_breakpoint_condition_parse(condition) orelse return;
+    const breakpoint = adw.adw_breakpoint_new(parsed);
+    for (stacked) |widget| {
+        var value: gtk.GValue = .{};
+        _ = gtk.g_value_init(&value, gtk.gtk_orientation_get_type());
+        gtk.g_value_set_enum(&value, gtk.ORIENTATION_VERTICAL);
+        adw.adw_breakpoint_add_setter(breakpoint, widget, "orientation", &value);
+        gtk.g_value_unset(&value);
+    }
+    for (expanded) |widget| {
+        var value: gtk.GValue = .{};
+        _ = gtk.g_value_init(&value, gtk.G_TYPE_BOOLEAN);
+        gtk.g_value_set_boolean(&value, gtk.true_);
+        adw.adw_breakpoint_add_setter(breakpoint, widget, "vexpand", &value);
+        gtk.g_value_unset(&value);
+    }
+    adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
+}
+
 const under_bar_key = "orca-under-bar";
 const under_bar_scroller_key = "orca-under-bar-scroller";
 

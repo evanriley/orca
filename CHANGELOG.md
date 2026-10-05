@@ -1479,6 +1479,16 @@
   third of the width and the header's controls sat mid-page. Row columns
   keep their fixed widths and text columns share the extra room; prose
   keeps a readable measure.
+- **Pages fit small screens.** orca-gtk now fits a 900-pixel-wide output,
+  and no page clips at 1440 pixels with the inspector open. Before, the
+  window could not be narrower than 1348 pixels, because the page stack
+  sized every page to the widest one, Match Review, even while hidden. The
+  stack now sizes only the page shown. When a page is too narrow for its
+  side-by-side layout, the artist page stacks Top Tracks above Albums; Change History and Duplicates
+  stack their list above the detail; Match Review stacks its two tables
+  and then its header; and the scan page stacks its four stages. The
+  About tab in Settings moves its buttons under its text when the tabs
+  turn to icons.
 - **Artist and album info fetches end within a minute.** An artist or
   album info Job now stops asking once a minute has passed, and each
   request's timeout ends there, so a slow or silent service can no longer

@@ -1430,6 +1430,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const pages = gtk.gtk_stack_new();
     self.pages = gtk.cast(gtk.Stack, pages);
     gtk.gtk_stack_set_transition_type(self.pages.?, gtk.STACK_TRANSITION_CROSSFADE);
+    gtk.gtk_stack_set_hhomogeneous(self.pages.?, gtk.false_);
     _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());

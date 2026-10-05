@@ -172,6 +172,12 @@ fn sectionsStacked(sections: *gtk.Widget) bool {
     return gtk.g_object_get_data(sections, stacked_key) != null;
 }
 
+fn stackedAt(sections: *gtk.Widget, columns: SectionColumns, width: c_int) bool {
+    if (sectionsStacked(sections)) return true;
+    const tracks = columns.tracks orelse return false;
+    return width >= 0 and width < minimumWidth(tracks) + sections_gap + minimumWidth(columns.side);
+}
+
 fn minimumWidth(widget: *gtk.Widget) c_int {
     var minimum: c_int = 0;
     gtk.gtk_widget_measure(widget, gtk.ORIENTATION_HORIZONTAL, -1, &minimum, null, null, null);
@@ -200,7 +206,7 @@ fn measureSections(
     natural_baseline.* = -1;
     const columns = sectionColumns(sections) orelse return;
     const horizontal = orientation == gtk.ORIENTATION_HORIZONTAL;
-    const stacked = sectionsStacked(sections);
+    const stacked = if (horizontal) sectionsStacked(sections) else stackedAt(sections, columns, for_size);
     var side_minimum: c_int = 0;
     var side_natural: c_int = 0;
     var tracks_minimum: c_int = 0;
@@ -218,7 +224,7 @@ fn measureSections(
         minimum.* = side_minimum;
         natural.* = side_natural;
     } else if (horizontal and !stacked) {
-        minimum.* = tracks_minimum + sections_gap + side_minimum;
+        minimum.* = @max(tracks_minimum, side_minimum);
         natural.* = @max(tracks_minimum, tracks_pixels) + sections_gap + side_natural;
     } else if (horizontal or !stacked) {
         minimum.* = @max(tracks_minimum, side_minimum);
@@ -233,7 +239,7 @@ fn allocateSections(sections: *gtk.Widget, width: c_int, height: c_int, _: c_int
     const columns = sectionColumns(sections) orelse return;
     const tracks = columns.tracks orelse
         return gtk.gtk_widget_size_allocate(columns.side, &.{ .x = 0, .y = 0, .width = width, .height = height }, -1);
-    if (sectionsStacked(sections)) {
+    if (stackedAt(sections, columns, width)) {
         var tracks_height: c_int = 0;
         gtk.gtk_widget_measure(tracks, gtk.ORIENTATION_VERTICAL, width, &tracks_height, null, null, null);
         gtk.gtk_widget_size_allocate(tracks, &.{ .x = 0, .y = 0, .width = width, .height = tracks_height }, -1);
