@@ -226,11 +226,6 @@ which reaches GTK where transient virtual pointers do not. Use
 (`zwlr_virtual_pointer_v1`): GTK does not bind a device that exists only for a
 single command, as `wlrctl`'s do.
 
-macOS: `zig build` first, then build `apps/macos` with SwiftPM — it links
-`zig-out/lib/liborca` through a systemLibrary modulemap. The SwiftUI client is
-not built or tested against the current C ABI, and liborca has no macOS audio
-output (`docs/roadmap.md`, Later).
-
 Live/host-dependent checks, excluded from the normal test run:
 
 ```sh

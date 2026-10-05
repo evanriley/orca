@@ -4,8 +4,7 @@
 //! The frontend owns windows, widgets and the event loop and nothing else.
 //! Every music, library, audio and job semantic belongs to `liborca`, and this
 //! process reaches it by calling `OrcaRuntime` methods directly — real Zig
-//! types, real optionals, caller-owned pages — rather than through the C ABI
-//! the SwiftUI client needs.
+//! types, real optionals, caller-owned pages — rather than through the C ABI.
 
 const std = @import("std");
 const build_options = @import("build_options");

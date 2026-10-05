@@ -9,7 +9,7 @@ frontends, no frontend owning behaviour.
 ## Layers
 
 ```text
- orca-gtk (Zig)   orca-cli (Zig)   future TUI (Zig)      SwiftUI app (Swift)
+ orca-gtk (Zig)   orca-cli (Zig)   future TUI (Zig)      foreign frontends
         \               |               /                        |
          +---- liborca Zig API --------+                 liborca C ABI (orca.h)
                          |                                       |
@@ -26,9 +26,7 @@ frontends, no frontend owning behaviour.
   another language.
 - **Non-Zig clients** use the C ABI in `liborca/orca.h`: opaque runtime
   ownership, generational handles, plain-data snapshots and callback-scoped
-  query views. Only the macOS app needs it, because AppKit requires Swift; that
-  app is not built against the current ABI (see
-  [frontends.md](frontends.md#macos-swiftui)).
+  query views. `tests/c_abi_smoke.c` exercises it; no shipped app uses it.
 - **Frontends own presentation only**: windows, widgets, accessibility, event
   loops and OS media-control glue. Transport state, library paging, metadata
   resolution and file mutation belong to `liborca`.

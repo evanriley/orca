@@ -2243,18 +2243,3 @@ same steps: the credential callback ([Credentials](#credentials)),
 `orca_library_scrobbler_status`, `orca_library_set_feedback` and
 `orca_library_set_release_love`. [providers.md](providers.md) describes what a listen is
 and what is sent.
-
-## macOS SwiftUI
-
-`apps/macos` is a Swift Package that links `zig-out/lib/liborca` through a
-systemLibrary modulemap (`Sources/COrca`). It is **not built or tested against
-the current C ABI**, and liborca has no macOS audio output, so it cannot play;
-both are listed under [Later](roadmap.md#later). `tests/c_abi_smoke.c` is what
-exercises the C ABI in the meantime.
-
-The client's design stays within the boundary: it requests 256-row pages,
-inside the ABI's 512-row bound, shows them in a SwiftUI `List`, mirrors Player
-snapshots through `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`, and
-imports no Zig, SQLite, codec or audio layout. File import, URL drops,
-notifications, accessibility labels, menus and keyboard shortcuts are
-presentation-only platform concerns.

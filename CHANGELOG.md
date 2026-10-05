@@ -1691,6 +1691,12 @@
   `TXXX`, in any case; a `COMM` wins. A tag write that changes the comment
   replaces that `TXXX` with the `COMM` frame.
 
+### Removed
+
+- **The SwiftUI client.** `apps/macos` was not built or tested against the
+  current C ABI and could not play. `liborca` still builds for aarch64 macOS;
+  a macOS app, output and watcher are a roadmap item.
+
 ## 0.8.1 - 2026-10-02
 
 Ships Library schema version 30, unchanged from 0.8.0.
