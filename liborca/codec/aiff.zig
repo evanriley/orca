@@ -40,7 +40,7 @@ pub fn openDecoder(allocator: std.mem.Allocator, source: storage.ReadableSource)
     context.* = .{ .allocator = allocator, .source = source, .layout = layout, .scratch = scratch };
     return .{
         .context = context,
-        .vtable = &vtable,
+        .vtable = if (layout.encoding == .big_float) &vtable else &integer_vtable,
         .codec = if (layout.encoding == .big_float) decoder_api.codec_id.pcm_float else decoder_api.codec_id.pcm,
         .source_format = layout.format,
         .format = .{
@@ -148,6 +148,19 @@ fn extendedToRate(bytes: *const [10]u8) ?u32 {
 }
 
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
+    return readFramesAs(f32, decodeSample, context_ptr, output);
+}
+
+fn readFramesI32(context_ptr: *anyopaque, output: []i32) !usize {
+    return readFramesAs(i32, decodeInteger, context_ptr, output);
+}
+
+fn readFramesAs(
+    comptime Sample: type,
+    comptime decode: fn (Encoding, []const u8) Sample,
+    context_ptr: *anyopaque,
+    output: []Sample,
+) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     const layout = context.layout;
     const channels = layout.format.channels;
@@ -160,7 +173,7 @@ fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const whole = read / layout.format.bytes_per_frame;
     const width = layout.format.bits_per_sample / 8;
     for (output[0 .. whole * channels], 0..) |*sample, index| {
-        sample.* = decodeSample(layout.encoding, bytes[index * width ..][0..width]);
+        sample.* = decode(layout.encoding, bytes[index * width ..][0..width]);
     }
     context.position += whole;
     return whole;
@@ -181,6 +194,17 @@ fn decodeSample(encoding: Encoding, bytes: []const u8) f32 {
     };
 }
 
+fn decodeInteger(encoding: Encoding, bytes: []const u8) i32 {
+    std.debug.assert(encoding != .big_float);
+    const endian: std.builtin.Endian = if (encoding == .little_integer) .little else .big;
+    return switch (bytes.len) {
+        1 => @as(i32, @as(i8, @bitCast(bytes[0]))) << 24,
+        2 => @as(i32, std.mem.readInt(i16, bytes[0..2], endian)) << 16,
+        3 => @as(i32, std.mem.readInt(i24, bytes[0..3], endian)) << 8,
+        else => std.mem.readInt(i32, bytes[0..4], endian),
+    };
+}
+
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     if (frame > context.layout.frames) return error.SeekOutOfRange;
@@ -196,6 +220,13 @@ fn deinit(context_ptr: *anyopaque) void {
 
 const vtable: decoder_api.Decoder.VTable = .{
     .read_frames = readFrames,
+    .seek = seek,
+    .deinit = deinit,
+};
+
+const integer_vtable: decoder_api.Decoder.VTable = .{
+    .read_frames = readFrames,
+    .read_frames_i32 = readFramesI32,
     .seek = seek,
     .deinit = deinit,
 };
@@ -242,6 +273,25 @@ test "the sample rate is read from an 80-bit extended float" {
     try std.testing.expectEqual(@as(?u32, 44_100), extendedToRate("\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00"));
     try std.testing.expectEqual(@as(?u32, 48_000), extendedToRate("\x40\x0e\xbb\x80\x00\x00\x00\x00\x00\x00"));
     try std.testing.expectEqual(@as(?u32, null), extendedToRate("\x00" ** 10));
+}
+
+test "integer AIFF samples read left-justified and agree with the float read" {
+    const cases = [_]struct { encoding: Encoding, bytes: []const u8, expected: i32 }{
+        .{ .encoding = .big_integer, .bytes = "\x80", .expected = std.math.minInt(i32) },
+        .{ .encoding = .big_integer, .bytes = "\x7f", .expected = 0x7f00_0000 },
+        .{ .encoding = .big_integer, .bytes = "\xff\xfe", .expected = -0x20000 },
+        .{ .encoding = .little_integer, .bytes = "\xfe\xff", .expected = -0x20000 },
+        .{ .encoding = .big_integer, .bytes = "\x12\x34\x56", .expected = 0x1234_5600 },
+        .{ .encoding = .little_integer, .bytes = "\x56\x34\x92", .expected = @bitCast(@as(u32, 0x9234_5600)) },
+        .{ .encoding = .big_integer, .bytes = "\x91\x23\x45\x7f", .expected = @bitCast(@as(u32, 0x9123_457f)) },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, decodeInteger(case.encoding, case.bytes));
+        try std.testing.expectEqual(
+            decodeSample(case.encoding, case.bytes),
+            decoder_api.integerSampleToFloat(decodeInteger(case.encoding, case.bytes)),
+        );
+    }
 }
 
 test "a compressed AIFC is refused rather than read as PCM" {

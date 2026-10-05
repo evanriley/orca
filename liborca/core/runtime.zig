@@ -806,7 +806,7 @@ pub const OrcaRuntime = struct {
     /// Files that still owe the default loudness and fingerprint measurement.
     pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
-            analysis_service.diagnosticsSelector(.{}),
+            analysis_service.analysisSelectors(.{}),
         );
     }
 

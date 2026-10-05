@@ -3,11 +3,11 @@
 //!
 //! Comparing every pair is O(n^2) and cannot run at 500,000 files, so
 //! candidates are found through indexes. `library/analysis_pass.zig` writes
-//! `files.audio_hash` — BLAKE3 over the decoded samples. Two files whose
-//! decoded audio hashes identically **are** the same audio, whatever their
-//! containers, bitrates or tags claim, and that is an index lookup rather than
-//! a comparison. Everything else the fingerprint decides, and it decides it
-//! only inside a bucket small enough to afford:
+//! `files.audio_hash` — ORAH over the decoded samples, with its tier. Two
+//! files whose lossless integer samples hash identically **are** the same
+//! audio, whatever their containers or tags claim, and that is an index lookup
+//! rather than a comparison. Everything else the fingerprint decides, and it
+//! decides it only inside a bucket small enough to afford:
 //!
 //! - **selection** walks `files` by primary key, cursor-resumable, bounded;
 //! - the **exact bucket** is an equality search of `files_audio_hash`;
@@ -31,6 +31,8 @@ const quick_hash = @import("../storage/quick_hash.zig");
 const scanner = @import("scanner.zig");
 
 pub const CancellationToken = scanner.CancellationToken;
+
+const lossless_tier: u8 = @intFromEnum(analysis.fingerprint.AudioHashTier.lossless_integer);
 
 /// The most files one bucket may hold, and therefore the most fingerprint
 /// comparisons one candidate can cost.
@@ -251,12 +253,13 @@ pub const DuplicateScan = struct {
         for (peers[0..found]) |peer| {
             // A peer with no decoded-audio hash is one no analysis has
             // measured, so it has no fingerprint to compare either; and a peer
-            // with *this* hash is already accounted for by the exact bucket,
-            // which a comparison could only agree with more expensively.
-            // Between them these two skips are what leaves `likely_recording`
-            // as the only verdict this loop can reach.
+            // with *this* lossless hash is already accounted for by the exact
+            // bucket, which a comparison could only agree with more
+            // expensively. Between them these two skips are what leaves
+            // `likely_recording` as the only verdict this loop can reach.
             const peer_hash = peer.audio_hash orelse continue;
-            if (std.mem.eql(u8, &peer_hash, &audio_hash)) continue;
+            if (peer.audio_hash_tier == lossless_tier and
+                std.mem.eql(u8, &peer_hash, &audio_hash)) continue;
             const peer_identity = peer.source_identity orelse continue;
             // A peer whose stored fingerprint is missing or unreadable is
             // skipped rather than failing the candidate: the defect belongs to
@@ -303,8 +306,10 @@ pub const DuplicateScan = struct {
     /// Two sources, in order of how sure they are. A second *present location*
     /// of the same `files` row is a byte-identical copy the scanner's identity
     /// cascade already resolved to one row, so it never becomes a second row
-    /// and could never be found by comparing rows. An equal `audio_hash` is a
-    /// different row whose decoded samples are the same audio.
+    /// and could never be found by comparing rows. An equal lossless
+    /// `audio_hash` is a different row whose integer samples are the same
+    /// audio; an equal hash of decoded float samples is not, because it says
+    /// only that one decoder rendered two lossy sources alike.
     fn exactDetails(
         self: *DuplicateScan,
         candidate: database.repository.DuplicateCandidate,
@@ -319,6 +324,7 @@ pub const DuplicateScan = struct {
             );
         }
         const audio_hash = candidate.audio_hash orelse return null;
+        if (candidate.audio_hash_tier != lossless_tier) return null;
         var peers: [max_bucket_peers]i64 = undefined;
         const found = try self.files.audioHashPeersInto(&peers, &audio_hash, candidate.id);
         if (found == 0) return null;
@@ -445,13 +451,34 @@ const Fixture = struct {
         return samples;
     }
 
-    /// A `files` row carrying exactly what the analysis pass stores: the
-    /// decoded-audio hash on `files`, the encoded fingerprint in
-    /// `analysis_results` under the file's recorded identity.
+    /// A `files` row carrying exactly what the analysis pass stores for a
+    /// lossless 16-bit source: the decoded-audio hash and its tier on
+    /// `files`, the encoded fingerprint in `analysis_results` under the
+    /// file's recorded identity.
     fn recordMeasured(self: *Fixture, path: []const u8, samples: []const f32) !i64 {
-        var analyzer = try analysis.fingerprint.Analyzer.init(testing.allocator, sample_rate, 1);
+        return self.recordMeasuredAt(path, samples, .lossless_integer);
+    }
+
+    fn recordMeasuredAt(
+        self: *Fixture,
+        path: []const u8,
+        samples: []const f32,
+        tier: analysis.fingerprint.AudioHashTier,
+    ) !i64 {
+        var analyzer = try analysis.fingerprint.Analyzer.init(testing.allocator, sample_rate, 1, tier);
         defer analyzer.deinit();
-        try analyzer.process(samples);
+        switch (tier) {
+            .decoded_float => try analyzer.process(samples),
+            .lossless_integer => {
+                const integers = try testing.allocator.alloc(i32, samples.len);
+                defer testing.allocator.free(integers);
+                for (integers, samples) |*integer, sample| {
+                    const quantized: i32 = @intFromFloat(@round(std.math.clamp(sample, -1, 1) * 32767));
+                    integer.* = quantized << 16;
+                }
+                try analyzer.processIntegers(integers);
+            },
+        }
         const measured = try analyzer.finish();
         defer measured.deinit();
 
@@ -460,7 +487,8 @@ const Fixture = struct {
         const file_id = try self.library.files.create(.{
             .audio_format = 1,
             .quick_hash = &identity,
-            .audio_hash = &measured.decoded_audio_hash,
+            .audio_hash = &measured.audio_hash.digest,
+            .audio_hash_tier = @intFromEnum(measured.audio_hash.tier),
             .duration_ms = @intCast(samples.len * 1000 / sample_rate),
         });
         const encoded = try analysis.fingerprint.encode(testing.allocator, measured);
@@ -548,7 +576,7 @@ test "selecting candidates and looking up either bucket are index searches, not 
 
     const selection = try planOf(
         &fixture,
-        "EXPLAIN QUERY PLAN SELECT id, audio_hash, duration_ms, quick_hash FROM files" ++
+        "EXPLAIN QUERY PLAN SELECT id, audio_hash, duration_ms, quick_hash, audio_hash_tier FROM files" ++
             " WHERE id > ?1 ORDER BY id LIMIT ?2;",
     );
     defer testing.allocator.free(selection);
@@ -558,7 +586,7 @@ test "selecting candidates and looking up either bucket are index searches, not 
     const exact_bucket = try planOf(
         &fixture,
         "EXPLAIN QUERY PLAN SELECT id FROM files WHERE audio_hash = ?1 AND id <> ?2" ++
-            " ORDER BY id LIMIT ?3;",
+            " AND audio_hash_tier = 1 ORDER BY id LIMIT ?3;",
     );
     defer testing.allocator.free(exact_bucket);
     try testing.expect(std.mem.indexOf(u8, exact_bucket, "SCAN files") == null);
@@ -566,7 +594,7 @@ test "selecting candidates and looking up either bucket are index searches, not 
 
     const plausible_bucket = try planOf(
         &fixture,
-        "EXPLAIN QUERY PLAN SELECT id, quick_hash, audio_hash FROM files" ++
+        "EXPLAIN QUERY PLAN SELECT id, quick_hash, audio_hash, audio_hash_tier FROM files" ++
             " WHERE duration_ms >= ?1 AND duration_ms <= ?2 AND id <> ?3" ++
             " ORDER BY duration_ms, id LIMIT ?4;",
     );
@@ -575,7 +603,7 @@ test "selecting candidates and looking up either bucket are index searches, not 
     try testing.expect(std.mem.indexOf(u8, plausible_bucket, "files_duration") != null);
 }
 
-test "two files whose decoded audio hashes alike are reported as exact duplicates" {
+test "two files whose lossless audio hashes alike are reported as exact duplicates" {
     var fixture = try Fixture.init("file:orca-duplicate-exact?mode=memory&cache=shared");
     defer fixture.deinit();
     const samples = try Fixture.tone(3, 1, 0.6);
@@ -595,6 +623,25 @@ test "two files whose decoded audio hashes alike are reported as exact duplicate
     const backward = (try fixture.finding(second, .exact_duplicate)).?;
     defer testing.allocator.free(backward);
     try testing.expect(std.mem.endsWith(u8, backward, "/music/album/track.flac"));
+}
+
+test "two lossy files whose decoded audio hashes alike are likely, not exact, duplicates" {
+    var fixture = try Fixture.init("file:orca-duplicate-decoded-float?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const samples = try Fixture.tone(3, 1, 0.6);
+    defer testing.allocator.free(samples);
+    const first = try fixture.recordMeasuredAt("/music/one.mp3", samples, .decoded_float);
+    const second = try fixture.recordMeasuredAt("/music/one-copy.mp3", samples, .decoded_float);
+
+    var pass = fixture.scan();
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 0), result.exact);
+    try testing.expectEqual(@as(u64, 2), result.likely);
+    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(first, .exact_duplicate));
+    try testing.expectEqual(@as(?[]u8, null), try fixture.finding(second, .exact_duplicate));
+    const details = (try fixture.finding(first, .likely_duplicate)).?;
+    defer testing.allocator.free(details);
+    try testing.expect(std.mem.indexOf(u8, details, "/music/one-copy.mp3") != null);
 }
 
 test "each exact duplicate names the other file, and keeps its finding when that file is deleted" {

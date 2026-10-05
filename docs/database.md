@@ -27,7 +27,10 @@ A scan re-finds a file through a cascade, cheapest first:
    only pass that decodes a whole file, and never by a scanner. It holds for
    the bytes it was measured from: an update that records a different
    `quick_hash` clears it, and it stays NULL until the analysis pass decodes
-   the new bytes.
+   the new bytes. `files.audio_hash_tier` records what was hashed: 1 for a
+   lossless source's integer samples, 2 for decoded float samples, NULL with
+   no hash. Only equal tier-1 hashes are the same audio (see
+   [analysis.md](analysis.md#the-audio-hash)).
 
 **A file is one set of bytes.** Byte-identical copies are one file at several
 locations: a new path holding bytes the Library already has joins that file
@@ -562,6 +565,13 @@ together, as it clears `audio_hash`. Neither the scanner nor the executor writes
 `files.content_hash`. Startup recovery reads the journal before this
 migration runs, so `MutationJournalRepository.get` reads NULL content hashes
 from a table that does not have the columns.
+
+Migration 57 sets every `files.audio_hash` to NULL and adds
+`files.audio_hash_tier INTEGER CHECK (audio_hash_tier IN (1, 2))`. The hashes
+it clears covered float32 samples without the sample rate, channel count or
+length, so 32-bit integer sources one LSB apart and the same samples at another
+rate hashed alike. Temporal fingerprint version 3 re-selects every file, and
+the analysis pass stores an ORAH version 2 hash with its tier.
 
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables

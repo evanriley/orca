@@ -20,11 +20,28 @@ pub const Decoder = struct {
         read_frames: *const fn (*anyopaque, []f32) anyerror!usize,
         seek: *const fn (*anyopaque, u64) anyerror!void,
         deinit: *const fn (*anyopaque) void,
+        /// Present only for a lossless integer source. The same frames as
+        /// `read_frames`, from the same cursor, left-justified in 32 bits.
+        read_frames_i32: ?*const fn (*anyopaque, []i32) anyerror!usize = null,
     };
 
     pub fn readFrames(self: Decoder, output: []f32) !usize {
         if (output.len % self.format.channels != 0) return error.UnalignedPcmBuffer;
         return self.vtable.read_frames(self.context, output);
+    }
+
+    /// Whether `readFramesI32` delivers the source's exact integer samples.
+    pub fn hasIntegerSamples(self: Decoder) bool {
+        return self.vtable.read_frames_i32 != null;
+    }
+
+    /// Interleaved samples left-justified in 32 bits: a 16-bit sample `s`
+    /// reads as `s << 16`. `integerSampleToFloat` of each is exactly what
+    /// `readFrames` returns for it.
+    pub fn readFramesI32(self: Decoder, output: []i32) !usize {
+        const read = self.vtable.read_frames_i32 orelse return error.NoIntegerSamples;
+        if (output.len % self.format.channels != 0) return error.UnalignedPcmBuffer;
+        return read(self.context, output);
     }
 
     pub fn seek(self: Decoder, frame: u64) !void {
@@ -36,6 +53,10 @@ pub const Decoder = struct {
         self.* = undefined;
     }
 };
+
+pub fn integerSampleToFloat(sample: i32) f32 {
+    return @floatCast(@as(f64, @floatFromInt(sample)) / 2147483648.0);
+}
 
 pub const OpenFn = *const fn (std.mem.Allocator, @import("../storage/source.zig").ReadableSource) anyerror!Decoder;
 

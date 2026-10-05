@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 56;
+pub const current_version = 57;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1585,6 +1585,12 @@ const migration_56 =
     \\
 ;
 
+const migration_57 =
+    \\UPDATE files SET audio_hash = NULL WHERE audio_hash IS NOT NULL;
+    \\ALTER TABLE files ADD COLUMN audio_hash_tier INTEGER CHECK (audio_hash_tier IN (1, 2));
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2125,6 +2131,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 54 and target_version >= 54) try db.exec(migration_54);
     if (version < 55 and target_version >= 55) try db.exec(migration_55);
     if (version < 56 and target_version >= 56) try db.exec(migration_56);
+    if (version < 57 and target_version >= 57) try db.exec(migration_57);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -3036,14 +3043,20 @@ test "a version-22 library keeps an audio hash only where a current fingerprint 
         \\    (6, 1, 'orca.audio-diagnostics', 2, X'00', X'06', X'00');
     );
 
-    try apply(db);
+    try applyThrough(db, 56);
 
-    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 56), try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE audio_hash IS NOT NULL;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1 AND audio_hash = X'AA';"));
     try std.testing.expectEqual(@as(i64, 6), try scalar(db, "SELECT count(*) FROM files WHERE quick_hash IS NOT NULL;"));
     try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
     try checkForeignKeys(db);
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM files WHERE audio_hash IS NOT NULL;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
 }
 
 test "a version-23 library keeps each service's block and backoff and gains no request time" {
@@ -4264,5 +4277,29 @@ test "a version-55 library keeps its journal and files and gains content hash co
         db,
         "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'files_content_hash' AND tbl_name = 'files';",
     ));
+    try checkForeignKeys(db);
+}
+
+test "a version-56 library drops every audio hash, which had no tier, and gains a tier column" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v56-audio-hash-tier.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 56);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes, quick_hash, audio_hash) VALUES
+        \\    (1, 1, 10, X'01', X'AA'),
+        \\    (2, 1, 10, X'02', NULL);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM files WHERE audio_hash IS NULL AND audio_hash_tier IS NULL;"));
+    try db.exec("UPDATE files SET audio_hash = X'BB', audio_hash_tier = 1 WHERE id = 1;");
+    try db.exec("UPDATE files SET audio_hash = X'CC', audio_hash_tier = 2 WHERE id = 2;");
+    try std.testing.expectError(error.SqlFailed, db.exec("UPDATE files SET audio_hash_tier = 3 WHERE id = 1;"));
     try checkForeignKeys(db);
 }

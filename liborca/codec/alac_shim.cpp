@@ -87,20 +87,32 @@ static int32_t packed24(const uint8_t *bytes)
     return (int32_t)(value << 8) >> 8;
 }
 
+static int32_t decode_packet(struct orca_alac_decoder *decoder, const uint8_t *packet,
+                             uint32_t packet_size, uint32_t *frames)
+{
+    BitBuffer bits;
+
+    *frames = 0;
+    BitBufferInit(&bits, const_cast<uint8_t *>(packet), packet_size);
+    if (decoder->native.Decode(&bits, decoder->scratch, decoder->frame_length,
+                               decoder->channels, frames) != 0 ||
+        *frames > decoder->frame_length) {
+        *frames = 0;
+        return -1;
+    }
+    return 0;
+}
+
 extern "C" int32_t orca_alac_decoder_decode(struct orca_alac_decoder *decoder,
                                             const uint8_t *packet, uint32_t packet_size,
                                             float *output, uint32_t *frames_written)
 {
-    BitBuffer bits;
     uint32_t frames = 0;
     size_t count;
     size_t index;
 
     *frames_written = 0;
-    BitBufferInit(&bits, const_cast<uint8_t *>(packet), packet_size);
-    if (decoder->native.Decode(&bits, decoder->scratch, decoder->frame_length,
-                               decoder->channels, &frames) != 0 ||
-        frames > decoder->frame_length) {
+    if (decode_packet(decoder, packet, packet_size, &frames) != 0) {
         return -1;
     }
     count = (size_t)frames * decoder->channels;
@@ -123,6 +135,40 @@ extern "C" int32_t orca_alac_decoder_decode(struct orca_alac_decoder *decoder,
         /* 20-bit samples arrive left-aligned in 24-bit containers. */
         for (index = 0; index < count; index++) {
             output[index] = (float)packed24(decoder->scratch + index * 3) / 8388608.0f;
+        }
+        break;
+    }
+    *frames_written = frames;
+    return 0;
+}
+
+extern "C" int32_t orca_alac_decoder_decode_i32(struct orca_alac_decoder *decoder,
+                                                const uint8_t *packet, uint32_t packet_size,
+                                                int32_t *output, uint32_t *frames_written)
+{
+    uint32_t frames = 0;
+    size_t count;
+    size_t index;
+
+    *frames_written = 0;
+    if (decode_packet(decoder, packet, packet_size, &frames) != 0) {
+        return -1;
+    }
+    count = (size_t)frames * decoder->channels;
+    switch (decoder->bit_depth) {
+    case 16: {
+        const int16_t *samples = reinterpret_cast<const int16_t *>(decoder->scratch);
+        for (index = 0; index < count; index++) {
+            output[index] = (int32_t)((uint32_t)(int32_t)samples[index] << 16);
+        }
+        break;
+    }
+    case 32:
+        memcpy(output, decoder->scratch, count * sizeof(int32_t));
+        break;
+    default:
+        for (index = 0; index < count; index++) {
+            output[index] = (int32_t)((uint32_t)packed24(decoder->scratch + index * 3) << 8);
         }
         break;
     }

@@ -70,14 +70,18 @@ only the finished measurements enter one.
 
 ### What "already analyzed" means
 
-The selection key is the analysis cache key itself, minus the file:
+The selection key is the analysis cache key itself, minus the file, for each
+of the two measurements the pass stores — the diagnostics and the temporal
+fingerprint (`analysis.service.analysisSelectors`):
 
 ```
 kind, algorithm_id, algorithm_version, parameter_hash   +   source_identity
 ```
 
-A file still owes work when no `analysis_results` row exists for it under that
-key with `source_identity = files.quick_hash`. That key is the right one
+A file still owes work when, for either measurement, no `analysis_results` row
+exists for it under that key with `source_identity = files.quick_hash`. Bumping
+either algorithm's version therefore re-selects every file. That key is the
+right one
 because it *already* encodes every reason a stored measurement stops counting,
 and a marker column on `files` would be a second source of truth free to
 disagree with the results it claims to describe:
@@ -87,12 +91,16 @@ disagree with the results it claims to describe:
 - the parameters changed — `parameter_hash` no longer matches.
 
 `analysis_results` is `WITHOUT ROWID` with exactly those six columns as its
-primary key, so each candidate row costs one full-prefix B-tree probe and no
-index had to be invented. `EXPLAIN QUERY PLAN` on the page query:
+primary key, so each candidate row costs at most two full-prefix B-tree probes
+and no index had to be invented. `EXPLAIN QUERY PLAN` on the page query:
 
 ```
 |--SEARCH files USING INTEGER PRIMARY KEY (rowid>?)
 |--CORRELATED SCALAR SUBQUERY 2
+|  `--SEARCH analysis_results USING COVERING INDEX analysis_results_current
+|     (file_id=? AND kind=? AND algorithm_id=? AND algorithm_version=?
+|      AND parameter_hash=? AND source_identity=?)
+|--CORRELATED SCALAR SUBQUERY 3
 |  `--SEARCH analysis_results USING COVERING INDEX analysis_results_current
 |     (file_id=? AND kind=? AND algorithm_id=? AND algorithm_version=?
 |      AND parameter_hash=? AND source_identity=?)
@@ -114,8 +122,9 @@ every reason to measure a file again is already a reason the selection sees it.
 
 - **Measured.** The encoded diagnostics and temporal fingerprint, the AcoustID
   fingerprint unless the audio is too short for one, the decoded-audio hash
-  into `files.audio_hash` (tier 4 of the identity cascade — the only tier that
-  survives Orca's own tag writes), `corrupt_audio` cleared and `clipping`,
+  into `files.audio_hash` and its tier into `files.audio_hash_tier` (tier 4 of
+  the identity cascade — the only tier that survives Orca's own tag writes;
+  see [the audio hash](#the-audio-hash)), `corrupt_audio` cleared and `clipping`,
   `excessive_silence` and `missing_analysis` raised or cleared, all in one
   bounded transaction per batch. A file with no gateable loudness — too short,
   or silent — is still stored, so it is not re-decoded on every run; it
@@ -342,9 +351,10 @@ mean measuring the library a second time.
   copy of the file it left (see
   [database.md](database.md#identity)).
   1. one `files` row with a second `present` location, or
-  2. two `files` rows whose `files.audio_hash` — BLAKE3 over the decoded
-     samples — is byte-identical. Same audio, whatever the container, the
-     bitrate or the tags claim.
+  2. two `files` rows whose `files.audio_hash` is byte-identical and of tier
+     1, lossless integer samples (see [the audio hash](#the-audio-hash)). Same
+     audio, whatever the container or the tags claim. Equal tier-2 hashes are
+     reported as `likely_duplicate` instead.
 - **`likely_duplicate`** — the audio only *resembles* another file's, above a
   similarity threshold, and the claim will sometimes be wrong. It is worth
   making because it catches the case the exact test structurally cannot: a
@@ -377,7 +387,7 @@ duplicate of something helps them decide nothing.
 | question | query | plan |
 | --- | --- | --- |
 | which file next | `files.id > ?` | `SEARCH files USING INTEGER PRIMARY KEY (rowid>?)` |
-| certain bucket | `audio_hash = ?` | `SEARCH files USING COVERING INDEX files_audio_hash (audio_hash=?)` |
+| certain bucket | `audio_hash = ? AND audio_hash_tier = 1` | `SEARCH files USING INDEX files_audio_hash (audio_hash=?)` |
 | plausible bucket | `duration_ms BETWEEN ? AND ?` | `SEARCH files USING INDEX files_duration (duration_ms>? AND duration_ms<?)` |
 
 None of the three is a scan. `files_audio_hash` serves the certain bucket and
@@ -439,18 +449,58 @@ than doubling them.
 Both members of a pair are reported, because either is the one somebody might
 delete.
 
+### The audio hash
+
+`files.audio_hash` is an ORAH version 2 digest, taken by
+`analysis.fingerprint.AudioHasher` in the same decode as the temporal
+fingerprint:
+
+```
+BLAKE3( header || BLAKE3(samples) )
+
+header (21 bytes, little-endian):
+  "ORAH"  u16 version = 2  u8 tier  u32 sample_rate  u8 channels
+  u8 layout = 0 (interleaved, source order)  u64 frames
+```
+
+The frame count is known only when the stream ends, so the header commits to
+the digest of the samples rather than preceding them. Two streams that differ
+in sample rate, channel count, tier or length never share a hash, whatever
+their samples.
+
+The tier says what the samples are, and is stored in `files.audio_hash_tier`:
+
+| tier | samples hashed | sources |
+| --- | --- | --- |
+| 1, lossless integer | each sample as an `i32` left-justified in 32 bits, little-endian | FLAC, ALAC, integer WAV, integer AIFF and AIFC |
+| 2, decoded float | the bits of each decoded `f32`, little-endian | float WAV and AIFF, MP3/MP2/MP1, AAC, Opus, Vorbis, QOA |
+
+Tier 1 reads the source's own integers through `Decoder.readFramesI32`, so the
+hash is exact at any width: two 32-bit samples one LSB apart hash differently
+although they narrow to the same `f32`. Left-justification makes the container
+width irrelevant, so 16-bit audio in FLAC, in a 16-bit WAV and in a 24-bit WAV
+hashes identically. The effective width — 32 minus the trailing zero bits
+common to every sample, 16 for 16-bit audio in a 24-bit container — is kept in
+the stored fingerprint result.
+
+Tier 2 is one decoder's rendering. A lossy stream decodes differently in
+another decoder or another decoder version, and a float source has no integer
+form to compare, so equal tier-2 hashes support only `likely_duplicate`.
+Hashes of different tiers never compare equal.
+
+The audio hash travels in the temporal fingerprint result (`ORFP` version 2,
+which refuses version 1). `fingerprint_algorithm_version` 3 marks the change, so
+every file measured under an earlier version is selected and measured again,
+and migration 57 clears every hash stored without a tier.
+
 ### The exact test and decoding
 
-The exact test holds because `files.audio_hash` is a function of the audio: the
-lossless decoders return the samples the file encodes, and FLAC decodes
-bit-exactly through libFLAC (see [codecs.md](codecs.md#flac)). Two lossless
-files holding identical PCM hash identically whatever their container or encoder
-settings, and are reported as `exact_duplicate`.
-
-Exact-duplicate certainty is currently limited. Decoded samples are narrowed to
-float32 before hashing, so 32-bit integer and float64 sources lose precision,
-and the hash covers neither sample rate nor channel layout. A release gate in
-[roadmap.md](roadmap.md#before-the-public-preview) fixes this.
+The exact test holds because a tier-1 `files.audio_hash` is a function of the
+audio: the lossless decoders return the integers the file encodes, and FLAC
+decodes bit-exactly through libFLAC (see [codecs.md](codecs.md#flac)). Two
+lossless files holding identical PCM at the same rate and channel count hash
+identically whatever their container, width or encoder settings, and are
+reported as `exact_duplicate`.
 
 ### Groups
 

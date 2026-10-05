@@ -1509,6 +1509,13 @@
 
 ### Fixed
 
+- **Exact duplicates are exact.** The audio hash is versioned and covers the
+  sample rate, channel count and length. For FLAC, ALAC, WAV and AIFF it
+  covers the source's own integer samples, so 32-bit files one LSB apart no
+  longer match. The same samples at another rate, or as mono and stereo, no
+  longer hash alike either. Lossy and float files are reported only as likely
+  duplicates. Migration 57 clears the old hashes and the next analysis
+  measures every file again.
 - **A brief provider outage costs seconds, not minutes.** Matching, AcoustID
   submission, cover art, lyrics and artist information ask again after about 5
   s, then about 30 s, then report the service unavailable; matching and

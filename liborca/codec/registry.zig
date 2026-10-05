@@ -227,7 +227,7 @@ const PrefixedDecoder = struct {
         self.inner = try registry.openExact(allocator, detected.format, self.view.readable());
         return .{
             .context = self,
-            .vtable = &vtable,
+            .vtable = if (self.inner.hasIntegerSamples()) &integer_vtable else &vtable,
             .codec = self.inner.codec,
             .source_format = self.inner.source_format,
             .format = self.inner.format,
@@ -238,6 +238,11 @@ const PrefixedDecoder = struct {
     fn readFrames(context: *anyopaque, output: []f32) !usize {
         const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
         return self.inner.readFrames(output);
+    }
+
+    fn readFramesI32(context: *anyopaque, output: []i32) !usize {
+        const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
+        return self.inner.readFramesI32(output);
     }
 
     fn seek(context: *anyopaque, frame: u64) !void {
@@ -254,6 +259,13 @@ const PrefixedDecoder = struct {
 
     const vtable: decoder.Decoder.VTable = .{
         .read_frames = readFrames,
+        .seek = seek,
+        .deinit = deinit,
+    };
+
+    const integer_vtable: decoder.Decoder.VTable = .{
+        .read_frames = readFrames,
+        .read_frames_i32 = readFramesI32,
         .seek = seek,
         .deinit = deinit,
     };

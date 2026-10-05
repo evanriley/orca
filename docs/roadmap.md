@@ -342,11 +342,6 @@ removed.
   the identity cascade still treat it as the old bytes. A merge or an exact
   verdict requires a full-content comparison. Checked by tests with files that
   differ only in the middle.
-- Decoded-audio hashes include sample rate and channel layout and keep source
-  precision. Today only float32 sample bits are hashed, so the same samples at
-  44.1 and 48 kHz, or as mono and stereo, hash equal, and 32-bit PCM values
-  below float32 precision collapse. Checked by hashing such pairs and
-  requiring different results.
 - A file the scan fails to open, for a permission, descriptor or I/O error,
   keeps its availability instead of being swept missing. Checked by a scan
   over an unreadable file.

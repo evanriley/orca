@@ -70,9 +70,9 @@ const Measurement = struct {
         /// Null when the audio is too short to fingerprint or Chromaprint
         /// failed; the other measurements are stored regardless.
         chromaprint_bytes: ?[]u8,
-        /// BLAKE3 over the decoded samples: tier 4 of the identity cascade,
+        /// ORAH over the decoded samples: tier 4 of the identity cascade,
         /// and the only tier that survives Orca writing a tag into the file.
-        audio_hash: [32]u8,
+        audio_hash: analysis.fingerprint.AudioHash,
         has_loudness: bool,
         integrated_lufs: ?f32,
         clipped_runs: u64,
@@ -223,7 +223,7 @@ pub const LibraryAnalysis = struct {
             self.batch_size,
             @as(usize, database.repository.max_page),
         ));
-        const measurement_selector = self.selector();
+        const measurement_selectors = self.selectors();
 
         const slots = try self.allocator.alloc(?(anyerror!Measurement.Outcome), page_limit);
         defer self.allocator.free(slots);
@@ -247,7 +247,7 @@ pub const LibraryAnalysis = struct {
                     self.allocator,
                     cursor,
                     page_limit,
-                    measurement_selector,
+                    measurement_selectors,
                 );
             defer page.deinit();
             if (page.items.len == 0) break;
@@ -292,10 +292,10 @@ pub const LibraryAnalysis = struct {
         return result;
     }
 
-    /// The measurement this pass selects on and stores under. One function, so
+    /// The measurements this pass selects on and stores under. One function, so
     /// "which files still owe work" and "what was written" cannot drift.
-    pub fn selector(self: *const LibraryAnalysis) database.repository.AnalysisSelector {
-        return analysis.service.diagnosticsSelector(self.parameters);
+    pub fn selectors(self: *const LibraryAnalysis) database.repository.AnalysisSelectors {
+        return analysis.service.analysisSelectors(self.parameters);
     }
 
     fn isCancelled(self: *const LibraryAnalysis) bool {
@@ -390,7 +390,7 @@ pub const LibraryAnalysis = struct {
             .diagnostics_bytes = diagnostics_bytes,
             .fingerprint_bytes = fingerprint_bytes,
             .chromaprint_bytes = chromaprint_bytes,
-            .audio_hash = measured.fingerprint.decoded_audio_hash,
+            .audio_hash = measured.fingerprint.audio_hash,
             .has_loudness = measured.diagnostics.replay_gain_db != null,
             .integrated_lufs = measured.diagnostics.integrated_lufs,
             .clipped_runs = measured.diagnostics.clipped_runs,
@@ -435,7 +435,11 @@ pub const LibraryAnalysis = struct {
                     );
                     result.bytes_stored += bytes.len;
                 }
-                try self.files.setAudioHashLocked(measurement.file_id, &value.audio_hash);
+                try self.files.setAudioHashLocked(
+                    measurement.file_id,
+                    &value.audio_hash.digest,
+                    @intFromEnum(value.audio_hash.tier),
+                );
                 // Safe to retire: only a pass that decoded the whole stream
                 // may raise or clear this kind, and this is that pass.
                 try self.health_issues.clearLocked(measurement.file_id, .corrupt_audio);
@@ -627,7 +631,7 @@ test "an analysis measures every file once and a second pass has nothing left to
     _ = try fixture.record("two.qoa");
 
     var pass = fixture.pass();
-    try testing.expectEqual(@as(u64, 2), try fixture.library.files.unanalyzedCount(pass.selector()));
+    try testing.expectEqual(@as(u64, 2), try fixture.library.files.unanalyzedCount(pass.selectors()));
     const first = try pass.run();
     try testing.expectEqual(@as(u64, 2), first.files_seen);
     try testing.expectEqual(@as(u64, 2), first.changed + first.unchanged);
@@ -647,7 +651,7 @@ test "an analysis measures every file once and a second pass has nothing left to
 
     const second = try pass.run();
     try testing.expectEqual(@as(u64, 0), second.files_seen);
-    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selector()));
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
 }
 
 test "a file whose recorded identity is stale is declined rather than measured" {
@@ -866,7 +870,7 @@ test "an interrupted analysis commits what it measured and resumes at the rest" 
     try testing.expectEqual(@as(u64, 4), resumed.files_seen);
     try testing.expectEqual(@as(u64, 6), interrupted.files_seen + resumed.files_seen);
     try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(
-        second.selector(),
+        second.selectors(),
     ));
 }
 
@@ -885,7 +889,7 @@ test "changing the measurement's parameters selects every file again" {
 
     pass.parameters.replay_gain_target_lufs = -14;
     try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(
-        pass.selector(),
+        pass.selectors(),
     ));
     try testing.expectEqual(@as(u64, 1), (try pass.run()).files_seen);
 }
@@ -908,7 +912,7 @@ test "a file whose bytes changed is measured again once a scan has recorded them
     try fixture.library.files.update(file_id, .{ .audio_format = 1, .quick_hash = &digest });
 
     try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(
-        pass.selector(),
+        pass.selectors(),
     ));
     const again = try pass.run();
     try testing.expectEqual(@as(u64, 1), again.files_seen);
@@ -956,7 +960,7 @@ test "a parallel analysis interrupted part way commits what finished and resumes
     try testing.expect(!resumed.cancelled);
     try testing.expectEqual(@as(u64, total), interrupted.files_seen + resumed.files_seen);
     try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(
-        second.selector(),
+        second.selectors(),
     ));
 }
 

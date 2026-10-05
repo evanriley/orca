@@ -19,10 +19,22 @@ pub const Engine = struct {
         decode: *const fn (*anyopaque, []const u8, []f32) anyerror!u32,
         reset: *const fn (*anyopaque) void,
         deinit: *const fn (*anyopaque) void,
+        /// Present only for a lossless integer encoding: the packet's exact
+        /// samples, left-justified in 32 bits.
+        decode_i32: ?*const fn (*anyopaque, []const u8, []i32) anyerror!u32 = null,
     };
 
     pub fn decode(self: Engine, packet: []const u8, output: []f32) !u32 {
         return self.vtable.decode(self.context, packet, output);
+    }
+
+    pub fn hasIntegerSamples(self: Engine) bool {
+        return self.vtable.decode_i32 != null;
+    }
+
+    pub fn decodeI32(self: Engine, packet: []const u8, output: []i32) !u32 {
+        const decode_i32 = self.vtable.decode_i32 orelse return error.NoIntegerSamples;
+        return decode_i32(self.context, packet, output);
     }
 
     pub fn reset(self: Engine) void {

@@ -7,8 +7,8 @@ const digestColumn = columns.digestColumn;
 const max_page = columns.max_page;
 const AnalysisCandidate = @import("analysis.zig").AnalysisCandidate;
 const AnalysisCandidatePage = @import("analysis.zig").AnalysisCandidatePage;
-const AnalysisSelector = @import("analysis.zig").AnalysisSelector;
-const bindAnalysisSelector = @import("analysis.zig").bindAnalysisSelector;
+const AnalysisSelectors = @import("analysis.zig").AnalysisSelectors;
+const bindAnalysisSelectors = @import("analysis.zig").bindAnalysisSelectors;
 const unanalyzed_predicate = @import("analysis.zig").unanalyzed_predicate;
 const DuplicateCandidate = @import("duplicates.zig").DuplicateCandidate;
 const DuplicateCandidatePage = @import("duplicates.zig").DuplicateCandidatePage;
@@ -32,6 +32,9 @@ pub const FileUpsert = struct {
     quick_hash: ?[]const u8 = null,
     audio_hash: ?[]const u8 = null,
     content_hash: ?[]const u8 = null,
+    /// `fingerprint.AudioHashTier` of `audio_hash`. A hash without a tier is
+    /// never evidence of exact audio.
+    audio_hash_tier: ?u8 = null,
 };
 
 /// The `files` rows a property backfill still owes a probe.
@@ -198,9 +201,9 @@ pub const FileRepository = struct {
             \\INSERT INTO files(
             \\    audio_format, codec, size_bytes, sample_rate, bit_depth, channels,
             \\    duration_ms, quick_hash, audio_hash, content_hash, content_hash_algorithm,
-            \\    first_seen_at
+            \\    audio_hash_tier, first_seen_at
             \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-            \\    CASE WHEN ?10 IS NOT NULL THEN 1 END, unixepoch())
+            \\    CASE WHEN ?10 IS NOT NULL THEN 1 END, ?11, unixepoch())
             \\RETURNING id;
         );
         defer statement.deinit();
@@ -221,15 +224,17 @@ pub const FileRepository = struct {
             \\    bit_depth=?5, channels=?6, duration_ms=?7, quick_hash=?8,
             \\    audio_hash=CASE WHEN ?9 IS NOT NULL THEN ?9
             \\        WHEN quick_hash IS ?8 THEN audio_hash ELSE NULL END,
+            \\    audio_hash_tier=CASE WHEN ?9 IS NOT NULL THEN ?11
+            \\        WHEN quick_hash IS ?8 THEN audio_hash_tier ELSE NULL END,
             \\    content_hash=CASE WHEN ?10 IS NOT NULL THEN ?10
             \\        WHEN quick_hash IS ?8 THEN content_hash ELSE NULL END,
             \\    content_hash_algorithm=CASE WHEN ?10 IS NOT NULL THEN 1
             \\        WHEN quick_hash IS ?8 THEN content_hash_algorithm ELSE NULL END
-            \\WHERE id=?11;
+            \\WHERE id=?12;
         );
         defer statement.deinit();
         try bindFile(statement, input);
-        try statement.bindInt64(11, file_id);
+        try statement.bindInt64(12, file_id);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -338,8 +343,8 @@ pub const FileRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 
-    /// One bounded page of files that still owe the measurement `selector`
-    /// names, past `after_id`.
+    /// One bounded page of files that still owe a measurement `selectors`
+    /// name, past `after_id`.
     ///
     /// The cursor is the file id for the same reason the backfill's is: a row
     /// this run declines to measure does not make the next page re-serve it,
@@ -350,7 +355,7 @@ pub const FileRepository = struct {
         allocator: std.mem.Allocator,
         after_id: i64,
         limit: u32,
-        selector: AnalysisSelector,
+        selectors: AnalysisSelectors,
     ) !AnalysisCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
         var statement = try self.db.prepare(
@@ -361,7 +366,7 @@ pub const FileRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, after_id);
         try statement.bindInt64(2, limit);
-        try bindAnalysisSelector(statement, &selector);
+        try bindAnalysisSelectors(statement, &selectors);
 
         var items: std.ArrayList(AnalysisCandidate) = .empty;
         errdefer {
@@ -406,12 +411,12 @@ pub const FileRepository = struct {
         return .{ .allocator = allocator, .items = items };
     }
 
-    /// How many files still owe that measurement. Like the backfill and unlike
+    /// How many files still owe those measurements. Like the backfill and unlike
     /// a filesystem walk, a library-wide analysis has an honest denominator
     /// before it starts, so its job snapshot reports a fraction.
     pub fn unanalyzedCount(
         self: *const FileRepository,
-        selector: AnalysisSelector,
+        selectors: AnalysisSelectors,
     ) !u64 {
         var statement = try self.db.prepare(
             "SELECT count(*) FROM files WHERE " ++ unanalyzed_predicate ++ ";",
@@ -420,7 +425,7 @@ pub const FileRepository = struct {
         // The count asks the same question with no cursor and no limit, so ?1
         // and ?2 are simply unbound; SQLite reads an unbound parameter as
         // NULL, and neither appears in this statement.
-        try bindAnalysisSelector(statement, &selector);
+        try bindAnalysisSelectors(statement, &selectors);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -441,7 +446,7 @@ pub const FileRepository = struct {
     ) !DuplicateCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
         var statement = try self.db.prepare(
-            "SELECT id, audio_hash, duration_ms, quick_hash FROM files" ++
+            "SELECT id, audio_hash, duration_ms, quick_hash, audio_hash_tier FROM files" ++
                 " WHERE id > ?1 ORDER BY id LIMIT ?2;",
         );
         defer statement.deinit();
@@ -455,6 +460,7 @@ pub const FileRepository = struct {
             .audio_hash = audioHashColumn(statement, 1),
             .duration_ms = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
             .source_identity = digestColumn(statement, 3),
+            .audio_hash_tier = tierColumn(statement, 4),
         });
         return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
     }
@@ -463,9 +469,10 @@ pub const FileRepository = struct {
     /// caller-owned buffer.
     ///
     /// This is the exact-duplicate bucket, and it is a search of
-    /// `files_audio_hash` rather than a comparison against anything: two files
-    /// whose decoded samples hash identically *are* the same audio, whatever
-    /// their containers, bitrates or tags say.
+    /// `files_audio_hash` rather than a comparison against anything. Only a
+    /// lossless integer hash (tier 1) makes two files the same audio, whatever
+    /// their containers or tags say, so only tier-1 peers are returned; the
+    /// tier is part of the hashed header, so an equal hash has an equal tier.
     ///
     /// The buffer is the caller's and the query is limited to its length, so
     /// one pathological bucket cannot allocate without bound. A returned count
@@ -478,7 +485,8 @@ pub const FileRepository = struct {
     ) !usize {
         if (buffer.len == 0) return 0;
         var statement = try self.db.prepare(
-            "SELECT id FROM files WHERE audio_hash = ?1 AND id <> ?2 ORDER BY id LIMIT ?3;",
+            "SELECT id FROM files WHERE audio_hash = ?1 AND id <> ?2" ++
+                " AND audio_hash_tier = 1 ORDER BY id LIMIT ?3;",
         );
         defer statement.deinit();
         try statement.bindBlob(1, audio_hash);
@@ -508,7 +516,7 @@ pub const FileRepository = struct {
     ) !usize {
         if (buffer.len == 0) return 0;
         var statement = try self.db.prepare(
-            "SELECT id, quick_hash, audio_hash FROM files" ++
+            "SELECT id, quick_hash, audio_hash, audio_hash_tier FROM files" ++
                 " WHERE duration_ms >= ?1 AND duration_ms <= ?2" ++
                 " AND id <> ?3 ORDER BY duration_ms, id LIMIT ?4;",
         );
@@ -522,22 +530,20 @@ pub const FileRepository = struct {
             .id = statement.columnInt64(0),
             .source_identity = digestColumn(statement, 1),
             .audio_hash = audioHashColumn(statement, 2),
+            .audio_hash_tier = tierColumn(statement, 3),
         };
         return found;
     }
 
     /// Tier 4 of the identity cascade, written by the analysis job rather than
     /// the scanner: a hash of the audio payload alone, which Orca's own tag
-    /// writes do not change. `update` clears it when the quick hash changes,
-    /// because it was measured from the old bytes.
-    pub fn setAudioHash(self: *FileRepository, file_id: i64, digest: []const u8) !void {
+    /// writes do not change, with the `fingerprint.AudioHashTier` it was taken
+    /// at. `update` clears both when the quick hash changes, because they were
+    /// measured from the old bytes.
+    pub fn setAudioHash(self: *FileRepository, file_id: i64, digest: []const u8, tier: u8) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
-        var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
-        defer statement.deinit();
-        try statement.bindBlob(1, digest);
-        try statement.bindInt64(2, file_id);
-        if (try statement.step() != .done) return error.SqlFailed;
+        return self.setAudioHashLocked(file_id, digest, tier);
     }
 
     /// The same write from inside a caller's transaction, so an analysis pass
@@ -546,11 +552,15 @@ pub const FileRepository = struct {
         self: *FileRepository,
         file_id: i64,
         digest: []const u8,
+        tier: u8,
     ) !void {
-        var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
+        var statement = try self.db.prepare(
+            "UPDATE files SET audio_hash=?1, audio_hash_tier=?2 WHERE id=?3;",
+        );
         defer statement.deinit();
         try statement.bindBlob(1, digest);
-        try statement.bindInt64(2, file_id);
+        try statement.bindInt64(2, tier);
+        try statement.bindInt64(3, file_id);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -772,6 +782,12 @@ fn bindFile(statement: sqlite.Statement, input: FileUpsert) !void {
     try bindOptionalBlob(statement, 8, input.quick_hash);
     try bindOptionalBlob(statement, 9, input.audio_hash);
     try bindOptionalBlob(statement, 10, input.content_hash);
+    try statement.bindOptionalInt64(11, if (input.audio_hash_tier) |tier| tier else null);
+}
+
+fn tierColumn(statement: sqlite.Statement, column: c_int) ?u8 {
+    if (statement.columnIsNull(column)) return null;
+    return std.math.cast(u8, statement.columnInt64(column));
 }
 
 fn bindOptionalBlob(statement: sqlite.Statement, index: c_int, value: ?[]const u8) !void {

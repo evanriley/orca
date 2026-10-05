@@ -63,6 +63,7 @@ pub const FilePropertyUpdate = files.FilePropertyUpdate;
 pub const IncompleteFile = files.IncompleteFile;
 pub const IncompleteFilePage = files.IncompleteFilePage;
 pub const AnalysisSelector = analysis.AnalysisSelector;
+pub const AnalysisSelectors = analysis.AnalysisSelectors;
 pub const unanalyzed_predicate = analysis.unanalyzed_predicate;
 pub const AnalysisCandidate = analysis.AnalysisCandidate;
 pub const AnalysisCandidatePage = analysis.AnalysisCandidatePage;

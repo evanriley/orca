@@ -22,6 +22,14 @@ extern fn orca_alac_decoder_decode(
     frames_written: *u32,
 ) i32;
 
+extern fn orca_alac_decoder_decode_i32(
+    decoder: ?*anyopaque,
+    packet: [*]const u8,
+    packet_size: u32,
+    output: [*]i32,
+    frames_written: *u32,
+) i32;
+
 pub fn open(config: []const u8) !engine_api.Engine {
     var info: Info = undefined;
     const native = orca_alac_decoder_create(
@@ -53,6 +61,18 @@ fn decode(context: *anyopaque, packet: []const u8, output: []f32) !u32 {
     return frames;
 }
 
+fn decodeI32(context: *anyopaque, packet: []const u8, output: []i32) !u32 {
+    var frames: u32 = 0;
+    if (orca_alac_decoder_decode_i32(
+        context,
+        packet.ptr,
+        std.math.cast(u32, packet.len) orelse return error.AlacDecodeFailed,
+        output.ptr,
+        &frames,
+    ) != 0) return error.AlacDecodeFailed;
+    return frames;
+}
+
 /// Every ALAC packet decodes independently, so a seek needs no reset.
 fn reset(_: *anyopaque) void {}
 
@@ -62,6 +82,7 @@ fn deinit(context: *anyopaque) void {
 
 const vtable: engine_api.Engine.VTable = .{
     .decode = decode,
+    .decode_i32 = decodeI32,
     .reset = reset,
     .deinit = deinit,
 };

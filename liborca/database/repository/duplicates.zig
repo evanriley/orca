@@ -12,6 +12,9 @@ const quick_hash = @import("../../storage/quick_hash.zig");
 pub const DuplicateCandidate = struct {
     id: i64,
     audio_hash: ?[32]u8,
+    /// `fingerprint.AudioHashTier` of `audio_hash`; only tier 1 is evidence of
+    /// exact audio.
+    audio_hash_tier: ?u8 = null,
     duration_ms: ?i64,
     /// The identity the Library recorded, which is the key its stored
     /// fingerprint is filed under. Null for a file no scan has hashed.
@@ -26,6 +29,7 @@ pub const DuplicatePeer = struct {
     id: i64,
     source_identity: ?quick_hash.Digest,
     audio_hash: ?[32]u8,
+    audio_hash_tier: ?u8 = null,
 };
 
 pub const DuplicateCandidatePage = struct {

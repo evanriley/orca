@@ -17,12 +17,18 @@ pub const AnalysisSelector = struct {
     parameter_hash: [32]u8,
 };
 
+/// The measurements a library-wide analysis takes together. A file owes the
+/// analysis while either is missing, so bumping either algorithm's version
+/// re-selects every file.
+pub const AnalysisSelectors = [2]AnalysisSelector;
+
 /// The `files` rows that still owe a library-wide analysis.
 ///
 /// One string, shared by `FileRepository.unanalyzedPage`, `unanalyzedCount`
 /// and the plan test that proves neither is a table scan. Parameters ?3 to ?6
-/// are the `AnalysisSelector`; ?1 and ?2 stay the caller's cursor and limit,
-/// as they are for every other page in this file.
+/// are the first `AnalysisSelector` and ?7 to ?10 the second; ?1 and ?2 stay
+/// the caller's cursor and limit, as they are for every other page in this
+/// file.
 ///
 /// This is an anti-join against `analysis_results`' own primary key rather
 /// than a flag on `files`, because that key *is* the answer. It already
@@ -52,6 +58,13 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.algorithm_id = ?4
     \\      AND analysis_results.algorithm_version = ?5
     \\      AND analysis_results.parameter_hash = ?6
+    \\      AND analysis_results.source_identity = files.quick_hash)
+    \\OR NOT EXISTS (SELECT 1 FROM analysis_results
+    \\    WHERE analysis_results.file_id = files.id
+    \\      AND analysis_results.kind = ?7
+    \\      AND analysis_results.algorithm_id = ?8
+    \\      AND analysis_results.algorithm_version = ?9
+    \\      AND analysis_results.parameter_hash = ?10
     \\      AND analysis_results.source_identity = files.quick_hash)
 ;
 
@@ -236,13 +249,23 @@ pub const AnalysisCacheRepository = struct {
     }
 };
 
-/// Binds ?3 to ?6 of `unanalyzed_predicate`. The cursor and limit stay ?1 and
-/// ?2 so the selector can be appended to any paged query without renumbering.
+/// Binds ?3 to ?6. The cursor and limit stay ?1 and ?2 so the selector can be
+/// appended to any paged query without renumbering.
 pub fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const AnalysisSelector) !void {
-    try statement.bindInt64(3, selector.kind);
-    try statement.bindText(4, selector.algorithm_id);
-    try statement.bindInt64(5, selector.algorithm_version);
-    try statement.bindBlob(6, &selector.parameter_hash);
+    try bindAnalysisSelectorAt(statement, 3, selector);
+}
+
+/// Binds ?3 to ?10 of `unanalyzed_predicate`.
+pub fn bindAnalysisSelectors(statement: sqlite.Statement, selectors: *const AnalysisSelectors) !void {
+    try bindAnalysisSelectorAt(statement, 3, &selectors[0]);
+    try bindAnalysisSelectorAt(statement, 7, &selectors[1]);
+}
+
+fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {
+    try statement.bindInt64(first, selector.kind);
+    try statement.bindText(first + 1, selector.algorithm_id);
+    try statement.bindInt64(first + 2, selector.algorithm_version);
+    try statement.bindBlob(first + 3, &selector.parameter_hash);
 }
 
 fn bindAnalysisKey(statement: sqlite.Statement, key: *const AnalysisCacheKey) !void {

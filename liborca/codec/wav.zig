@@ -27,7 +27,10 @@ pub fn openDecoder(
     context.* = .{ .allocator = allocator, .reader = reader, .scratch = scratch };
     return .{
         .context = context,
-        .vtable = &decoder_vtable,
+        .vtable = switch (reader.format.sample_format) {
+            .float_32, .float_64 => &decoder_vtable,
+            else => &integer_decoder_vtable,
+        },
         // RIFF/WAVE is a container: what it holds is integer PCM or IEEE
         // float, and only the format chunk says which.
         .codec = switch (reader.format.sample_format) {
@@ -53,6 +56,13 @@ fn decoderRead(context_ptr: *anyopaque, output: []f32) !usize {
     return frames;
 }
 
+fn decoderReadI32(context_ptr: *anyopaque, output: []i32) !usize {
+    const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
+    const frames = try context.reader.readFramesI32(context.position, output, context.scratch);
+    context.position += frames;
+    return frames;
+}
+
 fn decoderSeek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
     context.position = @min(frame, context.reader.frameCount());
@@ -67,6 +77,13 @@ fn decoderDeinit(context_ptr: *anyopaque) void {
 
 const decoder_vtable: @import("decoder.zig").Decoder.VTable = .{
     .read_frames = decoderRead,
+    .seek = decoderSeek,
+    .deinit = decoderDeinit,
+};
+
+const integer_decoder_vtable: @import("decoder.zig").Decoder.VTable = .{
+    .read_frames = decoderRead,
+    .read_frames_i32 = decoderReadI32,
     .seek = decoderSeek,
     .deinit = decoderDeinit,
 };
@@ -169,7 +186,42 @@ pub const Reader = struct {
         }
         return frames;
     }
+
+    /// Integer samples, left-justified in 32 bits, for integer PCM only.
+    pub fn readFramesI32(
+        self: Reader,
+        frame_offset: u64,
+        output: []i32,
+        scratch: []u8,
+    ) !usize {
+        if (output.len % self.format.channels != 0) return error.UnalignedPcmBuffer;
+        const output_frames = output.len / self.format.channels;
+        const scratch_frames = scratch.len / self.format.bytes_per_frame;
+        const requested_frames = @min(output_frames, scratch_frames);
+        if (requested_frames == 0) return 0;
+        const byte_count = requested_frames * self.format.bytes_per_frame;
+        const frames = try self.readFrames(frame_offset, scratch[0..byte_count]);
+        const sample_bytes = self.format.bits_per_sample / 8;
+        const sample_count = frames * self.format.channels;
+        for (output[0..sample_count], 0..) |*sample, index| {
+            const start = index * sample_bytes;
+            sample.* = try decodeInteger(self.format.sample_format, scratch[start .. start + sample_bytes]);
+        }
+        return frames;
+    }
 };
+
+fn decodeInteger(format: SampleFormat, bytes: []const u8) !i32 {
+    return switch (format) {
+        .unsigned_8 => @as(i32, @as(i8, @bitCast(bytes[0] ^ 0x80))) << 24,
+        .signed_16 => @as(i32, @as(i16, @bitCast(little16(bytes[0..2])))) << 16,
+        .signed_24 => @bitCast((@as(u32, bytes[0]) << 8) |
+            (@as(u32, bytes[1]) << 16) |
+            (@as(u32, bytes[2]) << 24)),
+        .signed_32 => @bitCast(little32(bytes[0..4])),
+        .float_32, .float_64 => error.NoIntegerSamples,
+    };
+}
 
 fn decodeSample(format: SampleFormat, bytes: []const u8) f32 {
     return switch (format) {
@@ -289,6 +341,32 @@ test "canonical conversion covers integer and floating WAV sample forms" {
     try std.testing.expectEqual(
         @as(f32, 0.5),
         decodeSample(.float_64, "\x00\x00\x00\x00\x00\x00\xe0\x3f"),
+    );
+}
+
+test "integer WAV samples read left-justified and agree with the float read" {
+    try std.testing.expectEqual(@as(i32, std.math.minInt(i32)), try decodeInteger(.unsigned_8, "\x00"));
+    try std.testing.expectEqual(@as(i32, 0x7f00_0000), try decodeInteger(.unsigned_8, "\xff"));
+    try std.testing.expectEqual(@as(i32, -0x10000), try decodeInteger(.signed_16, "\xff\xff"));
+    try std.testing.expectEqual(@as(i32, 0x0001_0000), try decodeInteger(.signed_16, "\x01\x00"));
+    try std.testing.expectEqual(@as(i32, -0x100), try decodeInteger(.signed_24, "\xff\xff\xff"));
+    try std.testing.expectEqual(@as(i32, 0x7fff_ff00), try decodeInteger(.signed_24, "\xff\xff\x7f"));
+    try std.testing.expectEqual(@as(i32, 1), try decodeInteger(.signed_32, "\x01\x00\x00\x00"));
+    try std.testing.expectError(error.NoIntegerSamples, decodeInteger(.float_32, "\x00\x00\x00\x3f"));
+    const cases = [_]struct { format: SampleFormat, bytes: []const u8 }{
+        .{ .format = .unsigned_8, .bytes = "\x01" },
+        .{ .format = .unsigned_8, .bytes = "\xfe" },
+        .{ .format = .signed_16, .bytes = "\x01\x80" },
+        .{ .format = .signed_16, .bytes = "\xff\x7f" },
+        .{ .format = .signed_24, .bytes = "\x01\x00\x80" },
+        .{ .format = .signed_24, .bytes = "\x35\x12\x7f" },
+        .{ .format = .signed_32, .bytes = "\x01\x00\x00\x80" },
+        .{ .format = .signed_32, .bytes = "\xff\xff\xff\x7f" },
+        .{ .format = .signed_32, .bytes = "\x7f\x45\x23\x91" },
+    };
+    for (cases) |case| try std.testing.expectEqual(
+        decodeSample(case.format, case.bytes),
+        decoder_api.integerSampleToFloat(try decodeInteger(case.format, case.bytes)),
     );
 }
 

@@ -29,6 +29,12 @@ extern fn orca_flac_decoder_read(
     output_frames: u32,
     frames_written: *u32,
 ) i32;
+extern fn orca_flac_decoder_read_i32(
+    decoder: ?*anyopaque,
+    output: [*]i32,
+    output_frames: u32,
+    frames_written: *u32,
+) i32;
 extern fn orca_flac_decoder_seek(decoder: ?*anyopaque, frame: u64) i32;
 
 const Context = struct {
@@ -179,11 +185,24 @@ fn reachedDeclaredEnd(context: *const Context) bool {
 }
 
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
+    return readFramesAs(f32, orca_flac_decoder_read, context_ptr, output);
+}
+
+fn readFramesI32(context_ptr: *anyopaque, output: []i32) !usize {
+    return readFramesAs(i32, orca_flac_decoder_read_i32, context_ptr, output);
+}
+
+fn readFramesAs(
+    comptime Sample: type,
+    comptime read: fn (?*anyopaque, [*]Sample, u32, *u32) callconv(.c) i32,
+    context_ptr: *anyopaque,
+    output: []Sample,
+) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     const capacity = output.len / context.channels;
     if (capacity == 0) return 0;
     var produced: u32 = 0;
-    const status = orca_flac_decoder_read(
+    const status = read(
         context.native,
         output.ptr,
         @intCast(@min(capacity, std.math.maxInt(u32))),
@@ -232,6 +251,7 @@ fn deinit(context_ptr: *anyopaque) void {
 
 const vtable: decoder_api.Decoder.VTable = .{
     .read_frames = readFrames,
+    .read_frames_i32 = readFramesI32,
     .seek = seek,
     .deinit = deinit,
 };

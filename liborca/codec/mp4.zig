@@ -562,6 +562,7 @@ pub fn openTrack(allocator: std.mem.Allocator, source: storage.ReadableSource, t
         .engine = undefined,
         .packet = &.{},
         .pcm = &.{},
+        .integers = &.{},
     };
     errdefer context.track.deinit();
     const codec_name, context.engine = switch (context.track.codec) {
@@ -577,7 +578,12 @@ pub fn openTrack(allocator: std.mem.Allocator, source: storage.ReadableSource, t
     if (largest > max_packet_bytes) return error.InvalidMp4;
     context.packet = try allocator.alloc(u8, largest);
     errdefer allocator.free(context.packet);
-    context.pcm = try allocator.alloc(f32, @as(usize, engine.max_packet_frames) * engine.channels);
+    const packet_samples = @as(usize, engine.max_packet_frames) * engine.channels;
+    if (engine.hasIntegerSamples())
+        context.integers = try allocator.alloc(i32, packet_samples)
+    else
+        context.pcm = try allocator.alloc(f32, packet_samples);
+    errdefer allocator.free(context.integers);
     errdefer allocator.free(context.pcm);
 
     context.start_frame = try context.toFrames(context.track.start_time);
@@ -590,7 +596,7 @@ pub fn openTrack(allocator: std.mem.Allocator, source: storage.ReadableSource, t
 
     return .{
         .context = context,
-        .vtable = &vtable,
+        .vtable = if (engine.hasIntegerSamples()) &integer_vtable else &vtable,
         .codec = codec_name,
         .source_format = if (engine.bits_per_sample) |bits| .{
             .sample_format = if (bits <= 16) .signed_16 else if (bits <= 24) .signed_24 else .signed_32,
@@ -631,8 +637,10 @@ const Context = struct {
     track: Track,
     engine: engine_api.Engine,
     packet: []u8,
-    /// One decoded packet, of which `pending_start..pending_end` is unread.
+    /// One decoded packet, of which `pending_start..pending_end` is unread:
+    /// in `integers` when the engine decodes integer samples, else in `pcm`.
     pcm: []f32,
+    integers: []i32,
     pending_start: usize = 0,
     pending_end: usize = 0,
     next_packet: usize = 0,
@@ -687,18 +695,34 @@ const Context = struct {
     /// back as silence at the front; they are encoder priming or seek
     /// pre-roll, and are skipped. The last packet is exempt: it is legitimately
     /// shorter than its successors' spacing.
-    fn alignToPacket(self: *Context, index: usize, frames: u64) !u64 {
+    fn alignToPacket(self: *Context, comptime T: type, buffer: []T, index: usize, frames: u64) !u64 {
         if (index + 1 >= self.track.samples.len) return frames;
         const expected = try self.toFrames(try self.packetStart(index + 1) - try self.packetStart(index));
-        const capacity = self.pcm.len / self.engine.channels;
+        const capacity = buffer.len / self.engine.channels;
         if (frames >= expected or expected > capacity) return frames;
         const channels = self.engine.channels;
         const decoded_frames: usize = @intCast(frames);
         const missing: usize = @intCast(expected - frames);
-        const decoded = self.pcm[0 .. decoded_frames * channels];
-        std.mem.copyBackwards(f32, self.pcm[missing * channels ..][0..decoded.len], decoded);
-        @memset(self.pcm[0 .. missing * channels], 0);
+        const decoded = buffer[0 .. decoded_frames * channels];
+        std.mem.copyBackwards(T, buffer[missing * channels ..][0..decoded.len], decoded);
+        @memset(buffer[0 .. missing * channels], 0);
         return expected;
+    }
+
+    const Taken = struct { start: usize = 0, samples: usize = 0 };
+
+    /// Claims up to `capacity` samples of whole frames from the pending
+    /// packet, decoding the next one when it is spent.
+    fn take(self: *Context, capacity: usize) !Taken {
+        const channels = self.engine.channels;
+        if (self.remaining_frames == 0) return .{};
+        if (self.pending_start == self.pending_end and !try self.decodeNext()) return .{};
+        const pending = (self.pending_end - self.pending_start) / channels;
+        const frames = @min(pending, capacity / channels, self.remaining_frames);
+        const taken: Taken = .{ .start = self.pending_start, .samples = frames * channels };
+        self.pending_start += taken.samples;
+        self.remaining_frames -= frames;
+        return taken;
     }
 
     fn decodeNext(self: *Context) !bool {
@@ -708,8 +732,10 @@ const Context = struct {
             self.next_packet += 1;
             const bytes = self.packet[0..sample.size];
             if (try self.source.readAt(sample.offset, bytes) != bytes.len) return error.TruncatedMp4;
-            var frames: u64 = try self.engine.decode(bytes, self.pcm);
-            frames = try self.alignToPacket(index, frames);
+            const frames: u64 = if (self.engine.hasIntegerSamples())
+                try self.alignToPacket(i32, self.integers, index, try self.engine.decodeI32(bytes, self.integers))
+            else
+                try self.alignToPacket(f32, self.pcm, index, try self.engine.decode(bytes, self.pcm));
             const dropped = @min(frames, self.skip_frames);
             self.skip_frames -= dropped;
             if (frames == dropped) continue;
@@ -724,16 +750,20 @@ const Context = struct {
 
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    const channels = context.engine.channels;
-    if (context.remaining_frames == 0) return 0;
-    if (context.pending_start == context.pending_end and !try context.decodeNext()) return 0;
-    const pending = (context.pending_end - context.pending_start) / channels;
-    const frames = @min(pending, output.len / channels, context.remaining_frames);
-    const samples = frames * channels;
-    @memcpy(output[0..samples], context.pcm[context.pending_start..][0..samples]);
-    context.pending_start += samples;
-    context.remaining_frames -= frames;
-    return frames;
+    const taken = try context.take(output.len);
+    const destination = output[0..taken.samples];
+    if (context.engine.hasIntegerSamples()) {
+        for (destination, context.integers[taken.start..][0..taken.samples]) |*sample, integer|
+            sample.* = decoder_api.integerSampleToFloat(integer);
+    } else @memcpy(destination, context.pcm[taken.start..][0..taken.samples]);
+    return taken.samples / context.engine.channels;
+}
+
+fn readFramesI32(context_ptr: *anyopaque, output: []i32) !usize {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    const taken = try context.take(output.len);
+    @memcpy(output[0..taken.samples], context.integers[taken.start..][0..taken.samples]);
+    return taken.samples / context.engine.channels;
 }
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
@@ -747,6 +777,7 @@ fn deinit(context_ptr: *anyopaque) void {
     const allocator = context.allocator;
     context.engine.deinit();
     allocator.free(context.pcm);
+    allocator.free(context.integers);
     allocator.free(context.packet);
     context.track.deinit();
     allocator.destroy(context);
@@ -754,6 +785,13 @@ fn deinit(context_ptr: *anyopaque) void {
 
 const vtable: decoder_api.Decoder.VTable = .{
     .read_frames = readFrames,
+    .seek = seek,
+    .deinit = deinit,
+};
+
+const integer_vtable: decoder_api.Decoder.VTable = .{
+    .read_frames = readFrames,
+    .read_frames_i32 = readFramesI32,
     .seek = seek,
     .deinit = deinit,
 };

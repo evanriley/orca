@@ -35,6 +35,12 @@ int32_t orca_alac_decoder_decode(struct orca_alac_decoder *decoder,
                                  const uint8_t *packet, uint32_t packet_size,
                                  float *output, uint32_t *frames_written);
 
+/* The same packet as integers left-justified in 32 bits: a 16-bit sample s is
+ * written as s << 16. `output` must hold `frame_length * channels` integers. */
+int32_t orca_alac_decoder_decode_i32(struct orca_alac_decoder *decoder,
+                                     const uint8_t *packet, uint32_t packet_size,
+                                     int32_t *output, uint32_t *frames_written);
+
 #ifdef __cplusplus
 }
 #endif

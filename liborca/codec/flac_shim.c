@@ -19,9 +19,11 @@ struct orca_flac_decoder {
      * callbacks because the source is positional and holds no cursor. */
     uint64_t position;
     uint64_t size;
-    /* One decoded block, interleaved. Capacity is in floats. */
-    float *pending;
+    /* One decoded block, interleaved, as libFLAC delivered it. Capacity is in
+     * samples. */
+    int32_t *pending;
     uint32_t pending_capacity;
+    uint32_t pending_bits;
     uint32_t pending_frames;
     uint32_t pending_offset;
     uint32_t channels;
@@ -102,19 +104,19 @@ static FLAC__bool eof_callback(const FLAC__StreamDecoder *native, void *client_d
     return self->position >= self->size;
 }
 
-static int reserve_pending(struct orca_flac_decoder *self, uint32_t floats)
+static int reserve_pending(struct orca_flac_decoder *self, uint32_t samples)
 {
-    float *grown;
+    int32_t *grown;
 
-    if (floats <= self->pending_capacity) {
+    if (samples <= self->pending_capacity) {
         return 1;
     }
-    grown = realloc(self->pending, (size_t)floats * sizeof(float));
+    grown = realloc(self->pending, (size_t)samples * sizeof(int32_t));
     if (!grown) {
         return 0;
     }
     self->pending = grown;
-    self->pending_capacity = floats;
+    self->pending_capacity = samples;
     return 1;
 }
 
@@ -127,7 +129,6 @@ static FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *
     uint32_t channels = frame->header.channels;
     uint32_t blocksize = frame->header.blocksize;
     uint32_t bits = frame->header.bits_per_sample;
-    double scale;
     uint32_t frame_index;
     uint32_t channel;
 
@@ -144,13 +145,10 @@ static FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *
         return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
     }
     self->channels = channels;
-    /* Full-scale for the stream's own sample width, so a 24-bit file and a
-     * 16-bit file of the same music land on the same float amplitudes. */
-    scale = 1.0 / (double)((int64_t)1 << (bits - 1));
+    self->pending_bits = bits;
     for (frame_index = 0; frame_index < blocksize; frame_index++) {
         for (channel = 0; channel < channels; channel++) {
-            self->pending[frame_index * channels + channel] =
-                (float)((double)buffer[channel][frame_index] * scale);
+            self->pending[frame_index * channels + channel] = buffer[channel][frame_index];
         }
     }
     self->pending_frames = blocksize;
@@ -276,31 +274,78 @@ static int32_t fill_pending(struct orca_flac_decoder *self)
     return ORCA_FLAC_FAILED;
 }
 
-int32_t orca_flac_decoder_read(struct orca_flac_decoder *decoder, float *output,
-                               uint32_t output_frames, uint32_t *frames_written)
+static int32_t take_pending(struct orca_flac_decoder *self, uint32_t output_frames,
+                            uint32_t *taken)
 {
     uint32_t available;
-    uint32_t taken;
 
-    if (!decoder || !output || !frames_written) {
-        return ORCA_FLAC_FAILED;
-    }
-    *frames_written = 0;
+    *taken = 0;
     if (output_frames == 0) {
         return ORCA_FLAC_OK;
     }
-    if (decoder->pending_offset >= decoder->pending_frames) {
-        int32_t status = fill_pending(decoder);
+    if (self->pending_offset >= self->pending_frames) {
+        int32_t status = fill_pending(self);
 
         if (status != ORCA_FLAC_OK) {
             return status;
         }
     }
-    available = decoder->pending_frames - decoder->pending_offset;
-    taken = available < output_frames ? available : output_frames;
-    memcpy(output,
-           decoder->pending + (size_t)decoder->pending_offset * decoder->channels,
-           (size_t)taken * decoder->channels * sizeof(float));
+    available = self->pending_frames - self->pending_offset;
+    *taken = available < output_frames ? available : output_frames;
+    return ORCA_FLAC_OK;
+}
+
+int32_t orca_flac_decoder_read(struct orca_flac_decoder *decoder, float *output,
+                               uint32_t output_frames, uint32_t *frames_written)
+{
+    const int32_t *source;
+    double scale;
+    uint32_t taken;
+    uint32_t index;
+    int32_t status;
+
+    if (!decoder || !output || !frames_written) {
+        return ORCA_FLAC_FAILED;
+    }
+    status = take_pending(decoder, output_frames, &taken);
+    if (status != ORCA_FLAC_OK || taken == 0) {
+        *frames_written = 0;
+        return status;
+    }
+    source = decoder->pending + (size_t)decoder->pending_offset * decoder->channels;
+    /* Full-scale for the stream's own sample width, so a 24-bit file and a
+     * 16-bit file of the same music land on the same float amplitudes. */
+    scale = 1.0 / (double)((int64_t)1 << (decoder->pending_bits - 1));
+    for (index = 0; index < taken * decoder->channels; index++) {
+        output[index] = (float)((double)source[index] * scale);
+    }
+    decoder->pending_offset += taken;
+    *frames_written = taken;
+    return ORCA_FLAC_OK;
+}
+
+int32_t orca_flac_decoder_read_i32(struct orca_flac_decoder *decoder, int32_t *output,
+                                   uint32_t output_frames, uint32_t *frames_written)
+{
+    const int32_t *source;
+    uint32_t shift;
+    uint32_t taken;
+    uint32_t index;
+    int32_t status;
+
+    if (!decoder || !output || !frames_written) {
+        return ORCA_FLAC_FAILED;
+    }
+    status = take_pending(decoder, output_frames, &taken);
+    if (status != ORCA_FLAC_OK || taken == 0) {
+        *frames_written = 0;
+        return status;
+    }
+    source = decoder->pending + (size_t)decoder->pending_offset * decoder->channels;
+    shift = 32 - decoder->pending_bits;
+    for (index = 0; index < taken * decoder->channels; index++) {
+        output[index] = (int32_t)((uint32_t)source[index] << shift);
+    }
     decoder->pending_offset += taken;
     *frames_written = taken;
     return ORCA_FLAC_OK;

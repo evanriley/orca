@@ -888,7 +888,7 @@ fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDat
             .incompletePropertiesCount(backfill.force) +
             try database.repository.unmeasuredCoverCount(library_database.database),
         .analysis => try library_database.files.unanalyzedCount(
-            analysis_service.diagnosticsSelector(.{}),
+            analysis_service.analysisSelectors(.{}),
         ),
         .duplicate_scan => try library_database.files.count(),
         .consistency => try library_database.releases.count(),

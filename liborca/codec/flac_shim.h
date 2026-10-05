@@ -44,6 +44,13 @@ int32_t orca_flac_decoder_read(struct orca_flac_decoder *decoder, float *output,
                                uint32_t output_frames,
                                uint32_t *frames_written);
 
+/* The same frames as `orca_flac_decoder_read`, as integers left-justified in
+ * 32 bits: a 16-bit sample s is delivered as s << 16. Either read may follow
+ * the other; both consume from the same decoded block. */
+int32_t orca_flac_decoder_read_i32(struct orca_flac_decoder *decoder, int32_t *output,
+                                   uint32_t output_frames,
+                                   uint32_t *frames_written);
+
 /* Positions the stream at an absolute frame. Returns ORCA_FLAC_OK or
  * ORCA_FLAC_FAILED; on failure the decoder is flushed and remains usable. */
 int32_t orca_flac_decoder_seek(struct orca_flac_decoder *decoder,
