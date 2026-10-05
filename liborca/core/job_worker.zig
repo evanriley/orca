@@ -384,7 +384,8 @@ pub fn reobserve(
         .health_issues = &library_database.health_issues,
     };
     defer scanner.deinit();
-    _ = try scanner.observeFiles(&.{location.uri});
+    const result = try scanner.observeFiles(&.{location.uri});
+    if (result.errors != 0) return error.ReadFailed;
 }
 
 pub const MatchingRequest = struct {

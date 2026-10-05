@@ -10,6 +10,7 @@ const library_pass = @import("../library/root.zig");
 const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const job = @import("job.zig");
+const job_worker = @import("job_worker.zig");
 const object = @import("object.zig");
 const storage = @import("../storage/root.zig");
 const work = @import("work.zig");
@@ -4400,6 +4401,26 @@ test "a reconcile keeps everything under a subdirectory it cannot enter and stil
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/Locked/three.m4a")).?.state);
     try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/one.flac")).?.state);
     try std.testing.expectEqual(@as(i64, 3), try fixture.scanRunCount(.completed));
+}
+
+test "re-observing a file it cannot read keeps the file and reports the error" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reobserve-unreadable?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const kept = (try fixture.location("A/one.flac")).?;
+    const uri = try std.fmt.allocPrint(std.testing.allocator, "{s}/A/one.flac", .{fixture.root});
+    defer std.testing.allocator.free(uri);
+    const library_database = try libraryDatabase(&fixture.runtime, fixture.library);
+    const location = (try library_database.locations.presentByUri(std.testing.allocator, uri)).?;
+    defer std.testing.allocator.free(location.uri);
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/one.flac", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/one.flac", .default_file, .{}) catch {};
+
+    try std.testing.expectError(error.ReadFailed, job_worker.reobserve(std.testing.allocator, std.testing.io, library_database, location));
+    const after = (try fixture.location("A/one.flac")).?;
+    try std.testing.expectEqual(database.LocationState.present, after.state);
+    try std.testing.expectEqual(kept.file_id, after.file_id);
 }
 
 test "a scan that cannot enter a directory succeeds, keeps everything under it and still sweeps what is gone" {
