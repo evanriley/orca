@@ -205,7 +205,7 @@ pub const PropertyBackfill = struct {
             .channels = optionalCount(properties.channels),
             .duration_ms = optionalCount(properties.duration_ms),
             .audio_format = if (detection) |resolved|
-                @intFromEnum(resolved.format)
+                @backingInt(resolved.format)
             else
                 null,
         } };
@@ -407,7 +407,7 @@ test "a backfill reads only the rows whose declared properties are missing" {
     try fixture.copyFixture("vbr-xing-reference.mp3");
     // Already probed by some earlier scan, and complete.
     _ = try fixture.record("tagged-reference.flac", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+        .audio_format = @backingInt(storage.AudioFormat.flac),
         .codec = "flac",
         .sample_rate = 44100,
         .bit_depth = 16,
@@ -415,7 +415,7 @@ test "a backfill reads only the rows whose declared properties are missing" {
         .duration_ms = 200,
     }, reference_tags);
     const incomplete = try fixture.record("vbr-xing-reference.mp3", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.mp3),
+        .audio_format = @backingInt(storage.AudioFormat.mp3),
     }, reference_tags);
 
     var pass = fixture.backfill();
@@ -463,7 +463,7 @@ test "a file no registered codec can decode is skipped, not reported as unreadab
     defer fixture.deinit();
     try fixture.copyFixture("generated-reference.flac");
     _ = try fixture.record("generated-reference.flac", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+        .audio_format = @backingInt(storage.AudioFormat.flac),
     }, reference_tags);
 
     const no_codecs: codec.CodecRegistry = .{};
@@ -483,7 +483,7 @@ test "a file that will not decode leaves its row alone and is reported as unread
     defer fixture.deinit();
     try fixture.writeBytes("broken.flac", "fLaC but not a stream");
     const file_id = try fixture.record("broken.flac", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+        .audio_format = @backingInt(storage.AudioFormat.flac),
         .size_bytes = 21,
     }, reference_tags);
 
@@ -544,13 +544,13 @@ test "the repairable count leaves out what a backfill cannot repair, and the bac
     defer fixture.deinit();
     try fixture.copyFixture("tagged-reference.flac");
     try fixture.writeBytes("broken.flac", "fLaC but not a stream");
-    const flac: database.FileUpsert = .{ .audio_format = @intFromEnum(storage.AudioFormat.flac) };
+    const flac: database.FileUpsert = .{ .audio_format = @backingInt(storage.AudioFormat.flac) };
     _ = try fixture.record("tagged-reference.flac", flac, reference_tags);
     _ = try fixture.record("broken.flac", flac, reference_tags);
     const missing = try fixture.record("missing.flac", flac, reference_tags);
     const offline = try fixture.record("offline.flac", flac, reference_tags);
     _ = try fixture.record("planned.wv", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.wavpack),
+        .audio_format = @backingInt(storage.AudioFormat.wavpack),
     }, reference_tags);
     const root_id = try fixture.library.library_roots.add(database.LibraryDatabase.null_volume, fixture.root);
     {
@@ -567,7 +567,7 @@ test "the repairable count leaves out what a backfill cannot repair, and the bac
     }
     var offline_ids: [32]u8 = undefined;
     const offline_roots = try std.fmt.bufPrint(&offline_ids, ",{d},", .{root_id});
-    const wavpack = @as(u64, 1) << @intFromEnum(storage.AudioFormat.wavpack);
+    const wavpack = @as(u64, 1) << @backingInt(storage.AudioFormat.wavpack);
 
     try testing.expectEqual(@as(u64, 5), try fixture.library.files.incompletePropertiesCount(false));
     try testing.expectEqual(@as(u64, 4), try fixture.library.files.repairablePropertiesCount("", 0));
@@ -692,7 +692,7 @@ test "a backfill fills the track durations derived from the rows it repaired" {
     defer fixture.deinit();
     try fixture.copyFixture("tagged-reference.flac");
     _ = try fixture.record("tagged-reference.flac", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+        .audio_format = @backingInt(storage.AudioFormat.flac),
     }, reference_tags);
 
     var pass = projection.Projection{
@@ -721,7 +721,7 @@ test "forcing a backfill re-probes a row that already declares properties" {
     defer fixture.deinit();
     try fixture.copyFixture("tagged-reference.flac");
     _ = try fixture.record("tagged-reference.flac", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+        .audio_format = @backingInt(storage.AudioFormat.flac),
         .codec = "flac",
         .sample_rate = 44100,
         .bit_depth = 16,
@@ -753,7 +753,7 @@ test "a row that names the wrong container is corrected by the probe that reads 
     try fixture.copyFixture("id3-prefixed-reference.flac");
     // Misfiled as MPEG because of ID3 at byte zero.
     const misfiled = try fixture.record("id3-prefixed-reference.flac", .{
-        .audio_format = @intFromEnum(storage.AudioFormat.mp3),
+        .audio_format = @backingInt(storage.AudioFormat.mp3),
     }, reference_tags);
 
     var pass = fixture.backfill();
@@ -762,7 +762,7 @@ test "a row that names the wrong container is corrected by the probe that reads 
     try testing.expectEqual(@as(u64, 1), result.changed);
 
     try testing.expectEqual(
-        @as(i64, @intFromEnum(storage.AudioFormat.flac)),
+        @as(i64, @backingInt(storage.AudioFormat.flac)),
         try scalar(fixture.library.database, "SELECT audio_format FROM files WHERE id = 1;"),
     );
     try testing.expectEqual(misfiled, try scalar(

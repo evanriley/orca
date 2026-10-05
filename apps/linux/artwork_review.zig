@@ -805,7 +805,7 @@ fn defaultPick(candidate: liborca.CoverArtCandidate, taken: *[3]bool) Pick {
         .booklet, .other => .none,
     };
     if (pick == .none) return .none;
-    const slot = &taken[@intFromEnum(pick)];
+    const slot = &taken[@backingInt(pick)];
     if (slot.*) return .none;
     slot.* = true;
     return pick;
@@ -857,7 +857,7 @@ fn newCard(self: *App, candidate: liborca.CoverArtCandidate, thumbnail: ?*gtk.Gd
     gtk.gtk_widget_add_css_class(drop_down, "smart-control");
     gtk.gtk_widget_add_css_class(drop_down, "artwork-review-pick");
     gtk.gtk_widget_set_valign(drop_down, gtk.ALIGN_CENTER);
-    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, drop_down), @intFromEnum(pick));
+    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, drop_down), @backingInt(pick));
     _ = gtk.signalConnect(drop_down, "notify::selected", gtk.callback(pickChanged), self);
     const use_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_add_css_class(use_row, "artwork-review-card-row");
@@ -874,7 +874,7 @@ fn newCard(self: *App, candidate: liborca.CoverArtCandidate, thumbnail: ?*gtk.Gd
 
 fn pickOf(card: Card) Pick {
     const selected = gtk.gtk_drop_down_get_selected(card.drop_down);
-    return if (selected < 3) @enumFromInt(selected) else .none;
+    return if (selected < 3) @fromBackingInt(@intCast(selected)) else .none;
 }
 
 fn pickChanged(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -887,7 +887,7 @@ fn pickChanged(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     defer review.syncing = false;
     if (pick != .none) for (review.cards[0..review.card_count]) |card| {
         if (card.drop_down == changed) continue;
-        if (pickOf(card) == pick) gtk.gtk_drop_down_set_selected(card.drop_down, @intFromEnum(Pick.none));
+        if (pickOf(card) == pick) gtk.gtk_drop_down_set_selected(card.drop_down, @backingInt(Pick.none));
     };
     syncCards(self);
     syncControls(self);
@@ -984,7 +984,7 @@ fn useClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     var picks: [3]?i64 = @splat(null);
     for (review.cards[0..review.card_count]) |card| {
         const pick = pickOf(card);
-        if (pick != .none) picks[@intFromEnum(pick)] = card.caa_id;
+        if (pick != .none) picks[@backingInt(pick)] = card.caa_id;
     }
     review.apply = .{ .release_id = release_id, .picks = picks };
     advanceApply(self);
@@ -998,7 +998,7 @@ fn advanceApply(self: *App) void {
         const index = apply.next;
         apply.next += 1;
         const caa_id = apply.picks[index] orelse continue;
-        const kind = kindOf(@enumFromInt(index)).?;
+        const kind = kindOf(@fromBackingInt(@intCast(index))).?;
         apply.job = self.runtime.libraryUseCoverArtCandidate(library, apply.release_id, caa_id, kind) catch |err| {
             self.toast(refusal(err));
             apply.failed += 1;

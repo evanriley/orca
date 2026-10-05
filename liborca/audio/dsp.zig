@@ -768,7 +768,7 @@ test "equalizer validation rejects out-of-range and non-finite values" {
 
 test "every preset is valid and carries the preamp its largest boost needs" {
     inline for (@typeInfo(Preset).@"enum".fields) |field| {
-        const value = Equalizer.preset(@enumFromInt(field.value));
+        const value = Equalizer.preset(@fromBackingInt(@intCast(field.value)));
         try value.validate();
         try std.testing.expectEqual(Equalizer.defaultPreamp(value.gains_db), value.preamp_db);
     }

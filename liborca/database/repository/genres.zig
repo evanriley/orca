@@ -609,7 +609,7 @@ pub const GenreWriter = struct {
             try self.insert_row.bindInt64(1, track_id);
             try self.insert_row.bindInt64(2, genre_id);
             try self.insert_row.bindInt64(3, @intCast(ordinal));
-            try self.insert_row.bindInt64(4, @intFromEnum(provenance));
+            try self.insert_row.bindInt64(4, @backingInt(provenance));
             if (try self.insert_row.step() != .done) return error.SqlFailed;
             try self.insert_row.reset();
         }

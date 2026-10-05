@@ -63,11 +63,11 @@ pub const OrcaMetadataRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, input.file_id);
-        try statement.bindInt64(2, @intFromEnum(input.field));
+        try statement.bindInt64(2, @backingInt(input.field));
         try statement.bindText(3, input.value);
-        try statement.bindInt64(4, @intFromEnum(input.provenance));
+        try statement.bindInt64(4, @backingInt(input.provenance));
         try statement.bindInt64(5, @intFromBool(input.locked));
-        try statement.bindInt64(6, @intFromEnum(metadata.Provenance.user));
+        try statement.bindInt64(6, @backingInt(metadata.Provenance.user));
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -82,7 +82,7 @@ pub const OrcaMetadataRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(field));
+        try statement.bindInt64(2, @backingInt(field));
         try statement.bindText(3, value);
         if (try statement.step() != .done) return error.SqlFailed;
     }
@@ -96,7 +96,7 @@ pub const OrcaMetadataRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(field));
+        try statement.bindInt64(2, @backingInt(field));
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -145,7 +145,7 @@ pub const OrcaMetadataRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(field));
+        try statement.bindInt64(2, @backingInt(field));
         if (try statement.step() != .row) return null;
         const provenance = std.enums.fromInt(
             metadata.Provenance,

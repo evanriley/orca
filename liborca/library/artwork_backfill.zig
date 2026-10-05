@@ -316,7 +316,7 @@ const Fixture = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(database.repository.HealthIssueKind.artwork_problem));
+        try statement.bindInt64(2, @backingInt(database.repository.HealthIssueKind.artwork_problem));
         if (try statement.step() != .row) return null;
         var copy: ArtworkDetails = .{};
         const text = statement.columnText(0);

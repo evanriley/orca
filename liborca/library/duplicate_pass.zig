@@ -32,7 +32,7 @@ const scanner = @import("scanner.zig");
 
 pub const CancellationToken = scanner.CancellationToken;
 
-const lossless_tier: u8 = @intFromEnum(analysis.fingerprint.AudioHashTier.lossless_integer);
+const lossless_tier: u8 = @backingInt(analysis.fingerprint.AudioHashTier.lossless_integer);
 
 /// The most files one bucket may hold, and therefore the most fingerprint
 /// comparisons one candidate can cost.
@@ -488,7 +488,7 @@ const Fixture = struct {
             .audio_format = 1,
             .quick_hash = &identity,
             .audio_hash = &measured.audio_hash.digest,
-            .audio_hash_tier = @intFromEnum(measured.audio_hash.tier),
+            .audio_hash_tier = @backingInt(measured.audio_hash.tier),
             .duration_ms = @intCast(samples.len * 1000 / sample_rate),
         });
         const encoded = try analysis.fingerprint.encode(testing.allocator, measured);
@@ -748,7 +748,7 @@ test "audio that only resembles another file is reported as likely rather than e
     );
     defer similarity.deinit();
     try similarity.bindInt64(1, first);
-    try similarity.bindInt64(2, @intFromEnum(database.HealthIssueKind.likely_duplicate));
+    try similarity.bindInt64(2, @backingInt(database.HealthIssueKind.likely_duplicate));
     try testing.expectEqual(database.sqlite.Step.row, try similarity.step());
     try testing.expect(similarity.columnDouble(0) >= pass.likely_threshold);
     try testing.expect(similarity.columnDouble(0) <= 1);

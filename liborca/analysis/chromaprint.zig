@@ -44,8 +44,8 @@ pub const Parameters = struct {
 
 pub fn parameterHash(parameters: Parameters) [32]u8 {
     var encoded: [12]u8 = undefined;
-    std.mem.writeInt(i32, encoded[0..4], @intFromEnum(parameters.algorithm), .little);
-    std.mem.writeInt(i32, encoded[4..8], @intFromEnum(parameters.converter), .little);
+    std.mem.writeInt(i32, encoded[0..4], @backingInt(parameters.algorithm), .little);
+    std.mem.writeInt(i32, encoded[4..8], @backingInt(parameters.converter), .little);
     std.mem.writeInt(u32, encoded[8..12], parameters.max_seconds, .little);
     var digest: [32]u8 = undefined;
     std.crypto.hash.Blake3.hash(&encoded, &digest, .{});
@@ -126,7 +126,7 @@ pub const Analyzer = struct {
         if (channels == 0 or sample_rate == 0) return error.InvalidAudioFormat;
         const target_rate = orca_chromaprint_sample_rate;
 
-        const context = orca_chromaprint_create(@intFromEnum(parameters.algorithm)) orelse
+        const context = orca_chromaprint_create(@backingInt(parameters.algorithm)) orelse
             return error.FingerprinterUnavailable;
         errdefer orca_chromaprint_destroy(context);
         if (orca_chromaprint_start(context, 1) != 0) return error.FingerprinterUnavailable;
@@ -488,7 +488,7 @@ test "Orca's fingerprint of the generated reference recording agrees with fpcalc
     defer raw.deinit();
 
     try testing.expectEqual(reference.duration_s, outcome.fingerprint.durationSeconds());
-    try testing.expectEqual(@as(i32, @intFromEnum(Algorithm.test2)), raw.algorithm);
+    try testing.expectEqual(@as(i32, @backingInt(Algorithm.test2)), raw.algorithm);
     try testing.expect(raw.items.len * 10 >= reference.raw.len * 9);
     try testing.expect(bitAgreement(raw.items, reference.raw) >= 0.95);
 }

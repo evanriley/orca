@@ -178,7 +178,7 @@ pub const ScrobbleQueueRepository = struct {
             \\WHERE id=?5 AND state=1 AND lease_owner=?6;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(outcome));
+        try statement.bindInt64(1, @backingInt(outcome));
         try statement.bindInt64(2, attempts);
         try statement.bindOptionalInt64(3, next_attempt_at);
         try statement.bindOptionalText(4, details);

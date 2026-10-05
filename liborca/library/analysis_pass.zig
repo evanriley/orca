@@ -438,7 +438,7 @@ pub const LibraryAnalysis = struct {
                 try self.files.setAudioHashLocked(
                     measurement.file_id,
                     &value.audio_hash.digest,
-                    @intFromEnum(value.audio_hash.tier),
+                    @backingInt(value.audio_hash.tier),
                 );
                 // Safe to retire: only a pass that decoded the whole stream
                 // may raise or clear this kind, and this is that pass.

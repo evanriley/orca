@@ -1611,7 +1611,7 @@ fn checkConsistency(context: Context) !void {
         if (stats.cancelled) "yes" else "no",
     });
     inline for (std.meta.fields(liborca.IssueCategory)) |field| {
-        const category: liborca.IssueCategory = @enumFromInt(field.value);
+        const category: liborca.IssueCategory = @fromBackingInt(@intCast(field.value));
         try stdout.print("{s}={d} ", .{ field.name, try runtime.libraryMetadataIssueCount(library_handle, category) });
     }
     try stdout.print("open={d}\n", .{try runtime.libraryMetadataIssueCount(library_handle, null)});

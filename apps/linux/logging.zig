@@ -6,7 +6,7 @@ const gtk = @import("gtk.zig");
 
 pub const Level = enum { info, debug, trace };
 
-var file_level: std.atomic.Value(u8) = .init(@intFromEnum(Level.info));
+var file_level: std.atomic.Value(u8) = .init(@backingInt(Level.info));
 var file_fd: std.atomic.Value(i32) = .init(-1);
 
 pub const file_name = "orca.log";
@@ -33,11 +33,11 @@ pub fn open() void {
 }
 
 pub fn level() Level {
-    return @enumFromInt(file_level.load(.monotonic));
+    return @fromBackingInt(@intCast(file_level.load(.monotonic)));
 }
 
 pub fn setLevel(value: Level) void {
-    file_level.store(@intFromEnum(value), .monotonic);
+    file_level.store(@backingInt(value), .monotonic);
     gtk.g_log_set_debug_enabled(@intFromBool(value == .trace));
 }
 
@@ -54,7 +54,7 @@ pub fn write(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (comptime @intFromEnum(message_level) <= @intFromEnum(std.log.default_level))
+    if (comptime @backingInt(message_level) <= @backingInt(std.log.default_level))
         std.log.defaultLog(message_level, scope, format, args);
     const fd = file_fd.load(.acquire);
     if (fd < 0 or !fileWants(message_level)) return;

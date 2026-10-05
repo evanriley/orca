@@ -416,7 +416,7 @@ pub const Fetch = struct {
         }
 
         const artist_mbid = mbid orelse {
-            record.outcome = @intFromEnum(Outcome.no_musicbrainz_id);
+            record.outcome = @backingInt(Outcome.no_musicbrainz_id);
             try info.storeReleaseGroups(artist_id, &.{});
             try info.store(artist_id, &record, photo, null);
             return .no_musicbrainz_id;
@@ -545,7 +545,7 @@ pub const Fetch = struct {
         } else if (!same_artist) try info.storeReleaseGroups(artist_id, &.{});
 
         const outcome = progress.failure orelse .fetched;
-        record.outcome = @intFromEnum(outcome);
+        record.outcome = @backingInt(outcome);
         try info.store(artist_id, &record, photo, if (links) |found| found.items else null);
         return outcome;
     }

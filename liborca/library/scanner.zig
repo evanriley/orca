@@ -646,7 +646,7 @@ pub const Scanner = struct {
         for (pending.items) |*entry| {
             const content_hash: ?*const storage.content_hash.Digest = if (entry.content_hash) |*digest| digest else null;
             const upsert = database.FileUpsert{
-                .audio_format = @intFromEnum(entry.audio_format),
+                .audio_format = @backingInt(entry.audio_format),
                 // Empty only for a file that sniffed as audio and then refused
                 // to open: the container is known, the encoding inside it is
                 // not, and an invented identifier would be worse than none.
@@ -2560,7 +2560,7 @@ test "an unchanged rescan and a projection read no cover bytes" {
         fn details(lib: *database.LibraryDatabase, buffer: []u8) ![]const u8 {
             var statement = try lib.database.prepare("SELECT details FROM library_health_issues WHERE kind = ?1;");
             defer statement.deinit();
-            try statement.bindInt64(1, @intFromEnum(database.HealthIssueKind.artwork_problem));
+            try statement.bindInt64(1, @backingInt(database.HealthIssueKind.artwork_problem));
             if (try statement.step() != .row) return error.TestExpectedEqual;
             const text = statement.columnText(0);
             @memcpy(buffer[0..text.len], text);

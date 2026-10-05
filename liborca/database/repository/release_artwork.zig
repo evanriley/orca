@@ -175,7 +175,7 @@ pub const ReleaseArtworkRepository = struct {
         var statement = try self.db.prepare("DELETE FROM release_artwork WHERE release_id=?1 AND kind=?2 RETURNING 1;");
         defer statement.deinit();
         try statement.bindInt64(1, release_id);
-        try statement.bindInt64(2, @intFromEnum(kind));
+        try statement.bindInt64(2, @backingInt(kind));
         const removed = try statement.step() == .row;
         if (removed) _ = try statement.step();
         if (removed and kind == .front) try artwork_problems.settleReleaseLocked(self.db, release_id);
@@ -268,7 +268,7 @@ pub const ReleaseArtworkRepository = struct {
             try statement.bindInt64(1, release_id);
             try statement.bindInt64(2, candidate.caa_id);
             try statement.bindText(3, candidate.musicbrainz_release_id);
-            try statement.bindInt64(4, @intFromEnum(candidate.kind));
+            try statement.bindInt64(4, @backingInt(candidate.kind));
             try statement.bindOptionalInt64(5, columns.optionalCount(candidate.width));
             try statement.bindOptionalInt64(6, columns.optionalCount(candidate.height));
             try statement.bindOptionalText(7, candidate.mime);
@@ -385,7 +385,7 @@ pub const ReleaseArtworkRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, release_id);
-        try statement.bindInt64(2, @intFromEnum(identification.ProposalState.accepted));
+        try statement.bindInt64(2, @backingInt(identification.ProposalState.accepted));
         try statement.bindInt64(3, max_page);
         while (try statement.step() == .row) {
             const parsed = identification.ProposalPayload.parse(allocator, statement.columnBlob(0)) catch |err| switch (err) {
@@ -422,8 +422,8 @@ fn storeLocked(db: sqlite.Database, row: Stored) !void {
     );
     defer statement.deinit();
     try statement.bindInt64(1, row.release_id);
-    try statement.bindInt64(2, @intFromEnum(row.kind));
-    try statement.bindInt64(3, @intFromEnum(row.source));
+    try statement.bindInt64(2, @backingInt(row.kind));
+    try statement.bindInt64(3, @backingInt(row.source));
     try statement.bindOptionalText(4, row.release_mbid);
     if (row.image) |present| {
         const measured = image_header.measure(present.bytes);

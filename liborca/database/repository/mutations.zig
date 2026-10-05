@@ -116,10 +116,10 @@ pub const MutationGroupSummaryPage = struct {
 };
 
 fn stateSum(comptime state_value: MutationState) []const u8 {
-    return std.fmt.comptimePrint("sum(operation.state = {d})", .{@intFromEnum(state_value)});
+    return std.fmt.comptimePrint("sum(operation.state = {d})", .{@backingInt(state_value)});
 }
 
-const write_tags_kind = std.fmt.comptimePrint("{d}", .{@intFromEnum(MutationKind.write_tags)});
+const write_tags_kind = std.fmt.comptimePrint("{d}", .{@backingInt(MutationKind.write_tags)});
 
 const group_summary_select =
     "SELECT operation.group_id, min(operation.created_at), count(*),\n" ++
@@ -127,7 +127,7 @@ const group_summary_select =
     "       " ++ stateSum(.rolled_back) ++ ", " ++ stateSum(.failed) ++ ",\n" ++
     "       " ++ stateSum(.needs_reconciliation) ++ ", " ++ stateSum(.undoing) ++ ",\n" ++
     "       sum(operation.kind = " ++ write_tags_kind ++ " AND operation.backup_path IS NULL),\n" ++
-    "       sum(operation.state = " ++ std.fmt.comptimePrint("{d}", .{@intFromEnum(MutationState.rolled_back)}) ++
+    "       sum(operation.state = " ++ std.fmt.comptimePrint("{d}", .{@backingInt(MutationState.rolled_back)}) ++
     " AND operation.error IS NOT NULL AND operation.error <> '" ++ recovered_message ++ "'),\n" ++
     "       sum(operation.error = '" ++ recovered_message ++ "'),\n" ++
     \\       (SELECT CASE WHEN count(DISTINCT track.release_id) = 1 THEN min(release_row.title) END
@@ -261,14 +261,14 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(1, @intCast(input.plan_id));
         try statement.bindInt64(2, @intCast(input.group_id));
         try statement.bindInt64(3, input.action_index);
-        try statement.bindInt64(4, @intFromEnum(input.kind));
+        try statement.bindInt64(4, @backingInt(input.kind));
         try statement.bindText(5, input.source_path);
         try statement.bindOptionalText(6, input.destination_path);
         try statement.bindOptionalText(7, input.stage_path);
         try statement.bindOptionalText(8, input.backup_path);
         try statement.bindInt64(9, @intCast(input.expected_size));
         try statement.bindInt64(10, input.expected_modified_ns);
-        try statement.bindInt64(11, @intFromEnum(MutationState.planned));
+        try statement.bindInt64(11, @backingInt(MutationState.planned));
         try statement.bindOptionalInt64(12, input.file_id);
         try statement.bindBlob(13, &input.expected_quick_hash);
         try statement.bindOptionalBlob(14, if (input.expected_content_hash) |*digest| digest else null);
@@ -294,10 +294,10 @@ pub const MutationJournalRepository = struct {
             \\WHERE id=?3 AND state=?4;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(next));
+        try statement.bindInt64(1, @backingInt(next));
         try statement.bindOptionalText(2, message);
         try statement.bindInt64(3, operation_id);
-        try statement.bindInt64(4, @intFromEnum(expected));
+        try statement.bindInt64(4, @backingInt(expected));
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -313,9 +313,9 @@ pub const MutationJournalRepository = struct {
             \\WHERE id=?2 AND state=?3;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(MutationState.rolled_back));
+        try statement.bindInt64(1, @backingInt(MutationState.rolled_back));
         try statement.bindInt64(2, operation_id);
-        try statement.bindInt64(3, @intFromEnum(MutationState.failed));
+        try statement.bindInt64(3, @backingInt(MutationState.failed));
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -350,11 +350,11 @@ pub const MutationJournalRepository = struct {
             \\WHERE id=?4 AND state=?5;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(MutationState.committed));
+        try statement.bindInt64(1, @backingInt(MutationState.committed));
         try statement.bindInt64(2, @intCast(committed_size));
         try statement.bindInt64(3, committed_modified_ns);
         try statement.bindInt64(4, operation_id);
-        try statement.bindInt64(5, @intFromEnum(MutationState.staged));
+        try statement.bindInt64(5, @backingInt(MutationState.staged));
         try statement.bindBlob(6, &committed_quick_hash);
         try statement.bindBlob(7, &committed_content_hash);
         if (try statement.step() != .done) return error.SqlFailed;
@@ -384,7 +384,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(1, @intCast(size));
         try statement.bindInt64(2, modified_ns);
         try statement.bindInt64(3, operation_id);
-        try statement.bindInt64(4, @intFromEnum(expected_state));
+        try statement.bindInt64(4, @backingInt(expected_state));
         try statement.bindBlob(5, &digest);
         try statement.bindBlob(6, &content);
         if (try statement.step() != .done) return error.SqlFailed;
@@ -472,10 +472,10 @@ pub const MutationJournalRepository = struct {
             \\WHERE state IN (?1, ?2, ?3, ?4) ORDER BY group_id;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(MutationState.planned));
-        try statement.bindInt64(2, @intFromEnum(MutationState.staged));
-        try statement.bindInt64(3, @intFromEnum(MutationState.failed));
-        try statement.bindInt64(4, @intFromEnum(MutationState.undoing));
+        try statement.bindInt64(1, @backingInt(MutationState.planned));
+        try statement.bindInt64(2, @backingInt(MutationState.staged));
+        try statement.bindInt64(3, @backingInt(MutationState.failed));
+        try statement.bindInt64(4, @backingInt(MutationState.undoing));
         var ids: std.ArrayList(u64) = .empty;
         errdefer ids.deinit(allocator);
         while (try statement.step() == .row)
@@ -521,9 +521,9 @@ pub const MutationJournalRepository = struct {
             \\WHERE group_id=?2 AND state=?3;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(MutationState.undoing));
+        try statement.bindInt64(1, @backingInt(MutationState.undoing));
         try statement.bindInt64(2, @intCast(group_id));
-        try statement.bindInt64(3, @intFromEnum(MutationState.committed));
+        try statement.bindInt64(3, @backingInt(MutationState.committed));
         if (try statement.step() != .done) return error.SqlFailed;
         return self.db.changes();
     }
@@ -574,7 +574,7 @@ pub const MutationJournalRepository = struct {
             \\ORDER BY operation.id LIMIT ?3;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(MutationState.committed));
+        try statement.bindInt64(1, @backingInt(MutationState.committed));
         try statement.bindInt64(2, std.math.cast(i64, older_than_s) orelse std.math.maxInt(i64));
         try statement.bindInt64(3, max_page);
         var items: std.ArrayList(PrunableBackup) = .empty;
@@ -606,7 +606,7 @@ pub const MutationJournalRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, operation_id);
-        try statement.bindInt64(2, @intFromEnum(MutationState.committed));
+        try statement.bindInt64(2, @backingInt(MutationState.committed));
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }

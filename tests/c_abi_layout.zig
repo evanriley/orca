@@ -200,28 +200,28 @@ const export_mappings = .{
         pub const prefix = "ORCA_ARTIST_INFO_OUTCOME_";
         pub const Tag = core.runtime.ArtistInfoOutcome;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_ARTIST_PHOTO_SOURCE_";
         pub const Tag = database.ArtistPhotoSource;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_RELEASE_DESCRIPTION_SOURCE_";
         pub const Tag = database.ReleaseDescriptionSource;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_ARTIST_LINK_KIND_";
         pub const Tag = database.ArtistLinkKind;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
@@ -263,35 +263,35 @@ const export_mappings = .{
         pub const prefix = "ORCA_STATUS_";
         pub const Tag = c_api.Status;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_TRACK_SORT_";
         pub const Tag = c_api.TrackSortKey;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_PLAYLIST_SORT_";
         pub const Tag = c_api.PlaylistSortKey;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_PLAYLIST_KIND_";
         pub const Tag = database.PlaylistKind;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_PLAYLIST_CREATOR_";
         pub const Tag = database.PlaylistCreator;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
@@ -333,63 +333,63 @@ const export_mappings = .{
         pub const prefix = "ORCA_ID_SOURCE_";
         pub const Tag = c_api.IdSource;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_EVENT_";
         pub const Tag = c_api.EventKind;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_TRANSPORT_";
         pub const Tag = audio.player.TransportState;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_REPEAT_";
         pub const Tag = audio.playback_queue.RepeatMode;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_QUEUE_HISTORY_REASON_";
         pub const Tag = core.runtime.QueueHistoryReason;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_OUTPUT_";
         pub const Tag = audio.zone.OutputState;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_REPLAY_GAIN_";
         pub const Tag = audio.processing.ReplayGainMode;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_RELEASE_MATCH_BUCKET_";
         pub const Tag = core.runtime.ReleaseMatchBucket;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
         pub const prefix = "ORCA_RELEASE_FIELD_";
         pub const Tag = core.runtime.ReleaseField;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
@@ -431,7 +431,7 @@ const export_mappings = .{
         pub const prefix = "ORCA_JOB_";
         pub const Tag = core.job.State;
         pub fn produce(tag: Tag) ?i64 {
-            return @intFromEnum(tag);
+            return @backingInt(tag);
         }
     },
     struct {
@@ -572,7 +572,7 @@ const export_mappings = .{
         pub const Tag = std.meta.Tag(core.control.Outcome);
         pub fn produce(tag: Tag) ?i64 {
             const event = c_api.exportCompletion(.{ .request_id = 1, .outcome = sampleOutcome(tag) });
-            if (event.kind != @intFromEnum(c_api.EventKind.command_completed)) return null;
+            if (event.kind != @backingInt(c_api.EventKind.command_completed)) return null;
             return event.payload.command_completed.outcome;
         }
     },

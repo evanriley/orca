@@ -1568,11 +1568,11 @@ fn syncControls(self: *App) void {
     defer playlists.syncing = false;
     for (playlists.tabs, 0..) |maybe, index| {
         const tab = maybe orelse continue;
-        const checked = index == @intFromEnum(playlists.tab);
+        const checked = index == @backingInt(playlists.tab);
         if (checked) gtk.gtk_toggle_button_set_active(tab, gtk.true_);
         gtk.gtk_widget_set_focusable(gtk.cast(gtk.Widget, tab), @intFromBool(checked));
     }
-    if (playlists.layout_toggles[@intFromEnum(playlists.layout)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
+    if (playlists.layout_toggles[@backingInt(playlists.layout)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
     if (playlists.sort_control) |control| {
         for (sorts, 0..) |entry, index| {
             if (entry.sort == playlists.sort) gtk.gtk_drop_down_set_selected(control, @intCast(index));
@@ -1593,7 +1593,7 @@ fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const toggle = gtk.cast(gtk.ToggleButton, button.?);
     if (gtk.gtk_toggle_button_get_active(toggle) == gtk.false_) return;
     const tab: Tab = for (self.playlists.tabs, 0..) |candidate, index| {
-        if (candidate == toggle) break @enumFromInt(index);
+        if (candidate == toggle) break @fromBackingInt(@intCast(index));
     } else return;
     chooseTab(self, tab);
 }
@@ -1606,8 +1606,8 @@ fn tabKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, _: c_uint, data: ?*a
         else => return gtk.false_,
     };
     const count: isize = @intCast(self.playlists.tabs.len);
-    const next: usize = @intCast(@mod(@as(isize, @intFromEnum(self.playlists.tab)) + step, count));
-    chooseTab(self, @enumFromInt(next));
+    const next: usize = @intCast(@mod(@as(isize, @backingInt(self.playlists.tab)) + step, count));
+    chooseTab(self, @fromBackingInt(@intCast(next)));
     const tab = self.playlists.tabs[next] orelse return gtk.true_;
     _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, tab));
     return gtk.true_;
@@ -1624,7 +1624,7 @@ fn newTabs(self: *App) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        self.playlists.tabs[@intFromEnum(tab)] = toggle;
+        self.playlists.tabs[@backingInt(tab)] = toggle;
         _ = gtk.signalConnect(button, "toggled", gtk.callback(tabToggled), self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, row), button);
     }
@@ -1640,7 +1640,7 @@ fn layoutToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const toggle = gtk.cast(gtk.ToggleButton, button.?);
     if (gtk.gtk_toggle_button_get_active(toggle) == gtk.false_) return;
     const layout: albums.Layout = for (self.playlists.layout_toggles, 0..) |candidate, index| {
-        if (candidate == toggle) break @enumFromInt(index);
+        if (candidate == toggle) break @fromBackingInt(@intCast(index));
     } else return;
     if (layout == self.playlists.layout) return;
     self.playlists.layout = layout;
@@ -1668,7 +1668,7 @@ fn newLayoutSwitch(self: *App) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        self.playlists.layout_toggles[@intFromEnum(choice.layout)] = toggle;
+        self.playlists.layout_toggles[@backingInt(choice.layout)] = toggle;
         _ = gtk.signalConnect(button, "toggled", gtk.callback(layoutToggled), self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), button);
     }

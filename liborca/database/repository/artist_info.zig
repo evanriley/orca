@@ -7,7 +7,7 @@ const text_key = @import("../text_key.zig");
 const max_page = columns.max_page;
 const WriteLane = @import("write_lane.zig").WriteLane;
 const track_play_file = @import("tracks.zig").track_play_file;
-const release_group_mbid_field = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Field.musicbrainz_release_group_id)});
+const release_group_mbid_field = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Field.musicbrainz_release_group_id)});
 
 pub const PhotoSource = enum(u8) { local = 0, commons = 1 };
 pub const BiographySource = enum(u8) { wikipedia = 0 };
@@ -342,7 +342,7 @@ pub const ArtistInfoRepository = struct {
         try statement.bindInt64(6, @intFromBool(record.ended));
         try statement.bindOptionalText(7, record.artist_type);
         try statement.bindOptionalText(8, record.biography);
-        try statement.bindOptionalInt64(9, if (record.biography_source) |source| @intFromEnum(source) else null);
+        try statement.bindOptionalInt64(9, if (record.biography_source) |source| @backingInt(source) else null);
         try statement.bindOptionalText(10, record.biography_url);
         try statement.bindOptionalText(11, record.biography_licence);
         try statement.bindOptionalText(12, record.biography_language);
@@ -353,7 +353,7 @@ pub const ArtistInfoRepository = struct {
         const described = new_photo != null;
         try statement.bindOptionalBlob(13, if (new_photo) |image| image.bytes else null);
         try statement.bindOptionalText(14, if (new_photo) |image| image.mime_type else null);
-        try statement.bindOptionalInt64(15, if (described) if (record.photo_source) |source| @intFromEnum(source) else null else null);
+        try statement.bindOptionalInt64(15, if (described) if (record.photo_source) |source| @backingInt(source) else null else null);
         try statement.bindOptionalText(16, if (described) record.photo_url else null);
         try statement.bindOptionalText(17, if (described) record.photo_licence else null);
         try statement.bindOptionalText(18, if (described) record.photo_licence_url else null);
@@ -376,7 +376,7 @@ pub const ArtistInfoRepository = struct {
             defer insert.deinit();
             for (replacement[0..@min(replacement.len, max_links)]) |link| {
                 try insert.bindInt64(1, artist_id);
-                try insert.bindInt64(2, @intFromEnum(link.kind));
+                try insert.bindInt64(2, @backingInt(link.kind));
                 try insert.bindText(3, link.url);
                 if (try insert.step() != .done) return error.SqlFailed;
                 try insert.reset();
@@ -688,7 +688,7 @@ pub const ArtistInfoRepository = struct {
         const record: RelatedArtistPhotoRecord = if (related_photo) |kept| kept.record else .{};
         try statement.bindOptionalBlob(2, if (related_photo) |kept| kept.image.bytes else null);
         try statement.bindOptionalText(3, if (related_photo) |kept| kept.image.mime_type else null);
-        try statement.bindOptionalInt64(4, if (related_photo != null) @intFromEnum(record.source) else null);
+        try statement.bindOptionalInt64(4, if (related_photo != null) @backingInt(record.source) else null);
         try statement.bindOptionalText(5, record.url);
         try statement.bindOptionalText(6, record.licence);
         try statement.bindOptionalText(7, record.licence_url);

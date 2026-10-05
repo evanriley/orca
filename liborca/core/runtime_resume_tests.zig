@@ -106,7 +106,7 @@ test "shutdown saves a playing Player's queue and position before any Player is 
     try std.testing.expectEqual(@as(i64, (wall_base_ms + 10_000) / 1000), saved.saved_at);
     try std.testing.expectEqual(@as(u32, 1), saved.state.cursor);
     try std.testing.expectEqual(@as(u64, 1_499), saved.state.position_ms);
-    try std.testing.expectEqual(@intFromEnum(runtime_module.RepeatMode.all), saved.state.repeat);
+    try std.testing.expectEqual(@backingInt(runtime_module.RepeatMode.all), saved.state.repeat);
     try std.testing.expect(!saved.state.shuffle);
     try std.testing.expectEqual(@as(usize, 3), saved.entries.len);
     for (saved.entries, rig.ids, 0..) |entry, track_id, index| {

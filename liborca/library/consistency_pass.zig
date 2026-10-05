@@ -190,7 +190,7 @@ pub fn refresh(allocator: std.mem.Allocator, library: *database.LibraryDatabase,
         for (skipped.items) |entry| {
             const still = for (issues, 0..) |issue, index| {
                 if (issue.release_id == entry.release_id and
-                    @intFromEnum(issue.category) == entry.category and
+                    @backingInt(issue.category) == entry.category and
                     std.mem.eql(u8, @tagName(issue.field), entry.field) and
                     std.mem.eql(u8, issue.key, entry.key) and
                     issue.fingerprint == entry.fingerprint) break index;
@@ -248,7 +248,7 @@ const Writer = struct {
     fn write(self: *Writer, allocator: std.mem.Allocator, issue: *const Issue) !void {
         const field = @tagName(issue.field);
         try self.header.bindInt64(1, issue.release_id);
-        try self.header.bindInt64(2, @intFromEnum(issue.category));
+        try self.header.bindInt64(2, @backingInt(issue.category));
         try self.header.bindText(3, field);
         try self.header.bindOptionalText(4, if (issue.key.len == 0) null else issue.key);
         try self.header.bindOptionalInt64(5, issue.gap);
@@ -290,7 +290,7 @@ const Writer = struct {
         const statement = &self.member;
         try statement.bindInt64(1, group_id);
         try statement.bindInt64(2, issue.release_id);
-        try statement.bindInt64(3, @intFromEnum(issue.category));
+        try statement.bindInt64(3, @backingInt(issue.category));
         try statement.bindText(4, field);
         try statement.bindOptionalInt64(5, track_id);
         try statement.bindOptionalText(6, current);
@@ -371,11 +371,11 @@ const rows_sql = std.fmt.comptimePrint(
     std.fmt.comptimePrint(effective_text, .{ "al", "album" }),
     std.fmt.comptimePrint(effective_text, .{ "aa", "album_artist" }),
     std.fmt.comptimePrint(effective_text, .{ "dt", "date" }),
-    @intFromEnum(metadata.Field.album),
-    @intFromEnum(metadata.Field.album_artist),
-    @intFromEnum(metadata.Field.date),
-    @intFromEnum(metadata.Field.track_number),
-    @intFromEnum(metadata.Field.disc_number),
+    @backingInt(metadata.Field.album),
+    @backingInt(metadata.Field.album_artist),
+    @backingInt(metadata.Field.date),
+    @backingInt(metadata.Field.track_number),
+    @backingInt(metadata.Field.disc_number),
 });
 
 /// The issues the releases with ids in `first..=last` have now. Every slice
@@ -439,7 +439,7 @@ pub fn detect(allocator: std.mem.Allocator, db: sqlite.Database, first: i64, las
         defer statement.deinit();
         try statement.bindInt64(1, first);
         try statement.bindInt64(2, last);
-        try statement.bindInt64(3, @intFromEnum(database.ProposalState.accepted));
+        try statement.bindInt64(3, @backingInt(database.ProposalState.accepted));
         while (try statement.step() == .row) {
             const index = index_of.get(statement.columnInt64(0)) orelse continue;
             if (rows.items[index].musicbrainz != null) continue;
@@ -660,7 +660,7 @@ fn finish(
 
 fn fingerprintStart(category: Category, field: Field, key: []const u8) std.hash.Wyhash {
     var hasher: std.hash.Wyhash = .init(0);
-    hasher.update(&.{ @intFromEnum(category), @intFromEnum(field) });
+    hasher.update(&.{ @backingInt(category), @backingInt(field) });
     hasher.update(key);
     hasher.update(&.{0});
     return hasher;
@@ -889,7 +889,7 @@ fn openCount(library: *database.LibraryDatabase, category: Category) !i64 {
         "SELECT count(*) FROM metadata_proposals WHERE id = group_id AND state = 0 AND category = ?1;",
     );
     defer statement.deinit();
-    try statement.bindInt64(1, @intFromEnum(category));
+    try statement.bindInt64(1, @backingInt(category));
     _ = try statement.step();
     return statement.columnInt64(0);
 }
@@ -902,7 +902,7 @@ fn optionValues(library: *database.LibraryDatabase, category: Category) ![]const
         \\  WHERE h.category = ?1 AND h.state = 0 AND m.option IS NOT NULL ORDER BY m.group_id, m.option) m;
     );
     defer statement.deinit();
-    try statement.bindInt64(1, @intFromEnum(category));
+    try statement.bindInt64(1, @backingInt(category));
     _ = try statement.step();
     return testing.allocator.dupe(u8, statement.columnText(0));
 }
@@ -1005,7 +1005,7 @@ test "running the pass again replaces open issues and keeps a skipped one skippe
 fn issueColumn(library: *database.LibraryDatabase, category: Category, sql: [:0]const u8) ![]const u8 {
     var statement = try library.database.prepare(sql);
     defer statement.deinit();
-    try statement.bindInt64(1, @intFromEnum(category));
+    try statement.bindInt64(1, @backingInt(category));
     _ = try statement.step();
     return testing.allocator.dupe(u8, statement.columnText(0));
 }

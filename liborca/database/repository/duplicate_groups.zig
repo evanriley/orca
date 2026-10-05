@@ -213,8 +213,8 @@ pub const DuplicateGroupRepository = struct {
     pub fn grouping(self: *const DuplicateGroupRepository, allocator: std.mem.Allocator) !DuplicateGrouping {
         var statement = try self.db.prepare(duplicate_links_sql);
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(HealthIssueKind.exact_duplicate));
-        try statement.bindInt64(2, @intFromEnum(HealthIssueKind.likely_duplicate));
+        try statement.bindInt64(1, @backingInt(HealthIssueKind.exact_duplicate));
+        try statement.bindInt64(2, @backingInt(HealthIssueKind.likely_duplicate));
         var links: std.ArrayList(DuplicateLink) = .empty;
         defer links.deinit(allocator);
         while (try statement.step() == .row) {
@@ -338,8 +338,8 @@ pub const DuplicateGroupRepository = struct {
         errdefer self.db.exec("ROLLBACK;") catch {};
         for (file_ids) |file_id| {
             try statement.bindInt64(1, file_id);
-            try statement.bindInt64(2, @intFromEnum(HealthIssueKind.exact_duplicate));
-            try statement.bindInt64(3, @intFromEnum(HealthIssueKind.likely_duplicate));
+            try statement.bindInt64(2, @backingInt(HealthIssueKind.exact_duplicate));
+            try statement.bindInt64(3, @backingInt(HealthIssueKind.likely_duplicate));
             if (try statement.step() != .done) return error.SqlFailed;
             try statement.reset();
         }

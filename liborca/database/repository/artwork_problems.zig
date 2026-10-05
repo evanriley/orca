@@ -359,7 +359,7 @@ pub fn releaseProblemPage(
         "GROUP BY issues.release_id\n" ++
         "ORDER BY releases.title COLLATE NOCASE, issues.release_id LIMIT ?2 OFFSET ?3;");
     defer statement.deinit();
-    try statement.bindInt64(1, @intFromEnum(health.HealthIssueKind.artwork_problem));
+    try statement.bindInt64(1, @backingInt(health.HealthIssueKind.artwork_problem));
     try statement.bindInt64(2, limit);
     try statement.bindInt64(3, offset);
     var items: std.ArrayList(ReleaseArtworkProblem) = .empty;
@@ -378,7 +378,7 @@ pub fn releaseProblemPage(
 pub fn releaseProblemCount(db: sqlite.Database) !u64 {
     var statement = try db.prepare("SELECT count(DISTINCT issues.release_id)\nFROM " ++ release_problem_issues_sql ++ ";");
     defer statement.deinit();
-    try statement.bindInt64(1, @intFromEnum(health.HealthIssueKind.artwork_problem));
+    try statement.bindInt64(1, @backingInt(health.HealthIssueKind.artwork_problem));
     if (try statement.step() != .row) return error.SqlFailed;
     return @intCast(statement.columnInt64(0));
 }
@@ -529,7 +529,7 @@ fn problemOf(db: sqlite.Database, file_id: i64) !?ArtworkFinding {
     var statement = try db.prepare("SELECT details FROM library_health_issues WHERE file_id = ?1 AND kind = ?2;");
     defer statement.deinit();
     try statement.bindInt64(1, file_id);
-    try statement.bindInt64(2, @intFromEnum(health.HealthIssueKind.artwork_problem));
+    try statement.bindInt64(2, @backingInt(health.HealthIssueKind.artwork_problem));
     if (try statement.step() != .row) return null;
     return ArtworkFinding.parse(statement.columnText(0)) orelse error.UnparsedArtworkProblem;
 }
@@ -561,7 +561,7 @@ test "a Release's files are settled from the covers the Library measured, file b
     try testing.expectEqual(@as(?ArtworkFinding, null), try problemOf(db, 2));
 }
 
-const artwork_kind = @intFromEnum(health.HealthIssueKind.artwork_problem);
+const artwork_kind = @backingInt(health.HealthIssueKind.artwork_problem);
 
 test "a Release with several files with artwork problems is one album, with its worst problem" {
     var library = try openTestLibrary("release-page");

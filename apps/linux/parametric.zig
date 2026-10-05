@@ -462,11 +462,11 @@ fn edited(self: *App) void {
 const Display = enum(usize) { frequency = 1, decibels, q, preamp };
 
 fn displayOf(data: ?*anyopaque) Display {
-    return @enumFromInt(@intFromPtr(data.?));
+    return @fromBackingInt(@intCast(@intFromPtr(data.?)));
 }
 
 fn displayData(display: Display) *anyopaque {
-    return @ptrFromInt(@intFromEnum(display));
+    return @ptrFromInt(@backingInt(display));
 }
 
 fn displayText(buffer: []u8, display: Display, value: f64) ?[:0]const u8 {

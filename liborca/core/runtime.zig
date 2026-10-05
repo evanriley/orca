@@ -3715,9 +3715,9 @@ fn undecodableFormats() u64 {
     const codecs = codec.CodecRegistry.builtins();
     var formats: u64 = 0;
     for (std.enums.values(storage.AudioFormat)) |format|
-        formats |= std.math.shl(u64, 1, @intFromEnum(format));
+        formats |= std.math.shl(u64, 1, @backingInt(format));
     for (codecs.entries[0..codecs.count]) |entry|
-        formats &= ~std.math.shl(u64, 1, @intFromEnum(entry.format));
+        formats &= ~std.math.shl(u64, 1, @backingInt(entry.format));
     return formats;
 }
 

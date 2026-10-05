@@ -25,7 +25,7 @@ pub const CacheSize = struct {
 
 const local_photo = "(photo IS NOT NULL AND photo_source = 0)";
 
-const fetched_artwork = std.fmt.comptimePrint("source = {d}", .{@intFromEnum(ReleaseArtworkSource.fetched)});
+const fetched_artwork = std.fmt.comptimePrint("source = {d}", .{@backingInt(ReleaseArtworkSource.fetched)});
 
 const artist_info_text =
     "COALESCE(length(CAST(wikidata_id AS BLOB)), 0) + COALESCE(length(CAST(artist_type AS BLOB)), 0) + " ++

@@ -120,12 +120,12 @@ fn changed(self: *App) void {
     filters.year_to = parseYear(ui.year_to);
     for (ui.formats, 0..) |toggle, index| {
         const button = toggle orelse continue;
-        if (gtk.gtk_toggle_button_get_active(button) != 0) filters.format = @enumFromInt(index);
+        if (gtk.gtk_toggle_button_get_active(button) != 0) filters.format = @fromBackingInt(@intCast(index));
     }
     if (ui.codec) |dropdown| {
         const index = gtk.gtk_drop_down_get_selected(dropdown);
         if (index != 0 and index != gtk.INVALID_LIST_POSITION and index - 1 < std.meta.fields(Codec).len)
-            filters.codec = @enumFromInt(index - 1);
+            filters.codec = @fromBackingInt(@intCast(index - 1));
     }
     if (ui.sample_rate) |dropdown| {
         const index = gtk.gtk_drop_down_get_selected(dropdown);
@@ -362,10 +362,10 @@ fn syncControls(self: *App) void {
     var year_buffer: [16]u8 = undefined;
     if (ui.year_from) |entry| gtk.gtk_editable_set_text(entry, if (filters.year_from) |year| strings.format(&year_buffer, "{d}", .{year}).ptr else "");
     if (ui.year_to) |entry| gtk.gtk_editable_set_text(entry, if (filters.year_to) |year| strings.format(&year_buffer, "{d}", .{year}).ptr else "");
-    if (ui.formats[@intFromEnum(filters.format)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
-    if (ui.codec) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, if (filters.codec) |codec| @intFromEnum(codec) + 1 else 0);
+    if (ui.formats[@backingInt(filters.format)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
+    if (ui.codec) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, if (filters.codec) |codec| @backingInt(codec) + 1 else 0);
     if (ui.sample_rate) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, @intCast(std.mem.indexOfScalar(?u32, &sample_rates, filters.rate_above) orelse 0));
-    if (ui.added) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, @intFromEnum(filters.added.window));
+    if (ui.added) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, @backingInt(filters.added.window));
     if (ui.loved) |check| gtk.gtk_check_button_set_active(check, if (filters.loved_only) gtk.true_ else gtk.false_);
     if (ui.explicit) |check| gtk.gtk_check_button_set_active(check, if (filters.explicit_only) gtk.true_ else gtk.false_);
 }
@@ -484,7 +484,7 @@ fn tokenWidget(self: *App, token: Token) *gtk.Widget {
     gtk.gtk_widget_add_css_class(remove, "tok-remove");
     gtk.gtk_widget_set_valign(remove, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_tooltip_text(remove, "Remove filter");
-    const cell = &ui.tokens_cell[@intFromEnum(token)];
+    const cell = &ui.tokens_cell[@backingInt(token)];
     cell.* = .{ .app = self, .token = token };
     _ = gtk.signalConnect(remove, "clicked", gtk.callback(tokenRemoved), cell);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), remove);

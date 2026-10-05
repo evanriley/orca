@@ -82,7 +82,7 @@ const forget_images_sql = "DELETE FROM folder_images WHERE root_id=?1 AND last_s
 
 fn sweptCoverReleasesSql(comptime swept: []const u8, comptime gone: []const u8) [:0]const u8 {
     const gone_folder = "rtrim(gone.uri, replace(gone.uri, '/', ''))";
-    const front = std.fmt.comptimePrint("{d}", .{@intFromEnum(ArtworkRole.front)});
+    const front = std.fmt.comptimePrint("{d}", .{@backingInt(ArtworkRole.front)});
     return "INSERT OR IGNORE INTO temp.swept_cover_releases(id)\n" ++
         "SELECT tracks.release_id FROM locations JOIN tracks ON tracks.preferred_file_id = locations.file_id\n" ++
         "WHERE " ++ swept ++ " AND locations.state<>'missing' AND tracks.release_id IS NOT NULL\n" ++
@@ -417,7 +417,7 @@ pub const FileRepository = struct {
         defer statement.deinit();
         try statement.bindText(1, offline_roots);
         try statement.bindInt64(2, @bitCast(undecodable_formats));
-        try statement.bindInt64(3, @intFromEnum(HealthIssueKind.unreadable_file));
+        try statement.bindInt64(3, @backingInt(HealthIssueKind.unreadable_file));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }

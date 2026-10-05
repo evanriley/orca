@@ -244,7 +244,7 @@ pub const RecordingVerificationRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
         try statement.bindText(2, recording_mbid);
-        try statement.bindInt64(3, @intFromEnum(ProposalState.dismissed));
+        try statement.bindInt64(3, @backingInt(ProposalState.dismissed));
         return try statement.step() == .row;
     }
 };
@@ -266,7 +266,7 @@ pub fn putLocked(db: sqlite.Database, verification: Verification) !void {
     try statement.bindInt64(1, verification.file_id);
     try statement.bindOptionalBlob(2, verification.quick_hash);
     try statement.bindText(3, verification.recording_mbid);
-    try statement.bindInt64(4, @intFromEnum(verification.outcome));
+    try statement.bindInt64(4, @backingInt(verification.outcome));
     try statement.bindOptionalText(5, if (verification.outcome == .no_fingerprint) null else heard.buffered());
     if (try statement.step() != .done) return error.SqlFailed;
 }
@@ -292,9 +292,9 @@ fn parseHeard(allocator: std.mem.Allocator, text: []const u8) ![]const HeardReco
     return parsed;
 }
 
-const recording_mbid_field = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Field.musicbrainz_recording_id)});
-const user_provenance = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Provenance.user)});
-const disagrees_outcome = std.fmt.comptimePrint("{d}", .{@intFromEnum(VerificationOutcome.disagrees)});
+const recording_mbid_field = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Field.musicbrainz_recording_id)});
+const user_provenance = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Provenance.user)});
+const disagrees_outcome = std.fmt.comptimePrint("{d}", .{@backingInt(VerificationOutcome.disagrees)});
 
 /// Which fresh `disagrees` files `verifiable` selects besides the stale and
 /// unverified ones.

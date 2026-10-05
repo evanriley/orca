@@ -157,10 +157,10 @@ fn releaseYear(release_date: []const u8) ?u32 {
 
 /// Binds ?3 to ?6 of `acoustid_submittable`.
 fn bindAcoustIdSubmittable(statement: sqlite.Statement) !void {
-    try statement.bindInt64(3, @intFromEnum(metadata.Field.musicbrainz_recording_id));
-    try statement.bindInt64(4, @intFromEnum(metadata.Provenance.provider));
-    try statement.bindInt64(5, @intFromEnum(metadata.Provenance.user));
-    try statement.bindInt64(6, @intFromEnum(ProposalState.accepted));
+    try statement.bindInt64(3, @backingInt(metadata.Field.musicbrainz_recording_id));
+    try statement.bindInt64(4, @backingInt(metadata.Provenance.provider));
+    try statement.bindInt64(5, @backingInt(metadata.Provenance.user));
+    try statement.bindInt64(6, @backingInt(ProposalState.accepted));
 }
 
 /// Files with ids above ?1 whose recording ID in effect is an Orca value of

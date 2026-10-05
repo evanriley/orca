@@ -92,7 +92,7 @@ pub const ReleaseInfoRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, release_id);
         try statement.bindOptionalText(2, record.description);
-        try statement.bindOptionalInt64(3, if (record.description_source) |source| @intFromEnum(source) else null);
+        try statement.bindOptionalInt64(3, if (record.description_source) |source| @backingInt(source) else null);
         try statement.bindOptionalText(4, record.description_url);
         try statement.bindOptionalText(5, record.description_licence);
         try statement.bindOptionalText(6, record.description_language);

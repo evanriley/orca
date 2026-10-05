@@ -334,7 +334,7 @@ pub const PlaylistRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, playlist_id);
         if (try statement.step() != .row) return error.UnknownPlaylist;
-        if (statement.columnInt64(0) != @intFromEnum(PlaylistKind.smart)) return null;
+        if (statement.columnInt64(0) != @backingInt(PlaylistKind.smart)) return null;
         return try allocator.dupe(u8, statement.columnText(1));
     }
 
@@ -652,9 +652,9 @@ pub const PlaylistRepository = struct {
     fn bindPageFilter(self: *const PlaylistRepository, statement: sqlite.Statement, query: PlaylistQuery) !void {
         _ = self;
         try statement.bindText(3, query.filter);
-        try statement.bindOptionalInt64(4, if (query.kind) |kind| @intFromEnum(kind) else null);
+        try statement.bindOptionalInt64(4, if (query.kind) |kind| @backingInt(kind) else null);
         try statement.bindInt64(5, @intFromBool(query.pinned_only));
-        try statement.bindOptionalInt64(6, if (query.created_by) |creator| @intFromEnum(creator) else null);
+        try statement.bindOptionalInt64(6, if (query.created_by) |creator| @backingInt(creator) else null);
     }
 
     fn readSummary(self: *const PlaylistRepository, allocator: std.mem.Allocator, statement: sqlite.Statement, evaluation: Evaluation) !PlaylistSummary {

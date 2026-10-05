@@ -113,7 +113,7 @@ fn firstValue(item: []const u8) !?Value {
     const data = try bmff.Iterator.find(item, "data") orelse return null;
     if (data.body.len < 8) return error.InvalidMp4;
     return .{
-        .kind = @enumFromInt(std.mem.readInt(u24, data.body[1..4], .big)),
+        .kind = @fromBackingInt(@intCast(std.mem.readInt(u24, data.body[1..4], .big))),
         .bytes = data.body[8..],
     };
 }

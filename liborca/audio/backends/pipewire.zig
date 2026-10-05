@@ -215,7 +215,7 @@ pub const OutputSession = struct {
     }
 
     pub fn status(self: *const OutputSession) Status {
-        return @enumFromInt(@as(std.meta.Tag(Status), @intCast(orca_pw_output_status(self.native))));
+        return @fromBackingInt(@intCast(@as(std.meta.Tag(Status), @intCast(orca_pw_output_status(self.native)))));
     }
 
     pub fn setStateWaker(self: *const OutputSession, waker: ?work.Waker) void {
@@ -624,8 +624,8 @@ fn scriptedDevice(id: u64, state: contract.DeviceState) NativeDevice {
         .id = id,
         .name = @splat(0),
         .name_len = 0,
-        .kind = @intFromEnum(contract.DeviceKind.usb),
-        .state = @intFromEnum(state),
+        .kind = @backingInt(contract.DeviceKind.usb),
+        .state = @backingInt(state),
         .bit_depths = contract.DeviceCapabilities.bit_depth_16 | contract.DeviceCapabilities.bit_depth_24,
         .channels_max = 2,
         .rate_min = 44_100,

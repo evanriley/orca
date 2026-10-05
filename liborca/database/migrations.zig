@@ -3154,7 +3154,7 @@ test "a version-25 library resumes an undo that was interrupted between files" {
     for ([_]struct { State, i64 }{
         .{ .planned, 0 }, .{ .staged, 1 },               .{ .committed, 2 }, .{ .rolled_back, 3 },
         .{ .failed, 4 },  .{ .needs_reconciliation, 5 }, .{ .undoing, 6 },
-    }) |pair| try std.testing.expectEqual(pair[1], @as(i64, @intFromEnum(pair[0])));
+    }) |pair| try std.testing.expectEqual(pair[1], @as(i64, @backingInt(pair[0])));
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE state = 6;"));
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE state = 6 AND id IN (1, 3);"));
     try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE state = 2 AND id IN (4, 5, 6, 9);"));

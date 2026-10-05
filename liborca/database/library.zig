@@ -3066,7 +3066,7 @@ fn playFileOf(library: *LibraryDatabase, track_id: i64) !i64 {
 fn proposalState(library: *LibraryDatabase, proposal_id: i64) !repository.ProposalState {
     var sql: [96]u8 = undefined;
     const state = try testScalar(library.database, try std.fmt.bufPrintSentinel(&sql, "SELECT state FROM identification_proposals WHERE id = {d};", .{proposal_id}, 0));
-    return @enumFromInt(@as(u8, @intCast(state)));
+    return @fromBackingInt(@intCast(@as(u8, @intCast(state))));
 }
 
 fn expectSyncedUnder(library: *LibraryDatabase, track_id: i64, expected: []const u8, provenance: metadata.Provenance) !void {
@@ -4418,9 +4418,9 @@ test "every rule field with every operator it accepts runs against the library" 
     const smart_playlist = @import("../library/smart_playlist.zig");
     var checked: usize = 0;
     inline for (std.meta.fields(smart_playlist.Field)) |field_info| {
-        const field: smart_playlist.Field = @enumFromInt(field_info.value);
+        const field: smart_playlist.Field = @fromBackingInt(@intCast(field_info.value));
         inline for (std.meta.fields(smart_playlist.Operator)) |operator_info| {
-            const operator: smart_playlist.Operator = @enumFromInt(operator_info.value);
+            const operator: smart_playlist.Operator = @fromBackingInt(@intCast(operator_info.value));
             if (operator.appliesTo(field.fieldType())) {
                 const value: []const u8 = switch (operator) {
                     .is_set, .is_not_set => "",

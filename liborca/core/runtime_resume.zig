@@ -244,7 +244,7 @@ fn saveInto(self: *OrcaRuntime, object_value: *PlayerObject, library: LibraryHan
     try library_database.player_state.save(.{
         .cursor = cursor,
         .position_ms = if (heard) read.status.position_ms else 0,
-        .repeat = @intFromEnum(read.status.repeat),
+        .repeat = @backingInt(read.status.repeat),
         .shuffle = read.status.shuffle,
     }, entries[0..count], now.wall_s);
 }

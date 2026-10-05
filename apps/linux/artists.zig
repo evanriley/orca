@@ -464,7 +464,7 @@ fn syncControls(self: *App) void {
             if (entry.sort == self.artist_sort) gtk.gtk_drop_down_set_selected(control, @intCast(index));
         }
     }
-    if (self.artist_layout_toggles[@intFromEnum(self.artist_layout)]) |toggle|
+    if (self.artist_layout_toggles[@backingInt(self.artist_layout)]) |toggle|
         gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
 }
 
@@ -518,7 +518,7 @@ fn layoutToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const toggle = gtk.cast(gtk.ToggleButton, button.?);
     if (gtk.gtk_toggle_button_get_active(toggle) == gtk.false_) return;
     const layout: albums.Layout = for (self.artist_layout_toggles, 0..) |candidate, index| {
-        if (candidate == toggle) break @enumFromInt(index);
+        if (candidate == toggle) break @fromBackingInt(@intCast(index));
     } else return;
     if (layout == self.artist_layout) return;
     self.artist_layout = layout;
@@ -543,7 +543,7 @@ fn newLayoutSwitch(self: *App) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        self.artist_layout_toggles[@intFromEnum(choice.layout)] = toggle;
+        self.artist_layout_toggles[@backingInt(choice.layout)] = toggle;
         _ = gtk.signalConnect(button, "toggled", gtk.callback(layoutToggled), self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), button);
     }

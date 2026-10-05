@@ -648,7 +648,7 @@ fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button.?)) == 0) return;
     const index = @intFromPtr(gtk.g_object_get_data(button.?, "orca-tab") orelse return) - 1;
-    const tab: Tab = @enumFromInt(index);
+    const tab: Tab = @fromBackingInt(@intCast(index));
     gtk.gtk_stack_set_visible_child_name(self.loved.tabs orelse return, @tagName(tab));
 }
 
@@ -674,7 +674,7 @@ fn buildTabs(self: *App) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        gtk.g_object_set_data(button, "orca-tab", @ptrFromInt(@intFromEnum(tab) + 1));
+        gtk.g_object_set_data(button, "orca-tab", @ptrFromInt(@backingInt(tab) + 1));
         _ = gtk.signalConnect(button, "toggled", gtk.callback(tabToggled), self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, row), button);
     }

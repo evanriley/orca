@@ -192,7 +192,7 @@ pub const ReleaseKind = enum(u8) {
 const release_kind = std.fmt.comptimePrint(
     "(CASE WHEN COALESCE(releases.release_type, '') IN ('', 'album', 'compilation') THEN {d}\n" ++
         "      WHEN releases.release_type IN ('ep', 'single') THEN {d} ELSE {d} END)",
-    .{ @intFromEnum(ReleaseKind.album), @intFromEnum(ReleaseKind.ep_or_single), @intFromEnum(ReleaseKind.other) },
+    .{ @backingInt(ReleaseKind.album), @backingInt(ReleaseKind.ep_or_single), @backingInt(ReleaseKind.other) },
 );
 
 /// The orders a Release listing comes in. Each ends in `releases.id`, so it is
@@ -273,7 +273,7 @@ fn letterOf(comptime key: []const u8) []const u8 {
     return "CASE WHEN " ++ startsWithLetter(key) ++ " THEN " ++ initial(key) ++ " ELSE '#' END";
 }
 
-const pending_state = std.fmt.comptimePrint("{d}", .{@intFromEnum(ProposalState.pending)});
+const pending_state = std.fmt.comptimePrint("{d}", .{@backingInt(ProposalState.pending)});
 
 const lossless_codecs = blk: {
     var list: []const u8 = "";
@@ -344,7 +344,7 @@ pub fn byAppearingArtist(comptime artist: []const u8) []const u8 {
         "    AND releases.album_artist_id IS NOT " ++ artist ++ ")";
 }
 
-const release_search_kind = std.fmt.comptimePrint("{d}", .{@intFromEnum(search.SearchKind.release)});
+const release_search_kind = std.fmt.comptimePrint("{d}", .{@backingInt(search.SearchKind.release)});
 
 const release_facts =
     "SELECT tracks.release_id AS release_id, count(*) AS track_count,\n" ++
@@ -480,7 +480,7 @@ fn bindBoundFilters(
     try statement.bindOptionalInt64(11, if (query.has_artwork) |wanted| @intFromBool(wanted) else null);
     try statement.bindOptionalText(12, if (query.text) |text| try search.matchExpression(expression, text) else null);
     try statement.bindOptionalInt64(13, query.appearing_artist_id);
-    try statement.bindOptionalInt64(14, if (query.release_kind) |kind| @intFromEnum(kind) else null);
+    try statement.bindOptionalInt64(14, if (query.release_kind) |kind| @backingInt(kind) else null);
     try statement.bindInt64(15, @intFromBool(query.own_releases_only and query.album_artist_id != null));
     try statement.bindOptionalInt64(16, query.added_after);
 }

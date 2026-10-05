@@ -1029,7 +1029,7 @@ fn syncControls(self: *App) void {
     const active = activeChip(self);
     for (self.album_chips, 0..) |maybe_chip, index| {
         const chip = maybe_chip orelse continue;
-        const checked = index == @intFromEnum(active);
+        const checked = index == @backingInt(active);
         if (checked) gtk.gtk_toggle_button_set_active(chip, gtk.true_);
         gtk.gtk_widget_set_focusable(gtk.cast(gtk.Widget, chip), @intFromBool(checked));
     }
@@ -1142,7 +1142,7 @@ fn chipToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const toggle = gtk.cast(gtk.ToggleButton, button.?);
     if (gtk.gtk_toggle_button_get_active(toggle) == gtk.false_) return;
     const chip: Chip = for (self.album_chips, 0..) |candidate, index| {
-        if (candidate == toggle) break @enumFromInt(index);
+        if (candidate == toggle) break @fromBackingInt(@intCast(index));
     } else return;
     chooseChip(self, chip);
 }
@@ -1165,8 +1165,8 @@ fn chipKeyPressed(
         else => return gtk.false_,
     };
     const count: isize = @intCast(self.album_chips.len);
-    const next: usize = @intCast(@mod(@as(isize, @intFromEnum(activeChip(self))) + step, count));
-    chooseChip(self, @enumFromInt(next));
+    const next: usize = @intCast(@mod(@as(isize, @backingInt(activeChip(self))) + step, count));
+    chooseChip(self, @fromBackingInt(@intCast(next)));
     const chip = self.album_chips[next] orelse return gtk.true_;
     _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, chip));
     return gtk.true_;
@@ -1199,7 +1199,7 @@ fn newChips(self: *App) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        self.album_chips[@intFromEnum(chip)] = toggle;
+        self.album_chips[@backingInt(chip)] = toggle;
         _ = gtk.signalConnect(button, "toggled", gtk.callback(chipToggled), self);
         adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, row), button);
     }
@@ -1370,7 +1370,7 @@ fn showLayout(self: *App) void {
     self.albums_syncing_controls = true;
     defer self.albums_syncing_controls = false;
     for (self.album_layout_toggles) |toggles| {
-        if (toggles[@intFromEnum(self.album_layout)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
+        if (toggles[@backingInt(self.album_layout)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
     }
     const body = self.albums_body orelse return;
     const visible = gtk.gtk_stack_get_visible_child_name(body) orelse return;
@@ -1385,7 +1385,7 @@ fn layoutToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (gtk.gtk_toggle_button_get_active(toggle) == gtk.false_) return;
     const layout: Layout = found: for (self.album_layout_toggles) |toggles| {
         for (toggles, 0..) |candidate, index| {
-            if (candidate == toggle) break :found @enumFromInt(index);
+            if (candidate == toggle) break :found @fromBackingInt(@intCast(index));
         }
     } else return;
     if (layout == self.album_layout) return;
@@ -1411,7 +1411,7 @@ fn newLayoutSwitch(self: *App, set: usize) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        self.album_layout_toggles[set][@intFromEnum(choice.layout)] = toggle;
+        self.album_layout_toggles[set][@backingInt(choice.layout)] = toggle;
         _ = gtk.signalConnect(button, "toggled", gtk.callback(layoutToggled), self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), button);
     }
@@ -2915,7 +2915,7 @@ fn columnChosen(action: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
     const self = state(data);
     const marked = @intFromPtr(gtk.g_object_get_data(action.?, "orca-column"));
     if (marked == 0) return;
-    const column: Column = @enumFromInt(marked - 1);
+    const column: Column = @fromBackingInt(@intCast(marked - 1));
     self.album_columns.toggle(column);
     const shown = self.album_columns.contains(column);
     gtk.g_simple_action_set_state(gtk.cast(gtk.GSimpleAction, action), gtk.g_variant_new_boolean(@intFromBool(shown)));
@@ -2933,7 +2933,7 @@ fn columnChooserClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) voi
     for (std.enums.values(Column)) |column| {
         const shown = self.album_columns.contains(column);
         const action = gtk.g_simple_action_new_stateful(@tagName(column), null, gtk.g_variant_new_boolean(@intFromBool(shown))) orelse continue;
-        gtk.g_object_set_data(action, "orca-column", @ptrFromInt(@as(usize, @intFromEnum(column)) + 1));
+        gtk.g_object_set_data(action, "orca-column", @ptrFromInt(@as(usize, @backingInt(column)) + 1));
         _ = gtk.signalConnect(action, "activate", gtk.callback(columnChosen), self);
         gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, group), gtk.cast(gtk.GAction, action));
         gtk.g_object_unref(action);

@@ -1034,7 +1034,7 @@ fn request(self: *App, want: Want) void {
     const matches = &self.matches;
     const library = self.library orelse return;
     if (matches.loader != null) {
-        if (@intFromEnum(want) > @intFromEnum(matches.wanted)) matches.wanted = want;
+        if (@backingInt(want) > @backingInt(matches.wanted)) matches.wanted = want;
         return;
     }
     if (want == .more and !canLoadMore(self)) return;

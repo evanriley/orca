@@ -314,11 +314,11 @@ pub const LibraryRootRepository = struct {
             );
             defer unfinished.deinit();
             try unfinished.bindText(1, old_path);
-            try unfinished.bindInt64(2, @intFromEnum(MutationState.committed));
-            try unfinished.bindInt64(3, @intFromEnum(MutationState.rolled_back));
-            try unfinished.bindInt64(4, @intFromEnum(MutationState.needs_reconciliation));
+            try unfinished.bindInt64(2, @backingInt(MutationState.committed));
+            try unfinished.bindInt64(3, @backingInt(MutationState.rolled_back));
+            try unfinished.bindInt64(4, @backingInt(MutationState.needs_reconciliation));
             if (try unfinished.step() == .row) {
-                if (unfinished.columnInt64(0) == @intFromEnum(MutationState.needs_reconciliation))
+                if (unfinished.columnInt64(0) == @backingInt(MutationState.needs_reconciliation))
                     return error.MutationNeedsReconciliation;
                 return error.MutationInProgress;
             }

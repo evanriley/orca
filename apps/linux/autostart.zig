@@ -26,7 +26,7 @@ fn entryPath(buffer: []u8) ?[:0]const u8 {
 pub fn set(enabled: bool) bool {
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const file = entryPath(&buffer) orelse return false;
-    if (!enabled) return gtk.g_unlink(file.ptr) == 0 or std.c._errno().* == @intFromEnum(std.posix.E.NOENT);
+    if (!enabled) return gtk.g_unlink(file.ptr) == 0 or std.c._errno().* == @backingInt(std.posix.E.NOENT);
     var err: ?*gtk.GError = null;
     if (gtk.g_file_set_contents(file.ptr, entry.ptr, entry.len, &err) != 0) return true;
     gtk.g_clear_error(&err);

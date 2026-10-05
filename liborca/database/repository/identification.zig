@@ -580,9 +580,9 @@ const ProviderValueWriter = struct {
         const clean = cleanValue(value orelse return) orelse return;
         if (isMusicBrainzIdField(field) and !metadata.isMusicBrainzId(clean)) return;
         try self.statement.bindInt64(1, file_id);
-        try self.statement.bindInt64(2, @intFromEnum(field));
+        try self.statement.bindInt64(2, @backingInt(field));
         try self.statement.bindText(3, clean);
-        try self.statement.bindInt64(4, @intFromEnum(metadata.Provenance.provider));
+        try self.statement.bindInt64(4, @backingInt(metadata.Provenance.provider));
         if (self.write == .correction) try self.statement.bindInt64(5, @intFromBool(field == .musicbrainz_recording_id));
         if (try self.statement.step() != .done) return error.SqlFailed;
         const changed = self.db.changes() != 0;
@@ -1097,7 +1097,7 @@ const releases_with_candidate_sources =
     "UNION SELECT tracks.release_id FROM sources JOIN files ON files.id = sources.file_id\n" ++
     "    JOIN tracks ON tracks.recording_id = files.recording_id";
 
-const release_search_kind = std.fmt.comptimePrint("{d}", .{@intFromEnum(search.SearchKind.release)});
+const release_search_kind = std.fmt.comptimePrint("{d}", .{@backingInt(search.SearchKind.release)});
 
 /// True for a Release whose title or album artist holds every word of the
 /// match expression bound as `?2`, and for every Release when it is null.
@@ -1254,9 +1254,9 @@ pub const IdentificationProposalRepository = struct {
         defer settle.deinit();
         try settle.bindInt64(1, proposal_id);
         try settle.bindInt64(2, file_id);
-        try settle.bindInt64(3, @intFromEnum(ProposalState.accepted));
-        try settle.bindInt64(4, @intFromEnum(ProposalState.dismissed));
-        try settle.bindInt64(5, @intFromEnum(ProposalState.pending));
+        try settle.bindInt64(3, @backingInt(ProposalState.accepted));
+        try settle.bindInt64(4, @backingInt(ProposalState.dismissed));
+        try settle.bindInt64(5, @backingInt(ProposalState.pending));
         try settle.bindInt64(6, @intFromBool(review == .bulk));
         if (try settle.step() != .done) return error.SqlFailed;
         try health.clearIssueLocked(self.db, file_id, .recording_mismatch);
@@ -1283,7 +1283,7 @@ pub const IdentificationProposalRepository = struct {
         defer select.deinit();
         try select.bindInt64(1, proposal_id);
         if (try select.step() != .row) return error.UnknownIdentificationProposal;
-        if (select.columnInt64(3) != @intFromEnum(ProposalState.pending)) return error.StaleIdentificationProposal;
+        if (select.columnInt64(3) != @backingInt(ProposalState.pending)) return error.StaleIdentificationProposal;
         const recording_mbid = try allocator.dupe(u8, select.columnText(1));
         if (!metadata.isMusicBrainzId(recording_mbid)) return error.InvalidProposalPayload;
         const payload = try ProposalPayload.parse(allocator, select.columnBlob(2));
@@ -1413,7 +1413,7 @@ pub const IdentificationProposalRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(ProposalState.accepted));
+        try statement.bindInt64(2, @backingInt(ProposalState.accepted));
         try statement.bindInt64(3, max_page);
         var payloads: std.ArrayList(ProposalPayload) = .empty;
         while (try statement.step() == .row) {
@@ -1480,7 +1480,7 @@ pub const IdentificationProposalRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, release_id);
-        try statement.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+        try statement.bindInt64(2, @backingInt(ProposalState.dismissed));
         try statement.bindInt64(3, max_release_proposals);
         var items: std.ArrayList(ReleaseProposal) = .empty;
         while (try statement.step() == .row) {
@@ -1603,7 +1603,7 @@ pub const IdentificationProposalRepository = struct {
                 "ORDER BY file_id, confidence DESC, id;");
             defer statement.deinit();
             try statement.bindText(1, listed_ids);
-            try statement.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+            try statement.bindInt64(2, @backingInt(ProposalState.dismissed));
             while (try statement.step() == .row) {
                 const entry = try by_file.getOrPut(owned, statement.columnInt64(8));
                 if (!entry.found_existing) entry.value_ptr.* = .empty;
@@ -1612,7 +1612,7 @@ pub const IdentificationProposalRepository = struct {
                     error.InvalidProposalPayload => continue,
                     error.OutOfMemory => return err,
                 };
-                const state: ProposalState = if (statement.columnInt64(1) == @intFromEnum(ProposalState.accepted)) .accepted else .pending;
+                const state: ProposalState = if (statement.columnInt64(1) == @backingInt(ProposalState.accepted)) .accepted else .pending;
                 const recording_mbid = try owned.dupe(u8, statement.columnText(4));
                 const in_effect = try duplicateNullableColumn(owned, statement, 7);
                 try entry.value_ptr.append(owned, .{
@@ -1768,7 +1768,7 @@ pub const IdentificationProposalRepository = struct {
                 "AND " ++ release_match_filter ++ "\n" ++
                 "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;");
         defer releases.deinit();
-        try releases.bindInt64(1, @intFromEnum(ProposalState.dismissed));
+        try releases.bindInt64(1, @backingInt(ProposalState.dismissed));
         try releases.bindOptionalText(2, expression);
         var ids: [weigh_chunk]i64 = undefined;
         var weighed: [weigh_chunk]bool = undefined;
@@ -1865,7 +1865,7 @@ pub const IdentificationProposalRepository = struct {
         else
             "SELECT id FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ") AND " ++ release_match_filter ++ ";");
         defer releases.deinit();
-        try releases.bindInt64(1, @intFromEnum(ProposalState.dismissed));
+        try releases.bindInt64(1, @backingInt(ProposalState.dismissed));
         if (expression != null) try releases.bindOptionalText(2, expression);
         var more = true;
         while (more) {
@@ -1985,8 +1985,8 @@ pub const IdentificationProposalRepository = struct {
         );
         defer update.deinit();
         try update.bindInt64(1, proposal_id);
-        try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
-        try update.bindInt64(3, @intFromEnum(ProposalState.pending));
+        try update.bindInt64(2, @backingInt(ProposalState.dismissed));
+        try update.bindInt64(3, @backingInt(ProposalState.pending));
         if (try update.step() == .row) {
             const file_id = update.columnInt64(0);
             if (try update.step() != .done) return error.SqlFailed;
@@ -1998,7 +1998,7 @@ pub const IdentificationProposalRepository = struct {
         defer exists.deinit();
         try exists.bindInt64(1, proposal_id);
         if (try exists.step() != .row) return error.UnknownIdentificationProposal;
-        if (exists.columnInt64(0) == @intFromEnum(ProposalState.pending) and !exists.columnIsNull(1)) return error.ProposalInGroup;
+        if (exists.columnInt64(0) == @backingInt(ProposalState.pending) and !exists.columnIsNull(1)) return error.ProposalInGroup;
         return error.StaleIdentificationProposal;
     }
 
@@ -2021,14 +2021,14 @@ pub const IdentificationProposalRepository = struct {
         defer groups.deinit();
         try groups.bindInt64(1, limit);
         try groups.bindInt64(2, offset);
-        try groups.bindInt64(3, @intFromEnum(ProposalState.pending));
+        try groups.bindInt64(3, @backingInt(ProposalState.pending));
         var members = try self.db.prepare(correction_members_sql);
         defer members.deinit();
         var items: std.ArrayList(CorrectionGroup) = .empty;
         while (try groups.step() == .row) {
             const group_id = groups.columnInt64(0);
             try members.bindInt64(1, group_id);
-            try members.bindInt64(2, @intFromEnum(ProposalState.pending));
+            try members.bindInt64(2, @backingInt(ProposalState.pending));
             try members.bindInt64(3, max_page);
             var group: CorrectionGroup = .{ .group_id = group_id, .release_id = null, .album = "", .album_artist = "", .proposals = &.{} };
             var proposals: std.ArrayList(CorrectionGroupMember) = .empty;
@@ -2110,7 +2110,7 @@ pub const IdentificationProposalRepository = struct {
         defer update.deinit();
         for (dismissed) |proposal_id| {
             try update.bindInt64(1, proposal_id);
-            try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+            try update.bindInt64(2, @backingInt(ProposalState.dismissed));
             if (try update.step() != .row) return error.SqlFailed;
             const file_id = update.columnInt64(0);
             if (try update.step() != .done) return error.SqlFailed;
@@ -2126,7 +2126,7 @@ pub const IdentificationProposalRepository = struct {
         );
         defer pending_left.deinit();
         try pending_left.bindInt64(1, file_id);
-        try pending_left.bindInt64(2, @intFromEnum(ProposalState.pending));
+        try pending_left.bindInt64(2, @backingInt(ProposalState.pending));
         if (try pending_left.step() == .row) return;
         try health.clearIssueLocked(self.db, file_id, .recording_mismatch);
     }
@@ -2137,7 +2137,7 @@ pub const IdentificationProposalRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, group_id);
-        try statement.bindInt64(2, @intFromEnum(ProposalState.pending));
+        try statement.bindInt64(2, @backingInt(ProposalState.pending));
         try statement.bindInt64(3, buffer.len);
         var count: usize = 0;
         while (try statement.step() == .row) : (count += 1) buffer[count] = statement.columnInt64(0);
@@ -2234,7 +2234,7 @@ pub const IdentificationProposalRepository = struct {
             try statement.bindDouble(1, minimum_confidence);
             try statement.bindInt64(2, cursor);
             try statement.bindInt64(3, files.len);
-            try statement.bindInt64(4, @intFromEnum(ProposalState.pending));
+            try statement.bindInt64(4, @backingInt(ProposalState.pending));
             while (try statement.step() == .row) : (file_count += 1) files[file_count] = statement.columnInt64(0);
         }
         var chosen_count: usize = 0;
@@ -2328,7 +2328,7 @@ pub const IdentificationProposalRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, track_id);
         try statement.bindInt64(2, limit);
-        try statement.bindInt64(3, @intFromEnum(ProposalState.pending));
+        try statement.bindInt64(3, @backingInt(ProposalState.pending));
 
         const arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(allocator);
@@ -2353,7 +2353,7 @@ pub const IdentificationProposalRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, limit);
         try statement.bindInt64(2, offset);
-        try statement.bindInt64(3, @intFromEnum(ProposalState.pending));
+        try statement.bindInt64(3, @backingInt(ProposalState.pending));
 
         const arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(allocator);
@@ -2378,7 +2378,7 @@ pub const IdentificationProposalRepository = struct {
     pub fn reviewCount(self: *const IdentificationProposalRepository) !u64 {
         var statement = try self.db.prepare(review_count_sql);
         defer statement.deinit();
-        try statement.bindInt64(3, @intFromEnum(ProposalState.pending));
+        try statement.bindInt64(3, @backingInt(ProposalState.pending));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -2445,7 +2445,7 @@ pub const IdentificationProposalRepository = struct {
             try insert.bindText(3, evidence.recording_mbid);
             try insert.bindDouble(4, evidence.payload.combinedConfidence());
             try insert.bindBlob(5, payload);
-            try insert.bindInt64(6, @intFromEnum(ProposalState.pending));
+            try insert.bindInt64(6, @backingInt(ProposalState.pending));
             try insert.bindOptionalInt64(7, album_group);
             if (try insert.step() != .done) return error.SqlFailed;
             return .pending;

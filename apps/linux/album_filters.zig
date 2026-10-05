@@ -112,7 +112,7 @@ fn chosen(self: *App) Filters {
     if (ui.formats[1]) |lossless| filters.lossless_only = gtk.gtk_toggle_button_get_active(lossless) != 0;
     for (ui.artwork, 0..) |toggle, index| {
         const button = toggle orelse continue;
-        if (gtk.gtk_toggle_button_get_active(button) != 0) filters.artwork = @enumFromInt(index);
+        if (gtk.gtk_toggle_button_get_active(button) != 0) filters.artwork = @fromBackingInt(@intCast(index));
     }
     return filters;
 }
@@ -132,7 +132,7 @@ fn showFilters(self: *App) void {
     setYear(ui.year_from, filters.year_from);
     setYear(ui.year_to, filters.year_to);
     if (ui.formats[@intFromBool(filters.lossless_only)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
-    if (ui.artwork[@intFromEnum(filters.artwork)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
+    if (ui.artwork[@backingInt(filters.artwork)]) |toggle| gtk.gtk_toggle_button_set_active(toggle, gtk.true_);
 }
 
 pub fn showActive(self: *App) void {
@@ -380,7 +380,7 @@ fn addedChecked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const index = chosenCheck(self, button) orelse return;
     popdown(self.album_filters_ui.facets.added_popover);
-    const window: albums.Added.Window = @enumFromInt(index);
+    const window: albums.Added.Window = @fromBackingInt(@intCast(index));
     if (window == self.album_added.window) return;
     albums.setAdded(self, window);
     albums.relist(self);
@@ -403,7 +403,7 @@ fn shelfChecked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const index = chosenCheck(self, button) orelse return;
     popdown(self.album_filters_ui.facets.more_popover);
-    const shelf: albums.Shelf = @enumFromInt(index);
+    const shelf: albums.Shelf = @fromBackingInt(@intCast(index));
     if (shelf == self.album_shelf) return;
     self.album_shelf = shelf;
     settings.save(self);
@@ -414,7 +414,7 @@ fn artworkChecked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const index = chosenCheck(self, button) orelse return;
     popdown(self.album_filters_ui.facets.more_popover);
-    const artwork: Artwork = @enumFromInt(index);
+    const artwork: Artwork = @fromBackingInt(@intCast(index));
     if (artwork == self.album_filters.artwork) return;
     self.album_filters.artwork = artwork;
     showActive(self);
@@ -615,7 +615,7 @@ pub fn showFacets(self: *App) void {
     const window = self.album_added.window;
     const added_label: [:0]const u8 = if (window == .any) "Added: any time" else strings.printZ(&buffer, "Added: {s}", .{std.mem.span(window.label())}) catch "Added";
     gtk.gtk_menu_button_set_label(added, added_label.ptr);
-    activate(facets.added_checks[@intFromEnum(window)]);
+    activate(facets.added_checks[@backingInt(window)]);
     markOn(added, window != .any);
 
     if (facets.genre) |genre| {
@@ -632,7 +632,7 @@ pub fn showFacets(self: *App) void {
         }
     }
 
-    activate(facets.shelf_checks[@intFromEnum(self.album_shelf)]);
-    activate(facets.artwork_checks[@intFromEnum(filters.artwork)]);
+    activate(facets.shelf_checks[@backingInt(self.album_shelf)]);
+    activate(facets.artwork_checks[@backingInt(filters.artwork)]);
     markOn(facets.more, self.album_shelf != .all or filters.artwork != .any);
 }

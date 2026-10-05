@@ -88,7 +88,7 @@ pub const AudioHasher = struct {
         var header: [21]u8 = undefined;
         @memcpy(header[0..4], "ORAH");
         std.mem.writeInt(u16, header[4..6], audio_hash_version, .little);
-        header[6] = @intFromEnum(self.tier);
+        header[6] = @backingInt(self.tier);
         std.mem.writeInt(u32, header[7..11], self.sample_rate, .little);
         header[11] = self.channels;
         header[12] = 0;
@@ -259,7 +259,7 @@ pub fn encode(allocator: std.mem.Allocator, result: Result) ![]u8 {
     std.mem.writeInt(u32, bytes[8..12], @intCast(result.signatures.len), .little);
     @memcpy(bytes[12..44], &result.digest);
     @memcpy(bytes[44..76], &result.audio_hash.digest);
-    bytes[76] = @intFromEnum(result.audio_hash.tier);
+    bytes[76] = @backingInt(result.audio_hash.tier);
     bytes[77] = result.audio_hash.effective_bits;
     for (result.signatures, 0..) |signature, index|
         std.mem.writeInt(u16, bytes[encoded_header_size + index * 2 ..][0..2], signature, .little);
@@ -474,9 +474,9 @@ test "a version 1 fingerprint result is refused and a corrupt tier is invalid" {
     std.mem.writeInt(u16, encoded[4..6], 2, .little);
     encoded[76] = 3;
     try std.testing.expectError(error.InvalidFingerprintResult, decode(allocator, encoded));
-    encoded[76] = @intFromEnum(AudioHashTier.decoded_float);
+    encoded[76] = @backingInt(AudioHashTier.decoded_float);
     try std.testing.expectError(error.InvalidFingerprintResult, decode(allocator, encoded));
-    encoded[76] = @intFromEnum(AudioHashTier.lossless_integer);
+    encoded[76] = @backingInt(AudioHashTier.lossless_integer);
     const decoded = try decode(allocator, encoded);
     defer decoded.deinit();
     try std.testing.expectEqual(result.audio_hash, decoded.audio_hash);

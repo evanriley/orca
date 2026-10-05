@@ -84,7 +84,7 @@ pub fn libraryMetadataIssueCount(self: *OrcaRuntime, library: LibraryHandle, cat
     else
         "SELECT count(*) FROM metadata_proposals WHERE id = group_id AND state = 0 AND category = ?1;");
     defer statement.deinit();
-    if (category) |value| try statement.bindInt64(1, @intFromEnum(value));
+    if (category) |value| try statement.bindInt64(1, @backingInt(value));
     if (try statement.step() != .row) return error.SqlFailed;
     return @intCast(statement.columnInt64(0));
 }
@@ -156,7 +156,7 @@ pub fn libraryMetadataIssuePage(
         else
             page_columns ++ " AND h.category = ?1\nORDER BY h.release_id, h.id LIMIT ?2 OFFSET ?3;");
         defer statement.deinit();
-        if (category) |value| try statement.bindInt64(1, @intFromEnum(value));
+        if (category) |value| try statement.bindInt64(1, @backingInt(value));
         try statement.bindInt64(2, limit);
         try statement.bindInt64(3, offset);
         while (try statement.step() == .row) try groups.append(owned, .{

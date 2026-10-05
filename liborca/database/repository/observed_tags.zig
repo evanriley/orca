@@ -150,7 +150,7 @@ pub const ObservedTagsRepository = struct {
             if (tags.artwork) |artwork| {
                 try statement.bindText(26, artwork.mime_type);
                 try statement.bindInt64(27, @intCast(artwork.byte_size));
-                try statement.bindInt64(28, @intFromEnum(artwork.kind));
+                try statement.bindInt64(28, @backingInt(artwork.kind));
                 try statement.bindOptionalInt64(31, optionalCount(artwork.width));
                 try statement.bindOptionalInt64(32, optionalCount(artwork.height));
                 try statement.bindOptionalInt64(33, artwork.hash);
@@ -162,7 +162,7 @@ pub const ObservedTagsRepository = struct {
                 try statement.bindOptionalInt64(32, null);
                 try statement.bindOptionalInt64(33, null);
             }
-            try statement.bindOptionalInt64(29, if (tags.explicit) |advisory| @intFromEnum(advisory) else null);
+            try statement.bindOptionalInt64(29, if (tags.explicit) |advisory| @backingInt(advisory) else null);
             try statement.bindOptionalText(30, presentText(tags.comment));
             if (try statement.step() != .done) return error.SqlFailed;
             try statement.reset();

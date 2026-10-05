@@ -299,7 +299,7 @@ fn buildPanel(self: *App) *gtk.Widget {
         gtk.gtk_widget_set_focus_on_click(button, gtk.false_);
         gtk.gtk_toggle_button_set_group(gtk.cast(gtk.ToggleButton, button), group);
         group = gtk.cast(gtk.ToggleButton, button);
-        gtk.g_object_set_data(button, "orca-tab", @ptrFromInt(@intFromEnum(tab) + 1));
+        gtk.g_object_set_data(button, "orca-tab", @ptrFromInt(@backingInt(tab) + 1));
         _ = gtk.signalConnect(button, "toggled", gtk.callback(tabToggled), self);
         append(tabs, button);
         page.tab_buttons.set(tab, button);
@@ -443,7 +443,7 @@ fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button.?)) == 0) return;
     const marked = @intFromPtr(gtk.g_object_get_data(button.?, "orca-tab"));
     if (marked == 0 or marked > std.enums.values(Tab).len) return;
-    const tab: Tab = @enumFromInt(@as(std.meta.Tag(Tab), @intCast(marked - 1)));
+    const tab: Tab = @fromBackingInt(@intCast(@as(std.meta.Tag(Tab), @intCast(marked - 1))));
     const self = state(data);
     if (tab != self.now_playing.tab) showTab(self, tab);
 }

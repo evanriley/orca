@@ -706,7 +706,7 @@ fn generalTab(self: *App) *gtk.Widget {
         "Default page",
         "Queue and resume behavior live in Playback",
         &.{ "Albums", "Artists", "Tracks", "Now Playing", null },
-        @intFromEnum(general.start_page),
+        @backingInt(general.start_page),
         gtk.callback(startPagePicked),
         self,
     ));
@@ -720,7 +720,7 @@ fn generalTab(self: *App) *gtk.Widget {
         "Sort artist names",
         "Ignore leading articles",
         &.{ "Ignore The, A, An", "Sort as written", null },
-        @intFromEnum(general.name_order),
+        @backingInt(general.name_order),
         gtk.callback(nameOrderPicked),
         self,
     ));
@@ -1082,7 +1082,7 @@ fn playbackTab(self: *App) *gtk.Widget {
         "On launch",
         "",
         &.{ "Restore queue, paused", "Restore and play", "Start empty", null },
-        @intFromEnum(playback.on_launch),
+        @backingInt(playback.on_launch),
         gtk.callback(onLaunchPicked),
         self,
     ));
@@ -1194,7 +1194,7 @@ fn showPreset(self: *App, preset: ?liborca.EqualizerPreset) void {
     defer self.suppress_sound_signals = previous;
     const has_custom = gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, names)) > preset_count;
     if (preset) |chosen| {
-        adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, row), @intFromEnum(chosen));
+        adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, row), @backingInt(chosen));
         if (has_custom) gtk.gtk_string_list_splice(names, preset_count, 1, null);
     } else {
         if (!has_custom) gtk.gtk_string_list_append(names, "Custom");
@@ -1393,7 +1393,7 @@ fn modeControl(self: *App, mode: parametric.Mode) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         if (first) |group| gtk.gtk_toggle_button_set_group(toggle, group) else first = toggle;
         gtk.gtk_toggle_button_set_active(toggle, @intFromBool(choice[1] == mode));
-        self.sound_controls.mode_buttons[@intFromEnum(choice[1])] = toggle;
+        self.sound_controls.mode_buttons[@backingInt(choice[1])] = toggle;
         _ = gtk.signalConnect(button, "toggled", choice[2], self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), button);
     }
@@ -2226,7 +2226,7 @@ fn appearanceTab(self: *App) *gtk.Widget {
         "Artwork influence",
         "How much album color tints the background",
         &.{ "Off", "Subtle", "Expressive" },
-        @intFromEnum(choices.artwork),
+        @backingInt(choices.artwork),
         gtk.callback(artworkChosen),
         self,
     ));
@@ -2236,14 +2236,14 @@ fn appearanceTab(self: *App) *gtk.Widget {
         "Display typeface",
         "Albums, artists, playlists and Now Playing titles",
         &.{ "Newsreader (serif)", "Same as interface", null },
-        @intFromEnum(choices.display_typeface),
+        @backingInt(choices.display_typeface),
         gtk.callback(typefacePicked),
         self,
     ));
     typeface.add(switchRow("Tabular numerals in tables", "Keeps durations and values aligned", choices.tabular_numerals, gtk.callback(numeralsSwitched), self));
 
     const layout = flatCard("orca-grid-symbolic", "Layout", "");
-    layout.add(segmentedRow("Density", "", &.{ "Comfortable", "Compact" }, @intFromEnum(choices.density), gtk.callback(densityChosen), self));
+    layout.add(segmentedRow("Density", "", &.{ "Comfortable", "Compact" }, @backingInt(choices.density), gtk.callback(densityChosen), self));
     const grid = actionRow("Album grid size", "Also adjustable from the Albums toolbar");
     const range = app.album_tile_range;
     const adjustment = gtk.gtk_adjustment_new(@floatFromInt(choices.album_grid_tile), @floatFromInt(range[0]), @floatFromInt(range[1]), 4, 16, 0);
@@ -2262,7 +2262,7 @@ fn appearanceTab(self: *App) *gtk.Widget {
         "Inspector",
         "",
         &.{ "Open on selection", "Remember last state", "Always closed", null },
-        @intFromEnum(choices.inspector),
+        @backingInt(choices.inspector),
         gtk.callback(inspectorPicked),
         self,
     ));
@@ -2569,7 +2569,7 @@ fn advancedTab(self: *App) *gtk.Widget {
     const history = actionRow("Operation history", "Every change Orca made to your files, with undo");
     _ = suffixButton(history, "View…", null, gtk.callback(historyClicked), self);
     storage.add(history);
-    storage.add(selectRow("Log level", "", &.{ "Info", "Debug", "Trace", null }, @intFromEnum(logging.level()), gtk.callback(logLevelPicked), self));
+    storage.add(selectRow("Log level", "", &.{ "Info", "Debug", "Trace", null }, @backingInt(logging.level()), gtk.callback(logLevelPicked), self));
 
     const reset = flatCard("orca-refresh-symbolic", "Reset", "Ratings, loves and history are always kept.");
     const rebuild = actionRow("Rebuild library database", "Rescans every file from scratch");
@@ -2829,7 +2829,7 @@ fn diagnosticsCard(self: *App) *gtk.Widget {
 
 fn showAbout(self: *App) void {
     const page = &self.settings_page;
-    if (page.contents[@intFromEnum(app.SettingsTab.about)] == null) return;
+    if (page.contents[@backingInt(app.SettingsTab.about)] == null) return;
     if (page.about_device) |label| gtk.gtk_label_set_text(label, transport.deviceName(self).ptr);
     var text_buffer: [512]u8 = undefined;
     if (page.about_formats) |label| gtk.gtk_label_set_text(label, deviceFormatsText(&text_buffer, self).ptr);
@@ -2944,9 +2944,9 @@ pub fn setFilter(self: *App, text: []const u8) void {
     var first: ?app.SettingsTab = null;
     var current_matches = false;
     for (std.enums.values(app.SettingsTab)) |which| {
-        const content = page.contents[@intFromEnum(which)] orelse continue;
+        const content = page.contents[@backingInt(which)] orelse continue;
         const found = needle.len == 0 or (Filter{ .self = self, .needle = needle }).cards(content);
-        if (page.tab_buttons[@intFromEnum(which)]) |button| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, button), @intFromBool(found));
+        if (page.tab_buttons[@backingInt(which)]) |button| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, button), @intFromBool(found));
         if (found and first == null) first = which;
         if (found and which == page.tab) current_matches = true;
     }
@@ -2958,7 +2958,7 @@ fn columnSpan(which: app.SettingsTab) [2]c_int {
 }
 
 fn layOut(self: *App, which: app.SettingsTab, narrow: bool) void {
-    const grid = self.settings_page.columns[@intFromEnum(which)] orelse return;
+    const grid = self.settings_page.columns[@backingInt(which)] orelse return;
     const manager = gtk.gtk_widget_get_layout_manager(grid) orelse return;
     const span = columnSpan(which);
     var child = gtk.gtk_widget_get_first_child(grid);
@@ -3001,14 +3001,14 @@ fn tab(self: *App, which: app.SettingsTab, top: ?*gtk.Widget, left: []const *gtk
         for (cards) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, column), widget);
         gtk.gtk_grid_attach(gtk.cast(gtk.Grid, grid), column, if (index == 0) 0 else span[0], 0, span[index], 1);
     }
-    self.settings_page.columns[@intFromEnum(which)] = grid;
+    self.settings_page.columns[@backingInt(which)] = grid;
     layOut(self, which, narrowLayout(self));
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
     gtk.gtk_widget_add_css_class(content, "settings-tab");
     if (top) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, content), widget);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), grid);
-    self.settings_page.contents[@intFromEnum(which)] = content;
+    self.settings_page.contents[@backingInt(which)] = content;
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
@@ -3064,7 +3064,7 @@ pub fn build(self: *App) *gtk.Widget {
 fn addFit(self: *App, bin: *gtk.Widget, condition: [*:0]const u8, fit: app.SettingsFit) void {
     const parsed = adw.adw_breakpoint_condition_parse(condition) orelse return;
     const breakpoint = adw.adw_breakpoint_new(parsed);
-    gtk.g_object_set_data(breakpoint, "orca-settings-fit", @ptrFromInt(@as(usize, @intFromEnum(fit)) + 1));
+    gtk.g_object_set_data(breakpoint, "orca-settings-fit", @ptrFromInt(@as(usize, @backingInt(fit)) + 1));
     _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(fitApplied), self);
     _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(fitUnapplied), self);
     adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
@@ -3072,7 +3072,7 @@ fn addFit(self: *App, bin: *gtk.Widget, condition: [*:0]const u8, fit: app.Setti
 
 fn fitOf(breakpoint: ?*anyopaque) app.SettingsFit {
     const tag = @intFromPtr(gtk.g_object_get_data(breakpoint.?, "orca-settings-fit"));
-    return @enumFromInt(@as(std.meta.Tag(app.SettingsFit), @intCast(tag - 1)));
+    return @fromBackingInt(@intCast(@as(std.meta.Tag(app.SettingsFit), @intCast(tag - 1))));
 }
 
 fn fitApplied(breakpoint: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -3104,15 +3104,15 @@ const tab_info = std.EnumArray(app.SettingsTab, TabInfo).init(.{
 fn syncTabs(self: *App) void {
     const page = &self.settings_page;
     buildTab(self, page.tab);
-    if (page.stale[@intFromEnum(page.tab)] and self.current_page == .settings) {
-        page.stale[@intFromEnum(page.tab)] = false;
+    if (page.stale[@backingInt(page.tab)] and self.current_page == .settings) {
+        page.stale[@backingInt(page.tab)] = false;
         refreshTab(self, page.tab);
     }
     page.syncing = true;
     defer page.syncing = false;
     for (page.tab_buttons, 0..) |maybe, index| {
         const button = maybe orelse continue;
-        const checked = index == @intFromEnum(page.tab);
+        const checked = index == @backingInt(page.tab);
         if (checked) gtk.gtk_toggle_button_set_active(button, gtk.true_);
         gtk.gtk_widget_set_focusable(gtk.cast(gtk.Widget, button), @intFromBool(checked));
     }
@@ -3139,7 +3139,7 @@ fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const toggle = gtk.cast(gtk.ToggleButton, button.?);
     if (gtk.gtk_toggle_button_get_active(toggle) == gtk.false_) return;
     for (self.settings_page.tab_buttons, 0..) |candidate, index| {
-        if (candidate == toggle) return selectTab(self, @enumFromInt(index));
+        if (candidate == toggle) return selectTab(self, @fromBackingInt(@intCast(index)));
     }
 }
 
@@ -3151,8 +3151,8 @@ fn tabKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, _: c_uint, data: ?*a
         else => return gtk.false_,
     };
     const count: isize = app.settings_tab_count;
-    const next: usize = @intCast(@mod(@as(isize, @intFromEnum(self.settings_page.tab)) + step, count));
-    selectTab(self, @enumFromInt(next));
+    const next: usize = @intCast(@mod(@as(isize, @backingInt(self.settings_page.tab)) + step, count));
+    selectTab(self, @fromBackingInt(@intCast(next)));
     const button = self.settings_page.tab_buttons[next] orelse return gtk.true_;
     _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, button));
     return gtk.true_;
@@ -3183,8 +3183,8 @@ fn tabBar(self: *App) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         gtk.gtk_toggle_button_set_group(toggle, group);
         group = group orelse toggle;
-        page.tab_buttons[@intFromEnum(which)] = toggle;
-        page.tab_labels[@intFromEnum(which)] = label;
+        page.tab_buttons[@backingInt(which)] = toggle;
+        page.tab_labels[@backingInt(which)] = label;
         _ = gtk.signalConnect(button, "toggled", gtk.callback(tabToggled), self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, bar), button);
     }
@@ -3197,7 +3197,7 @@ fn tabBar(self: *App) *gtk.Widget {
 fn buildTab(self: *App, which: app.SettingsTab) void {
     const page = &self.settings_page;
     const stack = page.tabs orelse return;
-    if (page.contents[@intFromEnum(which)] != null) return;
+    if (page.contents[@backingInt(which)] != null) return;
     const content = switch (which) {
         .general => generalTab(self),
         .library => libraryTab(self),
@@ -3210,7 +3210,7 @@ fn buildTab(self: *App, which: app.SettingsTab) void {
     };
     const info = tab_info.get(which);
     _ = adw.adw_view_stack_add_titled_with_icon(stack, content, info.name, info.label, info.icon);
-    page.stale[@intFromEnum(which)] = false;
+    page.stale[@backingInt(which)] = false;
 }
 
 /// Brings a tab built on an earlier visit in line with what may have changed

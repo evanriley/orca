@@ -756,7 +756,7 @@ fn albumsSection(page: *ArtistPage, row: *const ReleaseRow) *gtk.Widget {
         gtk.gtk_widget_add_css_class(see_all, "see-all");
         gtk.gtk_widget_set_valign(see_all, gtk.ALIGN_CENTER);
         gtk.gtk_widget_set_tooltip_text(see_all, row.tooltip());
-        markPosition(see_all, @intFromEnum(row.scope));
+        markPosition(see_all, @backingInt(row.scope));
         _ = gtk.signalConnect(see_all, "clicked", gtk.callback(releaseSeeAllClicked), page);
         gtk.gtk_box_append(gtk.cast(gtk.Box, heading), see_all);
     }

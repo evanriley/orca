@@ -732,8 +732,8 @@ fn summaryLine(key: [*:0]const u8, line: SummaryLine) *gtk.Widget {
     gtk.gtk_widget_add_css_class(value, "numeric");
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), key_label);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), value);
-    picker.lines[@intFromEnum(line)] = row;
-    picker.values[@intFromEnum(line)] = gtk.cast(gtk.Label, value);
+    picker.lines[@backingInt(line)] = row;
+    picker.values[@backingInt(line)] = gtk.cast(gtk.Label, value);
     return row;
 }
 
@@ -749,7 +749,7 @@ fn buildSummary() *gtk.Widget {
 }
 
 fn showSummaryLine(line: SummaryLine, text: [:0]const u8) void {
-    const index = @intFromEnum(line);
+    const index = @backingInt(line);
     if (picker.values[index]) |label| {
         gtk.gtk_label_set_text(label, text.ptr);
         gtk.gtk_widget_set_tooltip_text(gtk.cast(gtk.Widget, label), if (text.len == 0) null else text.ptr);
@@ -786,7 +786,7 @@ fn showDeviceSupports(self: *const App) void {
     const capabilities = if (self.device_index < max_rows) picker.capabilities[self.device_index] else null;
     const known = capabilities orelse return showSummaryLine(.supports, "");
     showSummaryText(.supports, signal_path.writeDeviceSupports, .{known});
-    if (picker.values[@intFromEnum(SummaryLine.supports)]) |label|
+    if (picker.values[@backingInt(SummaryLine.supports)]) |label|
         gtk.gtk_widget_set_tooltip_text(gtk.cast(gtk.Widget, label), signal_path.device_supports_source);
 }
 

@@ -237,7 +237,7 @@ pub fn parseWidths(text: []const u8, widths: *[Column.all.len]c_int) void {
         const split = std.mem.indexOfScalar(u8, pair, ':') orelse continue;
         const column = std.meta.stringToEnum(Column, std.mem.trim(u8, pair[0..split], " ")) orelse continue;
         const width = std.fmt.parseInt(c_int, std.mem.trim(u8, pair[split + 1 ..], " "), 10) catch continue;
-        if (width > 0 and width <= 2000) widths[@intFromEnum(column)] = width;
+        if (width > 0 and width <= 2000) widths[@backingInt(column)] = width;
     }
 }
 
@@ -245,7 +245,7 @@ pub fn formatWidths(buffer: []u8, widths: *const [Column.all.len]c_int) [:0]cons
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
     var first = true;
     for (Column.all) |column| {
-        const width = widths[@intFromEnum(column)];
+        const width = widths[@backingInt(column)];
         if (width <= 0) continue;
         writer.print("{s}{s}:{d}", .{ if (first) "" else ",", @tagName(column), width }) catch return "";
         first = false;
@@ -288,7 +288,7 @@ pub const Table = struct {
     header_source: c_uint = 0,
 
     pub fn header(self: *const Table, column: Column) ?*gtk.ColumnViewColumn {
-        return self.columns[@intFromEnum(column)];
+        return self.columns[@backingInt(column)];
     }
 
     fn chosen(self: *const Table) ColumnSet {
@@ -1026,7 +1026,7 @@ fn columnWidth(table: *const Table, column: Column) c_int {
     const view: View = if (table.config) |config| config.view else .small;
     if (table.narrow) if (narrowWidth(column)) |width| return width;
     if (column == .loved or column == .more) return defaultWidth(column, view);
-    const saved = if (table.config) |config| config.widths[@intFromEnum(column)] else 0;
+    const saved = if (table.config) |config| config.widths[@backingInt(column)] else 0;
     return if (saved > 0) saved else defaultWidth(column, view);
 }
 
@@ -1145,7 +1145,7 @@ fn refillChooser(table: *Table) void {
 
 fn chooserRow(table: *Table, column: Column) *gtk.Widget {
     const config = table.config.?;
-    const cell = &table.cells[@intFromEnum(column)];
+    const cell = &table.cells[@backingInt(column)];
     const row = gtk.gtk_list_box_row_new();
     gtk.gtk_list_box_row_set_activatable(gtk.cast(gtk.ListBoxRow, row), gtk.false_);
     gtk.gtk_widget_add_css_class(row, "chooser-row");
@@ -1187,7 +1187,7 @@ fn chooserDragPrepare(_: ?*anyopaque, _: f64, _: f64, data: ?*anyopaque) callcon
     var value: gtk.GValue = .{};
     _ = gtk.g_value_init(&value, gtk.G_TYPE_UINT);
     defer gtk.g_value_unset(&value);
-    gtk.g_value_set_uint(&value, @intFromEnum(cellData(data).column));
+    gtk.g_value_set_uint(&value, @backingInt(cellData(data).column));
     return gtk.gdk_content_provider_new_for_value(&value);
 }
 
@@ -1204,7 +1204,7 @@ fn chooserDropped(_: ?*anyopaque, value: *const gtk.GValue, _: f64, _: f64, data
     const config = table.config orelse return gtk.false_;
     const tag = gtk.g_value_get_uint(value);
     if (tag >= column_count) return gtk.false_;
-    const from: Column = @enumFromInt(@as(std.meta.Tag(Column), @intCast(tag)));
+    const from: Column = @fromBackingInt(@intCast(@as(std.meta.Tag(Column), @intCast(tag))));
     if (!moveColumn(config, from, cell.column)) return gtk.false_;
     applyOrder(table);
     refillChooser(table);
@@ -1263,7 +1263,7 @@ fn buildChooser(table: *Table, view: *gtk.Widget) void {
         if (!choosable(column) or always_shown.contains(column)) continue;
         const shown = config.columns.contains(column);
         const action = gtk.g_simple_action_new_stateful(@tagName(column), null, gtk.g_variant_new_boolean(if (shown) gtk.true_ else gtk.false_)) orelse continue;
-        _ = gtk.signalConnect(action, "activate", gtk.callback(choiceActivated), &table.cells[@intFromEnum(column)]);
+        _ = gtk.signalConnect(action, "activate", gtk.callback(choiceActivated), &table.cells[@backingInt(column)]);
         gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, group), gtk.cast(gtk.GAction, action));
         gtk.g_object_unref(action);
         var name: [48]u8 = undefined;
@@ -1286,12 +1286,12 @@ fn widthChanged(header: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
     const table = cell.table;
     const config = table.config orelse return;
     if (table.resizing or table.narrow) return;
-    config.widths[@intFromEnum(cell.column)] = gtk.gtk_column_view_column_get_fixed_width(gtk.cast(gtk.ColumnViewColumn, header));
+    config.widths[@backingInt(cell.column)] = gtk.gtk_column_view_column_get_fixed_width(gtk.cast(gtk.ColumnViewColumn, header));
     if (table.save_source == 0) table.save_source = gtk.g_timeout_add(500, saveLater, table);
 }
 
 fn makeColumn(table: *Table, column: Column, sortable: bool) *gtk.ColumnViewColumn {
-    const cell = &table.cells[@intFromEnum(column)];
+    const cell = &table.cells[@backingInt(column)];
     cell.* = .{ .table = table, .column = column };
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupCell), cell);
@@ -1353,7 +1353,7 @@ pub fn build(table: *Table, self: *App, options: Options) *gtk.Widget {
         if (table.config == null and !table.fixed.contains(column)) continue;
         const header = makeColumn(table, column, options.sortable);
         gtk.gtk_column_view_append_column(table.view.?, header);
-        table.columns[@intFromEnum(column)] = header;
+        table.columns[@backingInt(column)] = header;
         gtk.g_object_unref(header);
     }
     applyOrder(table);

@@ -71,7 +71,7 @@ fn packDeviceFormat(format: ?contract.DeviceFormat) u64 {
     const value = format orelse return 0;
     return @as(u64, value.sample_rate) << 32 |
         @as(u64, value.channels) << 8 |
-        (@as(u64, @intFromEnum(value.sample_format)) + 1);
+        (@as(u64, @backingInt(value.sample_format)) + 1);
 }
 
 fn unpackDeviceFormat(bits: u64) ?contract.DeviceFormat {
@@ -109,7 +109,7 @@ pub const ZoneRuntime = struct {
     requested_device_id: std.atomic.Value(u64) = .init(0),
 
     // Written by the engine, read by the control lane.
-    published_output_state: std.atomic.Value(u8) = .init(@intFromEnum(zone_model.OutputState.closed)),
+    published_output_state: std.atomic.Value(u8) = .init(@backingInt(zone_model.OutputState.closed)),
     published_recovery_attempts: std.atomic.Value(u32) = .init(0),
     published_quantum_frames: std.atomic.Value(u32) = .init(0),
     published_graph_rate_hz: std.atomic.Value(u32) = .init(0),
@@ -185,7 +185,7 @@ pub const ZoneRuntime = struct {
     }
 
     pub fn outputState(self: *const ZoneRuntime) zone_model.OutputState {
-        return @enumFromInt(@as(std.meta.Tag(zone_model.OutputState), @intCast(self.published_output_state.load(.acquire))));
+        return @fromBackingInt(@intCast(@as(std.meta.Tag(zone_model.OutputState), @intCast(self.published_output_state.load(.acquire)))));
     }
 
     pub fn publishState(self: *ZoneRuntime) void {
@@ -193,7 +193,7 @@ pub const ZoneRuntime = struct {
     }
 
     pub fn publishStateChanged(self: *ZoneRuntime) bool {
-        const output_state = @intFromEnum(self.zone.output_state);
+        const output_state = @backingInt(self.zone.output_state);
         const recovery_attempts = self.zone.recovery_attempts;
         const quantum_frames = self.zone.latency.backend_quantum_frames;
         const graph_rate_hz = if (self.zone.output_state == .active)

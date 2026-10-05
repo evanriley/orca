@@ -323,7 +323,7 @@ fn digestOf(id: u64, actions: []const Action) Digest {
             updateIdentity(&hasher, write.expected);
             updateInt(&hasher, write.changes.len);
             for (write.changes) |change| {
-                updateInt(&hasher, @intFromEnum(change.field));
+                updateInt(&hasher, @backingInt(change.field));
                 updateOptionalBytes(&hasher, change.before);
                 updateOptionalBytes(&hasher, change.after);
             }

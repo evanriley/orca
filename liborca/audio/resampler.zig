@@ -43,7 +43,7 @@ pub const SampleRate = struct {
             return error.InvalidResamplerFormat;
         const ratio = ratioOf(input_rate, output_rate);
         if (ratio < 1.0 / 256.0 or ratio > 256.0) return error.InvalidResamplerFormat;
-        const native = orca_samplerate_create(@intFromEnum(converter), channels) orelse
+        const native = orca_samplerate_create(@backingInt(converter), channels) orelse
             return error.ResamplerUnavailable;
         return .{
             .native = native,

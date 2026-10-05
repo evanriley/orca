@@ -153,7 +153,7 @@ fn isSeparator(codepoint: u21) bool {
 }
 
 fn kindNumber(comptime kind: SearchKind) []const u8 {
-    return std.fmt.comptimePrint("{d}", .{@intFromEnum(kind)});
+    return std.fmt.comptimePrint("{d}", .{@backingInt(kind)});
 }
 
 fn ofArtist(comptime predicate: []const u8, comptime artist: []const u8) []const u8 {
@@ -195,7 +195,7 @@ const entry_details =
     "CASE entry.kind WHEN " ++ kindNumber(.release) ++ " THEN (SELECT " ++ release_year ++
     " FROM releases WHERE releases.id = entry.entity_id) END AS year,\n" ++
     "CASE WHEN entry.kind = " ++ kindNumber(.playlist) ++ " AND (SELECT playlists.kind FROM playlists\n" ++
-    "    WHERE playlists.id = entry.entity_id) = " ++ std.fmt.comptimePrint("{d}", .{@intFromEnum(PlaylistKind.manual)}) ++
+    "    WHERE playlists.id = entry.entity_id) = " ++ std.fmt.comptimePrint("{d}", .{@backingInt(PlaylistKind.manual)}) ++
     " THEN " ++ playlistDuration("entry.entity_id") ++ " END AS duration_ms,\n" ++
     "CASE entry.kind WHEN " ++ kindNumber(.release) ++ " THEN entry.subtitle ELSE '' END AS artist\n";
 
@@ -225,7 +225,7 @@ const track_hits_sql = "SELECT " ++ kindNumber(.track) ++
 const ranked_hits_sql = blk: {
     var arms: []const u8 = "";
     for (0..std.meta.fields(SearchKind).len) |kind| {
-        if (kind == @intFromEnum(SearchKind.track)) continue;
+        if (kind == @backingInt(SearchKind.track)) continue;
         arms = arms ++ (if (arms.len == 0) "" else "    UNION ALL\n") ++ std.fmt.comptimePrint(
             \\    SELECT * FROM (
             \\        SELECT rowid AS hit, bm25(search_index, 0, 0, 10, 4) AS score FROM search_index
@@ -294,7 +294,7 @@ pub const SearchRepository = struct {
             const artist = try allocator.dupe(u8, statement.columnText(10));
             errdefer allocator.free(artist);
             const hit: SearchHit = .{
-                .kind = @enumFromInt(@as(u8, @intCast(statement.columnInt64(0)))),
+                .kind = @fromBackingInt(@intCast(@as(u8, @intCast(statement.columnInt64(0))))),
                 .id = statement.columnInt64(1),
                 .title = title,
                 .subtitle = subtitle,
@@ -406,7 +406,7 @@ fn containsHit(hits: []const SearchHit, kind: SearchKind, id: i64) bool {
 }
 
 fn kindEnd(hits: []const SearchHit, kind: SearchKind) usize {
-    for (hits, 0..) |hit, index| if (@intFromEnum(hit.kind) > @intFromEnum(kind)) return index;
+    for (hits, 0..) |hit, index| if (@backingInt(hit.kind) > @backingInt(kind)) return index;
     return hits.len;
 }
 
@@ -437,7 +437,7 @@ fn indexRow(library: *LibraryDatabase, kind: SearchKind, id: i64) !?[2][]u8 {
     );
     defer statement.deinit();
     try statement.bindInt64(1, id);
-    try statement.bindInt64(2, @intFromEnum(kind));
+    try statement.bindInt64(2, @backingInt(kind));
     if (try statement.step() != .row) return null;
     const title = try std.testing.allocator.dupe(u8, statement.columnText(0));
     errdefer std.testing.allocator.free(title);

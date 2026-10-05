@@ -189,7 +189,7 @@ const under_directory_filter = " WHERE volume_id=?1 AND uri>=?2 || '/' AND uri<?
 const seen_under_sql = "UPDATE locations SET last_seen_generation=max(last_seen_generation, ?4)" ++ under_directory_filter;
 const images_seen_under_sql = "UPDATE folder_images SET last_seen_generation=max(last_seen_generation, ?4)" ++ under_directory_filter;
 
-const front_role = std.fmt.comptimePrint("{d}", .{@intFromEnum(ArtworkRole.front)});
+const front_role = std.fmt.comptimePrint("{d}", .{@backingInt(ArtworkRole.front)});
 
 /// The `(volume_id, folder path)` of the folder holding most of a Release's
 /// present preferred files, the lowest path on a tie: the one folder whose
@@ -826,7 +826,7 @@ pub const LocationRepository = struct {
                 if (files <= file_offset) continue;
                 try file_facts.reset();
                 try file_facts.bindInt64(1, walk.file_id);
-                try file_facts.bindInt64(2, @intFromEnum(HealthIssueKind.unreadable_file));
+                try file_facts.bindInt64(2, @backingInt(HealthIssueKind.unreadable_file));
                 if (try file_facts.step() != .row) return error.SqlFailed;
                 const track_id: ?i64 = if (file_facts.columnIsNull(0)) null else file_facts.columnInt64(0);
                 const name = try allocator.dupe(u8, walk.name.items);
@@ -988,7 +988,7 @@ pub const LocationRepository = struct {
         try statement.bindOptionalInt64(2, input.root_id);
         try statement.bindText(3, input.uri);
         try statement.bindText(4, input.mime);
-        try statement.bindInt64(5, @intFromEnum(input.role));
+        try statement.bindInt64(5, @backingInt(input.role));
         try statement.bindInt64(6, input.size_bytes);
         try statement.bindInt64(7, input.modified_ns);
         try statement.bindInt64(8, input.last_seen_generation);
@@ -1424,7 +1424,7 @@ test "a new front image retires the missing artwork issue of the Releases it now
         "SELECT file_id FROM library_health_issues WHERE kind = ?1 ORDER BY file_id;",
     );
     defer remaining.deinit();
-    try remaining.bindInt64(1, @intFromEnum(HealthIssueKind.artwork_problem));
+    try remaining.bindInt64(1, @backingInt(HealthIssueKind.artwork_problem));
     var file_ids: std.ArrayList(i64) = .empty;
     defer file_ids.deinit(std.testing.allocator);
     while (try remaining.step() == .row) try file_ids.append(std.testing.allocator, remaining.columnInt64(0));
@@ -1527,7 +1527,7 @@ test "a file property backfill could not decode is listed as unreadable" {
         "INSERT INTO library_health_issues(file_id, kind, severity) VALUES (1, ?1, 2);",
     );
     defer statement.deinit();
-    try statement.bindInt64(1, @intFromEnum(HealthIssueKind.unreadable_file));
+    try statement.bindInt64(1, @backingInt(HealthIssueKind.unreadable_file));
     _ = try statement.step();
     const page = try library.locations.folderPage(std.testing.allocator, 1, "", 512, 0);
     defer page.deinit();

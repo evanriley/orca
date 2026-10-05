@@ -113,7 +113,7 @@ pub const TestBackend = struct {
         render: RenderFn,
         userdata: ?*anyopaque,
         request: contract.OpenRequest,
-        state: std.atomic.Value(u8) = .init(@intFromEnum(Status.active)),
+        state: std.atomic.Value(u8) = .init(@backingInt(Status.active)),
         closed: bool = false,
         state_waker: ?work.Waker = null,
 
@@ -123,7 +123,7 @@ pub const TestBackend = struct {
         }
 
         pub fn markLost(self: *Stream) void {
-            self.state.store(@intFromEnum(Status.lost), .release);
+            self.state.store(@backingInt(Status.lost), .release);
             if (self.state_waker) |waker| waker.wake();
         }
     };
@@ -226,7 +226,7 @@ pub const TestBackend = struct {
 
     fn streamStatus(context: ?*anyopaque) Status {
         const stream: *Stream = @ptrCast(@alignCast(context.?));
-        return @enumFromInt(@as(std.meta.Tag(Status), @intCast(stream.state.load(.acquire))));
+        return @fromBackingInt(@intCast(@as(std.meta.Tag(Status), @intCast(stream.state.load(.acquire)))));
     }
 
     fn streamLatency(

@@ -137,7 +137,7 @@ pub fn clearReleaseLocked(db: sqlite.Database, release_id: i64, kind: HealthIssu
     );
     defer statement.deinit();
     try statement.bindInt64(1, release_id);
-    try statement.bindInt64(2, @intFromEnum(kind));
+    try statement.bindInt64(2, @backingInt(kind));
     if (try statement.step() != .done) return error.SqlFailed;
 }
 
@@ -154,8 +154,8 @@ pub fn recordIssueLocked(db: sqlite.Database, file_id: i64, issue: HealthIssueIn
     );
     defer statement.deinit();
     try statement.bindInt64(1, file_id);
-    try statement.bindInt64(2, @intFromEnum(issue.kind));
-    try statement.bindInt64(3, @intFromEnum(issue.severity));
+    try statement.bindInt64(2, @backingInt(issue.kind));
+    try statement.bindInt64(3, @backingInt(issue.severity));
     try statement.bindText(4, issue.details);
     try statement.bindOptionalInt64(5, issue.related_file_id);
     try statement.bindOptionalDouble(6, if (issue.similarity) |value| value else null);
@@ -168,7 +168,7 @@ pub fn clearIssueLocked(db: sqlite.Database, file_id: i64, kind: HealthIssueKind
     );
     defer statement.deinit();
     try statement.bindInt64(1, file_id);
-    try statement.bindInt64(2, @intFromEnum(kind));
+    try statement.bindInt64(2, @backingInt(kind));
     if (try statement.step() != .done) return error.SqlFailed;
 }
 
@@ -288,8 +288,8 @@ pub const HealthIssueRepository = struct {
         defer insert.deinit();
         for (issues) |issue| {
             try insert.bindInt64(1, file_id);
-            try insert.bindInt64(2, @intFromEnum(issue.kind));
-            try insert.bindInt64(3, @intFromEnum(issue.severity));
+            try insert.bindInt64(2, @backingInt(issue.kind));
+            try insert.bindInt64(3, @backingInt(issue.severity));
             try insert.bindText(4, issue.details);
             try insert.bindOptionalInt64(5, issue.related_file_id);
             try insert.bindOptionalDouble(6, if (issue.similarity) |value| value else null);
@@ -350,7 +350,7 @@ pub const HealthIssueRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(kind));
+        try statement.bindInt64(2, @backingInt(kind));
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() == 0) return error.UnknownFile;
     }
@@ -365,7 +365,7 @@ pub const HealthIssueRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @intFromEnum(kind));
+        try statement.bindInt64(2, @backingInt(kind));
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -394,7 +394,7 @@ pub const HealthIssueRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, limit);
         try statement.bindInt64(2, offset);
-        try statement.bindInt64(3, @intFromEnum(kind));
+        try statement.bindInt64(3, @backingInt(kind));
         return self.collectPage(allocator, statement);
     }
 
@@ -487,7 +487,7 @@ pub const HealthIssueRepository = struct {
     fn reclaimable(self: *const HealthIssueRepository, kind: HealthIssueKind) !u64 {
         var statement = try self.db.prepare(health_reclaimable_sql);
         defer statement.deinit();
-        try statement.bindInt64(1, @intFromEnum(kind));
+        try statement.bindInt64(1, @backingInt(kind));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }

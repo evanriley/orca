@@ -54,7 +54,7 @@ pub const Fetch = struct {
             if (!self.genres_only) try info.store(release_id, &.{
                 .requested_language = self.language,
                 .fetched_at = now_s,
-                .outcome = @intFromEnum(Outcome.no_musicbrainz_id),
+                .outcome = @backingInt(Outcome.no_musicbrainz_id),
             });
             return .no_musicbrainz_id;
         };
@@ -129,7 +129,7 @@ pub const Fetch = struct {
             },
         }
         const outcome = progress.failure orelse .fetched;
-        record.outcome = @intFromEnum(outcome);
+        record.outcome = @backingInt(outcome);
         try info.store(release_id, &record);
         return outcome;
     }

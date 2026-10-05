@@ -63,7 +63,7 @@ fn bindSeated(statement: sqlite.Statement, track: TrackInput) !void {
     try statement.bindOptionalInt64(12, track.artist_id);
     try statement.bindOptionalInt64(13, track.track_total);
     try statement.bindOptionalInt64(14, track.disc_total);
-    try statement.bindInt64(15, @intFromEnum(track.explicit));
+    try statement.bindInt64(15, @backingInt(track.explicit));
 }
 
 /// Everything playback needs to open a Track's bytes without a second query.
@@ -343,7 +343,7 @@ pub const TrackRepository = struct {
                 try update.bindOptionalInt64(11, track.artist_id);
                 try update.bindOptionalInt64(12, track.track_total);
                 try update.bindOptionalInt64(13, track.disc_total);
-                try update.bindInt64(14, @intFromEnum(track.explicit));
+                try update.bindInt64(14, @backingInt(track.explicit));
                 if (try update.step() != .done) return error.SqlFailed;
                 const updated = self.db.changes() != 0;
                 try update.reset();
@@ -362,7 +362,7 @@ pub const TrackRepository = struct {
             try insert.bindOptionalInt64(11, track.artist_id);
             try insert.bindOptionalInt64(12, track.track_total);
             try insert.bindOptionalInt64(13, track.disc_total);
-            try insert.bindInt64(14, @intFromEnum(track.explicit));
+            try insert.bindInt64(14, @backingInt(track.explicit));
             if (try insert.step() != .done) return error.SqlFailed;
             try insert.reset();
         }
@@ -642,7 +642,7 @@ pub const TrackRepository = struct {
         track_id: i64,
         comptime field: metadata.Field,
     ) !?RecordingMbid {
-        const field_number = std.fmt.comptimePrint("{d}", .{@intFromEnum(field)});
+        const field_number = std.fmt.comptimePrint("{d}", .{@backingInt(field)});
         var statement = try self.db.prepare(
             "SELECT orca.value, orca.provenance, orca.locked, observed." ++ @tagName(field) ++ "\n" ++
                 "FROM (SELECT " ++ track_play_file ++ " AS file_id FROM tracks WHERE tracks.id = ?1) AS track\n" ++
@@ -1107,7 +1107,7 @@ const lossless_codecs = blk: {
     break :blk list;
 };
 
-const explicit_value = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Explicit.explicit)});
+const explicit_value = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Explicit.explicit)});
 
 fn hasBoundFilter(query: TrackQuery) bool {
     return query.year_min != null or query.year_max != null or query.lossless != null or
@@ -1505,7 +1505,7 @@ pub const track_play_file =
     \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1))
 ;
 
-const recording_mbid_field = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Field.musicbrainz_recording_id)});
+const recording_mbid_field = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Field.musicbrainz_recording_id)});
 
 /// A locked Orca value, else the file's tag, else an Orca value: the order
 /// `TrackRepository.recordingMbid` applies through `metadata.resolveValue`.

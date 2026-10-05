@@ -174,7 +174,7 @@ fn fillTable(write: *WritePage, all: bool) void {
         var genres_shown = file.genres == null;
         const name = std.Io.Dir.path.basename(file.path);
         for (file.changes) |change| {
-            if (!genres_shown and @intFromEnum(change.field) >= @intFromEnum(liborca.MetadataField.date)) {
+            if (!genres_shown and @backingInt(change.field) >= @backingInt(liborca.MetadataField.date)) {
                 appendGenresRow(table, &row, file, name, &first);
                 genres_shown = true;
             }
