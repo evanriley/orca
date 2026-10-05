@@ -25,7 +25,6 @@ const transport = @import("transport.zig");
 const App = app.App;
 
 const cover_pixels: c_int = 340;
-const lyrics_cover_pixels: c_int = 380;
 const up_next_rows = 10;
 const panel_width: c_int = 340;
 const tabbed_panel_width: c_int = 380;
@@ -49,6 +48,7 @@ pub const State = struct {
     artist: ?*gtk.Label = null,
     album: ?*gtk.Label = null,
     quote_slot: ?*gtk.Widget = null,
+    show_all: ?*gtk.Widget = null,
     panel: ?*gtk.Widget = null,
     tabs: ?*gtk.Widget = null,
     tab_buttons: std.EnumArray(Tab, ?*gtk.Widget) = .initFill(null),
@@ -92,7 +92,7 @@ fn append(box: *gtk.Widget, child: *gtk.Widget) void {
 
 pub fn build(self: *App) *gtk.Widget {
     const page = &self.now_playing;
-    const host = art.newCover(self, art.iconPlaceholder(lyrics_cover_pixels), lyrics_cover_pixels);
+    const host = art.newCover(self, art.iconPlaceholder(cover_pixels), cover_pixels);
     gtk.gtk_widget_set_visible(host, gtk.false_);
     art.paintWhileUnmapped(host);
     page.host = host;
@@ -174,6 +174,8 @@ fn buildCentre(self: *App) *gtk.Widget {
     gtk.gtk_aspect_frame_set_child(gtk.cast(gtk.AspectFrame, frame), cover);
     const cover_clamp = adw.adw_clamp_new();
     page.cover_clamp = gtk.cast(adw.Clamp, cover_clamp);
+    adw.adw_clamp_set_maximum_size(page.cover_clamp.?, cover_pixels);
+    adw.adw_clamp_set_tightening_threshold(page.cover_clamp.?, cover_pixels);
     adw.adw_clamp_set_child(page.cover_clamp.?, frame);
     gtk.gtk_widget_add_css_class(cover_clamp, "now-cover-clamp");
     append(body, cover_clamp);
@@ -243,6 +245,7 @@ fn buildQuote(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_halign(show_all, gtk.ALIGN_CENTER);
     _ = gtk.signalConnect(show_all, "clicked", gtk.callback(showAllClicked), self);
     append(quote, show_all);
+    self.now_playing.show_all = show_all;
 
     const clamp = adw.adw_clamp_new();
     adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), quote_width);
@@ -402,7 +405,15 @@ pub fn placePanel(self: *App) void {
     const panel = self.now_playing.panel orelse return;
     const shown = !self.header_compact and inspector.shownMode(self) == .hidden;
     gtk.gtk_widget_set_visible(panel, boolean(shown));
+    placeShowAll(self);
     page_ui.fitToPage(self);
+}
+
+fn placeShowAll(self: *App) void {
+    const page = &self.now_playing;
+    const button = page.show_all orelse return;
+    const panel_shown = if (page.panel) |panel| gtk.gtk_widget_get_visible(panel) != 0 else false;
+    gtk.gtk_widget_set_visible(button, boolean(!panel_shown or page.tab != .lyrics));
 }
 
 pub fn panelWidth(self: *App) c_int {
@@ -424,12 +435,7 @@ fn showTab(self: *App, tab: Tab) void {
     if (page.panel) |panel| gtk.gtk_widget_set_size_request(panel, if (tabbed) tabbed_panel_width else panel_width, -1);
     if (page.panel_pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, if (tab == .lyrics) "lyrics" else "facts");
     if (page.queue_section) |section| gtk.gtk_widget_set_visible(section, boolean(tab == .up_next));
-    if (page.quote_slot) |slot| gtk.gtk_widget_set_visible(slot, boolean(tab != .lyrics));
-    const size = if (tab == .lyrics) lyrics_cover_pixels else cover_pixels;
-    if (page.cover_clamp) |clamp| {
-        adw.adw_clamp_set_maximum_size(clamp, size);
-        adw.adw_clamp_set_tightening_threshold(clamp, size);
-    }
+    placeShowAll(self);
     page_ui.fitToPage(self);
 }
 
@@ -443,7 +449,10 @@ fn tabToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn showAllClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    showTab(state(data), .lyrics);
+    const self = state(data);
+    if (self.header_compact) return inspector.showSidebar(self, .lyrics);
+    inspector.showSidebar(self, .hidden);
+    showTab(self, .lyrics);
 }
 
 fn coverPainted(image: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

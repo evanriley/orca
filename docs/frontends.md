@@ -1073,8 +1073,10 @@ The window is an `AdwNavigationSplitView`:
   column, so the Now Playing overline and the search sit over the centre
   column, and hides the back and forward buttons (Alt+Left and Alt+Right
   still work); every other page keeps the top bar above its content. Show
-  all lyrics turns the column into 380 px with Up Next, Lyrics and Info
-  tabs: Lyrics scrolls the whole lyrics with the current line bright and a
+  all lyrics closes an open inspector and turns the column into 380 px with
+  Up Next, Lyrics and Info tabs, keeping the three lines and hiding itself
+  while the Lyrics tab shows; below 900sp it opens the Lyrics inspector
+  instead. Lyrics scrolls the whole lyrics with the current line bright and a
   third of the way down, seeks to a synced line when it is clicked, and
   ends in a footer naming the source ("Synced · from 01 Dr. Whoever.lrc",
   "Synced · embedded") and its `[offset:]` ("Offset −0.2 s", left out when

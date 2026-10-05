@@ -611,7 +611,9 @@
   with the Now Playing overline and the search over the centre column and
   no back and forward buttons, a 48 px serif title, the artist,
   `ALBUM · YEAR`, a heart, five rating stars and a more button, then three
-  synced lyric lines with Show all lyrics. A right column holds Up Next
+  synced lyric lines with Show all lyrics, which closes an open sidebar and
+  opens the Lyrics tab beside the three lines, or the Lyrics sidebar in a
+  narrow window. A right column holds Up Next
   (ten rows, the playing one tinted, Clear and View Full Album) and Track
   Info (Album, Date, Genre, Track, Source); Up Next, Lyrics and Info tabs
   switch it. The Lyrics tab scrolls the whole lyrics with the current line
