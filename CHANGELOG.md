@@ -1137,6 +1137,11 @@
 
 ### Changed
 
+- Provider GET requests reuse connections within a job, with at most 16 idle
+  connections, all closed when the job ends. A GET that fails on a reused
+  connection before any response arrives is sent again once, at once, on a
+  new connection, and counts as one request. POST submissions always open a
+  new connection with `Connection: close`.
 - The Artist page shows a spinner and `Looking up artist info…` beside the
   genres while an artist-info fetch for that Artist runs, forced refreshes
   included, and hides it when the fetch ends.

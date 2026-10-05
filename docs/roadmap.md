@@ -368,8 +368,6 @@ removed.
 
 ### Before 1.0
 
-- Providers reuse connections. Every request opens a new connection. Back-off
-  a provider asks for stays as it is. Checked by tests with a local server.
 - Signal path truth. Unknown device details must not produce an unqualified
   bit-perfect verdict: zero known reasons currently means eligible, and a
   channel mismatch is not checked. A float32-to-integer device path is not by

@@ -770,7 +770,16 @@ fn retryableStatus(status: u16) bool {
 pub const StandardTransport = struct {
     client: std.http.Client,
 
+    const max_idle_connections = 16;
+
     const Verdict = enum { canceled, timed_out, stopped };
+
+    const ConnectionChoice = enum { pooled, fresh };
+
+    const Opened = struct {
+        request: std.http.Client.Request,
+        reused: bool,
+    };
 
     const Outcome = union(enum) {
         exchange: anyerror!Response,
@@ -781,7 +790,11 @@ pub const StandardTransport = struct {
 
     /// `io` must support concurrency, e.g. `std.Io.Threaded.init(gpa, .{})`, not `init_single_threaded`.
     pub fn init(allocator: std.mem.Allocator, io: std.Io) StandardTransport {
-        return .{ .client = .{ .allocator = allocator, .io = io } };
+        return .{ .client = .{
+            .allocator = allocator,
+            .io = io,
+            .connection_pool = .{ .free_size = max_idle_connections },
+        } };
     }
 
     pub fn deinit(self: *StandardTransport) void {
@@ -854,6 +867,22 @@ pub const StandardTransport = struct {
     }
 
     fn exchange(self: *StandardTransport, allocator: std.mem.Allocator, request: Request) anyerror!Response {
+        const choice: ConnectionChoice = switch (request.method) {
+            .get => .pooled,
+            .post => .fresh,
+        };
+        return self.exchangeOn(allocator, request, choice) catch |err| switch (err) {
+            error.StaleConnection => self.exchangeOn(allocator, request, .fresh),
+            else => err,
+        };
+    }
+
+    fn exchangeOn(
+        self: *StandardTransport,
+        allocator: std.mem.Allocator,
+        request: Request,
+        choice: ConnectionChoice,
+    ) anyerror!Response {
         const uri = try std.Uri.parse(request.url);
         const storage = try allocator.alloc(u8, request.max_response_bytes + 1);
         defer allocator.free(storage);
@@ -862,31 +891,25 @@ pub const StandardTransport = struct {
         defer allocator.free(standard_headers);
         for (request.headers, standard_headers) |source, *destination|
             destination.* = .{ .name = source.name, .value = source.value };
-        var http_request = try self.client.request(switch (request.method) {
+        var opened = try self.open(switch (request.method) {
             .get => .GET,
             .post => .POST,
         }, uri, .{
             .redirect_behavior = .unhandled,
-            .keep_alive = false,
+            .keep_alive = request.method == .get,
             .headers = .{ .user_agent = .{ .override = request.user_agent } },
             .extra_headers = standard_headers,
-        });
+        }, choice);
+        const http_request = &opened.request;
         defer http_request.deinit();
-
-        if (request.body) |payload| {
-            http_request.transfer_encoding = .{ .content_length = payload.len };
-            var body = try http_request.sendBodyUnflushed(&.{});
-            try body.writer.writeAll(payload);
-            try body.end();
-            try http_request.connection.?.flush();
-        } else {
-            try http_request.sendBodiless();
-        }
-
-        var response = try http_request.receiveHead(&.{});
         errdefer if (http_request.connection) |connection| {
             connection.closing = true;
         };
+
+        send(http_request, request.body) catch |err|
+            return if (opened.reused and isStaleConnectionFailure(http_request.connection.?, err)) error.StaleConnection else err;
+        var response = http_request.receiveHead(&.{}) catch |err|
+            return if (opened.reused and isStaleConnectionFailure(http_request.connection.?, err)) error.StaleConnection else err;
         var rate_limit: RateLimit = .{};
         var location: ?[]u8 = null;
         errdefer if (location) |value| allocator.free(value);
@@ -895,6 +918,17 @@ pub const StandardTransport = struct {
             rate_limit.observe(header.name, header.value);
             if (location == null and std.ascii.eqlIgnoreCase(header.name, "location"))
                 location = try allocator.dupe(u8, header.value);
+        }
+        const status = @intFromEnum(response.head.status);
+        if (!statusHasBody(response.head.status)) {
+            http_request.connection.?.closing = true;
+            return .{
+                .allocator = allocator,
+                .status = status,
+                .body = try allocator.alloc(u8, 0),
+                .rate_limit = rate_limit,
+                .location = location,
+            };
         }
 
         const decompress_buffer: []u8 = switch (response.head.content_encoding) {
@@ -916,11 +950,75 @@ pub const StandardTransport = struct {
         if (buffered.len > request.max_response_bytes) return error.ResponseTooLarge;
         return .{
             .allocator = allocator,
-            .status = @intFromEnum(response.head.status),
+            .status = status,
             .body = try allocator.dupe(u8, buffered),
             .rate_limit = rate_limit,
             .location = location,
         };
+    }
+
+    fn open(
+        self: *StandardTransport,
+        method: std.http.Method,
+        uri: std.Uri,
+        options: std.http.Client.RequestOptions,
+        choice: ConnectionChoice,
+    ) !Opened {
+        const io = self.client.io;
+        const pool = &self.client.connection_pool;
+        const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
+        var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        const criteria: std.http.Client.ConnectionPool.Criteria = .{
+            .host = try uri.getHost(&host_buffer),
+            .port = uri.port orelse switch (protocol) {
+                .plain => 80,
+                .tls => 443,
+            },
+            .protocol = protocol,
+        };
+        if (choice == .pooled) {
+            if (pool.findConnection(io, criteria)) |connection| {
+                errdefer {
+                    connection.closing = true;
+                    pool.release(connection, io);
+                }
+                var pooled_options = options;
+                pooled_options.connection = connection;
+                return .{ .request = try self.client.request(method, uri, pooled_options), .reused = true };
+            }
+        }
+        var set_aside: [max_idle_connections]*std.http.Client.Connection = undefined;
+        var set_aside_len: usize = 0;
+        defer for (set_aside[0..set_aside_len]) |connection| pool.release(connection, io);
+        while (set_aside_len < set_aside.len) : (set_aside_len += 1)
+            set_aside[set_aside_len] = pool.findConnection(io, criteria) orelse break;
+        return .{ .request = try self.client.request(method, uri, options), .reused = false };
+    }
+
+    fn send(http_request: *std.http.Client.Request, payload: ?[]const u8) !void {
+        const bytes = payload orelse return http_request.sendBodiless();
+        http_request.transfer_encoding = .{ .content_length = bytes.len };
+        var body = try http_request.sendBodyUnflushed(&.{});
+        try body.writer.writeAll(bytes);
+        try body.end();
+        try http_request.connection.?.flush();
+    }
+
+    fn isStaleConnectionFailure(connection: *std.http.Client.Connection, err: anyerror) bool {
+        return switch (err) {
+            error.HttpConnectionClosing => true,
+            error.WriteFailed => if (connection.stream_writer.err) |cause|
+                cause == error.ConnectionResetByPeer or cause == error.SocketUnconnected
+            else
+                false,
+            error.ReadFailed => connection.reader().buffered().len == 0 and
+                if (connection.stream_reader.err) |cause| cause == error.ConnectionResetByPeer else false,
+            else => false,
+        };
+    }
+
+    fn statusHasBody(status: std.http.Status) bool {
+        return status.class() != .informational and status != .no_content and status != .not_modified;
     }
 };
 
@@ -1499,6 +1597,269 @@ test "setting the cancel flag makes a hung request return promptly" {
     ));
     const elapsed = std.Io.Clock.awake.now(io).toMilliseconds() - started;
     try std.testing.expect(elapsed < 500);
+}
+
+const KeepAliveServer = struct {
+    io: std.Io,
+    listener: std.Io.net.Server,
+    replies: []const Reply,
+    group: std.Io.Group = .init,
+    accepts: std.atomic.Value(u32) = .init(0),
+    requests: std.atomic.Value(u32) = .init(0),
+
+    const Reply = enum {
+        keep_alive,
+        close_after,
+        connection_close,
+        stall_head,
+        stall_body,
+        oversized,
+        no_content,
+        redirect,
+    };
+
+    const keep_alive_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+    fn start(self: *KeepAliveServer, io: std.Io, replies: []const Reply) !void {
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        self.* = .{ .io = io, .listener = try address.listen(io, .{}), .replies = replies };
+        errdefer self.listener.deinit(io);
+        try self.group.concurrent(io, acceptConnections, .{self});
+    }
+
+    fn stop(self: *KeepAliveServer) void {
+        self.group.cancel(self.io);
+        self.listener.deinit(self.io);
+    }
+
+    fn url(self: *const KeepAliveServer, buffer: []u8) ![]u8 {
+        return std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}/", .{self.listener.socket.address.getPort()});
+    }
+
+    fn acceptConnections(self: *KeepAliveServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            _ = self.accepts.fetchAdd(1, .monotonic);
+            self.group.concurrent(self.io, serveConnection, .{ self, stream }) catch {
+                stream.close(self.io);
+                return;
+            };
+        }
+    }
+
+    fn serveConnection(self: *KeepAliveServer, stream: std.Io.net.Stream) void {
+        defer stream.close(self.io);
+        self.serveRequests(stream) catch {};
+    }
+
+    fn serveRequests(self: *KeepAliveServer, stream: std.Io.net.Stream) !void {
+        var read_buffer: [1024]u8 = undefined;
+        var reader = stream.reader(self.io, &read_buffer);
+        var write_buffer: [256]u8 = undefined;
+        var writer = stream.writer(self.io, &write_buffer);
+        while (true) {
+            var content_length: usize = 0;
+            while (true) {
+                const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                    error.EndOfStream => return,
+                    else => return err,
+                };
+                if (line.len <= 2) break;
+                const prefix = "content-length:";
+                if (std.ascii.startsWithIgnoreCase(line, prefix))
+                    content_length = try std.fmt.parseInt(usize, std.mem.trim(u8, line[prefix.len..], " \r\n"), 10);
+            }
+            try reader.interface.discardAll(content_length);
+            const index = self.requests.fetchAdd(1, .monotonic);
+            const reply = if (index < self.replies.len) self.replies[index] else .keep_alive;
+            switch (reply) {
+                .keep_alive => try writer.interface.writeAll(keep_alive_response),
+                .close_after => {
+                    try writer.interface.writeAll(keep_alive_response);
+                    try writer.interface.flush();
+                    return;
+                },
+                .connection_close => try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"),
+                .stall_head => return self.io.sleep(.fromSeconds(30), .awake),
+                .stall_body => {
+                    try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nok");
+                    try writer.interface.flush();
+                    return self.io.sleep(.fromSeconds(30), .awake);
+                },
+                .oversized => try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n" ++ "x" ** 32),
+                .no_content => try writer.interface.writeAll("HTTP/1.1 204 No Content\r\n\r\n"),
+                .redirect => try writer.interface.writeAll("HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n"),
+            }
+            try writer.interface.flush();
+        }
+    }
+};
+
+const CountingTransport = struct {
+    inner: Transport,
+    performed: u32 = 0,
+
+    fn transport(self: *CountingTransport) Transport {
+        return .{ .context = self, .perform_fn = perform };
+    }
+
+    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: Request) anyerror!Response {
+        const self: *CountingTransport = @ptrCast(@alignCast(context));
+        self.performed += 1;
+        return self.inner.perform(allocator, request);
+    }
+};
+
+const PooledExchange = struct {
+    server: KeepAliveServer,
+    standard: StandardTransport,
+    counting: CountingTransport,
+    system_clock: SystemClock,
+    random: std.Random.IoSource,
+    gateway: Gateway,
+    url_buffer: [64]u8,
+
+    fn init(self: *PooledExchange, replies: []const KeepAliveServer.Reply, config: Config) !void {
+        const io = std.testing.io;
+        try self.server.start(io, replies);
+        self.standard = .init(std.testing.allocator, io);
+        self.counting = .{ .inner = self.standard.transport() };
+        self.system_clock = .{ .io = io };
+        self.random = .{ .io = io };
+        self.gateway = .{
+            .transport = self.counting.transport(),
+            .clock = self.system_clock.clock(),
+            .wall_clock = self.system_clock.wallClock(),
+            .random = self.random.interface(),
+            .config = config,
+        };
+    }
+
+    fn deinit(self: *PooledExchange) void {
+        self.standard.deinit();
+        self.server.stop();
+    }
+
+    fn send(self: *PooledExchange, method: Method) !u16 {
+        const url = try self.server.url(&self.url_buffer);
+        const response = try self.gateway.execute(std.testing.allocator, method, url, if (method == .post) "{}" else null, &.{});
+        defer response.deinit();
+        if (response.status == 200) try std.testing.expectEqualStrings("ok", response.body);
+        return response.status;
+    }
+
+    fn accepts(self: *PooledExchange) u32 {
+        return self.server.accepts.load(.monotonic);
+    }
+};
+
+fn pooledConfig(request_timeout_ms: u64, max_response_bytes: usize) Config {
+    return .{
+        .identity = net_testing.test_identity,
+        .minimum_interval_ms = 0,
+        .request_timeout_ms = request_timeout_ms,
+        .max_response_bytes = max_response_bytes,
+    };
+}
+
+test "sequential GETs through one transport share one connection" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{}, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 1), exchange.accepts());
+    try std.testing.expectEqual(@as(u32, 3), exchange.server.requests.load(.monotonic));
+}
+
+test "a POST opens its own connection and leaves the idle GET connection pooled" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{}, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.post));
+    try std.testing.expectEqual(@as(u32, 1), exchange.accepts());
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.post));
+    try std.testing.expectEqual(@as(u32, 3), exchange.accepts());
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 3), exchange.accepts());
+}
+
+test "a GET on a connection the server closed while idle is sent again once on a new one" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .close_after, .keep_alive }, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.counting.performed);
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+    try std.testing.expectEqual(@as(u32, 2), exchange.server.requests.load(.monotonic));
+}
+
+test "a response with Connection: close is not reused" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .connection_close, .keep_alive }, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+}
+
+test "a GET that times out mid-body leaves its connection unused" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .stall_body, .keep_alive }, pooledConfig(300, 1024));
+    defer exchange.deinit();
+    try std.testing.expectError(error.Timeout, exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+}
+
+test "a canceled GET leaves its connection unused" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .stall_head, .keep_alive }, pooledConfig(10_000, 1024));
+    defer exchange.deinit();
+    const io = std.testing.io;
+    var canceled: std.atomic.Value(bool) = .init(false);
+    exchange.gateway.cancel = &canceled;
+    var tripping = try io.concurrent(tripAfter, .{ io, &canceled, 100 });
+    defer tripping.cancel(io);
+    try std.testing.expectError(error.Canceled, exchange.send(.get));
+    canceled.store(false, .release);
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+}
+
+test "a GET whose response is too large leaves its connection unused" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .oversized, .keep_alive }, pooledConfig(5000, 16));
+    defer exchange.deinit();
+    try std.testing.expectError(error.ResponseTooLarge, exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+}
+
+test "a 204 returns at once and its connection is not reused" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .no_content, .keep_alive }, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    try std.testing.expectEqual(@as(u16, 204), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), exchange.accepts());
+}
+
+test "a redirect hop to the same server reuses the connection" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .redirect, .keep_alive }, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    const url = try exchange.server.url(&exchange.url_buffer);
+    const response = try exchange.gateway.fetch(std.testing.allocator, url, &.{}, .{ .host = "archive.org" });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+    try std.testing.expectEqual(@as(u32, 2), exchange.server.requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), exchange.accepts());
 }
 
 const archive_allowance: RedirectAllowance = .{ .host = "archive.org" };

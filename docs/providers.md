@@ -84,9 +84,15 @@ not a tuning choice.
   request is made once. A failure goes back to the caller, which retries on
   its own schedule. The gateway has a 30 s
   request deadline and a cancellation flag checked while it waits.
-- **No connection reuse.** Provider requests do not reuse connections
-  (`Connection: close`), because a pooled one the server dropped while idle
-  would fail the first request after a quiet period.
+- **Connection reuse.** GET requests reuse connections within one job. At
+  most 16 connections stay idle, and all of them close when the job ends. A
+  GET that fails on a reused connection before any response byte arrives
+  (reset, end of stream or broken pipe) is sent again once, at once, on a new
+  connection, as part of the same request: it counts as one attempt and takes
+  no extra pacing slot. POST submissions open a new connection and send
+  `Connection: close`. A connection that timed out, was canceled, failed, or
+  whose response was not read in full is closed and never reused, and so is
+  one that answered with `Connection: close` or a 1xx, 204 or 304 status.
 - **One backoff per service.** A refusal or outage on one endpoint delays
   every endpoint of that service, so a failing submission cannot be masked by
   a working validation, or the reverse.
