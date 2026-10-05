@@ -452,6 +452,21 @@ Small defects that are not yet scheduled:
 - Re-identifying a Release turns its pending album correction into
   single-file corrections, which can then be accepted one at a time and
   leave the album's positions half-moved until the rest are accepted.
+- Applying a reviewed release (`apply-release`, Match Review's Apply)
+  writes nothing unless every Track holds an accepted or pending proposal
+  enriched on that release, or a tag naming it. Tracks are placed on a
+  release only by recording ID, and MusicBrainz often lists the same song
+  on an EP or single as a separate recording, so an album whose files are
+  all on the release can stay partly aligned through any number of
+  re-identifications; orca-gtk then reports only "Every track must be on
+  the release first", without naming the Tracks. No action sets a Track's
+  release, and the metadata editor sets only a recording ID, which matching
+  then treats as confirmed and stores no proposal for.
+- A Release whose tags already name its MusicBrainz release is listed for
+  review with that release as a 100% candidate, but the release is never
+  looked up, so Match Review shows no MusicBrainz values and Apply writes
+  nothing. The only way off the list is Not This Release, which says the
+  opposite.
 - In a Release of more than 512 Tracks, verified a page at a time, a file
   that still disagrees is checked again only while the Release has a stale
   file left when its page is reached, though the job's total counted it.
@@ -491,6 +506,14 @@ are sniffed or not recognized until then:
 
 ## Later
 
+- Release review without guessing: once a release is chosen, apply its
+  release-level values (album, album artist, date, type, release ID) to
+  every Track, and track titles and recording IDs only to Tracks aligned
+  by recording ID; let the user pair each remaining Track with one of the
+  release's tracks by hand; offer Mark as Reviewed when nothing differs;
+  name the unaligned Tracks when Apply refuses. Aligning by position,
+  title or duration automatically is rejected: a wrong pairing would lock
+  a wrong recording ID and reach AcoustID submissions and ListenBrainz.
 - Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files; a
   figure comes only from Orca's own analysis.
 - Exact album loudness: the album figure is a duration-weighted energy mean
