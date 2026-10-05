@@ -397,6 +397,10 @@ Small defects that are not yet scheduled:
 - Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
 - `orca-gtk` ignores a Library that fails to open, including one with a newer
   schema, and shows the welcome page.
+- When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
+  sometimes not drawn, and is still missing seconds later; it was missing
+  in 10 of 20 headless starts. The race is likely in `updateBackdrop`
+  and `sourcePainted` in `apps/linux/art.zig`.
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.
