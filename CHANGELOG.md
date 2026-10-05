@@ -1137,6 +1137,11 @@
 
 ### Changed
 
+- **Providers are paced at their published rates.** Requests were spaced 1 s
+  apart for every service. Each service now has its own interval: AcoustID 334
+  ms, the Cover Art Archive 250 ms, Wikidata, Wikimedia Commons and Wikipedia
+  300 ms, LRCLIB 500 ms, and MusicBrainz and ListenBrainz still 1 s. Back-off,
+  blocks and `Retry-After` handling are unchanged.
 - **The fingerprint test recording is generated.** The Chromaprint 1.6.1 test
   recording, which had no documented origin or licence in this repository, is
   replaced by a generated one, `fixtures/audio/fingerprint-reference.*`, and

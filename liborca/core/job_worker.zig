@@ -784,6 +784,16 @@ const InfoServices = struct {
         providers.coverartarchive.service,
     };
 
+    const intervals_ms = [names.len]u64{
+        providers.musicbrainz.minimum_interval_ms,
+        providers.wikidata.minimum_interval_ms,
+        providers.wikimedia_commons.minimum_interval_ms,
+        providers.wikipedia.minimum_interval_ms,
+        providers.listenbrainz_labs.minimum_interval_ms,
+        providers.listenbrainz.minimum_interval_ms,
+        providers.coverartarchive.minimum_interval_ms,
+    };
+
     fn init(self: *InfoServices, worker: *JobWorker, setup: *const ArtistInfoSetup, offline: bool, bounded: bool) void {
         self.setup = setup;
         self.standard = .init(worker.allocator, setup.io);
@@ -791,12 +801,12 @@ const InfoServices = struct {
         self.random_source = .{ .io = setup.io };
         self.wall_clock = setup.hooks.wall_clock orelse self.system_clock.wallClock();
         const shared_state = providers.shared_state.store(&worker.database.provider_state);
-        for (&self.gateways, names) |*gateway, service| gateway.* = .{
+        for (&self.gateways, names, intervals_ms) |*gateway, service, interval_ms| gateway.* = .{
             .transport = setup.hooks.transport orelse self.standard.transport(),
             .clock = setup.hooks.clock orelse self.system_clock.clock(),
             .wall_clock = self.wall_clock,
             .random = setup.hooks.random orelse self.random_source.interface(),
-            .config = .{ .identity = setup.identity.view(), .offline = offline },
+            .config = .{ .identity = setup.identity.view(), .offline = offline, .minimum_interval_ms = interval_ms },
             .cancel = &worker.registration.cancel,
             .sharing = .{ .store = shared_state, .service = service },
         };
@@ -982,6 +992,7 @@ pub const JobWorker = struct {
             .random = setup.hooks.random orelse random_source.interface(),
             .config = .{
                 .identity = setup.identity.view(),
+                .minimum_interval_ms = providers.lrclib.minimum_interval_ms,
                 .max_response_bytes = providers.lrclib.max_response_bytes,
             },
             .cancel = &self.registration.cancel,
@@ -1364,6 +1375,7 @@ pub const JobWorker = struct {
             .random = services.random,
             .config = .{
                 .identity = setup.identity.view(),
+                .minimum_interval_ms = providers.coverartarchive.minimum_interval_ms,
                 .max_response_bytes = switch (task) {
                     .front => providers.coverartarchive.max_image_bytes,
                     .candidates, .use => metadata.model.max_image_bytes,
@@ -1434,7 +1446,7 @@ pub const JobWorker = struct {
             .clock = clock,
             .wall_clock = wall_clock,
             .random = random,
-            .config = .{ .identity = setup.identity.view() },
+            .config = .{ .identity = setup.identity.view(), .minimum_interval_ms = providers.musicbrainz.minimum_interval_ms },
             .cancel = &self.registration.cancel,
             .sharing = .{ .store = shared_state, .service = providers.musicbrainz.service },
         };
@@ -1450,7 +1462,7 @@ pub const JobWorker = struct {
             .clock = clock,
             .wall_clock = wall_clock,
             .random = random,
-            .config = .{ .identity = setup.identity.view() },
+            .config = .{ .identity = setup.identity.view(), .minimum_interval_ms = providers.acoustid.minimum_interval_ms },
             .cancel = &self.registration.cancel,
             .sharing = .{ .store = shared_state, .service = providers.acoustid.service },
         };
@@ -1539,7 +1551,7 @@ pub const JobWorker = struct {
             .clock = setup.hooks.clock orelse system_clock.clock(),
             .wall_clock = wall_clock,
             .random = setup.hooks.random orelse random_source.interface(),
-            .config = .{ .identity = setup.identity.view() },
+            .config = .{ .identity = setup.identity.view(), .minimum_interval_ms = providers.acoustid.minimum_interval_ms },
             .cancel = &self.registration.cancel,
             .sharing = .{
                 .store = providers.shared_state.store(&self.database.provider_state),
@@ -2108,4 +2120,21 @@ test "a reconcile directory that is empty, absolute, escapes its root or is not 
         .root_id = 1,
         .scope = .{ .subtrees = &.{} },
     }));
+}
+
+test "artist info gateways are spaced at each service's published interval" {
+    const expected = [_]struct { service: []const u8, interval_ms: u64 }{
+        .{ .service = "musicbrainz", .interval_ms = 1000 },
+        .{ .service = "wikidata", .interval_ms = 300 },
+        .{ .service = "wikimedia-commons", .interval_ms = 300 },
+        .{ .service = "wikipedia", .interval_ms = 300 },
+        .{ .service = "listenbrainz-labs", .interval_ms = 1000 },
+        .{ .service = "listenbrainz", .interval_ms = 1000 },
+        .{ .service = "coverartarchive", .interval_ms = 250 },
+    };
+    try std.testing.expectEqual(expected.len, InfoServices.names.len);
+    for (expected, InfoServices.names, InfoServices.intervals_ms) |want, name, interval_ms| {
+        try std.testing.expectEqualStrings(want.service, name);
+        try std.testing.expectEqual(want.interval_ms, interval_ms);
+    }
 }

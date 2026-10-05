@@ -42,3 +42,35 @@ test {
     _ = @import("wikipedia.zig");
     _ = @import("workflow.zig");
 }
+
+const std = @import("std");
+const network = @import("../network/root.zig");
+
+fn fetchOnce(gateway: *network.Gateway) !void {
+    const response = try gateway.execute(std.testing.allocator, .get, "https://example.test", null, &.{});
+    response.deinit();
+}
+
+test "gateways of different services are each spaced by their own interval" {
+    var mb: network.testing.TestGateway = undefined;
+    mb.init(.{ .config = .{ .identity = network.testing.test_identity, .minimum_interval_ms = musicbrainz.minimum_interval_ms } });
+    defer mb.deinit();
+    var acoustid_net = network.testing.gateway(
+        &mb.transport,
+        &mb.clock,
+        &mb.prng,
+        .{ .identity = network.testing.test_identity, .minimum_interval_ms = acoustid.minimum_interval_ms },
+    );
+
+    try fetchOnce(&acoustid_net);
+    try std.testing.expectEqual(@as(u64, 0), mb.clock.slept());
+    try fetchOnce(&acoustid_net);
+    try std.testing.expectEqual(@as(u64, 334), mb.clock.slept());
+
+    try fetchOnce(&mb.gateway);
+    try std.testing.expectEqual(@as(u64, 334), mb.clock.slept());
+    try fetchOnce(&acoustid_net);
+    try std.testing.expectEqual(@as(u64, 334 + 334), mb.clock.slept());
+    try fetchOnce(&mb.gateway);
+    try std.testing.expectEqual(@as(u64, 334 + 334 + 666), mb.clock.slept());
+}

@@ -7,6 +7,7 @@ const cached_get = @import("cached_get.zig");
 const url_encoding = @import("url.zig");
 
 pub const service = "wikidata";
+pub const minimum_interval_ms: u64 = 300;
 pub const default_server = "https://www.wikidata.org";
 
 /// What Orca reads from one item. Strings live in `arena`.

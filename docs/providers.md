@@ -19,9 +19,25 @@ not a tuning choice.
   because the repository is private; it becomes the repository URL when the
   repository is public. Names and contacts are validated: empty, control
   characters and parentheses are refused.
-- **Rate.** At most one request per second per service. The gateway honours
-  `X-RateLimit-Remaining` and `X-RateLimit-Reset-In` when a response carries
-  them, and waits out the window instead of sending into it.
+- **Rate.** Each service's requests are spaced by its own minimum interval,
+  the provider module's `minimum_interval_ms`, taken from what the service
+  publishes. Orca does not wait longer than the service asks. A Gateway
+  configured without an interval waits 1000 ms.
+
+  | Service | Published guidance | Interval |
+  | --- | --- | --- |
+  | MusicBrainz | about 1 request a second per IP; more returns 503 to all (rate-limiting page) | 1000 ms |
+  | AcoustID | "no more than 3 requests per second" (web service docs) | 334 ms |
+  | ListenBrainz | "never more than one call per second", and `X-RateLimit-*` (API docs) | 1000 ms |
+  | ListenBrainz Labs | none; follows ListenBrainz | 1000 ms |
+  | Wikidata, Wikimedia Commons | Action API: one at a time, under 5 a second; API Gateway: 200 a minute with a `User-Agent` | 300 ms |
+  | Wikipedia (REST) | under 5 a second; API Gateway: 200 a minute | 300 ms |
+  | Cover Art Archive | "no rate limiting rules in place" (API docs) | 250 ms |
+  | LRCLIB | none published; served behind Cloudflare | 500 ms |
+
+  The gateway also honours `X-RateLimit-Remaining` and `X-RateLimit-Reset-In`
+  when a response carries them, and waits out the window instead of sending
+  into it.
 - **429 and 503.** A `429`, or a `503` with a `Retry-After`, blocks every
   request to the service until the latest of its `Retry-After`, its
   `X-RateLimit-Reset-In` and a backoff of 60 s, doubling per repeated refusal
@@ -599,7 +615,7 @@ chosen cover always wins, then an embedded one.
   `no_release_id`: review the matches, then fetch again. The ID is checked
   to be a lowercase UUID before a URL is built from it.
 - **The request.** `GET /release/{mbid}/front-500` through the gateway as the
-  service `coverartarchive`: one request a second, the shared backoff and
+  service `coverartarchive`: its request interval, the shared backoff and
   block, the client identity and the service lease, as above.
 - **Redirects.** The archive answers with a redirect to `archive.org`, which
   redirects again to the node holding the file. `Gateway.fetch` follows at
@@ -690,7 +706,7 @@ the Track's own is in [metadata.md](metadata.md#lyrics).
   MusicBrainz ID, path, file name, token or other Library content is sent.
   A Track without a title or an artist is not looked up (`no_metadata`).
 - **The request.** Through the gateway as the service `lrclib`: the client
-  identity's `User-Agent`, one request a second, the shared backoff and
+  identity's `User-Agent`, its request interval, the shared backoff and
   block, and the service lease, as above. A lookup inside a block sends
   nothing and reports `unavailable`.
 - **The answer.** At most 512 KiB of JSON. A record's `syncedLyrics` and
@@ -838,7 +854,7 @@ what was kept.
   the services themselves returned, and the language. No path, file name, tag or other Library
   content leaves the machine.
 - **Rules.** Each service has its own gateway: the client
-  identity's `User-Agent`, one request a second, the shared backoff and
+  identity's `User-Agent`, its request interval, the shared backoff and
   block, and the service lease, as above. Answers are kept in
   `provider_cache` for 30 days and a refusal for 7; when a service cannot be
   reached an expired answer is used instead.

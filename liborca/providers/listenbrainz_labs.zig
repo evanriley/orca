@@ -6,6 +6,7 @@ const cached_get = @import("cached_get.zig");
 const metadata = @import("../metadata/model.zig");
 
 pub const service = "listenbrainz-labs";
+pub const minimum_interval_ms: u64 = 1000;
 pub const default_server = "https://labs.api.listenbrainz.org";
 /// The similarity dataset ListenBrainz itself shows on an artist's page.
 pub const algorithm = "session_based_days_9000_session_300_contribution_5_threshold_15_limit_50_skip_30";

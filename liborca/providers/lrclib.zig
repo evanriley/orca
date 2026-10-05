@@ -3,6 +3,7 @@ const network = @import("../network/root.zig");
 const url_encoding = @import("url.zig");
 
 pub const service = "lrclib";
+pub const minimum_interval_ms: u64 = 500;
 pub const default_server = "https://lrclib.net";
 pub const max_response_bytes: usize = 512 * 1024;
 pub const max_duration_s: u32 = 3600;

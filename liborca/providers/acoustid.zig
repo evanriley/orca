@@ -7,6 +7,7 @@ const scoring = @import("scoring.zig");
 const url_encoding = @import("url.zig");
 
 pub const service = "acoustid";
+pub const minimum_interval_ms: u64 = 334;
 pub const default_server = "https://api.acoustid.org";
 /// Where a `CredentialStore` holds AcoustID keys: `client-key` overrides the
 /// application key a host sets, and `user-key` is the user's own key, needed

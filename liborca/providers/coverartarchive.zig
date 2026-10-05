@@ -3,6 +3,7 @@ const metadata = @import("../metadata/model.zig");
 const network = @import("../network/root.zig");
 
 pub const service = "coverartarchive";
+pub const minimum_interval_ms: u64 = 250;
 pub const default_server = "https://coverartarchive.org";
 pub const max_image_bytes: usize = 4 * 1024 * 1024;
 /// The front cover is served from the Internet Archive, through up to two

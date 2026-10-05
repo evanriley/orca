@@ -8,6 +8,7 @@ const scoring = @import("scoring.zig");
 const url_encoding = @import("url.zig");
 
 pub const service = "musicbrainz";
+pub const minimum_interval_ms: u64 = 1000;
 pub const default_server = "https://musicbrainz.org";
 const search_limit = 10;
 

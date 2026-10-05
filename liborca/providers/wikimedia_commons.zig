@@ -9,6 +9,7 @@ const cached_get = @import("cached_get.zig");
 const url_encoding = @import("url.zig");
 
 pub const service = "wikimedia-commons";
+pub const minimum_interval_ms: u64 = 300;
 pub const default_server = "https://commons.wikimedia.org";
 pub const max_image_bytes: usize = 4 * 1024 * 1024;
 pub const thumbnail_width = 800;

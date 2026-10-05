@@ -7,6 +7,7 @@ const url_encoding = @import("url.zig");
 const wikidata = @import("wikidata.zig");
 
 pub const service = "wikipedia";
+pub const minimum_interval_ms: u64 = 300;
 pub const licence = "CC BY-SA 4.0";
 const max_extract_bytes = 16 * 1024;
 

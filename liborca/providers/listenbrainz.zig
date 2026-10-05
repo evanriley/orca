@@ -6,6 +6,7 @@ const scrobble = @import("scrobble.zig");
 const isMusicBrainzId = @import("../metadata/model.zig").isMusicBrainzId;
 
 pub const service = "listenbrainz";
+pub const minimum_interval_ms: u64 = 1000;
 
 pub const token_service = "org.listenbrainz";
 pub const token_account = "user-token";

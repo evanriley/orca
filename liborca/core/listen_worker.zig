@@ -252,7 +252,7 @@ pub const Worker = struct {
             .clock = self.hooks.clock orelse system_clock.clock(),
             .wall_clock = self.hooks.wall_clock orelse system_clock.wallClock(),
             .random = self.hooks.random orelse random_source.interface(),
-            .config = .{ .identity = unidentified },
+            .config = .{ .identity = unidentified, .minimum_interval_ms = listenbrainz.minimum_interval_ms },
             .cancel = &self.registration.cancel,
             .sharing = .{
                 .store = providers.shared_state.store(&self.database.provider_state),
