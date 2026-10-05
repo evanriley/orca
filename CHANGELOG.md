@@ -1470,6 +1470,15 @@
 
 ### Fixed
 
+- **Pages fill wide windows.** In orca-gtk, Library Health, Matches, Match
+  Review, Write to Files, Activity, Queue, Scan and the album and artist
+  pages now fill the window to its gutters, with or without the inspector
+  open, as Loved and the browse pages already did. Before, each capped its
+  content at the 1440-pixel design's width, between 796 and 1224 pixels,
+  and pinned it to the left, so on a wide window the rows stopped at a
+  third of the width and the header's controls sat mid-page. Row columns
+  keep their fixed widths and text columns share the extra room; prose
+  keeps a readable measure.
 - **Artist and album info fetches end within a minute.** An artist or
   album info Job now stops asking once a minute has passed, and each
   request's timeout ends there, so a slow or silent service can no longer

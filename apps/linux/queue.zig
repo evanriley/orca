@@ -22,7 +22,6 @@ const TrackObject = track_model.TrackObject;
 
 const now_cover_pixels: c_int = 56;
 const history_capacity = liborca.queue_history_capacity;
-const max_width: c_int = 980;
 const origin_capacity = 256;
 
 pub const State = struct {
@@ -558,39 +557,6 @@ fn addAction(group: *gtk.GSimpleActionGroup, name: [*:0]const u8, handler: gtk.G
     gtk.g_object_unref(action);
 }
 
-fn measureLimited(
-    widget: *gtk.Widget,
-    orientation: c_int,
-    for_size: c_int,
-    minimum: *c_int,
-    natural: *c_int,
-    minimum_baseline: *c_int,
-    natural_baseline: *c_int,
-) callconv(.c) void {
-    minimum.* = 0;
-    natural.* = 0;
-    minimum_baseline.* = -1;
-    natural_baseline.* = -1;
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    const size = if (orientation == gtk.ORIENTATION_VERTICAL and for_size >= 0) @min(for_size, max_width) else for_size;
-    gtk.gtk_widget_measure(child, orientation, size, minimum, natural, null, null);
-}
-
-fn allocateLimited(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    var child_minimum: c_int = 0;
-    gtk.gtk_widget_measure(child, gtk.ORIENTATION_HORIZONTAL, -1, &child_minimum, null, null, null);
-    const child_width = @min(width, @max(max_width, child_minimum));
-    gtk.gtk_widget_size_allocate(child, &.{ .x = 0, .y = 0, .width = child_width, .height = height }, -1);
-}
-
-fn limited(child: *gtk.Widget) *gtk.Widget {
-    const wrapper = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_layout_manager(wrapper, gtk.gtk_custom_layout_new(null, measureLimited, allocateLimited));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, wrapper), child);
-    return wrapper;
-}
-
 pub fn build(self: *App) *gtk.Widget {
     const page = &self.queue;
     const now_store = gtk.g_list_store_new(track_model.getType()).?;
@@ -639,7 +605,7 @@ pub fn build(self: *App) *gtk.Widget {
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), limited(column));
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
 
     const empty = adw.adw_status_page_new();
     adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, empty), "view-list-symbolic");
@@ -661,7 +627,6 @@ pub fn build(self: *App) *gtk.Widget {
     const clear = headerButton("Clear", null, "Clear the queue", gtk.callback(clearClicked), self);
     gtk.gtk_widget_add_css_class(clear, "queue-clear");
     title.add(clear);
-    title.widget = limited(title.widget);
 
     const view = page_ui.withTitle(title, body);
 

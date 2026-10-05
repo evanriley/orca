@@ -21,7 +21,6 @@ const page_ui = @import("page.zig");
 
 const App = app.App;
 
-const content_max_pixels = 1060;
 const photo_pixels: c_int = 232;
 const biography_max_pixels = 580;
 const biography_lines = 3;
@@ -715,6 +714,10 @@ const ReleaseRow = struct {
     }
 };
 
+fn releaseLimit(scope: albums.ArtistScope) c_uint {
+    return if (scope == .appearances) appearance_limit else own_release_limit;
+}
+
 fn loadReleaseRow(self: *App, library: liborca.LibraryHandle, artist_id: i64, scope: albums.ArtistScope, count: u64) ?ReleaseRow {
     if (count == 0) return null;
     var query: liborca.ReleaseQuery = if (scope == .appearances)
@@ -722,7 +725,7 @@ fn loadReleaseRow(self: *App, library: liborca.LibraryHandle, artist_id: i64, sc
     else
         .{ .album_artist_id = artist_id, .own_releases_only = true };
     query.sort = .year;
-    query.limit = if (scope == .appearances) appearance_limit else own_release_limit;
+    query.limit = releaseLimit(scope);
     const releases = self.runtime.libraryReleasePage(library, query) catch return null;
     return .{ .scope = scope, .count = count, .releases = releases };
 }
@@ -746,7 +749,7 @@ fn albumsSection(page: *ArtistPage, row: *const ReleaseRow) *gtk.Widget {
     const flow_box = gtk.cast(gtk.FlowBox, flow);
     gtk.gtk_flow_box_set_selection_mode(flow_box, gtk.SELECTION_NONE);
     gtk.gtk_flow_box_set_min_children_per_line(flow_box, album_columns);
-    gtk.gtk_flow_box_set_max_children_per_line(flow_box, album_columns);
+    gtk.gtk_flow_box_set_max_children_per_line(flow_box, releaseLimit(row.scope));
     gtk.gtk_flow_box_set_homogeneous(flow_box, gtk.true_);
     gtk.gtk_flow_box_set_column_spacing(flow_box, 20);
     gtk.gtk_flow_box_set_row_spacing(flow_box, 20);
@@ -1261,7 +1264,6 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     page.sections = sections;
     if (top.count != 0) gtk.gtk_box_append(gtk.cast(gtk.Box, sections), tracksSection(page, top.items(), top.by_plays));
     const side = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 28);
-    gtk.gtk_widget_set_halign(side, gtk.ALIGN_START);
     for (rows) |*row| gtk.gtk_box_append(gtk.cast(gtk.Box, side), albumsSection(page, row));
     gtk.gtk_box_append(gtk.cast(gtk.Box, sections), side);
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), sections);
@@ -1271,17 +1273,12 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     _ = showInfo(page);
     if (self.fetch_artist_info) requestInfo(self, artist_id, false);
 
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_max_pixels);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, clamp), content_max_pixels);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), column);
-    gtk.gtk_widget_set_halign(clamp, gtk.ALIGN_FILL);
     const layers = gtk.gtk_overlay_new();
     const backdrop = art.newBackdrop(self, .header);
     art.showBackdrop(self, backdrop, &.{page.photo.?});
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), clamp);
-    gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), clamp, gtk.true_);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), column);
+    gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), column, gtk.true_);
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);

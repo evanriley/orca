@@ -6,7 +6,6 @@
 const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
-const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const art = @import("art.zig");
@@ -743,15 +742,12 @@ pub fn build(self: *App) *gtk.Widget {
 
     const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(column, "match-review-page");
+    gtk.gtk_widget_set_hexpand(column, gtk.true_);
     append(column, &.{ content, message });
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), 1224);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, clamp), 1224);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), column);
 
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), clamp);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
     review.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(scrollerDestroyed), self);
     review.built = true;

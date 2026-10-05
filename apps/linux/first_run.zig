@@ -17,7 +17,6 @@ const found_slots = 14;
 const found_columns = 7;
 const tile_pixels: c_int = 132;
 const problem_rows = 5;
-const scan_max_width: c_int = 1120;
 const refresh_interval_us: i64 = 1_000_000;
 const user_directory_music: c_int = 3;
 
@@ -620,32 +619,6 @@ fn finish(self: *App) void {
     syncFolders(self);
 }
 
-fn measureLimited(
-    widget: *gtk.Widget,
-    orientation: c_int,
-    for_size: c_int,
-    minimum: *c_int,
-    natural: *c_int,
-    minimum_baseline: *c_int,
-    natural_baseline: *c_int,
-) callconv(.c) void {
-    minimum.* = 0;
-    natural.* = 0;
-    minimum_baseline.* = -1;
-    natural_baseline.* = -1;
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    const size = if (orientation == gtk.ORIENTATION_VERTICAL and for_size >= 0) @min(for_size, scan_max_width) else for_size;
-    gtk.gtk_widget_measure(child, orientation, size, minimum, natural, null, null);
-}
-
-fn allocateLimited(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    var child_minimum: c_int = 0;
-    gtk.gtk_widget_measure(child, gtk.ORIENTATION_HORIZONTAL, -1, &child_minimum, null, null, null);
-    const child_width = @min(width, @max(scan_max_width, child_minimum));
-    gtk.gtk_widget_size_allocate(child, &.{ .x = 0, .y = 0, .width = child_width, .height = height }, -1);
-}
-
 fn buildStage(self: *App, index: usize, title: [*:0]const u8, detail: [*:0]const u8) *gtk.Widget {
     const mark = box(gtk.ORIENTATION_HORIZONTAL, 0, "scan-stage-mark");
     const check = icon("orca-check-symbolic", 13, null);
@@ -763,20 +736,18 @@ pub fn buildScan(self: *App) *gtk.Widget {
     gtk.gtk_flow_box_set_column_spacing(flow, 20);
     gtk.gtk_flow_box_set_row_spacing(flow, 22);
     gtk.gtk_widget_add_css_class(grid, "scan-found");
+    gtk.gtk_widget_set_halign(grid, gtk.ALIGN_START);
     for (0..found_slots) |index| gtk.gtk_flow_box_append(flow, buildSlot(self, index));
     const found = box(gtk.ORIENTATION_VERTICAL, 14, null);
     append(found, &.{ found_header, grid });
 
     const column = box(gtk.ORIENTATION_VERTICAL, 26, "scan-body");
     append(column, &.{ header, card, problems, found });
-    const limited = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_layout_manager(limited, gtk.gtk_custom_layout_new(null, measureLimited, allocateLimited));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, limited), column);
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), limited);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
     gtk.gtk_widget_add_css_class(scroller, "scan-page");
     return scroller;
 }

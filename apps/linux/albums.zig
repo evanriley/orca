@@ -35,7 +35,6 @@ const duration_column_pixels: c_int = 50;
 const format_column_pixels: c_int = 96;
 const rate_column_pixels: c_int = 64;
 const stars_column_pixels: c_int = 96;
-const content_max_pixels = 1020;
 const meta_separator = "  <span fgalpha=\"43%\">·</span>  ";
 const grid_cell_padding_pixels = 22;
 const cover_size_pixels = 96;
@@ -3369,17 +3368,13 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
     showColumns(page);
     markRows(page, self.shown_track_id);
 
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_max_pixels);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, clamp), content_max_pixels);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
     const layers = gtk.gtk_overlay_new();
     const backdrop = art.newBackdrop(self, .header);
     gtk.gtk_widget_add_css_class(backdrop, "album-backdrop");
     art.showBackdrop(self, backdrop, &.{cover});
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), clamp);
-    gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), clamp, gtk.true_);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), content);
+    gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), content, gtk.true_);
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), layers);

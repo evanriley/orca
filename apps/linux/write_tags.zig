@@ -18,11 +18,7 @@ const App = app.App;
 
 const page_key = "orca-write-tags";
 const files_shown = 2;
-const content_width: c_int = 1036;
-const page_side_padding: c_int = 32;
-const max_width: c_int = content_width + 2 * page_side_padding;
 const card_spacing: c_int = 12;
-const card_width: c_int = @divTrunc(content_width - 2 * card_spacing, 3);
 
 const WritePage = struct {
     self: *App,
@@ -253,7 +249,6 @@ fn label(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
 fn card(title: [:0]const u8, subtitle: [:0]const u8) *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 3);
     gtk.gtk_widget_add_css_class(box, "write-card");
-    gtk.gtk_widget_set_size_request(box, card_width, -1);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), label(title.ptr, "write-card-title"));
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), label(subtitle.ptr, "write-card-subtitle"));
     return box;
@@ -364,43 +359,8 @@ fn undoCard() *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), toggle);
     const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(box, "write-toggles");
-    gtk.gtk_widget_set_halign(box, gtk.ALIGN_START);
-    gtk.gtk_widget_set_size_request(box, 796, -1);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), row);
     return box;
-}
-
-fn measureLimited(
-    widget: *gtk.Widget,
-    orientation: c_int,
-    for_size: c_int,
-    minimum: *c_int,
-    natural: *c_int,
-    minimum_baseline: *c_int,
-    natural_baseline: *c_int,
-) callconv(.c) void {
-    minimum.* = 0;
-    natural.* = 0;
-    minimum_baseline.* = -1;
-    natural_baseline.* = -1;
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    const size = if (orientation == gtk.ORIENTATION_VERTICAL and for_size >= 0) @min(for_size, max_width) else for_size;
-    gtk.gtk_widget_measure(child, orientation, size, minimum, natural, null, null);
-}
-
-fn allocateLimited(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    var child_minimum: c_int = 0;
-    gtk.gtk_widget_measure(child, gtk.ORIENTATION_HORIZONTAL, -1, &child_minimum, null, null, null);
-    const child_width = @min(width, @max(max_width, child_minimum));
-    gtk.gtk_widget_size_allocate(child, &.{ .x = 0, .y = 0, .width = child_width, .height = height }, -1);
-}
-
-fn limited(child: *gtk.Widget) *gtk.Widget {
-    const wrapper = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_layout_manager(wrapper, gtk.gtk_custom_layout_new(null, measureLimited, allocateLimited));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, wrapper), child);
-    return wrapper;
 }
 
 fn editorBelow(write: *WritePage) ?*adw.NavigationPage {
@@ -521,7 +481,7 @@ pub fn open(self: *App, ids: []const i64) void {
     gtk.gtk_box_append(gtk.cast(gtk.Box, header), actions);
 
     const cards = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, card_spacing);
-    gtk.gtk_widget_set_halign(cards, gtk.ALIGN_START);
+    gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, cards), gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, cards), fieldsCard(plan));
     gtk.gtk_box_append(gtk.cast(gtk.Box, cards), formatCard(plan));
 
@@ -539,7 +499,7 @@ pub fn open(self: *App, ids: []const i64) void {
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), limited(content));
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(destroyed), write);
 
     const page = adw.adw_navigation_page_new(scroller, "Write to Files");

@@ -20,7 +20,6 @@ const App = app.App;
 pub const max_cards = liborca.max_waiting_jobs + 1;
 const history_page: u32 = 100;
 const recent_count: u32 = 3;
-const max_width: c_int = 1080;
 
 const Entry = struct {
     queued: liborca.QueuedJob,
@@ -394,39 +393,6 @@ fn dayLabel(buffer: []u8, unix_seconds: i64) [:0]const u8 {
         if (std.mem.eql(u8, day, dayKey(&other_buffer, yesterday))) return "Yesterday";
     }
     return localTime(buffer, unix_seconds, "%-d %B %Y");
-}
-
-fn measureLimited(
-    widget: *gtk.Widget,
-    orientation: c_int,
-    for_size: c_int,
-    minimum: *c_int,
-    natural: *c_int,
-    minimum_baseline: *c_int,
-    natural_baseline: *c_int,
-) callconv(.c) void {
-    minimum.* = 0;
-    natural.* = 0;
-    minimum_baseline.* = -1;
-    natural_baseline.* = -1;
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    const size = if (orientation == gtk.ORIENTATION_VERTICAL and for_size >= 0) @min(for_size, max_width) else for_size;
-    gtk.gtk_widget_measure(child, orientation, size, minimum, natural, null, null);
-}
-
-fn allocateLimited(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv(.c) void {
-    const child = gtk.gtk_widget_get_first_child(widget) orelse return;
-    var child_minimum: c_int = 0;
-    gtk.gtk_widget_measure(child, gtk.ORIENTATION_HORIZONTAL, -1, &child_minimum, null, null, null);
-    const child_width = @min(width, @max(max_width, child_minimum));
-    gtk.gtk_widget_size_allocate(child, &.{ .x = 0, .y = 0, .width = child_width, .height = height }, -1);
-}
-
-fn limited(child: *gtk.Widget) *gtk.Widget {
-    const wrapper = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_layout_manager(wrapper, gtk.gtk_custom_layout_new(null, measureLimited, allocateLimited));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, wrapper), child);
-    return wrapper;
 }
 
 fn viewAllClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1194,7 +1160,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), limited(column));
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
     gtk.gtk_widget_add_css_class(scroller, "activity-page");
     return scroller;
 }

@@ -27,8 +27,6 @@ const Kind = liborca.HealthIssueKind;
 
 const first_page: u32 = 50;
 
-const content_width: c_int = 976;
-
 pub const Row = enum { duplicates, mismatched, clipping, loudness, unmatched, artwork, missing_files };
 
 const Tone = enum { caution, neutral, warn };
@@ -164,7 +162,6 @@ pub const State = struct {
     built: bool = false,
     views: std.EnumArray(Row, View) = .initFill(.{}),
     scroller: ?*gtk.ScrolledWindow = null,
-    content: ?*gtk.Widget = null,
     last_analyzed: ?*gtk.Label = null,
     analyze_label: ?*gtk.Label = null,
     headline: ?*gtk.Label = null,
@@ -632,7 +629,7 @@ fn rowWidget(self: *App, row: Row) *gtk.Widget {
     gtk.gtk_label_set_lines(gtk.cast(gtk.Label, detail), 2);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, detail), gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, detail), 30);
-    gtk.gtk_widget_set_size_request(detail, 220, -1);
+    gtk.gtk_widget_set_hexpand(detail, gtk.true_);
     gtk.gtk_widget_set_valign(detail, gtk.ALIGN_CENTER);
 
     const action = gtk.gtk_button_new_with_label(row_info.action);
@@ -650,11 +647,19 @@ fn rowWidget(self: *App, row: Row) *gtk.Widget {
 
     const top = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
     gtk.gtk_widget_add_css_class(top, "health-row-header");
-    append(top, &.{ tile(row_info.icon, toneClass(row_info.tone), 40, 18), text, tally, detail, action, toggle });
+    const figures = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    append(figures, &.{ tally, detail });
+    const columns = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, columns), gtk.true_);
+    gtk.gtk_widget_set_hexpand(columns, gtk.true_);
+    append(columns, &.{ text, figures });
+    append(top, &.{ tile(row_info.icon, toneClass(row_info.tone), 40, 18), columns, action, toggle });
 
     const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(body, "health-row-body");
     const about = wrapped(row_info.about, "health-about");
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, about), 90);
+    gtk.gtk_widget_set_halign(about, gtk.ALIGN_START);
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), about);
     if (row_info.kinds.len != 0) {
         const list = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -766,40 +771,15 @@ fn header(self: *App) *gtk.Widget {
     return row;
 }
 
-fn fluidApplied(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const content = state(data).health.content orelse return;
-    gtk.gtk_widget_set_size_request(content, -1, -1);
-    gtk.gtk_widget_set_hexpand(content, gtk.true_);
-}
-
-fn fluidUnapplied(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const content = state(data).health.content orelse return;
-    gtk.gtk_widget_set_size_request(content, content_width, -1);
-    gtk.gtk_widget_set_hexpand(content, gtk.false_);
-}
-
 pub fn build(self: *App) *gtk.Widget {
     const rows = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(rows, "health-rows");
     for (std.enums.values(Row)) |row| gtk.gtk_box_append(gtk.cast(gtk.Box, rows), rowWidget(self, row));
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 26);
-    gtk.gtk_widget_add_css_class(content, "health-content");
-    gtk.gtk_widget_set_size_request(content, content_width, -1);
-    gtk.gtk_widget_set_hexpand(content, gtk.false_);
+    gtk.gtk_widget_add_css_class(content, "health-page");
+    gtk.gtk_widget_set_hexpand(content, gtk.true_);
     append(content, &.{ header(self), statusCard(self), rows });
-    self.health.content = content;
-
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_width);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, clamp), content_width);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
-
-    const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
-    const column = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(column, "health-page");
-    append(column, &.{ clamp, spacer });
 
     const scroller = gtk.gtk_scrolled_window_new();
     self.health.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
@@ -807,17 +787,11 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
 
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
     adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), scroller);
-    if (adw.adw_breakpoint_condition_parse("max-width: 1040px")) |condition| {
-        const breakpoint = adw.adw_breakpoint_new(condition);
-        _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(fluidApplied), self);
-        _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(fluidUnapplied), self);
-        adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
-    }
     self.health.built = true;
     return bin;
 }

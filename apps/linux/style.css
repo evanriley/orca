@@ -4703,7 +4703,6 @@ button.health-chevron.open image {
 }
 
 .health-about {
-  margin-right: 260px;
   margin-bottom: 12px;
   font-size: 13px;
   line-height: 20px;
@@ -4714,8 +4713,7 @@ button.health-chevron.open image {
   margin-right: 180px;
 }
 
-.narrow .health-files.narrow-list,
-.narrow .health-about {
+.narrow .health-files.narrow-list {
   margin-right: 0;
 }
 

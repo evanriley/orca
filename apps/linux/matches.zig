@@ -27,7 +27,6 @@ const Field = liborca.ReleaseField;
 const separator = " · ";
 const recording_url = "https://musicbrainz.org/recording/";
 const list_limit: u32 = 100;
-const content_width: c_int = 1080;
 const cover_pixels: c_int = 48;
 
 pub const Detail = struct {
@@ -182,7 +181,6 @@ pub const State = struct {
     corrections: ?*gtk.ListBox = null,
     corrections_box: ?*gtk.Widget = null,
     scroller: ?*gtk.ScrolledWindow = null,
-    content: ?*gtk.Widget = null,
     search: ?*gtk.Widget = null,
 
     pub fn deinit(self: *State) void {
@@ -854,20 +852,7 @@ fn matchAgainClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn scrollerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.matches.scroller = null;
-    self.matches.content = null;
     self.matches.built = false;
-}
-
-fn fluidApplied(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const content = state(data).matches.content orelse return;
-    gtk.gtk_widget_set_size_request(content, -1, -1);
-    gtk.gtk_widget_set_hexpand(content, gtk.true_);
-}
-
-fn fluidUnapplied(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const content = state(data).matches.content orelse return;
-    gtk.gtk_widget_set_size_request(content, content_width, -1);
-    gtk.gtk_widget_set_hexpand(content, gtk.false_);
 }
 
 pub fn build(self: *App) *gtk.Widget {
@@ -911,25 +896,14 @@ pub fn build(self: *App) *gtk.Widget {
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(content, "matches-body");
-    gtk.gtk_widget_set_size_request(content, content_width, -1);
-    gtk.gtk_widget_set_hexpand(content, gtk.false_);
+    gtk.gtk_widget_set_hexpand(content, gtk.true_);
     append(content, &.{ title.widget, tabs, corrections_box, list, empty });
-    matches.content = content;
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_width);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, clamp), content_width);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
-
-    const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
-    const column = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    append(column, &.{ clamp, spacer });
 
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), column);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
     matches.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(scrollerDestroyed), self);
     _ = gtk.signalConnect(
@@ -942,12 +916,6 @@ pub fn build(self: *App) *gtk.Widget {
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
     adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), scroller);
-    if (adw.adw_breakpoint_condition_parse("max-width: 1140px")) |condition| {
-        const breakpoint = adw.adw_breakpoint_new(condition);
-        _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(fluidApplied), self);
-        _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(fluidUnapplied), self);
-        adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
-    }
 
     page_ui.addEnd(self, .matches, buildSearch(self));
     matches.built = true;
