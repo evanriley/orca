@@ -313,8 +313,10 @@ names each `Runtime` method the C ABI does not reach and why.
 - Linux x86_64, and a static `liborca` for aarch64 macOS (`zig build lib
   -Dtarget=aarch64-macos`).
 - CI (`.github/workflows/test.yml`): `zig build test` against a private
-  PipeWire and WirePlumber, `zig fmt --check`, and the aarch64 macOS
-  cross-build.
+  PipeWire and WirePlumber, `zig fmt --check`, the aarch64 macOS
+  cross-build, `nix flake check` (package build, NixOS module and the
+  installed tree), and `zig build package-check` against the fetched Zig
+  package. A `required` job fails when any of them fails.
 
 ## Built but not reachable
 

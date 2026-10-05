@@ -72,7 +72,7 @@ boundaries. More specific rules are loaded from `liborca/CLAUDE.md` and
 Run commands from the repository root inside the dev shell.
 
 ```sh
-zig fmt --check liborca apps benchmarks tests build.zig
+zig fmt --check liborca apps benchmarks tests build build.zig
 zig build
 zig build test
 zig build fuzz

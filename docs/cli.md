@@ -11,13 +11,14 @@ Run these inside the dev shell (`nix develop`, or automatically with direnv).
 nix build                     # package: orca-cli, orca-gtk (Linux), liborca, orca.h
 nix flake check
 nix fmt                       # formats Nix files
-zig fmt --check liborca apps benchmarks tests build.zig
+zig fmt --check liborca apps benchmarks tests build build.zig
 
 zig build                     # static + shared liborca, orca-cli, headers; orca-gtk on Linux
 zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
 zig build test                # unit + integration + C ABI smoke (+ PipeWire link smoke on Linux)
 zig build fuzz                # replay the parser fuzz targets' seeds
 zig build fuzz --fuzz[=N]     # fuzz them; N iterations per target, unlimited opens the web UI
+zig build package-check       # build examples/embed and an install from the fetched build.zig.zon package
 scripts/headless-audio.sh zig build test   # tests against a private PipeWire and WirePlumber, as CI runs them
 zig build run -- --version    # orca-cli
 zig build bench               # 500k-track persistence benchmark

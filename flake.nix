@@ -73,7 +73,7 @@
           zig-fmt = pkgs.runCommand "orca-zig-fmt" { nativeBuildInputs = [ pkgs.zig ]; } ''
             export HOME="$TMPDIR"
             cd ${self}
-            zig fmt --check liborca apps benchmarks tests build.zig
+            zig fmt --check liborca apps benchmarks tests build build.zig
             touch "$out"
           '';
         }
@@ -81,6 +81,50 @@
           nixos-module =
             assert builtins.elem orca nixos.config.environment.systemPackages;
             pkgs.runCommand "orca-nixos-module" { } ''touch "$out"'';
+
+          installed =
+            pkgs.runCommand "orca-installed"
+              {
+                nativeBuildInputs = [
+                  pkgs.pkg-config
+                  pkgs.binutils
+                ];
+                buildInputs = orca.buildInputs;
+              }
+              ''
+                set -euo pipefail
+                export HOME="$TMPDIR"
+                fail() {
+                  echo "installed: $*" >&2
+                  exit 1
+                }
+
+                reported=$(${orca}/bin/orca-cli --version)
+                [ "$reported" = "orca-cli ${orca.version}" ] ||
+                  fail "orca-cli --version printed '$reported'; expected 'orca-cli ${orca.version}' from build.zig.zon"
+
+                [ -x ${orca}/bin/orca-gtk ] || fail "bin/orca-gtk is missing"
+                [ -f ${orca}/include/orca/orca.h ] || fail "include/orca/orca.h is missing"
+                [ -f ${orca}/lib/liborca.so.0 ] || fail "lib/liborca.so.0 is missing"
+                soname=$(readelf -d ${orca}/lib/liborca.so.0 | sed -n 's/.*Library soname: \[\(.*\)\]/\1/p')
+                [ "$soname" = liborca.so.0 ] || fail "lib/liborca.so.0 has SONAME '$soname'; expected liborca.so.0"
+
+                export PKG_CONFIG_PATH="${orca}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                pkg_version=$(pkg-config --modversion orca)
+                [ "$pkg_version" = ${orca.version} ] || fail "orca.pc has version '$pkg_version'; expected ${orca.version}"
+                pkg-config --cflags --libs --static orca >/dev/null || fail "orca.pc does not resolve"
+
+                licenses=${orca}/share/doc/orca/licenses
+                expected="alac/LICENSE chromaprint/LICENSE.md kissfft/BSD-3-Clause libxaac/LICENSE libxaac/NOTICE minimp3/LICENSE orca/LICENSE qoa/LICENSE"
+                for file in $expected; do
+                  [ -s "$licenses/$file" ] || fail "share/doc/orca/licenses/$file is missing or empty"
+                done
+                installed=$(cd "$licenses" && find . -type f | sed 's,^\./,,' | sort | tr '\n' ' ')
+                [ "$installed" = "$expected " ] ||
+                  fail "share/doc/orca/licenses holds '$installed'; expected '$expected'"
+
+                touch "$out"
+              '';
         }
       );
 

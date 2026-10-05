@@ -25,9 +25,12 @@
         "benchmarks",
         "tests",
         "fixtures",
+        "scripts",
+        "examples",
         "docs",
         "CHANGELOG.md",
         "README.md",
+        "LICENSE",
     },
     .fingerprint = 0x6111eddd391f5ccd,
 }

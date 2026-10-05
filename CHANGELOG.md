@@ -1121,6 +1121,13 @@
   header checks that `orca_library_scan_stats` writes nothing past its
   88-byte struct. `orca_player_signal_path_v2` hands the
   `orca_signal_path_view_v2` that holds the 0.8.1 view as `base`.
+- **Package and install checks.** `zig build package-check` fetches the
+  Zig package as `build.zig.zon` filters it into a temporary cache, builds
+  `examples/embed` against it and installs from it. The `installed` flake
+  check verifies the built package: the `orca-cli` version, the
+  `liborca.so.0` SONAME, `orca.h`, a resolving `orca.pc`, `orca-gtk` and
+  every installed licence. CI runs `nix flake check` and the package check,
+  and a `required` job fails when any job fails.
 
 ### Changed
 
@@ -1487,6 +1494,10 @@
 
 ### Fixed
 
+- **The Zig package ships what it builds from.** `build.zig.zon` `.paths`
+  now includes `LICENSE`, `scripts/` and `examples/`; a package fetched as
+  a dependency failed to install without `LICENSE`. `zig fmt --check` also
+  covers the `build/` helpers.
 - **Hover and scrolling no longer restyle hidden pages.** orca-gtk kept
   every page it had built, and the views Albums, Artists, Tracks and Loved
   were not showing, visible to GTK's style system while they were off

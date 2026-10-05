@@ -279,6 +279,19 @@ pub fn build(b: *std.Build) void {
     check_cli_stdio.addArtifactArg(cli);
     _ = check_cli_stdio.addOutputDirectoryArg("cli-stdio");
     test_step.dependOn(&check_cli_stdio.step);
+    const manifest = @import("build.zig.zon");
+    const check_package = b.addSystemCommand(&.{"bash"});
+    check_package.addFileArg(b.path("scripts/check-package.sh"));
+    check_package.addArgs(&.{ b.graph.zig_exe, b.pathFromRoot("."), manifest.version });
+    inline for (@typeInfo(@TypeOf(manifest.dependencies)).@"struct".fields) |field| {
+        const dependency = @field(manifest.dependencies, field.name);
+        if (@hasField(@TypeOf(dependency), "hash")) {
+            check_package.addArg(b.graph.global_cache_root.join(b.allocator, &.{ "p", dependency.hash ++ ".tar.gz" }) catch @panic("OOM"));
+        }
+    }
+    check_package.has_side_effects = true;
+    const package_check_step = b.step("package-check", "Build examples/embed and a standalone install against the fetched build.zig.zon package");
+    package_check_step.dependOn(&check_package.step);
 
     const fuzz_tests = b.addTest(.{
         .root_module = liborca_module,
