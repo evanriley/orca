@@ -30,7 +30,7 @@ resampler, which is LGPL and accepts only 11,025 Hz input; see
   again next time.
 - **Cached per file.** A fingerprint is stored in `analysis_results` as kind 3,
   `orca.chromaprint` version 1, under a parameter hash of the algorithm, the
-  libsamplerate converter and the window length, and the quick hash of the
+  libsamplerate converter and the window length, and the content hash of the
   bytes it was taken from. Changing any of them takes a new fingerprint. The
   stored result is the length in milliseconds (8 bytes, little-endian)
   followed by the fingerprint.
@@ -79,14 +79,16 @@ kind, algorithm_id, algorithm_version, parameter_hash   +   source_identity
 ```
 
 A file still owes work when, for either measurement, no `analysis_results` row
-exists for it under that key with `source_identity = files.quick_hash`. Bumping
-either algorithm's version therefore re-selects every file. That key is the
-right one
-because it *already* encodes every reason a stored measurement stops counting,
-and a marker column on `files` would be a second source of truth free to
-disagree with the results it claims to describe:
+exists for it under that key with `source_identity = files.content_hash` and
+`files.content_hash_algorithm = 1`. A file with no content hash recorded always
+owes work. Bumping either algorithm's version therefore re-selects every file.
+That key is the right one because it *already* encodes every reason a stored
+measurement stops counting, and a marker column on `files` would be a second
+source of truth free to disagree with the results it claims to describe:
 
-- the bytes changed — `source_identity` no longer matches;
+- the bytes changed — `source_identity` no longer matches, because a scan that
+  sees a file's inode, size or mtime change without hashing it forgets the
+  content hash;
 - the algorithm changed — `algorithm_version` no longer matches;
 - the parameters changed — `parameter_hash` no longer matches.
 
@@ -128,9 +130,16 @@ every reason to measure a file again is already a reason the selection sees it.
   `excessive_silence` and `missing_analysis` raised or cleared, all in one
   bounded transaction per batch. A file with no gateable loudness — too short,
   or silent — is still stored, so it is not re-decoded on every run; it
-  yields no correction and raises `missing_analysis`.
+  yields no correction and raises `missing_analysis`. Every result is keyed by
+  the content hash of the bytes decoded, taken in a second sequential read of
+  the whole file beside the decode, and the same transaction records that hash
+  on the file (see [database.md](database.md#schema-and-migrations)).
 - **Declined.** Not reachable, not audio, or the identity the Library recorded
-  is not the file's identity any more. Counted, no health issue:
+  is not the file's identity any more: the quick hash differs, the content hash
+  read is not the one the file records, or, with none recorded, the inode, size
+  or mtime read is not what the location records. The same checks run again
+  under the write lane, so a scan that recorded other bytes meanwhile declines
+  the file rather than keying its results to them. Counted, no health issue:
   `locations.state` already models absence, a stale identity is a scan's job to
   repair, and filing a defect for every file on an unmounted drive would bury
   every real finding. The identity check happens *before* the decode, on two
@@ -213,11 +222,14 @@ the figure.
   carries 1. Playing one track at another track's loudness is the exact failure
   the feature exists to prevent, and it would be silent.
 - **Provenance is checked against the bytes, not the row.** The lookup is keyed
-  on the quick hash of the file that was just opened, not on
-  `files.quick_hash`, because the Library's record is only as fresh as the last
-  scan. A file edited since then plays at unity instead of at a correction
-  measured from audio it no longer contains. That costs one extra open and two
-  64 KiB reads per track load, against a decode of the whole file.
+  on the file's recorded content hash, and only while the file just opened
+  still has the quick hash the file records and the inode, size and mtime its
+  location records (`AnalysisCacheRepository.vouchedContentHash`), because the
+  Library's record is only as fresh as the last scan. A file edited since then
+  plays at unity instead of at a correction measured from audio it no longer
+  contains. That costs one extra open, a stat and two 64 KiB reads per track
+  load, against a decode of the whole file; hashing the whole file would read
+  it all before the first frame plays.
 - **Canonical parameters only.** The Player asks for the measurement made under
   the default `diagnostics.Parameters`, which is what the pass produces. A
   library measured under other parameters is a different measurement and is not
@@ -275,7 +287,7 @@ within an album stay as mastered.
   but still counts toward the peak.
 - **Whose measurement.** The entry's own measurement is keyed on the bytes just
   opened, as in track mode. Every other member's is keyed on
-  `files.quick_hash`, because hashing every file of the album at each open
+  `files.content_hash`, because checking every file of the album at each open
   would cost a disc's worth of reads per track.
 - **What a host sees.** `SignalPath` carries the applied gain
   (`replay_gain_db`), its source (`replay_gain_source`: `none`, `track`,

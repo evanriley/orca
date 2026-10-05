@@ -62,9 +62,18 @@ const Measurement = struct {
     outcome: Outcome,
 
     const Measured = struct {
-        /// The identity the measurement was taken from, which is also the one
-        /// it is filed under. Never the row's claim about the file.
-        source_identity: quick_hash.Digest,
+        /// The content hash of the bytes the measurement was taken from, which
+        /// is also the identity it is filed under. Never the row's claim about
+        /// the file.
+        source_identity: storage.content_hash.Digest,
+        /// What the file recorded when it was selected, which it must still
+        /// record for the measurement to be filed: `adoptContentHashLocked`
+        /// re-checks it under the write lane.
+        quick_hash: quick_hash.Digest,
+        location_id: i64,
+        /// The identity of the location measured, which it had from open to
+        /// the last byte read.
+        read_identity: database.StorageIdentityKey,
         diagnostics_bytes: []u8,
         fingerprint_bytes: []u8,
         /// Null when the audio is too short to fingerprint or Chromaprint
@@ -327,13 +336,13 @@ pub const LibraryAnalysis = struct {
         candidate: database.repository.AnalysisCandidate,
     ) !Measurement.Outcome {
         if (candidate.uri.len == 0) return .skipped;
-        const recorded = candidate.source_identity orelse return .skipped;
+        const recorded = candidate.quick_hash orelse return .skipped;
+        const location_id = candidate.location_id orelse return .skipped;
         // Cheap, and it settles provenance before anything expensive happens.
-        // A file whose bytes no longer match what the Library recorded would
-        // have its measurement filed under an identity the selection does not
-        // look for, so it would be decoded again on every run for ever. Two
-        // 64 KiB reads decline it instead, and a scan is the pass that repairs
-        // the record.
+        // A file whose bytes no longer match what the Library recorded cannot
+        // have its measurement filed, so it would be decoded again on every
+        // run for ever. Two 64 KiB reads decline most of them instead, and a
+        // scan is the pass that repairs the record.
         {
             var local = storage.LocalFileSource.open(io, candidate.uri) catch
                 return .skipped;
@@ -369,7 +378,10 @@ pub const LibraryAnalysis = struct {
                 else => return .{ .unreadable = @errorName(err) },
             };
         defer measured.deinit();
-        if (!std.mem.eql(u8, &measured.source_identity, &recorded)) return .skipped;
+        const read_identity = readIdentity(candidate, measured.storage_identity) orelse return .skipped;
+        if (candidate.content_hash) |stored| {
+            if (!std.mem.eql(u8, &measured.source_identity, &stored)) return .skipped;
+        } else if (!std.meta.eql(candidate.recorded, read_identity)) return .skipped;
 
         const diagnostics_bytes = try analysis.encoding.encode(
             self.allocator,
@@ -387,6 +399,9 @@ pub const LibraryAnalysis = struct {
             null;
         return .{ .measured = .{
             .source_identity = measured.source_identity,
+            .quick_hash = recorded,
+            .location_id = location_id,
+            .read_identity = read_identity,
             .diagnostics_bytes = diagnostics_bytes,
             .fingerprint_bytes = fingerprint_bytes,
             .chromaprint_bytes = chromaprint_bytes,
@@ -413,6 +428,16 @@ pub const LibraryAnalysis = struct {
         errdefer self.database_handle.exec("ROLLBACK;") catch {};
         for (measurements) |measurement| switch (measurement.outcome) {
             .measured => |value| {
+                if (!try self.files.adoptContentHashLocked(
+                    measurement.file_id,
+                    &value.source_identity,
+                    &value.quick_hash,
+                    value.location_id,
+                    value.read_identity,
+                )) {
+                    result.unsupported += 1;
+                    continue;
+                }
                 try self.analysis_cache.putLocked(
                     analysis.service.diagnosticsKey(
                         measurement.file_id,
@@ -483,6 +508,21 @@ pub const LibraryAnalysis = struct {
     }
 };
 
+/// The identity of the location `candidate` names while it had `identity`,
+/// in the form the Library records it.
+fn readIdentity(
+    candidate: database.repository.AnalysisCandidate,
+    identity: storage.StorageIdentity,
+) ?database.StorageIdentityKey {
+    const recorded = candidate.recorded orelse return null;
+    return .{
+        .volume_id = recorded.volume_id,
+        .native_inode = std.math.cast(i64, identity.inode) orelse return null,
+        .size_bytes = std.math.cast(i64, identity.size) orelse return null,
+        .modified_ns = std.math.cast(i64, identity.modified_ns) orelse return null,
+    };
+}
+
 const testing = std.testing;
 const metadata = @import("../metadata/model.zig");
 
@@ -541,11 +581,12 @@ const Fixture = struct {
     }
 
     /// A `files` row carrying the quick hash a scan would have observed, plus
-    /// the location that names it.
+    /// the location that names it with the identity a scan would record.
     fn record(self: *Fixture, name: []const u8) !i64 {
         const uri = try self.path(name);
         defer testing.allocator.free(uri);
         const digest = try quick_hash.fromPath(testing.io, uri);
+        const stat = try std.Io.Dir.cwd().statFile(testing.io, uri, .{});
         const file_id = try self.library.files.create(.{
             .audio_format = 1,
             .quick_hash = &digest,
@@ -554,6 +595,9 @@ const Fixture = struct {
             .file_id = file_id,
             .volume_id = database.LibraryDatabase.null_volume,
             .uri = uri,
+            .native_inode = @intCast(stat.inode),
+            .size_bytes = @intCast(stat.size),
+            .modified_ns = @intCast(stat.mtime.nanoseconds),
             .state = .present,
         });
         try self.library.observed_tags.upsert(.{
@@ -561,6 +605,32 @@ const Fixture = struct {
             .values = .{ .title = "One", .artist = "Artist", .album = "Album" },
         });
         return file_id;
+    }
+
+    /// Records the bytes now at `name` on `file_id` as a scan that saw them
+    /// change would: their quick hash and identity, and no content hash.
+    fn observe(self: *Fixture, file_id: i64, name: []const u8) !void {
+        const uri = try self.path(name);
+        defer testing.allocator.free(uri);
+        const digest = try quick_hash.fromPath(testing.io, uri);
+        const stat = try std.Io.Dir.cwd().statFile(testing.io, uri, .{});
+        var update = try self.library.database.prepare(
+            "UPDATE files SET quick_hash = ?1, content_hash = NULL, content_hash_algorithm = NULL WHERE id = ?2;",
+        );
+        defer update.deinit();
+        try update.bindBlob(1, &digest);
+        try update.bindInt64(2, file_id);
+        try testing.expectEqual(database.sqlite.Step.done, try update.step());
+        var location = try self.library.database.prepare(
+            "UPDATE locations SET native_inode = ?1, size_bytes = ?2, modified_ns = ?3 WHERE file_id = ?4 AND uri = ?5;",
+        );
+        defer location.deinit();
+        try location.bindInt64(1, @intCast(stat.inode));
+        try location.bindInt64(2, @intCast(stat.size));
+        try location.bindInt64(3, @intCast(stat.mtime.nanoseconds));
+        try location.bindInt64(4, file_id);
+        try location.bindText(5, uri);
+        try testing.expectEqual(database.sqlite.Step.done, try location.step());
     }
 
     /// A row whose recorded identity is not the file's, as a library scanned
@@ -579,6 +649,38 @@ const Fixture = struct {
             .state = .present,
         });
         return file_id;
+    }
+
+    /// A completed scan of the fixture's root, swept as a scan job sweeps it.
+    fn scan(self: *Fixture) !scanner.Result {
+        const binding = try self.library.ensureRoot(testing.io, self.root, .{ .stable_key = "test:analysis-root" });
+        const run = try self.library.scan_runs.begin(binding.root_id);
+        var walk = scanner.Scanner{
+            .allocator = testing.allocator,
+            .io = testing.io,
+            .files = &self.library.files,
+            .locations = &self.library.locations,
+            .observed_tags = &self.library.observed_tags,
+            .write_lane = self.library.write_lane,
+            .database_handle = self.library.database,
+            .volume_id = binding.volume_id,
+            .root_id = binding.root_id,
+            .generation = run.generation,
+        };
+        defer walk.deinit();
+        const result = try walk.scan(self.root);
+        _ = try self.library.files.markMissingBelowGeneration(binding.root_id, run.generation);
+        return result;
+    }
+
+    fn scannedFile(self: *Fixture, name: []const u8) !i64 {
+        const uri = try self.path(name);
+        defer testing.allocator.free(uri);
+        var statement = try self.library.database.prepare("SELECT file_id FROM locations WHERE uri = ?1;");
+        defer statement.deinit();
+        try statement.bindText(1, uri);
+        if (try statement.step() != .row) return error.TestUnexpectedResult;
+        return statement.columnInt64(0);
     }
 
     fn pass(self: *Fixture) LibraryAnalysis {
@@ -906,10 +1008,7 @@ test "a file whose bytes changed is measured again once a scan has recorded them
 
     // Different audio at the same path, and a scan that recorded it.
     try fixture.copyFixture("generated-reference.qoa", "one.flac");
-    const uri = try fixture.path("one.flac");
-    defer testing.allocator.free(uri);
-    const digest = try quick_hash.fromPath(testing.io, uri);
-    try fixture.library.files.update(file_id, .{ .audio_format = 1, .quick_hash = &digest });
+    try fixture.observe(file_id, "one.flac");
 
     try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(
         pass.selectors(),
@@ -917,6 +1016,159 @@ test "a file whose bytes changed is measured again once a scan has recorded them
     const again = try pass.run();
     try testing.expectEqual(@as(u64, 1), again.files_seen);
     try testing.expectEqual(@as(u64, 1), again.changed + again.unchanged);
+}
+
+/// The loudness playback would apply to `file_id`, and the identity it was
+/// measured from.
+fn playbackLoudness(fixture: *Fixture, file_id: i64) !struct { source_identity: [32]u8, lufs: f64 } {
+    var statement = try fixture.library.database.prepare(
+        "SELECT source_identity, integrated_lufs FROM file_loudness WHERE file_id = ?1;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    if (try statement.step() != .row) return error.TestUnexpectedResult;
+    const identity = database.columns.digestColumn(statement, 0) orelse return error.TestUnexpectedResult;
+    return .{ .source_identity = identity, .lufs = statement.columnDouble(1) };
+}
+
+test "a file whose middle changed under an unchanged quick hash is measured again after a rescan" {
+    for ([_]bool{ false, true }) |keep_modified_time| {
+        var fixture = try Fixture.init("file:orca-analysis-middle-edit?mode=memory&cache=shared");
+        defer fixture.deinit();
+        const before = try toneWav(6, 0.05, 0.05);
+        defer testing.allocator.free(before);
+        const after = try toneWav(6, 0.05, 0.5);
+        defer testing.allocator.free(after);
+        try testing.expect(std.mem.eql(u8, before[0..quick_hash.window_bytes], after[0..quick_hash.window_bytes]));
+        try testing.expect(std.mem.eql(u8, before[before.len - quick_hash.window_bytes ..], after[after.len - quick_hash.window_bytes ..]));
+
+        try fixture.writeBytes("song.wav", before);
+        try testing.expectEqual(@as(u64, 1), (try fixture.scan()).changed);
+        const file_id = try fixture.scannedFile("song.wav");
+        var pass = fixture.pass();
+        pass.parameters = .{};
+        try testing.expectEqual(@as(u64, 1), (try pass.run()).changed);
+        const measured = try playbackLoudness(&fixture, file_id);
+        const results = try scalar(fixture.library.database, "SELECT count(*) FROM analysis_results;");
+        try testing.expect(results >= 2);
+
+        const uri = try fixture.path("song.wav");
+        defer testing.allocator.free(uri);
+        const old_quick_hash = try quick_hash.fromPath(testing.io, uri);
+        if (keep_modified_time) {
+            const old = try fixture.directory.dir.statFile(testing.io, "song.wav", .{});
+            try fixture.writeBytes("song.wav.new", after);
+            try fixture.directory.dir.rename("song.wav.new", fixture.directory.dir, "song.wav", testing.io);
+            try fixture.directory.dir.setTimestamps(testing.io, "song.wav", .{ .modify_timestamp = .{ .new = old.mtime } });
+            const new = try fixture.directory.dir.statFile(testing.io, "song.wav", .{});
+            try testing.expectEqual(old.mtime.nanoseconds, new.mtime.nanoseconds);
+            try testing.expectEqual(old.size, new.size);
+        } else {
+            try fixture.writeBytes("song.wav", after);
+            try fixture.directory.dir.setTimestamps(testing.io, "song.wav", .{
+                .modify_timestamp = .{ .new = .fromNanoseconds(1_800_000_000 * std.time.ns_per_s) },
+            });
+        }
+        try testing.expectEqual(old_quick_hash, try quick_hash.fromPath(testing.io, uri));
+
+        const rescan = try fixture.scan();
+        try testing.expectEqual(@as(u64, 1), rescan.changed);
+        try testing.expectEqual(file_id, try fixture.scannedFile("song.wav"));
+        try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(pass.selectors()));
+        const again = try pass.run();
+        try testing.expectEqual(@as(u64, 1), again.files_seen);
+        try testing.expectEqual(@as(u64, 1), again.changed);
+
+        const remeasured = try playbackLoudness(&fixture, file_id);
+        const bytes_hash = try storage.content_hash.fromPath(testing.io, uri);
+        try testing.expectEqual(bytes_hash, remeasured.source_identity);
+        try testing.expect(remeasured.lufs > measured.lufs + 3);
+        var fresh = try fixture.library.database.prepare(
+            "SELECT count(*) FROM analysis_results WHERE file_id = ?1 AND source_identity = ?2;",
+        );
+        defer fresh.deinit();
+        try fresh.bindInt64(1, file_id);
+        try fresh.bindBlob(2, &bytes_hash);
+        try testing.expectEqual(database.sqlite.Step.row, try fresh.step());
+        try testing.expectEqual(results, fresh.columnInt64(0));
+        try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
+    }
+}
+
+test "a 0.8.1 library's loudness keyed by quick hash opens as stale and is measured again" {
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    const root = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{directory.sub_path});
+    defer testing.allocator.free(root);
+    var fixture: Fixture = .{ .directory = directory, .root = root, .library = undefined };
+    const tone = try toneWav(2, 0.5, 0.5);
+    defer testing.allocator.free(tone);
+    try fixture.writeBytes("song.wav", tone);
+    const uri = try fixture.path("song.wav");
+    defer testing.allocator.free(uri);
+    const database_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/library.db", .{root}, 0);
+    defer testing.allocator.free(database_path);
+    const old_identity = try quick_hash.fromPath(testing.io, uri);
+    const stat = try std.Io.Dir.cwd().statFile(testing.io, uri, .{});
+    {
+        const raw = try database.sqlite.Database.open(database_path);
+        defer raw.close();
+        try database.migrations.applyThrough(raw, 30);
+        var file = try raw.prepare("INSERT INTO files(id, audio_format, size_bytes, quick_hash) VALUES (1, 0, ?1, ?2);");
+        defer file.deinit();
+        try file.bindInt64(1, @intCast(stat.size));
+        try file.bindBlob(2, &old_identity);
+        try testing.expectEqual(database.sqlite.Step.done, try file.step());
+        var location = try raw.prepare(
+            \\INSERT INTO locations(file_id, volume_id, uri, native_inode, size_bytes, modified_ns, state)
+            \\VALUES (1, 1, ?1, ?2, ?3, ?4, 'present');
+        );
+        defer location.deinit();
+        try location.bindText(1, uri);
+        try location.bindInt64(2, @intCast(stat.inode));
+        try location.bindInt64(3, @intCast(stat.size));
+        try location.bindInt64(4, @intCast(stat.mtime.nanoseconds));
+        try testing.expectEqual(database.sqlite.Step.done, try location.step());
+        var result = try raw.prepare(
+            \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result)
+            \\VALUES (1, 1, 'orca.audio-diagnostics', 4, ?1, ?2, ?3);
+        );
+        defer result.deinit();
+        const parameter_hash = analysis.encoding.parameterHash(.{});
+        var loudness: [72]u8 = @splat(0);
+        @memcpy(loudness[0..12], "ORAD\x02\x00\x01\x00\x00\x00\x60\xc1");
+        try result.bindBlob(1, &parameter_hash);
+        try result.bindBlob(2, &old_identity);
+        try result.bindBlob(3, &loudness);
+        try testing.expectEqual(database.sqlite.Step.done, try result.step());
+    }
+    fixture.library = try database.LibraryDatabase.open(testing.allocator, testing.io, database_path);
+    defer fixture.library.close();
+
+    const inherited = try playbackLoudness(&fixture, 1);
+    try testing.expectEqual(old_identity, inherited.source_identity);
+    try testing.expectEqual(@as(f64, -14), inherited.lufs);
+    var pass = fixture.pass();
+    pass.parameters = .{};
+    try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(pass.selectors()));
+    try testing.expectEqual(@as(i64, 1), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM files WHERE content_hash IS NULL AND content_hash_algorithm IS NULL;",
+    ));
+
+    try fixture.observe(1, "song.wav");
+    try testing.expectEqual(@as(u64, 1), (try pass.run()).changed);
+    const content = try storage.content_hash.fromPath(testing.io, uri);
+    const measured = try playbackLoudness(&fixture, 1);
+    try testing.expectEqual(content, measured.source_identity);
+    try testing.expect(measured.lufs != -14);
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
+    var recorded = try fixture.library.database.prepare(
+        "SELECT content_hash FROM files WHERE id = 1 AND content_hash_algorithm = 1;",
+    );
+    defer recorded.deinit();
+    try testing.expectEqual(database.sqlite.Step.row, try recorded.step());
+    try testing.expectEqual(@as(?storage.content_hash.Digest, content), database.columns.digestColumn(recorded, 0));
 }
 
 test "a parallel analysis interrupted part way commits what finished and resumes at the rest" {
@@ -1090,10 +1342,17 @@ test "an analysis refuses zero threads" {
 /// One second of 16-bit mono PCM at 48 kHz, every sample `amplitude` times a
 /// 1 kHz sine.
 fn sineWav(amplitude: f32) ![]u8 {
+    return toneWav(1, amplitude, amplitude);
+}
+
+/// `seconds` of 16-bit mono PCM at 48 kHz: a 1 kHz sine at `edge` times full
+/// scale, and at `middle` times full scale for the middle third.
+fn toneWav(seconds: u32, edge: f32, middle: f32) ![]u8 {
     const rate = 48_000;
+    const frames = rate * seconds;
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(testing.allocator);
-    const data_size: u32 = rate * 2;
+    const data_size: u32 = frames * 2;
     try bytes.appendSlice(testing.allocator, "RIFF");
     try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, 36 + data_size)));
     try bytes.appendSlice(testing.allocator, "WAVEfmt ");
@@ -1101,8 +1360,9 @@ fn sineWav(amplitude: f32) ![]u8 {
         try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, word)));
     try bytes.appendSlice(testing.allocator, "data");
     try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, data_size)));
-    for (0..rate) |frame| {
-        const phase = 2 * std.math.pi * 1000 * @as(f32, @floatFromInt(frame)) / rate;
+    for (0..frames) |frame| {
+        const amplitude = if (frame >= frames / 3 and frame < 2 * frames / 3) middle else edge;
+        const phase = 2 * std.math.pi * 1000 * @as(f32, @floatFromInt(frame % rate)) / rate;
         const sample = std.math.clamp(amplitude * @sin(phase) * 32768, -32768, 32767);
         try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(i16, @intFromFloat(sample))));
     }
@@ -1121,14 +1381,7 @@ fn issueKinds(library: *database.LibraryDatabase, file_id: i64) ![]database.Heal
 
 fn rewrite(fixture: *Fixture, name: []const u8, file_id: i64, bytes: []const u8) !void {
     try fixture.writeBytes(name, bytes);
-    const uri = try fixture.path(name);
-    defer testing.allocator.free(uri);
-    const digest = try quick_hash.fromPath(testing.io, uri);
-    var update = try fixture.library.database.prepare("UPDATE files SET quick_hash = ?1 WHERE id = ?2;");
-    defer update.deinit();
-    try update.bindBlob(1, &digest);
-    try update.bindInt64(2, file_id);
-    try testing.expectEqual(database.sqlite.Step.done, try update.step());
+    try fixture.observe(file_id, name);
 }
 
 test "analysis raises clipping and retires it when the file is clean" {

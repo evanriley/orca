@@ -1536,6 +1536,16 @@
 
 ### Fixed
 
+- **A change in the middle of a file is seen.** An edit that kept a file's
+  size and its first and last 64 KiB kept its quick hash, so its loudness,
+  ReplayGain, fingerprints and audio hash still counted for the old bytes,
+  and an edited copy of a file kept sharing the File with its unedited twin.
+  Analysis results are now keyed by the content hash of the bytes measured,
+  and a rescan that sees the file change forgets the recorded hash, so the
+  next analysis measures the file again. A changed copy, or a missing one
+  that comes back, stays on a File present at another path only when its
+  content hash proves it holds the same bytes; otherwise it becomes a File
+  of its own. Results stored by earlier versions are measured again.
 - **Long sessions pick up renewed server certificates.** The HTTP client
   read the CA bundle and the current time once, at its first TLS
   connection, and the ListenBrainz worker keeps one client for the whole

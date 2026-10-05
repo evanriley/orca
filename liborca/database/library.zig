@@ -1,6 +1,7 @@
 const std = @import("std");
 const content_hash = @import("../storage/content_hash.zig");
-const ContentMeasurements = @import("content_measurements.zig").ContentMeasurements;
+const content_measurements = @import("content_measurements.zig");
+const ContentMeasurements = content_measurements.ContentMeasurements;
 const metadata = @import("../metadata/model.zig");
 const migrations = @import("migrations.zig");
 const JournalLock = @import("../metadata/journal_lock.zig").JournalLock;
@@ -38,6 +39,9 @@ pub const FileBinding = struct {
     file_id: i64,
     location_id: i64,
     volume_id: i64,
+    /// What the location recorded of the bytes it was resolved for.
+    quick_hash: quick_hash.Digest,
+    identity: repository.StorageIdentityKey,
 };
 
 /// One independently openable Library and its serialized write connection.
@@ -392,8 +396,9 @@ pub const LibraryDatabase = struct {
     /// volume, then the same inode/size/mtime elsewhere on that volume, then a
     /// file with the same quick hash whose content hash proves the bytes
     /// equal. It is what lets `orca-cli analyze` cache a result against a file
-    /// rather than a path. A path whose bytes diverged from a file still
-    /// present elsewhere becomes a file of its own, as a scan would make it.
+    /// rather than a path. A path whose bytes are not proven to equal those of
+    /// a file still present elsewhere becomes a file of its own, as a scan
+    /// would make it.
     pub fn resolveOrCreateFile(
         self: *LibraryDatabase,
         io: std.Io,
@@ -414,9 +419,10 @@ pub const LibraryDatabase = struct {
         var measurements: ContentMeasurements = .{};
         defer measurements.deinit(self.allocator);
         var own: ?content_hash.Digest = null;
-        if (try self.files.reachesQuickHash(path, identity, &digest)) {
-            own = try content_hash.fromFile(io, file, stat.size);
-            try measurements.measureNominees(self.allocator, io, &self.files, path, identity, &digest);
+        const question = try self.files.contentQuestion(path, identity, &digest);
+        if (question != .none) {
+            own = try content_measurements.hashHeld(io, file, identity);
+            try measurements.measureQuestion(self.allocator, io, &self.files, question, path, identity, &digest);
         }
         const own_digest: ?*const content_hash.Digest = if (own) |*bytes| bytes else null;
         const upsert: repository.FileUpsert = .{
@@ -448,7 +454,29 @@ pub const LibraryDatabase = struct {
             .state = .present,
         });
         try self.database.exec("COMMIT;");
-        return .{ .file_id = file_id, .location_id = location_id, .volume_id = volume_id };
+        return .{
+            .file_id = file_id,
+            .location_id = location_id,
+            .volume_id = volume_id,
+            .quick_hash = digest,
+            .identity = identity,
+        };
+    }
+
+    /// Records `digest`, read whole from `binding`'s path while it had
+    /// `read`, as the content hash of its file, and reports whether the file
+    /// records it now. False when the bytes read are not the ones `binding`
+    /// was resolved for, or a scan has recorded others there since.
+    pub fn adoptContentHash(
+        self: *LibraryDatabase,
+        binding: FileBinding,
+        digest: *const content_hash.Digest,
+        read: repository.StorageIdentityKey,
+    ) !bool {
+        if (read.volume_id != binding.volume_id) return false;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.files.adoptContentHashLocked(binding.file_id, digest, &binding.quick_hash, binding.location_id, read);
     }
 
     /// The volume every path with no better identity falls back to. It exists
@@ -4262,8 +4290,10 @@ test "a playlist's formats count each codec and the entries measured for their f
     try library.database.exec(
         \\INSERT INTO artists(name) SELECT DISTINCT artist FROM tracks;
         \\UPDATE tracks SET artist_id = (SELECT id FROM artists WHERE artists.name = tracks.artist);
-        \\UPDATE files SET codec = 'flac', quick_hash = x'01' WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('One', 'Two'));
-        \\UPDATE files SET codec = 'alac', quick_hash = x'02' WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Three');
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1
+        \\    WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('One', 'Two'));
+        \\UPDATE files SET codec = 'alac', content_hash = x'02', content_hash_algorithm = 1
+        \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Three');
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
         \\    SELECT preferred_file_id, x'01', -14.0 FROM tracks WHERE title = 'One';
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)

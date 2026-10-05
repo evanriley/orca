@@ -1,7 +1,10 @@
 const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const quick_hash = @import("../../storage/quick_hash.zig");
+const content_hash = @import("../../storage/content_hash.zig");
+const digestColumn = @import("../columns.zig").digestColumn;
 
+const StorageIdentityKey = @import("locations.zig").StorageIdentityKey;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
 /// Which measurement a library-wide analysis is asking about.
@@ -40,12 +43,13 @@ pub const AnalysisSelectors = [2]AnalysisSelector;
 /// exactly those six columns as its primary key, so each row of `files` costs
 /// one full-prefix B-tree probe and no index has to be invented for this.
 ///
-/// `source_identity = files.quick_hash` compares the measurement against the
-/// identity the *Library* recorded, not against the bytes on disk. A file
-/// whose bytes moved without a rescan therefore keeps being selected: that is
-/// correct — its stored measurement no longer describes it — and the pass
-/// declines to measure it until a scan has caught up, rather than filing a new
-/// measurement the selection would go on missing for ever.
+/// `source_identity` is the content hash of the bytes a measurement was taken
+/// from, and it counts only while it equals the content hash the *Library*
+/// recorded for the file. A file with no recorded content hash, or whose
+/// bytes changed so that a scan forgot it, is therefore selected: its stored
+/// measurement no longer describes it. A result filed under a quick hash,
+/// as a Library before content-hash keying filed them, never equals a content
+/// hash and is selected the same way.
 ///
 /// The *playback* lookup is stricter, and deliberately asymmetric: it keys on
 /// the identity of the bytes it just opened, because adopting a correction for
@@ -58,14 +62,16 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.algorithm_id = ?4
     \\      AND analysis_results.algorithm_version = ?5
     \\      AND analysis_results.parameter_hash = ?6
-    \\      AND analysis_results.source_identity = files.quick_hash)
+    \\      AND analysis_results.source_identity = files.content_hash
+    \\      AND files.content_hash_algorithm = 1)
     \\OR NOT EXISTS (SELECT 1 FROM analysis_results
     \\    WHERE analysis_results.file_id = files.id
     \\      AND analysis_results.kind = ?7
     \\      AND analysis_results.algorithm_id = ?8
     \\      AND analysis_results.algorithm_version = ?9
     \\      AND analysis_results.parameter_hash = ?10
-    \\      AND analysis_results.source_identity = files.quick_hash)
+    \\      AND analysis_results.source_identity = files.content_hash
+    \\      AND files.content_hash_algorithm = 1)
 ;
 
 /// One file that still owes an analysis, where to read it, and what the
@@ -76,7 +82,13 @@ pub const AnalysisCandidate = struct {
     uri: []u8,
     /// Null when the Library has never fingerprinted this file, which is a row
     /// no measurement can be keyed against until a scan gives it an identity.
-    source_identity: ?quick_hash.Digest,
+    quick_hash: ?quick_hash.Digest,
+    /// The content hash the Library recorded for the file, which the bytes
+    /// read must equal. Null when it recorded none.
+    content_hash: ?content_hash.Digest = null,
+    /// The location `uri` names, and the storage identity it recorded.
+    location_id: ?i64 = null,
+    recorded: ?StorageIdentityKey = null,
 };
 
 pub const AnalysisCandidatePage = struct {
@@ -89,16 +101,25 @@ pub const AnalysisCandidatePage = struct {
     }
 };
 
-/// Analysis is cached against `files.id` and the file's quick hash, not its
-/// size and modification time: writing a tag changes both of those and must not
-/// invalidate a loudness measurement of audio that did not change.
+/// What a reader saw of the bytes at one location: the quick hash it read and
+/// the storage identity they had.
+pub const ObservedBytes = struct {
+    quick_hash: quick_hash.Digest,
+    native_inode: i64,
+    size_bytes: i64,
+    modified_ns: i64,
+};
+
+/// Analysis is cached against `files.id` and the content hash of the bytes it
+/// was taken from. Anything coarser, a quick hash included, can call bytes
+/// equal that are not.
 pub const AnalysisCacheKey = struct {
     file_id: i64,
     kind: u8,
     algorithm_id: []const u8,
     algorithm_version: u32,
     parameter_hash: [32]u8,
-    source_identity: quick_hash.Digest,
+    source_identity: content_hash.Digest,
 };
 
 pub const ReleaseMember = struct {
@@ -174,7 +195,35 @@ pub const AnalysisCacheRepository = struct {
         return stored.len;
     }
 
-    /// A member's result is keyed on `files.quick_hash`, the identity the
+    /// The content hash `file_id` records for the bytes at `uri`, when that
+    /// location still records the identity `observed` saw there and the file
+    /// still records the quick hash it read: then they are the bytes the
+    /// content hash describes. Null otherwise, and the bytes are unknown.
+    pub fn vouchedContentHash(
+        self: *const AnalysisCacheRepository,
+        file_id: i64,
+        uri: []const u8,
+        observed: ObservedBytes,
+    ) !?content_hash.Digest {
+        var statement = try self.db.prepare(
+            \\SELECT files.content_hash FROM files JOIN locations ON locations.file_id = files.id
+            \\WHERE files.id = ?1 AND files.content_hash_algorithm = 1 AND files.quick_hash = ?2
+            \\  AND locations.uri = ?3 AND locations.native_inode = ?4 AND locations.size_bytes = ?5
+            \\  AND locations.modified_ns = ?6
+            \\LIMIT 1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindBlob(2, &observed.quick_hash);
+        try statement.bindText(3, uri);
+        try statement.bindInt64(4, observed.native_inode);
+        try statement.bindInt64(5, observed.size_bytes);
+        try statement.bindInt64(6, observed.modified_ns);
+        if (try statement.step() != .row) return null;
+        return digestColumn(statement, 0);
+    }
+
+    /// A member's result is keyed on `files.content_hash`, the identity the
     /// Library recorded, as `unanalyzed_predicate` keys it. One statement over
     /// `tracks_release` and the primary key of `analysis_results`, at most
     /// `max_release_members` rows, and nothing allocated.
@@ -198,7 +247,8 @@ pub const AnalysisCacheRepository = struct {
             \\    AND analysis_results.algorithm_id = ?4
             \\    AND analysis_results.algorithm_version = ?5
             \\    AND analysis_results.parameter_hash = ?6
-            \\    AND analysis_results.source_identity = files.quick_hash
+            \\    AND analysis_results.source_identity = files.content_hash
+            \\    AND files.content_hash_algorithm = 1
             \\WHERE entry.id = ?1 AND entry.release_id IS NOT NULL
             \\ORDER BY member.id
             \\LIMIT ?2;

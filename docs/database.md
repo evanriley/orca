@@ -53,17 +53,22 @@ first four is read as recorded. An undecided nominee is never joined, and the pa
 nominee confirms. A join records the path's content hash on the file, as does a
 new file whose bytes were hashed.
 
-Only a path that reaches tier 3, or that shares a quick hash with another path
-in the same scan batch, is hashed whole; a scan with no collision reads no more
-than before. The hashes are taken before the batch's transaction begins,
+Only a path that reaches tier 3, that shares a quick hash with another path in
+the same scan batch, or that changed while its file is present at another path
+(below) is hashed whole; a scan with no collision reads no more than before.
+`FileRepository.contentQuestion` names what a path's resolution will weigh,
+and `content_measurements` reads it: the path itself, re-stat after the read so
+bytes that changed during it count as unread, and the nominees' or other
+copies' locations. The hashes are taken before the batch's transaction begins,
 because nothing under the write lane reads a file. Inside it,
 `FileRepository.resolveForBytes` re-reads the nominees and their locations and
 treats one it holds no hash for as undecided, so a candidate that appeared
 since makes the path a new file rather than an unproven join. The hashes are
 written in the transaction that records their paths, so a cancelled or failed
-batch leaves none behind. A path re-found through tier 1 or 2 is not hashed,
-so a file re-found at an inode, size and mtime none of its locations records
-forgets its content hash: it may no longer hold the bytes the hash describes.
+batch leaves none behind. Any other path re-found through tier 1 or 2 is not
+hashed, so a file re-found at an inode, size and mtime none of its locations
+records forgets its content hash: it may no longer hold the bytes the hash
+describes.
 
 Known limit: a nominee with no content hash and no location left to read —
 each is `missing`, or nothing is at its path — is joined on the quick hash
@@ -75,23 +80,43 @@ same way.
 
 **A file is one set of bytes.** Byte-identical copies are one file at several
 locations: a new path holding bytes the Library already has joins that file
-through tier 3 once its content hash confirms them. When a changed path
-resolves to a file that is still present at another path and records a
-different `quick_hash`, the path has *diverged*: the other path still holds the
-bytes the file describes, so the path gets a file of its own instead of
-rewriting the shared one.
+through tier 3 once its content hash confirms them. A path re-found through
+tier 1 or 2 whose file is still present at another path stays on that file only
+when its bytes are proven to be the other path's:
+
+- its location is `present` and still records the inode, size and mtime just
+  read, so its bytes are the ones that were proven; or
+- it changed or came back from `missing` or `unverified`, the file records the
+  same `quick_hash`, and the path's content hash equals the file's recorded
+  one (`content_hash_algorithm` 1), or, when the file records none, that of
+  the first other copy read with the inode, size and mtime its location
+  records.
+
+Otherwise the path has *diverged*: the other path still holds the bytes the
+file describes, so the path gets a file of its own instead of rewriting the
+shared one. A changed path whose file records a different `quick_hash`
+diverges without being hashed. One whose other copies cannot be read as
+recorded, with no content hash on the file, diverges too: a file is never
+shared without proof. A middle-only edit, which keeps the size and the first
+and last 64 KiB and so the quick hash, therefore splits the edited copy off.
 `FileRepository.resolveForBytes` decides this and `forkLocked` makes the new
 file, in the scan batch's transaction, and `resolveOrCreateFile` applies the
-same rule. The split moves the location to the new file, copies Orca's values
-and locks to it with `written_at` cleared, and re-points journal rows that
-name the path. The new file takes the bytes' properties and observed tags from
-the read; analysis results, the audio hash, health issues, identification
+same rule, so a full scan, a reconcile, a watcher pass, the re-observation after
+a tag write and `orca-cli analyze PATH` agree. The other copies are read before
+the transaction; inside it only a copy whose location still records the
+identity it was read with counts, so a copy that changed or appeared since
+leaves the path undecided and it diverges. When both copies of a file change in
+one batch, the first one flushed diverges and the second, now its file's only
+present path, stays. The split moves the location to the new file, copies
+Orca's values and locks to it with `written_at` cleared, and re-points journal
+rows that name the path. The new file takes the bytes' properties and observed
+tags from the read; analysis results, the audio hash, health issues, identification
 proposals and searches, AcoustID submissions and listens stay with the file the
 copy left. A scan reprojects both copies' folders. Only a `present` location
 counts as the other path, because a `missing` one is usually what a move left
 behind, and a location on the same volume with this path's inode does not
-count, because a hard link cannot hold other bytes. A file with no quick hash,
-or whose only present location is this path, is updated in place.
+count, because a hard link cannot hold other bytes. A file whose only present
+location is this path is updated in place.
 
 Not handled yet:
 
@@ -99,6 +124,12 @@ Not handled yet:
   so two files can share a `quick_hash`.
 - Two copies changed in the same way end as two files with equal hashes.
 - A tag write writes one location of a file, not every copy of it.
+- An edit that keeps a path's inode, size and mtime is not seen: the scan's
+  unchanged fast path skips it, and nothing re-reads it.
+- A copy edited while the file's other copies are `missing` keeps the file. A
+  missing copy that comes back with other bytes splits off as a new file,
+  although it holds the bytes the file's earlier analysis, audio hash and
+  listens describe.
 
 Volumes are identified by a `stable_key` the platform adapter resolves — a
 filesystem UUID, else an identifier persisted at the mount root, else
@@ -435,6 +466,24 @@ truth free to disagree with the results it claims to describe.
 shared by the paged selection, the count that gives the job its denominator,
 and the plan test that asserts neither is a table scan. See `docs/analysis.md`.
 
+`source_identity` is the content hash (BLAKE3-256 over every byte) of the
+bytes the analysis pass decoded. A result counts only while it equals
+`files.content_hash` with `content_hash_algorithm` 1: the unanalyzed
+predicate, the duplicate pass, `file_loudness` readers and playback's
+ReplayGain all join on it. A scan that sees a path's inode, size or mtime
+change without hashing it forgets the file's content hash, so a change
+confined to the middle of a file, which keeps its quick hash, leaves its
+results stale and the next pass measures it again. The pass records the hash it
+read on the file, in the transaction that writes the results, only while the
+file still records the quick hash it read and either already records that
+content hash or has the location it read still recording the inode, size and
+mtime it read; otherwise it writes nothing for the file. Results stored before
+this were keyed by the quick hash, which hashes the first and last 64 KiB and
+the size rather than the whole file, so short of a contrived file or a BLAKE3
+collision it equals no content hash: those results are stale, and the next
+analysis pass measures their files again. No migration rewrites them, and a
+Library from an earlier release opens unchanged.
+
 Migration 8 preserves paths that only ever appeared in `analysis_results` or
 `library_health_issues` — an `orca-cli analyze` of a file no scan ever saw — by
 synthesizing `files` and `locations` rows in the `unverified` state. Their old
@@ -604,8 +653,9 @@ the index `files_content_hash` on `files(content_hash)`. Existing rows keep NULL
 in all three columns; nothing is backfilled. The file update that records a
 different `quick_hash` clears `content_hash` and `content_hash_algorithm`
 together, as it clears `audio_hash`. The executor does not write
-`files.content_hash`; the identity cascade records it when tier 3 hashes a path
-(see [Identity](#identity)). Startup recovery reads the journal before this
+`files.content_hash`; the identity cascade records it when it hashes a path
+(see [Identity](#identity)), and the analysis pass records the hash of the
+bytes it decoded. Startup recovery reads the journal before this
 migration runs, so `MutationJournalRepository.get` reads NULL content hashes
 from a table that does not have the columns.
 
@@ -922,9 +972,10 @@ read, and an index for each new sort:
   result deletes it. The value is decoded in SQL from the stored result's
   little-endian `f32` at byte 8, written only when the result's flags say
   loudness was measured. A row counts only while its `source_identity`
-  equals the file's `quick_hash`, so changed bytes make the loudness unknown
-  until the file is analysed again. The migration backfills it from the
-  results already stored. `file_loudness_by_lufs` orders it.
+  equals the file's `content_hash` with `content_hash_algorithm` 1, so
+  changed bytes make the loudness unknown until the file is analysed again.
+  The migration backfilled it from the results then stored, which were keyed
+  by quick hash and so no longer count. `file_loudness_by_lufs` orders it.
 - `files_by_bitrate` indexes `(size_bytes * 8 + duration_ms / 2) /
   duration_ms`, the kbps `TrackSummary.bitrate_kbps` reports, for files with
   a positive size and duration.

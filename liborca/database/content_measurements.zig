@@ -3,6 +3,7 @@ const content_hash = @import("../storage/content_hash.zig");
 const repository = @import("repository.zig");
 
 const ContentEvidence = repository.ContentEvidence;
+const ContentQuestion = repository.ContentQuestion;
 const FileRepository = repository.FileRepository;
 const MeasuredBytes = repository.MeasuredBytes;
 const MeasuredLocation = repository.MeasuredLocation;
@@ -12,8 +13,9 @@ const StorageIdentityKey = repository.StorageIdentityKey;
 /// begins.
 ///
 /// `FileRepository.resolveForBytes` joins a path to a file through its quick
-/// hash only on equal content hashes, and it runs under the write lane, where
-/// no file is read. A caller measures here first what the resolution will
+/// hash, and keeps a changed path on a file present at another path, only on
+/// equal content hashes, and it runs under the write lane, where no file is
+/// read. A caller measures here first what the resolution will
 /// weigh, then hands it `evidence`. Clear between transactions: a measurement
 /// is evidence only about the rows it was taken against.
 pub const ContentMeasurements = struct {
@@ -60,26 +62,33 @@ pub const ContentMeasurements = struct {
         return bytes;
     }
 
-    /// Measures what tier 3 will weigh for the bytes at `uri`: for each file
-    /// recording `digest` and no content hash, its locations in order until
-    /// one is read as recorded.
-    pub fn measureNominees(
+    /// Measures what resolving the bytes at `uri`, whose quick hash is
+    /// `digest`, will weigh besides their own content hash: for tier 3, each
+    /// file recording `digest` and no content hash, and for a changed path,
+    /// the other copies of its file when it records no content hash. A
+    /// file's locations are read in order until one is read as recorded.
+    pub fn measureQuestion(
         self: *ContentMeasurements,
         allocator: std.mem.Allocator,
         io: std.Io,
         files: *const FileRepository,
+        question: ContentQuestion,
         uri: []const u8,
         identity: StorageIdentityKey,
         digest: []const u8,
     ) !void {
-        const nominees = try files.nomineeLocations(allocator, uri, identity, digest);
-        defer nominees.deinit();
+        const locations = switch (question) {
+            .none => return,
+            .nominees => try files.nomineeLocations(allocator, uri, identity, digest),
+            .copies => |file_id| try files.copyLocations(allocator, file_id, uri, identity),
+        };
+        defer locations.deinit();
         var read_file: ?i64 = null;
-        for (nominees.items) |nominee| {
-            if (read_file == nominee.file_id) continue;
-            switch (try self.measure(allocator, io, nominee.volume_id, nominee.uri)) {
-                .read => |measured| if (measured.holds(nominee.recorded)) {
-                    read_file = nominee.file_id;
+        for (locations.items) |location| {
+            if (read_file == location.file_id) continue;
+            switch (try self.measure(allocator, io, location.volume_id, location.uri)) {
+                .read => |measured| if (measured.holds(location.recorded)) {
+                    read_file = location.file_id;
                 },
                 .gone, .unreadable => {},
             }
@@ -106,6 +115,25 @@ pub const ContentMeasurements = struct {
     }
 };
 
+/// The content hash of `file`, which had `identity` when it was opened, or
+/// null when it no longer has that identity once read whole: the bytes read
+/// may then be no single version of the file.
+pub fn hashHeld(io: std.Io, file: std.Io.File, identity: StorageIdentityKey) !?content_hash.Digest {
+    const size = std.math.cast(u64, identity.size_bytes) orelse return null;
+    const digest = try content_hash.fromFile(io, file, size);
+    const after = statIdentity(identity.volume_id, try file.stat(io)) orelse return null;
+    return if (std.meta.eql(after, identity)) digest else null;
+}
+
+fn statIdentity(volume_id: i64, stat: std.Io.File.Stat) ?StorageIdentityKey {
+    return .{
+        .volume_id = volume_id,
+        .native_inode = @bitCast(@as(u64, stat.inode)),
+        .size_bytes = std.math.cast(i64, stat.size) orelse return null,
+        .modified_ns = std.math.cast(i64, stat.mtime.nanoseconds) orelse return null,
+    };
+}
+
 fn read(io: std.Io, volume_id: i64, uri: []const u8) error{Canceled}!MeasuredBytes {
     const file = std.Io.Dir.cwd().openFile(io, uri, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
@@ -117,17 +145,10 @@ fn read(io: std.Io, volume_id: i64, uri: []const u8) error{Canceled}!MeasuredByt
         error.Canceled => error.Canceled,
         else => .unreadable,
     };
-    const digest = content_hash.fromFile(io, file, stat.size) catch |err| return switch (err) {
+    const identity = statIdentity(volume_id, stat) orelse return .unreadable;
+    const digest = (hashHeld(io, file, identity) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         else => .unreadable,
-    };
-    return .{ .read = .{
-        .identity = .{
-            .volume_id = volume_id,
-            .native_inode = @bitCast(@as(u64, stat.inode)),
-            .size_bytes = std.math.cast(i64, stat.size) orelse return .unreadable,
-            .modified_ns = std.math.cast(i64, stat.mtime.nanoseconds) orelse return .unreadable,
-        },
-        .digest = digest,
-    } };
+    }) orelse return .unreadable;
+    return .{ .read = .{ .identity = identity, .digest = digest } };
 }

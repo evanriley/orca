@@ -145,12 +145,25 @@ pub const FilePropertyUpdate = struct {
     audio_format: ?i64 = null,
 };
 
+/// What resolving the bytes at one path needs measured before its
+/// transaction.
+pub const ContentQuestion = union(enum) {
+    /// Nothing beyond the quick hash.
+    none,
+    /// The files tier 3 nominates by quick hash.
+    nominees,
+    /// The path changed or came back under the quick hash its file records,
+    /// and the file is present at another path: this path's bytes against
+    /// those copies.
+    copies: i64,
+};
+
 /// Which file the bytes now at one path belong to.
 pub const FileResolution = union(enum) {
     new,
     same: i64,
-    /// A file still present at another path with other bytes than these: the
-    /// path leaves it for a file of its own, forked from it.
+    /// A file still present at another path with bytes these are not proven
+    /// to equal: the path leaves it for a file of its own, forked from it.
     diverged: i64,
 };
 
@@ -257,12 +270,45 @@ pub const IncompleteFilePage = struct {
 ///
 /// One definition, because every pass that repairs `files` by id needs exactly
 /// this rule and two spellings of it would drift.
-const location_uri_column =
-    \\(SELECT locations.uri FROM locations WHERE locations.file_id = files.id
+const location_uri_column = "(SELECT locations.uri " ++ preferred_location ++ ")";
+
+const preferred_location =
+    \\FROM locations WHERE locations.file_id = files.id
     \\ ORDER BY CASE locations.state WHEN 'present' THEN 0
     \\               WHEN 'unverified' THEN 1 ELSE 2 END, locations.id
-    \\ LIMIT 1)
+    \\ LIMIT 1
 ;
+
+/// The analysis candidate columns of a `files` row, read by `candidateRow`,
+/// with the location `location_uri_column` would name joined as `chosen`.
+const analysis_candidate_select =
+    "SELECT files.id, files.quick_hash," ++
+    " CASE WHEN files.content_hash_algorithm = 1 THEN files.content_hash END," ++
+    " chosen.id, chosen.uri, chosen.volume_id, chosen.native_inode, chosen.size_bytes, chosen.modified_ns" ++
+    " FROM files LEFT JOIN locations AS chosen ON chosen.id = (SELECT locations.id " ++
+    preferred_location ++ ")";
+
+/// A location of file ?1 holding its bytes somewhere other than path ?4 on
+/// volume ?3: present, and not a hard link to inode ?5 on that volume.
+const other_copy =
+    \\locations.file_id = ?1 AND locations.state = 'present'
+    \\  AND NOT (locations.volume_id = ?3 AND (locations.uri = ?4 OR locations.native_inode IS ?5))
+;
+
+const differs_from_copies_sql = "SELECT EXISTS (SELECT 1 FROM files JOIN locations ON locations.file_id = files.id" ++
+    " WHERE files.id = ?1 AND files.quick_hash IS NOT NULL AND files.quick_hash <> ?2 AND " ++ other_copy ++ ");";
+
+const changed_copy_sql = "SELECT EXISTS (SELECT 1 FROM locations AS here" ++
+    " WHERE here.file_id = ?1 AND here.volume_id = ?3 AND here.uri = ?4" ++
+    " AND NOT (here.state = 'present' AND here.native_inode IS ?5 AND here.size_bytes IS ?6" ++
+    " AND here.modified_ns IS ?7))" ++
+    " AND EXISTS (SELECT 1 FROM locations WHERE " ++ other_copy ++ ");";
+
+const copy_locations_sql = "SELECT volume_id, uri, native_inode, size_bytes, modified_ns FROM locations WHERE " ++
+    other_copy ++ " ORDER BY id LIMIT ?8;";
+
+const recorded_content_hash_sql =
+    "SELECT CASE WHEN content_hash_algorithm = 1 THEN content_hash END FROM files WHERE id = ?1;";
 
 /// Byte facts about one encoding, and the identity tiers that re-find it.
 pub const FileRepository = struct {
@@ -438,8 +484,7 @@ pub const FileRepository = struct {
     ) !AnalysisCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
         var statement = try self.db.prepare(
-            "SELECT files.id, files.quick_hash, " ++ location_uri_column ++
-                " FROM files WHERE files.id > ?1 AND (" ++ unanalyzed_predicate ++
+            analysis_candidate_select ++ " WHERE files.id > ?1 AND (" ++ unanalyzed_predicate ++
                 ") ORDER BY files.id LIMIT ?2;",
         );
         defer statement.deinit();
@@ -453,13 +498,9 @@ pub const FileRepository = struct {
             items.deinit(allocator);
         }
         while (try statement.step() == .row) {
-            const uri = try allocator.dupe(u8, statement.columnText(2));
-            errdefer allocator.free(uri);
-            try items.append(allocator, .{
-                .id = statement.columnInt64(0),
-                .source_identity = digestColumn(statement, 1),
-                .uri = uri,
-            });
+            const candidate = try candidateRow(allocator, statement);
+            errdefer allocator.free(candidate.uri);
+            try items.append(allocator, candidate);
         }
         return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
     }
@@ -471,22 +512,15 @@ pub const FileRepository = struct {
         allocator: std.mem.Allocator,
         file_id: i64,
     ) !AnalysisCandidatePage {
-        var statement = try self.db.prepare(
-            "SELECT files.id, files.quick_hash, " ++ location_uri_column ++
-                " FROM files WHERE files.id = ?1;",
-        );
+        var statement = try self.db.prepare(analysis_candidate_select ++ " WHERE files.id = ?1;");
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
         if (try statement.step() != .row)
             return .{ .allocator = allocator, .items = try allocator.alloc(AnalysisCandidate, 0) };
-        const uri = try allocator.dupe(u8, statement.columnText(2));
-        errdefer allocator.free(uri);
+        const candidate = try candidateRow(allocator, statement);
+        errdefer allocator.free(candidate.uri);
         const items = try allocator.alloc(AnalysisCandidate, 1);
-        items[0] = .{
-            .id = statement.columnInt64(0),
-            .source_identity = digestColumn(statement, 1),
-            .uri = uri,
-        };
+        items[0] = candidate;
         return .{ .allocator = allocator, .items = items };
     }
 
@@ -525,7 +559,8 @@ pub const FileRepository = struct {
     ) !DuplicateCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
         var statement = try self.db.prepare(
-            "SELECT id, audio_hash, duration_ms, quick_hash, audio_hash_tier FROM files" ++
+            "SELECT id, audio_hash, duration_ms, CASE WHEN content_hash_algorithm = 1 THEN content_hash END," ++
+                " audio_hash_tier FROM files" ++
                 " WHERE id > ?1 ORDER BY id LIMIT ?2;",
         );
         defer statement.deinit();
@@ -595,7 +630,7 @@ pub const FileRepository = struct {
     ) !usize {
         if (buffer.len == 0) return 0;
         var statement = try self.db.prepare(
-            "SELECT id, quick_hash, audio_hash, audio_hash_tier FROM files" ++
+            "SELECT id, CASE WHEN content_hash_algorithm = 1 THEN content_hash END, audio_hash, audio_hash_tier FROM files" ++
                 " WHERE duration_ms >= ?1 AND duration_ms <= ?2" ++
                 " AND id <> ?3 ORDER BY duration_ms, id LIMIT ?4;",
         );
@@ -643,6 +678,44 @@ pub const FileRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
+    /// Records `digest`, read whole from location `location_id` while it had
+    /// `identity`, as file `file_id`'s content hash, and reports whether the
+    /// file records it now.
+    ///
+    /// A file that records a content hash keeps it: `digest` must equal it.
+    /// One that records none takes `digest` only while the location still
+    /// records `identity` and the file still records `quick`, because then
+    /// these are the bytes the Library holds for it. Anything else means a
+    /// scan saw other bytes since they were read.
+    pub fn adoptContentHashLocked(
+        self: *FileRepository,
+        file_id: i64,
+        digest: *const content_hash.Digest,
+        quick: *const quick_hash.Digest,
+        location_id: i64,
+        identity: StorageIdentityKey,
+    ) !bool {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET content_hash = ?2, content_hash_algorithm = 1
+            \\WHERE id = ?1 AND quick_hash = ?3 AND (
+            \\    (content_hash_algorithm = 1 AND content_hash = ?2)
+            \\    OR (content_hash_algorithm IS NOT 1 AND EXISTS (
+            \\        SELECT 1 FROM locations WHERE id = ?4 AND file_id = ?1 AND volume_id = ?5
+            \\          AND native_inode = ?6 AND size_bytes = ?7 AND modified_ns = ?8)));
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindBlob(2, digest);
+        try statement.bindBlob(3, quick);
+        try statement.bindInt64(4, location_id);
+        try statement.bindInt64(5, identity.volume_id);
+        try statement.bindInt64(6, identity.native_inode);
+        try statement.bindInt64(7, identity.size_bytes);
+        try statement.bindInt64(8, identity.modified_ns);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes() > 0;
+    }
+
     /// Tier 1: the same path on the same volume.
     pub fn resolveByUri(
         self: *const FileRepository,
@@ -677,22 +750,92 @@ pub const FileRepository = struct {
         return statement.columnInt64(0);
     }
 
-    /// Whether resolving the bytes at `uri` reaches tier 3: no location has
-    /// this path or identity, and a file records `digest` as its quick hash.
-    /// Only then does the resolution weigh content hashes.
-    pub fn reachesQuickHash(
+    /// The content hashes resolving the bytes at `uri`, whose quick hash is
+    /// `digest`, will weigh. Only these cases read more than a quick hash.
+    pub fn contentQuestion(
         self: *const FileRepository,
         uri: []const u8,
         identity: StorageIdentityKey,
         digest: []const u8,
-    ) !bool {
-        if (try self.resolveByUri(identity.volume_id, uri) != null) return false;
-        if (try self.resolveByIdentity(identity) != null) return false;
+    ) !ContentQuestion {
+        if (try self.resolveByUri(identity.volume_id, uri)) |file_id| {
+            if (try self.copyQuestion(.differs, file_id, uri, identity, digest)) return .none;
+            if (try self.copyQuestion(.changed, file_id, uri, identity, digest)) return .{ .copies = file_id };
+            return .none;
+        }
+        if (try self.resolveByIdentity(identity) != null) return .none;
         var statement = try self.db.prepare("SELECT EXISTS (SELECT 1 FROM files WHERE quick_hash = ?1);");
         defer statement.deinit();
         try statement.bindBlob(1, digest);
         if (try statement.step() != .row) return error.SqlFailed;
+        return if (statement.columnInt64(0) != 0) .nominees else .none;
+    }
+
+    /// The other copies of `file_id` whose bytes the changed path `uri` must
+    /// equal to stay on it, in the order `resolveForBytes` weighs them. None
+    /// when the file records a content hash, which decides alone.
+    pub fn copyLocations(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+    ) !NomineeLocations {
+        var found: std.ArrayList(NomineeLocation) = .empty;
+        errdefer {
+            for (found.items) |item| allocator.free(item.uri);
+            found.deinit(allocator);
+        }
+        if (try self.recordedContentHash(file_id) == null) {
+            var locations = try self.db.prepare(copy_locations_sql);
+            defer locations.deinit();
+            try bindOtherCopy(locations, file_id, uri, identity);
+            try locations.bindInt64(8, max_nominee_locations);
+            while (try locations.step() == .row) {
+                const location_uri = try allocator.dupe(u8, locations.columnText(1));
+                errdefer allocator.free(location_uri);
+                try found.append(allocator, .{
+                    .file_id = file_id,
+                    .volume_id = locations.columnInt64(0),
+                    .uri = location_uri,
+                    .recorded = recordedIdentity(locations),
+                });
+            }
+        }
+        return .{ .allocator = allocator, .items = try found.toOwnedSlice(allocator) };
+    }
+
+    fn copyQuestion(
+        self: *const FileRepository,
+        comptime question: enum { differs, changed },
+        file_id: i64,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+        digest: []const u8,
+    ) !bool {
+        var statement = try self.db.prepare(switch (question) {
+            .differs => differs_from_copies_sql,
+            .changed => changed_copy_sql,
+        });
+        defer statement.deinit();
+        try bindOtherCopy(statement, file_id, uri, identity);
+        switch (question) {
+            .differs => try statement.bindBlob(2, digest),
+            .changed => {
+                try statement.bindInt64(6, identity.size_bytes);
+                try statement.bindInt64(7, identity.modified_ns);
+            },
+        }
+        if (try statement.step() != .row) return error.SqlFailed;
         return statement.columnInt64(0) != 0;
+    }
+
+    fn recordedContentHash(self: *const FileRepository, file_id: i64) !?content_hash.Digest {
+        var statement = try self.db.prepare(recorded_content_hash_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return null;
+        return digestColumn(statement, 0);
     }
 
     /// The locations whose bytes tier 3 would read for `uri`: those of each
@@ -826,17 +969,47 @@ pub const FileRepository = struct {
         return if (unknown) .unknown else .absent;
     }
 
+    /// Whether the bytes `evidence` measured are those of `file_id`'s other
+    /// copies: its recorded content hash decides when it has one, and
+    /// otherwise the first copy read with the identity its location records.
+    fn weighCopies(
+        self: *const FileRepository,
+        file_id: i64,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+        evidence: ContentEvidence,
+    ) !Weight {
+        if (try self.recordedContentHash(file_id)) |stored| return weighDigest(evidence.own, &stored);
+        var locations = try self.db.prepare(copy_locations_sql);
+        defer locations.deinit();
+        try bindOtherCopy(locations, file_id, uri, identity);
+        try locations.bindInt64(8, max_nominee_locations);
+        while (try locations.step() == .row) {
+            const measured = evidence.find(locations.columnInt64(0), locations.columnText(1)) orelse continue;
+            switch (measured) {
+                .read => |read| if (read.holds(recordedIdentity(locations))) return weighDigest(evidence.own, &read.digest),
+                .gone, .unreadable => {},
+            }
+        }
+        return .unknown;
+    }
+
     /// The identity cascade for the bytes now at `uri`, whose quick hash is
-    /// `digest`. `evidence` holds the content hashes tier 3 weighs; it never
-    /// reads a file itself, because it runs inside the caller's transaction.
+    /// `digest`. `evidence` holds the content hashes tiers 1 to 3 weigh; it
+    /// never reads a file itself, because it runs inside the caller's
+    /// transaction.
     ///
-    /// A file is one set of bytes. When the cascade finds a file whose recorded
-    /// quick hash differs from `digest` and that is still present at another
-    /// path, that path holds the bytes the file describes, so this path has
-    /// diverged from it and must not rewrite it. A missing location does not
-    /// count, because it is usually what a move left behind, and neither does
-    /// a hard link to this path on the same volume, which cannot hold other
-    /// bytes. A tier-3 file never diverges: it records `digest` itself.
+    /// A file is one set of bytes. A file still present at another path holds
+    /// the bytes that path has, so a path found by uri or identity stays on
+    /// it only when its bytes are those: always when its own location is
+    /// present at an unchanged identity, never when the file records another
+    /// quick hash, and otherwise only when its content hash equals the file's
+    /// recorded one or that of a copy read as recorded. Anything less
+    /// diverges, and the path leaves for a file of its own. A missing location
+    /// does not count as the other path, because it is usually what a move
+    /// left behind, and neither does a hard link to this path on the same
+    /// volume, which cannot hold other bytes. A tier-3 file never diverges:
+    /// it records `digest` itself.
     pub fn resolveForBytes(
         self: *const FileRepository,
         uri: []const u8,
@@ -847,24 +1020,12 @@ pub const FileRepository = struct {
         const existing = (try self.resolveByUri(identity.volume_id, uri)) orelse
             (try self.resolveByIdentity(identity)) orelse
             return self.resolveByContent(uri, identity, digest, evidence);
-        var statement = try self.db.prepare(
-            \\SELECT EXISTS (
-            \\    SELECT 1 FROM files JOIN locations ON locations.file_id = files.id
-            \\    WHERE files.id = ?1 AND files.quick_hash IS NOT NULL AND files.quick_hash <> ?2
-            \\      AND locations.state = 'present'
-            \\      AND NOT (locations.volume_id = ?3
-            \\          AND (locations.uri = ?4 OR locations.native_inode IS ?5))
-            \\);
-        );
-        defer statement.deinit();
-        try statement.bindInt64(1, existing);
-        try statement.bindBlob(2, digest);
-        try statement.bindInt64(3, identity.volume_id);
-        try statement.bindText(4, uri);
-        try statement.bindInt64(5, identity.native_inode);
-        if (try statement.step() != .row) return error.SqlFailed;
-        if (statement.columnInt64(0) != 0) return .{ .diverged = existing };
-        return .{ .same = existing };
+        if (try self.copyQuestion(.differs, existing, uri, identity, digest)) return .{ .diverged = existing };
+        if (!try self.copyQuestion(.changed, existing, uri, identity, digest)) return .{ .same = existing };
+        return switch (try self.weighCopies(existing, uri, identity, evidence)) {
+            .equal => .{ .same = existing },
+            .different, .unknown, .absent => .{ .diverged = existing },
+        };
     }
 
     /// Forgets `file_id`'s content hash unless one of its locations already
@@ -1016,7 +1177,8 @@ pub const FileRepository = struct {
     }
 };
 
-/// The identity a row of `nominee_locations_sql` records.
+/// The identity a row of `nominee_locations_sql` or `copy_locations_sql`
+/// records.
 fn recordedIdentity(statement: sqlite.Statement) ?StorageIdentityKey {
     if (statement.columnIsNull(2)) return null;
     return .{
@@ -1024,6 +1186,33 @@ fn recordedIdentity(statement: sqlite.Statement) ?StorageIdentityKey {
         .native_inode = statement.columnInt64(2),
         .size_bytes = statement.columnInt64(3),
         .modified_ns = statement.columnInt64(4),
+    };
+}
+
+fn bindOtherCopy(statement: sqlite.Statement, file_id: i64, uri: []const u8, identity: StorageIdentityKey) !void {
+    try statement.bindInt64(1, file_id);
+    try statement.bindInt64(3, identity.volume_id);
+    try statement.bindText(4, uri);
+    try statement.bindInt64(5, identity.native_inode);
+}
+
+/// A row of `analysis_candidate_select`. The caller owns its `uri`.
+fn candidateRow(allocator: std.mem.Allocator, statement: sqlite.Statement) !AnalysisCandidate {
+    const location_id: ?i64 = if (statement.columnIsNull(3)) null else statement.columnInt64(3);
+    const recorded: ?StorageIdentityKey = if (location_id == null or statement.columnIsNull(6) or
+        statement.columnIsNull(7) or statement.columnIsNull(8)) null else .{
+        .volume_id = statement.columnInt64(5),
+        .native_inode = statement.columnInt64(6),
+        .size_bytes = statement.columnInt64(7),
+        .modified_ns = statement.columnInt64(8),
+    };
+    return .{
+        .id = statement.columnInt64(0),
+        .quick_hash = digestColumn(statement, 1),
+        .content_hash = digestColumn(statement, 2),
+        .location_id = location_id,
+        .recorded = recorded,
+        .uri = try allocator.dupe(u8, statement.columnText(4)),
     };
 }
 

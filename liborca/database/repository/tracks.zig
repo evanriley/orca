@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const metadata = @import("../../metadata/model.zig");
 const quick_hash = @import("../../storage/quick_hash.zig");
+const content_hash = @import("../../storage/content_hash.zig");
 const codec_id = @import("../../codec/decoder.zig").codec_id;
 const columns = @import("../columns.zig");
 
@@ -93,6 +94,9 @@ pub const TrackFileFacts = struct {
     channels: ?i64,
     duration_ms: ?i64,
     quick_hash: ?quick_hash.Digest,
+    /// The content hash recorded for the file's bytes, which keys their
+    /// analysis results, or null when none is recorded.
+    content_hash: ?content_hash.Digest,
     /// The uri of the best location that is not missing, or null when every
     /// location is.
     path: ?[]u8,
@@ -804,7 +808,8 @@ pub const TrackRepository = struct {
             \\           SELECT 1 FROM files AS member
             \\           JOIN observed_file_tags AS member_tags ON member_tags.file_id = member.id
             \\           WHERE (member.id = tracks.preferred_file_id OR member.recording_id = tracks.recording_id)
-            \\             AND member_tags.track_total > 0)
+            \\             AND member_tags.track_total > 0),
+            \\       CASE WHEN files.content_hash_algorithm = 1 THEN files.content_hash END
             \\FROM tracks
             \\JOIN files ON files.id = COALESCE(
             \\    ?2,
@@ -841,6 +846,7 @@ pub const TrackRepository = struct {
             .channels = optionalInt64(statement, 5),
             .duration_ms = optionalInt64(statement, 6),
             .quick_hash = digestColumn(statement, 7),
+            .content_hash = digestColumn(statement, 15),
             .path = path,
             .has_artwork = statement.columnInt64(9) != 0,
             .release_date = release_date,
@@ -948,7 +954,8 @@ fn bestLocation(comptime column: []const u8, comptime file_id: []const u8) []con
 
 const play_file_join = "LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n";
 pub const play_file_loudness = "(SELECT file_loudness.integrated_lufs FROM file_loudness " ++
-    "WHERE file_loudness.file_id = play_file.id AND file_loudness.source_identity = play_file.quick_hash)";
+    "WHERE file_loudness.file_id = play_file.id AND file_loudness.source_identity = play_file.content_hash " ++
+    "AND play_file.content_hash_algorithm = 1)";
 const play_file_path = bestLocation("uri", "play_file.id");
 const first_genre_id = "(SELECT first_track_genre.genre_id FROM track_genres AS first_track_genre " ++
     "WHERE first_track_genre.track_id = tracks.id AND first_track_genre.ordinal = 0)";
@@ -1279,13 +1286,14 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
         ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction),
         .loudness => candidatePart(
             "file_loudness CROSS JOIN files AS play_file ON play_file.id = file_loudness.file_id " ++
-                "AND play_file.quick_hash = file_loudness.source_identity\n" ++
+                "AND play_file.content_hash = file_loudness.source_identity AND play_file.content_hash_algorithm = 1\n" ++
                 "CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id",
             "file_loudness.integrated_lufs" ++ suffix ++ ", " ++ by_id,
         ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
             "tracks WHERE tracks.preferred_file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM files " ++
                 "CROSS JOIN file_loudness ON file_loudness.file_id = files.id " ++
-                "AND file_loudness.source_identity = files.quick_hash WHERE files.id = tracks.preferred_file_id)",
+                "AND file_loudness.source_identity = files.content_hash AND files.content_hash_algorithm = 1 " ++
+                "WHERE files.id = tracks.preferred_file_id)",
             by_id,
         ),
         .bitrate => candidatePart(
@@ -1561,9 +1569,9 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
         \\    album = CASE id % 3 WHEN 0 THEN 'x' ELSE 'Y' END;
         \\UPDATE files SET size_bytes = (id * 7919) % 5 * 1000000,
         \\    duration_ms = CASE WHEN id % 7 = 0 THEN NULL ELSE 200000 + (id % 3) * 1000 END,
-        \\    quick_hash = CAST(id AS BLOB);
+        \\    quick_hash = CAST(id AS BLOB), content_hash = CAST(id AS BLOB), content_hash_algorithm = 1;
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
-        \\    SELECT id, quick_hash, -((id * 13) % 6) - 0.5 FROM files WHERE id % 5 <> 0;
+        \\    SELECT id, content_hash, -((id * 13) % 6) - 0.5 FROM files WHERE id % 5 <> 0;
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES (5, x'ff', -1.0);
         \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
         \\INSERT INTO locations(file_id, volume_id, uri, state)
@@ -1640,8 +1648,9 @@ test "a Track reads loudness, bitrate and path from the file it plays and its fi
         \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'AA', 'AA', 'aa');
         \\INSERT INTO releases(id, title, album_artist_id) VALUES (1, 'X', 1);
         \\INSERT INTO recordings(id, title) VALUES (1, 'r'), (2, 'r'), (3, 'r'), (4, 'r');
-        \\INSERT INTO files(id, recording_id, size_bytes, duration_ms, quick_hash) VALUES
-        \\    (1, 1, 4012500, 200000, x'01'), (2, 2, 0, 200000, x'02'), (4, 4, 1000000, 100000, x'04');
+        \\INSERT INTO files(id, recording_id, size_bytes, duration_ms, quick_hash, content_hash, content_hash_algorithm) VALUES
+        \\    (1, 1, 4012500, 200000, x'01', x'01', 1), (2, 2, 0, 200000, x'02', x'02', 1),
+        \\    (4, 4, 1000000, 100000, x'04', x'04', 1);
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES
         \\    (1, x'01', -9.5), (2, x'ff', -3.0), (4, x'04', -20.0);
         \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');

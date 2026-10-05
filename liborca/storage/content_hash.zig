@@ -8,10 +8,19 @@ pub const Digest = [Blake3.digest_length]u8;
 /// BLAKE3-256 over every byte of the file, streamed through a fixed buffer.
 /// Unlike the quick hash, equal digests mean equal content.
 pub fn fromFile(io: std.Io, file: std.Io.File, size: u64) !Digest {
+    return fromFileCancellable(io, file, size, null);
+}
+
+/// `fromFile`, returning `error.Cancelled` as soon as `context.cancelled()`
+/// says so between chunks. A `null` context is never cancelled.
+pub fn fromFileCancellable(io: std.Io, file: std.Io.File, size: u64, context: anytype) !Digest {
     var hasher = Blake3.init(.{});
     var buffer: [64 * 1024]u8 = undefined;
     var offset: u64 = 0;
     while (offset < size) {
+        if (@TypeOf(context) != @TypeOf(null)) {
+            if (context.cancelled()) return error.Cancelled;
+        }
         const wanted: usize = @intCast(@min(buffer.len, size - offset));
         const read = try file.readPositional(io, &.{buffer[0..wanted]}, offset);
         if (read == 0) return error.UnexpectedEndOfFile;

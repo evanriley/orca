@@ -27,7 +27,7 @@
 const std = @import("std");
 const analysis = @import("../analysis/root.zig");
 const database = @import("../database/root.zig");
-const quick_hash = @import("../storage/quick_hash.zig");
+const content_hash = @import("../storage/content_hash.zig");
 const scanner = @import("scanner.zig");
 
 pub const CancellationToken = scanner.CancellationToken;
@@ -358,7 +358,7 @@ pub const DuplicateScan = struct {
     fn fingerprint(
         self: *DuplicateScan,
         file_id: i64,
-        identity: quick_hash.Digest,
+        identity: content_hash.Digest,
     ) !?analysis.fingerprint.Result {
         const bytes = try self.analysis_cache.get(
             self.allocator,
@@ -482,11 +482,12 @@ const Fixture = struct {
         const measured = try analyzer.finish();
         defer measured.deinit();
 
-        const identity: quick_hash.Digest = @splat(self.next_identity);
+        const identity: content_hash.Digest = @splat(self.next_identity);
         self.next_identity += 1;
         const file_id = try self.library.files.create(.{
             .audio_format = 1,
             .quick_hash = &identity,
+            .content_hash = &identity,
             .audio_hash = &measured.audio_hash.digest,
             .audio_hash_tier = @backingInt(measured.audio_hash.tier),
             .duration_ms = @intCast(samples.len * 1000 / sample_rate),
@@ -504,11 +505,12 @@ const Fixture = struct {
     /// A `files` row as a scan leaves it: a length and an identity, and no
     /// measurement of what the audio is.
     fn recordUnmeasured(self: *Fixture, path: []const u8, duration_ms: i64) !i64 {
-        const identity: quick_hash.Digest = @splat(self.next_identity);
+        const identity: content_hash.Digest = @splat(self.next_identity);
         self.next_identity += 1;
         const file_id = try self.library.files.create(.{
             .audio_format = 1,
             .quick_hash = &identity,
+            .content_hash = &identity,
             .duration_ms = duration_ms,
         });
         try self.addLocation(file_id, path);
@@ -576,7 +578,8 @@ test "selecting candidates and looking up either bucket are index searches, not 
 
     const selection = try planOf(
         &fixture,
-        "EXPLAIN QUERY PLAN SELECT id, audio_hash, duration_ms, quick_hash, audio_hash_tier FROM files" ++
+        "EXPLAIN QUERY PLAN SELECT id, audio_hash, duration_ms, CASE WHEN content_hash_algorithm = 1 THEN content_hash END," ++
+            " audio_hash_tier FROM files" ++
             " WHERE id > ?1 ORDER BY id LIMIT ?2;",
     );
     defer testing.allocator.free(selection);
@@ -594,7 +597,8 @@ test "selecting candidates and looking up either bucket are index searches, not 
 
     const plausible_bucket = try planOf(
         &fixture,
-        "EXPLAIN QUERY PLAN SELECT id, quick_hash, audio_hash, audio_hash_tier FROM files" ++
+        "EXPLAIN QUERY PLAN SELECT id, CASE WHEN content_hash_algorithm = 1 THEN content_hash END, audio_hash," ++
+            " audio_hash_tier FROM files" ++
             " WHERE duration_ms >= ?1 AND duration_ms <= ?2 AND id <> ?3" ++
             " ORDER BY duration_ms, id LIMIT ?4;",
     );

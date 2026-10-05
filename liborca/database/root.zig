@@ -85,6 +85,7 @@ pub const MutationJournalRepository = repository.MutationJournalRepository;
 pub const MutationOperationInput = repository.MutationOperationInput;
 pub const MutationState = repository.MutationState;
 pub const AnalysisCacheKey = repository.AnalysisCacheKey;
+pub const ObservedBytes = repository.ObservedBytes;
 pub const AnalysisSelector = repository.AnalysisSelector;
 pub const AnalysisSelectors = repository.AnalysisSelectors;
 pub const ReleaseMember = repository.ReleaseMember;

@@ -2,7 +2,7 @@ const std = @import("std");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const scanner = @import("../library/scanner.zig");
-const quick_hash = @import("../storage/quick_hash.zig");
+const content_hash = @import("../storage/content_hash.zig");
 const storage = @import("../storage/root.zig");
 const chromaprint = @import("chromaprint.zig");
 const diagnostics = @import("diagnostics.zig");
@@ -33,7 +33,7 @@ pub const fingerprint_algorithm_version: u32 = 3;
 /// has to exist independently of a `Service`.
 pub fn diagnosticsKey(
     file_id: i64,
-    source_identity: quick_hash.Digest,
+    source_identity: content_hash.Digest,
     parameters: diagnostics.Parameters,
 ) database.AnalysisCacheKey {
     return .{
@@ -87,7 +87,7 @@ pub fn analysisSelectors(
 /// resolution changed.
 pub fn fingerprintKey(
     file_id: i64,
-    source_identity: quick_hash.Digest,
+    source_identity: content_hash.Digest,
 ) database.AnalysisCacheKey {
     return .{
         .file_id = file_id,
@@ -119,11 +119,14 @@ pub const Analysis = struct {
     cache_hit: bool,
     /// Frames decoded, or null on a cache hit, which decodes nothing.
     decoded_frames: ?u64,
-    /// The identity of the bytes this measurement describes, as the Service
-    /// observed them. A caller that stores the result itself keys on this
+    /// The content hash of the bytes this measurement describes, read by the
+    /// Service itself. A caller that stores the result itself keys on this
     /// rather than on what a database row claims, so a measurement can never
     /// be filed under an identity it was not taken from.
-    source_identity: quick_hash.Digest,
+    source_identity: content_hash.Digest,
+    /// The file's storage identity when it was opened, which it still had
+    /// once the measurement was taken.
+    storage_identity: storage.StorageIdentity,
 
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
@@ -143,12 +146,13 @@ pub const Service = struct {
     /// so transport and render threads remain schedulable on constrained hosts.
     yield_between_chunks: bool = true,
 
-    /// Analyze one file, caching against `file_id` and the file's quick hash.
+    /// Analyze one file, caching against `file_id` and the content hash of
+    /// the file's bytes, which it reads whole before anything else.
     ///
     /// Passing no `file_id` analyzes without touching the cache — the honest
-    /// answer for a source the Library has no identity for yet. Keying on the
-    /// quick hash rather than size and mtime is what lets a loudness
-    /// measurement survive Orca writing a tag into the same file.
+    /// answer for a source the Library has no identity for yet. A stored
+    /// result is reused only for exactly the bytes it was measured from, so
+    /// any write into the file, a tag included, takes a new measurement.
     pub fn analyzeFile(
         self: Service,
         file_id: ?i64,
@@ -159,7 +163,11 @@ pub const Service = struct {
         var local = try storage.LocalFileSource.open(self.io, path);
         defer local.close();
         const initial_identity = local.readable().identity();
-        const source_identity = try quick_hash.fromSource(local.readable());
+        const source_identity = content_hash.fromFileCancellable(self.io, local.file, local.stat.size, self) catch |err|
+            return switch (err) {
+                error.UnexpectedEndOfFile => error.SourceChangedDuringAnalysis,
+                else => err,
+            };
         const diagnostics_key = diagnosticsKey(file_id orelse 0, source_identity, parameters);
         const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
         const chromaprint_key = chromaprint.cacheKey(file_id orelse 0, source_identity, .{});
@@ -180,6 +188,7 @@ pub const Service = struct {
                     .cache_hit = true,
                     .decoded_frames = null,
                     .source_identity = source_identity,
+                    .storage_identity = initial_identity,
                 };
             }
             if (cached_diagnostics) |result| result.deinit();
@@ -285,10 +294,11 @@ pub const Service = struct {
             .cache_hit = false,
             .decoded_frames = completed_frames,
             .source_identity = source_identity,
+            .storage_identity = initial_identity,
         };
     }
 
-    fn cancelled(self: Service) bool {
+    pub fn cancelled(self: Service) bool {
         return if (self.cancellation) |token| token.checkpoint() else false;
     }
 

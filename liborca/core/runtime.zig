@@ -811,8 +811,10 @@ pub const OrcaRuntime = struct {
     }
 
     /// Measures one file on the caller's thread and records the result in the
-    /// Library's analysis cache, registering the file if no scan has seen it.
-    /// The caller owns the returned analysis.
+    /// Library's analysis cache, registering the file if no scan has seen it,
+    /// and the content hash it was taken from as the file's when those are
+    /// still the bytes the Library records there. The caller owns the
+    /// returned analysis.
     pub fn libraryAnalyzeFile(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -828,7 +830,15 @@ pub const OrcaRuntime = struct {
             .cache = &library_database.analysis_cache,
         };
         const binding = try library_database.resolveOrCreateFile(io, path, .{});
-        return service.analyzeFile(binding.file_id, path, .{});
+        const measured = try service.analyzeFile(binding.file_id, path, .{});
+        errdefer measured.deinit();
+        _ = try library_database.adoptContentHash(binding, &measured.source_identity, .{
+            .volume_id = binding.volume_id,
+            .native_inode = @bitCast(@as(u64, measured.storage_identity.inode)),
+            .size_bytes = std.math.cast(i64, measured.storage_identity.size) orelse return measured,
+            .modified_ns = std.math.cast(i64, measured.storage_identity.modified_ns) orelse return measured,
+        });
+        return measured;
     }
 
     /// Decodes file `file_id` again on the caller's thread, even when its

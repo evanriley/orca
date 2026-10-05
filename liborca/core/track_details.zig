@@ -275,7 +275,7 @@ fn storedLoudness(
     library: *database.LibraryDatabase,
     file: database.repository.TrackFileFacts,
 ) !?Loudness {
-    const identity = file.quick_hash orelse return null;
+    const identity = file.content_hash orelse return null;
     var header: [analysis.encoding.header_size]u8 = undefined;
     const stored = (try library.analysis_cache.resultInto(
         analysis.service.diagnosticsKey(file.file_id, identity, .{}),

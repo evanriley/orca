@@ -451,16 +451,16 @@ pub const Scanner = struct {
             return;
         };
         const quick_hash = storage.quick_hash.fromSource(local.readable()) catch return self.keepUnobserved(path, result);
-        const nominated = try self.files.reachesQuickHash(path, identity, &quick_hash);
+        const question = try self.files.contentQuestion(path, identity, &quick_hash);
         var content_hash: ?storage.content_hash.Digest = null;
-        if (nominated or hasPeer(pending.items, &quick_hash, identity)) {
-            const digest = storage.content_hash.fromFile(self.io, local.file, local.stat.size) catch |err| switch (err) {
+        if (question != .none or hasPeer(pending.items, &quick_hash, identity)) {
+            const digest = (database.content_measurements.hashHeld(self.io, local.file, identity) catch |err| switch (err) {
                 error.Canceled => return err,
                 else => return self.keepUnobserved(path, result),
-            };
+            }) orelse return self.keepUnobserved(path, result);
             content_hash = digest;
             try self.measurements.record(self.allocator, path, identity, &digest);
-            if (nominated) try self.measurements.measureNominees(self.allocator, self.io, self.files, path, identity, &quick_hash);
+            try self.measurements.measureQuestion(self.allocator, self.io, self.files, question, path, identity, &quick_hash);
             try self.measurePeers(pending.items, &quick_hash, identity);
         }
         const audio_format = detection.format;
@@ -2108,18 +2108,27 @@ test "a split copy does not submit a recording id it inherited from a provider m
     try std.testing.expectEqual(shared, page.items[0].file_id);
 }
 
-test "a shared file with no quick hash is updated in place rather than split" {
+test "a changed copy of a shared file with no quick hash stays only while its bytes equal the other copy's" {
     var copies: SharedCopies = undefined;
     try copies.init("file:orca-scanner-no-quick-hash?mode=memory&cache=shared");
     defer copies.deinit();
     const shared = (try copies.fileAt(copies.first_path)).?;
-    try copies.library.database.exec("UPDATE files SET quick_hash = NULL;");
+    try copies.library.database.exec(
+        "UPDATE files SET quick_hash = NULL, content_hash = NULL, content_hash_algorithm = NULL;",
+    );
+
+    try copies.temporary.dir.setTimestamps(std.testing.io, "a/song.flac", .{
+        .modify_timestamp = .{ .new = .fromNanoseconds(1_800_000_000 * std.time.ns_per_s) },
+    });
+    _ = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
 
     try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
     const rescan = try copies.scan();
     try std.testing.expectEqual(@as(u64, 1), rescan.changed);
-    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
-    try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
+    try std.testing.expectEqual(@as(u64, 2), try copies.library.files.count());
+    try std.testing.expect((try copies.fileAt(copies.first_path)).? != shared);
     try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
 }
 
@@ -2431,6 +2440,123 @@ test "a copy of a file with no content hash joins it through a location still as
         @as(?storage.content_hash.Digest, try twins.bytesHashOf(1, "third.flac")),
         try twins.contentHashOf(file_id),
     );
+}
+
+/// Two byte-identical copies in one root, scanned into one file.
+fn initSharedTwins(twins: *TwinRoots, name: [:0]const u8) !i64 {
+    try twins.init(name);
+    errdefer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    try twins.write(0, "two.flac", 0, 1);
+    _ = try twins.scan(0);
+    const shared = (try twins.fileAt(0, "one.flac")).?;
+    try std.testing.expectEqual(shared, (try twins.fileAt(0, "two.flac")).?);
+    try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+    return shared;
+}
+
+fn touch(twins: *TwinRoots, sub_path: []const u8) !void {
+    try twins.temporary.dir.setTimestamps(std.testing.io, sub_path, .{
+        .modify_timestamp = .{ .new = .fromNanoseconds(1_800_000_000 * std.time.ns_per_s) },
+    });
+}
+
+test "a copy of a shared file whose middle changed under an unchanged quick hash leaves it for a file of its own" {
+    for ([_]bool{ false, true }) |recorded| {
+        var twins: TwinRoots = undefined;
+        const shared = try initSharedTwins(&twins, "file:orca-scanner-middle-fork?mode=memory&cache=shared");
+        defer twins.deinit();
+        try std.testing.expect(try twins.contentHashOf(shared) != null);
+        if (!recorded) try twins.library.database.exec("UPDATE files SET content_hash = NULL, content_hash_algorithm = NULL;");
+
+        try twins.write(0, "one.flac", 0, 2);
+        try touch(&twins, "here/one.flac");
+        for ([_]bool{ false, true }) |reprobe| {
+            const rescan = try twins.scanWith(0, reprobe);
+            try std.testing.expectEqual(@as(u64, 0), rescan.errors);
+            try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+            try std.testing.expectEqual(shared, (try twins.fileAt(0, "two.flac")).?);
+            const edited = (try twins.fileAt(0, "one.flac")).?;
+            try std.testing.expect(edited != shared);
+            try std.testing.expectEqual(
+                @as(?storage.content_hash.Digest, try twins.bytesHashOf(0, "one.flac")),
+                try twins.contentHashOf(edited),
+            );
+        }
+    }
+}
+
+test "a changed copy of a shared file with no content hash leaves it when the other copy cannot be read" {
+    try skipWhenPermissionsAreIgnored();
+    var twins: TwinRoots = undefined;
+    const shared = try initSharedTwins(&twins, "file:orca-scanner-middle-fork-unreadable?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.library.database.exec("UPDATE files SET content_hash = NULL, content_hash_algorithm = NULL;");
+    try twins.temporary.dir.setFilePermissions(std.testing.io, "here/two.flac", .fromMode(0), .{});
+    defer twins.temporary.dir.setFilePermissions(std.testing.io, "here/two.flac", .default_file, .{}) catch {};
+
+    try touch(&twins, "here/one.flac");
+    const rescan = try twins.scan(0);
+    try std.testing.expectEqual(@as(u64, 1), rescan.errors);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+    try std.testing.expectEqual(shared, (try twins.fileAt(0, "two.flac")).?);
+    try std.testing.expect((try twins.fileAt(0, "one.flac")).? != shared);
+}
+
+test "a missing copy that comes back after its file's other copy changed under an unchanged quick hash leaves it for a file of its own" {
+    for ([_]bool{ false, true }) |unchanged| {
+        var twins: TwinRoots = undefined;
+        const shared = try initSharedTwins(&twins, "file:orca-scanner-returning-copy?mode=memory&cache=shared");
+        defer twins.deinit();
+        try twins.temporary.dir.rename("here/two.flac", twins.temporary.dir, "away.flac", std.testing.io);
+        _ = try twins.scan(0);
+
+        if (unchanged) try touch(&twins, "here/one.flac") else {
+            try twins.write(0, "one.flac", 0, 2);
+            try touch(&twins, "here/one.flac");
+        }
+        const edited = try twins.scan(0);
+        try std.testing.expectEqual(@as(u64, 1), edited.changed);
+        try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+        try std.testing.expectEqual(shared, (try twins.fileAt(0, "one.flac")).?);
+
+        try twins.temporary.dir.rename("away.flac", twins.temporary.dir, "here/two.flac", std.testing.io);
+        const returned = try twins.scan(0);
+        try std.testing.expectEqual(@as(u64, 0), returned.errors);
+        try std.testing.expectEqual(shared, (try twins.fileAt(0, "one.flac")).?);
+        const back = (try twins.fileAt(0, "two.flac")).?;
+        if (unchanged) {
+            try std.testing.expectEqual(shared, back);
+            try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+        } else {
+            try std.testing.expect(back != shared);
+            try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+            try std.testing.expectEqual(
+                @as(?storage.content_hash.Digest, try twins.bytesHashOf(0, "two.flac")),
+                try twins.contentHashOf(back),
+            );
+        }
+    }
+}
+
+test "a copy of a shared file whose bytes did not change stays on it when only its modification time changed" {
+    for ([_]bool{ false, true }) |recorded| {
+        var twins: TwinRoots = undefined;
+        const shared = try initSharedTwins(&twins, "file:orca-scanner-touched-copy?mode=memory&cache=shared");
+        defer twins.deinit();
+        if (!recorded) try twins.library.database.exec("UPDATE files SET content_hash = NULL, content_hash_algorithm = NULL;");
+
+        try touch(&twins, "here/one.flac");
+        const rescan = try twins.scan(0);
+        try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+        try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+        try std.testing.expectEqual(shared, (try twins.fileAt(0, "one.flac")).?);
+        try std.testing.expectEqual(shared, (try twins.fileAt(0, "two.flac")).?);
+        try std.testing.expectEqual(
+            @as(?storage.content_hash.Digest, try twins.bytesHashOf(0, "two.flac")),
+            try twins.contentHashOf(shared),
+        );
+    }
 }
 
 test "an image in a scanned folder is listed as a front cover beside the music, never as a Track" {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const quick_hash = @import("../../storage/quick_hash.zig");
+const content_hash = @import("../../storage/content_hash.zig");
 
 /// One file a duplicate scan will examine, and the two keys it can be
 /// bucketed by.
@@ -16,9 +16,10 @@ pub const DuplicateCandidate = struct {
     /// exact audio.
     audio_hash_tier: ?u8 = null,
     duration_ms: ?i64,
-    /// The identity the Library recorded, which is the key its stored
-    /// fingerprint is filed under. Null for a file no scan has hashed.
-    source_identity: ?quick_hash.Digest,
+    /// The content hash the Library recorded, which is the key its stored
+    /// fingerprint is filed under. Null for a file whose bytes no analysis or
+    /// scan has hashed whole.
+    source_identity: ?content_hash.Digest,
 };
 
 /// A file inside a duplicate scan's plausible bucket, with everything needed
@@ -27,7 +28,7 @@ pub const DuplicateCandidate = struct {
 /// already accounted for it.
 pub const DuplicatePeer = struct {
     id: i64,
-    source_identity: ?quick_hash.Digest,
+    source_identity: ?content_hash.Digest,
     audio_hash: ?[32]u8,
     audio_hash_tier: ?u8 = null,
 };

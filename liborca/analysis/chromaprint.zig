@@ -7,7 +7,7 @@ const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const resampler = @import("../audio/resampler.zig");
 const scanner = @import("../library/scanner.zig");
-const quick_hash = @import("../storage/quick_hash.zig");
+const content_hash = @import("../storage/content_hash.zig");
 const storage = @import("../storage/root.zig");
 
 extern const orca_chromaprint_sample_rate: u32;
@@ -54,7 +54,7 @@ pub fn parameterHash(parameters: Parameters) [32]u8 {
 
 pub fn cacheKey(
     file_id: i64,
-    source_identity: quick_hash.Digest,
+    source_identity: content_hash.Digest,
     parameters: Parameters,
 ) database.AnalysisCacheKey {
     return .{
@@ -344,18 +344,28 @@ pub const Fingerprinter = struct {
         cache_hit: bool,
     };
 
-    /// Without a `file_id` nothing is cached.
+    /// Without a `file_id` nothing is cached. With one, the file is read
+    /// whole first, because a cached fingerprint is reused only for the
+    /// bytes it was taken from.
     pub fn fingerprintFile(self: Fingerprinter, file_id: ?i64, path: []const u8) !Outcome {
         var local = try storage.LocalFileSource.open(self.io, path);
         defer local.close();
         const initial_identity = local.readable().identity();
-        const source_identity = try quick_hash.fromSource(local.readable());
-        const key = cacheKey(file_id orelse 0, source_identity, self.parameters);
         const cache = if (file_id == null) null else self.cache;
+        const key: ?database.AnalysisCacheKey = if (cache == null) null else key: {
+            const source_identity = content_hash.fromFileCancellable(self.io, local.file, local.stat.size, self) catch |err|
+                return switch (err) {
+                    error.UnexpectedEndOfFile => error.SourceChangedDuringAnalysis,
+                    else => err,
+                };
+            break :key cacheKey(file_id.?, source_identity, self.parameters);
+        };
         if (cache) |repository| {
-            if (try repository.get(self.allocator, key)) |bytes| {
+            if (try repository.get(self.allocator, key.?)) |bytes| {
                 defer self.allocator.free(bytes);
                 if (Fingerprint.decode(self.allocator, bytes)) |cached| {
+                    errdefer cached.deinit();
+                    try verifyIdentity(self.io, path, initial_identity);
                     return .{ .fingerprint = cached, .cache_hit = true };
                 } else |_| {}
             }
@@ -364,20 +374,28 @@ pub const Fingerprinter = struct {
         defer decoder.deinit();
         const fingerprint = try fingerprintDecoder(self.allocator, decoder, self.parameters, self.cancellation);
         errdefer fingerprint.deinit();
-        var identity_check = try storage.LocalFileSource.open(self.io, path);
-        defer identity_check.close();
-        const final_identity = identity_check.readable().identity();
-        if (initial_identity.inode != final_identity.inode or initial_identity.size != final_identity.size or
-            initial_identity.modified_ns != final_identity.modified_ns)
-            return error.SourceChangedDuringAnalysis;
+        try verifyIdentity(self.io, path, initial_identity);
         if (cache) |repository| {
             const bytes = try fingerprint.encode(self.allocator);
             defer self.allocator.free(bytes);
-            try repository.put(key, bytes);
+            try repository.put(key.?, bytes);
         }
         return .{ .fingerprint = fingerprint, .cache_hit = false };
     }
+
+    pub fn cancelled(self: Fingerprinter) bool {
+        return if (self.cancellation) |token| token.checkpoint() else false;
+    }
 };
+
+fn verifyIdentity(io: std.Io, path: []const u8, expected: storage.StorageIdentity) !void {
+    var identity_check = try storage.LocalFileSource.open(io, path);
+    defer identity_check.close();
+    const final_identity = identity_check.readable().identity();
+    if (expected.inode != final_identity.inode or expected.size != final_identity.size or
+        expected.modified_ns != final_identity.modified_ns)
+        return error.SourceChangedDuringAnalysis;
+}
 
 const testing = std.testing;
 

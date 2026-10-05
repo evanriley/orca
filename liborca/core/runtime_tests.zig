@@ -470,6 +470,23 @@ test "details report a track whose file has gone as missing, without a path" {
     try std.testing.expect(details.duration_ms == null);
 }
 
+/// Records the content hash of the bytes at `facts.path` on its file, as an
+/// analysis pass that read them would.
+fn recordContentHash(
+    library_database: *database.LibraryDatabase,
+    facts: database.repository.TrackFileFacts,
+) !storage.content_hash.Digest {
+    const digest = try storage.content_hash.fromPath(std.testing.io, facts.path.?);
+    var statement = try library_database.database.prepare(
+        "UPDATE files SET content_hash = ?1, content_hash_algorithm = 1 WHERE id = ?2;",
+    );
+    defer statement.deinit();
+    try statement.bindBlob(1, &digest);
+    try statement.bindInt64(2, facts.file_id);
+    if (try statement.step() != .done) return error.TestUnexpectedResult;
+    return digest;
+}
+
 test "details carry the loudness stored for the file's recorded bytes and no other" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -500,7 +517,7 @@ test "details carry the loudness stored for the file's recorded bytes and no oth
     const facts = (try library_database.tracks.fileFacts(std.testing.allocator, before.track_id)).?;
     defer facts.deinit();
     try library_database.analysis_cache.put(
-        analysis_service.diagnosticsKey(facts.file_id, facts.quick_hash.?, .{}),
+        analysis_service.diagnosticsKey(facts.file_id, try recordContentHash(library_database, facts), .{}),
         encoded,
     );
 
@@ -508,9 +525,14 @@ test "details carry the loudness stored for the file's recorded bytes and no oth
     defer mp3.deinit();
     const mp3_facts = (try library_database.tracks.fileFacts(std.testing.allocator, mp3.track_id)).?;
     defer mp3_facts.deinit();
+    _ = try recordContentHash(library_database, mp3_facts);
     const stale_identity: storage.quick_hash.Digest = @splat(7);
     try library_database.analysis_cache.put(
         analysis_service.diagnosticsKey(mp3_facts.file_id, stale_identity, .{}),
+        encoded,
+    );
+    try library_database.analysis_cache.put(
+        analysis_service.diagnosticsKey(mp3_facts.file_id, mp3_facts.quick_hash.?, .{}),
         encoded,
     );
 

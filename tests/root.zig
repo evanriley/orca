@@ -285,8 +285,29 @@ fn writeSineWav(
     try directory.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 }
 
-/// A `files` row plus its Location and Track, carrying the quick hash a scan
-/// would have recorded — which is what an analysis is keyed against.
+/// The Location of `file_id` at `uri`, with the identity a scan would record
+/// for the bytes there now.
+fn recordLocation(
+    database: *liborca.internal.database.LibraryDatabase,
+    file_id: i64,
+    volume_id: i64,
+    uri: []const u8,
+) !void {
+    const stat = try std.Io.Dir.cwd().statFile(std.testing.io, uri, .{});
+    _ = try database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = volume_id,
+        .uri = uri,
+        .native_inode = @intCast(stat.inode),
+        .size_bytes = @intCast(stat.size),
+        .modified_ns = @intCast(stat.mtime.nanoseconds),
+        .state = .present,
+    });
+}
+
+/// A `files` row plus its Location and Track, carrying the quick hash and
+/// identity a scan would have recorded, which an analysis checks before it
+/// records the content hash its results are keyed against.
 fn recordAnalyzableTrack(
     database: *liborca.internal.database.LibraryDatabase,
     volume_id: i64,
@@ -295,12 +316,7 @@ fn recordAnalyzableTrack(
 ) !struct { file_id: i64, track_id: i64 } {
     const digest = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, uri);
     const file_id = try database.files.create(.{ .audio_format = 1, .quick_hash = &digest });
-    _ = try database.locations.upsert(.{
-        .file_id = file_id,
-        .volume_id = volume_id,
-        .uri = uri,
-        .state = .present,
-    });
+    try recordLocation(database, file_id, volume_id, uri);
     try database.tracks.upsertTracks(&.{.{ .title = title, .preferred_file_id = file_id }});
     var page = try database.tracks.page(std.testing.allocator, .{ .limit = 512, .offset = 0 });
     defer page.deinit();
@@ -318,7 +334,7 @@ fn storedLoudness(
     file_id: i64,
     uri: []const u8,
 ) !?liborca.internal.analysis.encoding.Loudness {
-    const identity = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, uri);
+    const identity = try liborca.internal.storage.content_hash.fromPath(std.testing.io, uri);
     var header: [liborca.internal.analysis.encoding.header_size]u8 = undefined;
     const length = (try database.analysis_cache.resultInto(
         liborca.internal.analysis.service.diagnosticsKey(file_id, identity, .{}),
@@ -547,7 +563,8 @@ test "an entry whose bytes changed since it was measured plays at unity" {
     try std.testing.expect(try runtime.playerEffectiveGain(player) < 0.6);
 
     // Half the amplitude, at the same path, with the Library none the wiser:
-    // no rescan, so `files.quick_hash` still names the audio that was measured.
+    // no rescan, so `files.content_hash` still names the audio that was
+    // measured.
     try runtime.stopPlayer(player);
     try writeSineWav(temporary.dir, "edited.wav", 0.25, 2);
     try runtime.playerPlayTracks(player, library, std.testing.io, &.{edited.track_id}, 0);
@@ -790,12 +807,7 @@ fn recordAlbumTrack(
         .duration_ms = seconds * 1000,
         .quick_hash = &digest,
     });
-    _ = try database.locations.upsert(.{
-        .file_id = file_id,
-        .volume_id = volume_id,
-        .uri = uri,
-        .state = .present,
-    });
+    try recordLocation(database, file_id, volume_id, uri);
     try database.tracks.upsertTracks(&.{.{
         .title = title,
         .release_id = release_id,
@@ -996,6 +1008,7 @@ test "re-analysing a Track or moving it to another Release changes the album gai
     try writeSineWav(temporary.dir, "changed.wav", 0.5, 2);
     const digest = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, changed_uri);
     try database.files.update(changed.file_id, .{ .audio_format = 1, .duration_ms = 2000, .quick_hash = &digest });
+    try recordLocation(database, changed.file_id, volume_id, changed_uri);
     try std.testing.expectEqual(@as(u64, 1), (try runLibraryAnalysis(database)).changed);
     const loud_loudness = (try storedLoudness(database, changed.file_id, changed_uri)).?;
     try runtime.playerPlayTracks(player, library, std.testing.io, &.{kept.track_id}, 0);

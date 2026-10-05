@@ -188,9 +188,10 @@ pub fn main(init: std.process.Init) !void {
 fn timeFileSorts(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
     const seed_start = std.Io.Clock.awake.now(io);
     try library.database.exec(
-        \\UPDATE files SET duration_ms = 120000 + (id * 7919) % 240000, quick_hash = CAST(id AS BLOB);
+        \\UPDATE files SET duration_ms = 120000 + (id * 7919) % 240000, quick_hash = CAST(id AS BLOB),
+        \\    content_hash = CAST(id AS BLOB), content_hash_algorithm = 1;
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
-        \\    SELECT id, quick_hash, -6.0 - ((id * 104729) % 2000) / 100.0 FROM files WHERE id % 3 <> 0;
+        \\    SELECT id, content_hash, -6.0 - ((id * 104729) % 2000) / 100.0 FROM files WHERE id % 3 <> 0;
         \\UPDATE tracks SET album_artist = printf('Album Artist %05d', (id * 31) % 25000),
         \\    album = printf('Album %d', id % 7);
     );

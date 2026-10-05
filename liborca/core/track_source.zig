@@ -157,7 +157,7 @@ pub const TrackSourceOpener = struct {
         // either way.
         const own = self.measurement(
             resolved.file_id,
-            observedIdentity(self.io, resolved.uri),
+            self.observedContent(resolved.file_id, resolved.uri),
         ) catch null;
         session.replay_gain = .{
             .track = if (own) |value| value.trackGain() else null,
@@ -173,9 +173,10 @@ pub const TrackSourceOpener = struct {
     /// analyzed from bytes this file no longer has — because a Player does the
     /// same thing with all four: play at unity. A correction whose provenance
     /// is not the file in front of us is worse than no correction, and only
-    /// this identity, taken from the file itself, can rule that out: the
-    /// Library's own record of a file's bytes is only as fresh as the last
-    /// scan.
+    /// the file itself can rule that out: the Library's own record of a
+    /// file's bytes is only as fresh as the last scan. `observedContent`
+    /// adopts the recorded content hash only for bytes that still have the
+    /// identity and quick hash the Library recorded with it.
     ///
     /// Only the canonical parameters are adopted. The target LUFS is one of
     /// them, so adopting a measurement made under arbitrary parameters would
@@ -186,7 +187,7 @@ pub const TrackSourceOpener = struct {
     fn measurement(
         self: *const TrackSourceOpener,
         file_id: i64,
-        source_identity: ?quick_hash.Digest,
+        source_identity: ?storage.content_hash.Digest,
     ) !?Measurement {
         const identity = source_identity orelse return null;
         var header: [analysis.encoding.header_size]u8 = undefined;
@@ -194,6 +195,15 @@ pub const TrackSourceOpener = struct {
         const stored = (try self.analysis_cache.resultInto(key, &header)) orelse return null;
         if (stored < header.len) return null;
         return try Measurement.decode(&header);
+    }
+
+    /// The content hash `file_id` records for the bytes at `uri`, when they
+    /// still have the identity and quick hash it was recorded with. They are
+    /// not hashed whole here: that would read the entire file before a single
+    /// frame plays.
+    fn observedContent(self: *const TrackSourceOpener, file_id: i64, uri: []const u8) ?storage.content_hash.Digest {
+        const observed = observedBytes(self.io, uri) orelse return null;
+        return self.analysis_cache.vouchedContentHash(file_id, uri, observed) catch null;
     }
 
     /// The album correction for the Release `track_id` belongs to, or null
@@ -294,7 +304,8 @@ fn positivePeak(peak: f32) ?f32 {
     return if (peak > 0) peak else null;
 }
 
-/// The quick hash of a file that has just been opened for playback.
+/// The quick hash and storage identity of a file that has just been opened
+/// for playback.
 ///
 /// A second open rather than a borrowed one: `SourceSession` deliberately
 /// hides the `ReadableSource` its decoder holds, because nothing downstream of
@@ -304,10 +315,16 @@ fn positivePeak(peak: f32) ?f32 {
 /// Failure is null rather than an error: an identity that cannot be read means
 /// nothing content-keyed can be adopted, which is the same answer as having no
 /// measurement, and it must never stop a playable track from playing.
-fn observedIdentity(io: std.Io, uri: []const u8) ?quick_hash.Digest {
+fn observedBytes(io: std.Io, uri: []const u8) ?database.ObservedBytes {
     var local = storage.LocalFileSource.open(io, uri) catch return null;
     defer local.close();
-    return quick_hash.fromSource(local.readable()) catch null;
+    const identity = local.readable().identity();
+    return .{
+        .quick_hash = quick_hash.fromSource(local.readable()) catch return null,
+        .native_inode = std.math.cast(i64, identity.inode) orelse return null,
+        .size_bytes = std.math.cast(i64, identity.size) orelse return null,
+        .modified_ns = std.math.cast(i64, identity.modified_ns) orelse return null,
+    };
 }
 
 /// Marks every Location of a file as `missing`.
