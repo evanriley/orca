@@ -1139,6 +1139,10 @@
 
 ### Changed
 
+- **`orca-gtk`'s side panels keep their width.** Every inspector panel
+  (track, album, artist, playlist, lyrics and Signal Path) is 388 px wide,
+  so switching between them no longer shifts the page; the navigation
+  sidebar is 240 px instead of 216 px.
 - **Orca builds with Zig 0.17.0.** `minimum_zig_version` is `0.17.0`, the
   flake and `nix/package.nix` use `zig_0_17`, and the overlay needs
   `pkgs.zig_0_17` from the consumer's nixpkgs. The dev shell no longer

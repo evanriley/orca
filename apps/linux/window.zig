@@ -1477,8 +1477,8 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     self.split_view = gtk.cast(adw.NavigationSplitView, split);
     adw.adw_navigation_split_view_set_sidebar(self.split_view.?, sidebar);
     adw.adw_navigation_split_view_set_content(self.split_view.?, content);
-    adw.adw_navigation_split_view_set_min_sidebar_width(self.split_view.?, 216);
-    adw.adw_navigation_split_view_set_max_sidebar_width(self.split_view.?, 216);
+    adw.adw_navigation_split_view_set_min_sidebar_width(self.split_view.?, 240);
+    adw.adw_navigation_split_view_set_max_sidebar_width(self.split_view.?, 240);
 
     const root = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, root), split);

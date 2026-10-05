@@ -32,11 +32,7 @@ const playlists = @import("playlists.zig");
 
 const App = app.App;
 
-const track_width: f64 = 316;
-const artist_width: f64 = 300;
-const playlist_width: f64 = 290;
-const lyrics_width: f64 = 380;
-const signal_path_width: f64 = 388;
+const inspector_width: f64 = 388;
 const key_width = 104;
 const separator = " · ";
 const minus = "−";
@@ -351,23 +347,6 @@ fn showMode(panel: *Panel, mode: app.Sidebar) void {
     if (mode != .hidden) gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, panel.root), pageName(mode));
     adw.adw_overlay_split_view_set_collapsed(split, boolean(overlays(panel.self)));
     adw.adw_overlay_split_view_set_show_sidebar(split, boolean(mode != .hidden));
-    fitWidth(panel);
-}
-
-fn fitWidth(panel: *Panel) void {
-    const width = switch (panel.laid_out) {
-        .lyrics => lyrics_width,
-        .signal_path => signal_path_width,
-        .hidden, .details => if (gtk.gtk_widget_get_visible(panel.artist_view.content) != 0)
-            artist_width
-        else if (gtk.gtk_widget_get_visible(panel.playlist_view.content) != 0)
-            playlist_width
-        else
-            track_width,
-    };
-    const split = gtk.cast(adw.OverlaySplitView, panel.split);
-    adw.adw_overlay_split_view_set_min_sidebar_width(split, width);
-    adw.adw_overlay_split_view_set_max_sidebar_width(split, width);
 }
 
 fn sidebarShownChanged(split: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -555,7 +534,6 @@ fn show(panel: *Panel, track_id: ?i64) void {
 fn showOnly(panel: *Panel, shown: *gtk.Widget) void {
     for ([_]*gtk.Widget{ panel.placeholder, panel.content, panel.album_view.content, panel.artist_view.content, panel.playlist_view.content }) |view|
         gtk.gtk_widget_set_visible(view, boolean(view == shown));
-    fitWidth(panel);
 }
 
 fn showPlaceholder(panel: *Panel) void {
@@ -2324,6 +2302,8 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(body), "details");
 
     adw.adw_overlay_split_view_set_sidebar(split, root);
+    adw.adw_overlay_split_view_set_min_sidebar_width(split, inspector_width);
+    adw.adw_overlay_split_view_set_max_sidebar_width(split, inspector_width);
 
     panel.* = .{
         .self = self,
