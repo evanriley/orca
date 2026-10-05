@@ -9526,7 +9526,7 @@ test "a lyrics job hands its synced lines over once through the C ABI, and plain
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
 
-    const synced = try finishedLyricsJob(runtime, "fixtures/audio/chromaprint-test.mp3", "a.mp3", "fixtures/audio/chromaprint-test.lrc", "file:orca-c-api-lyrics-sidecar?mode=memory&cache=shared");
+    const synced = try finishedLyricsJob(runtime, "fixtures/audio/fingerprint-reference.mp3", "a.mp3", "fixtures/audio/fingerprint-reference.lrc", "file:orca-c-api-lyrics-sidecar?mode=memory&cache=shared");
     var outcome: u8 = 255;
     try std.testing.expectEqual(Status.ok, orca_job_lyrics_outcome(runtime, synced, &outcome));
     try std.testing.expectEqual(exportLyricsOutcome(.local), outcome);

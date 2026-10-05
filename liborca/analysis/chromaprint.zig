@@ -455,8 +455,8 @@ test "a cancelled fingerprint stops before decoding" {
     try testing.expectEqual(@as(u64, 0), synthetic.position);
 }
 
-const parity_audio = "fixtures/audio/chromaprint-test.mp3";
-const parity_reference = "fixtures/audio/chromaprint-test.fpcalc.txt";
+const parity_audio = "fixtures/audio/fingerprint-reference.mp3";
+const parity_reference = "fixtures/audio/fingerprint-reference.fpcalc.txt";
 
 fn readReference(allocator: std.mem.Allocator) !struct { duration_s: u32, raw: []u32 } {
     const text = try std.Io.Dir.cwd().readFileAlloc(testing.io, parity_reference, allocator, .limited(1 << 20));
@@ -476,7 +476,7 @@ fn readReference(allocator: std.mem.Allocator) !struct { duration_s: u32, raw: [
     return .{ .duration_s = duration_s orelse return error.InvalidReference, .raw = try raw.toOwnedSlice(allocator) };
 }
 
-test "Orca's fingerprint of Chromaprint's test recording agrees with fpcalc's on at least 95% of its bits" {
+test "Orca's fingerprint of the generated reference recording agrees with fpcalc's on at least 95% of its bits" {
     const reference = try readReference(testing.allocator);
     defer testing.allocator.free(reference.raw);
     const codecs = codec.CodecRegistry.builtins();

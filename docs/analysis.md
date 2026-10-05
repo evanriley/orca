@@ -35,9 +35,9 @@ resampler, which is LGPL and accepts only 11,025 Hz input; see
   stored result is the length in milliseconds (8 bytes, little-endian)
   followed by the fingerprint.
 - **Agreement with `fpcalc`.** A unit test holds Orca's fingerprint of
-  Chromaprint's own test recording (`fixtures/audio/chromaprint-test.mp3`) to
-  at least 95 % bit agreement with `fpcalc`'s
-  (`fixtures/audio/chromaprint-test.fpcalc.txt`).
+  the generated reference recording (`fixtures/audio/fingerprint-reference.mp3`)
+  to at least 95 % bit agreement with `fpcalc`'s
+  (`fixtures/audio/fingerprint-reference.fpcalc.txt`).
 
 `chromaprint.Analyzer` takes the fingerprint from audio fed to it a chunk at a
 time, so the analysis service takes it in the same decode as everything else
@@ -46,7 +46,7 @@ matching and AcoustID submission then find it there instead of decoding the
 file again. Audio too
 short to fingerprint is measured without one. The service feeds the analyzer
 the chunks a standalone fingerprint reads, and a unit test holds the two
-fingerprints of `fixtures/audio/chromaprint-test.mp3` byte-identical.
+fingerprints of `fixtures/audio/fingerprint-reference.mp3` byte-identical.
 
 Matching and AcoustID submission take the fingerprints the pass has not stored
 yet as they need them; `Runtime.libraryTrackFingerprint` and

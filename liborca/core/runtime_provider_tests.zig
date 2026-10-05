@@ -4193,10 +4193,10 @@ test "cancelling a verification while a unit's lookup is in flight commits nothi
     try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(rig.library_database.database, "SELECT count(*) FROM identification_proposals;"));
 }
 
-/// Ten seconds of the Chromaprint reference audio under an ID3v2.3 title, so
+/// Ten seconds of the fingerprint reference audio under an ID3v2.3 title, so
 /// two files of it differ in bytes and not in sound.
 fn writeTitledMp3(dir: std.Io.Dir, name: []const u8, title: []const u8) !void {
-    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/chromaprint-test.mp3", std.testing.allocator, .limited(1 << 22));
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/fingerprint-reference.mp3", std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(source);
     const tag_size = (@as(usize, source[6]) << 21) | (@as(usize, source[7]) << 14) | (@as(usize, source[8]) << 7) | source[9];
     var frames: std.ArrayList(u8) = .empty;

@@ -1131,6 +1131,10 @@
 
 ### Changed
 
+- **The fingerprint test recording is generated.** The Chromaprint 1.6.1 test
+  recording, which had no documented origin or licence in this repository, is
+  replaced by a generated one, `fixtures/audio/fingerprint-reference.*`, and
+  `fixtures/README.md` records the origin of every remaining fixture.
 - **The command palette and search are frosted.** Opening either takes one
   snapshot of the window behind it, blurs and saturates it at a quarter
   scale on a worker thread with the cover backdrop's blur, and shows it

@@ -366,10 +366,10 @@ test "the library keeps the integrated loudness a default analysis stores, as th
     };
     const binding = try library.resolveOrCreateFile(
         std.testing.io,
-        "fixtures/audio/chromaprint-test.mp3",
+        "fixtures/audio/fingerprint-reference.mp3",
         .{ .stable_key = "test:loudness" },
     );
-    var analysis = try service.analyzeFile(binding.file_id, "fixtures/audio/chromaprint-test.mp3", .{});
+    var analysis = try service.analyzeFile(binding.file_id, "fixtures/audio/fingerprint-reference.mp3", .{});
     defer analysis.deinit();
     const expected = analysis.diagnostics.integrated_lufs.?;
 
@@ -388,14 +388,14 @@ test "the AcoustID fingerprint taken in the analysis decode is the one a standal
         .io = std.testing.io,
         .codecs = &codecs,
     };
-    const analysis = try service.analyzeFile(null, "fixtures/audio/chromaprint-test.mp3", .{});
+    const analysis = try service.analyzeFile(null, "fixtures/audio/fingerprint-reference.mp3", .{});
     defer analysis.deinit();
     const fingerprinter: chromaprint.Fingerprinter = .{
         .allocator = allocator,
         .io = std.testing.io,
         .codecs = &codecs,
     };
-    const standalone = try fingerprinter.fingerprintFile(null, "fixtures/audio/chromaprint-test.mp3");
+    const standalone = try fingerprinter.fingerprintFile(null, "fixtures/audio/fingerprint-reference.mp3");
     defer standalone.fingerprint.deinit();
 
     const measured = analysis.chromaprint.?;

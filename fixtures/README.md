@@ -73,6 +73,11 @@ with the artists' aliases removed. MusicBrainz data is CC0. It covers a joined
 artist credit, a recording with no length, several releases per recording and
 a track numbered `B6`.
 
+`providers/musicbrainz-release-lookup.json` is MusicBrainz's answer to
+`/ws/2/release/047a4aae-27f8-4f2d-92fb-214fd8dc865a?fmt=json&inc=recordings+artist-credits+release-groups`
+for the 2014 deluxe edition of Hot Space: two discs of 11 and 8 tracks, each
+with its recording and artist credits. MusicBrainz data is CC0.
+
 `providers/musicbrainz-artist-lookup.json`, `providers/wikidata-entity.json`,
 `providers/wikimedia-commons-imageinfo.json` and
 `providers/wikipedia-summary.json` are written by hand in the shape of the
@@ -104,13 +109,51 @@ credited with another artist joined by ` & `, a single with a `feat.` guest,
 and one with no primary type and an empty first release date. The IDs and
 the counts are invented for the tests.
 
-`audio/chromaprint-test.mp3` and `audio/chromaprint-test.fpcalc.txt` are
-`tests/data/test.mp3` and `tests/data/test.mp3.fpcalc.out` from Chromaprint
-1.6.1, copied unchanged: 10 s of audio and `fpcalc -raw`'s fingerprint of it.
-Chromaprint is MIT-licensed. The fingerprint parity test compares Orca's
-fingerprint of the MP3 with the reference.
-`audio/chromaprint-test.lrc` is a synced sidecar for it, with lines at 1, 3,
-5.5 and 8 seconds.
+`audio/fingerprint-reference.mp3` is 10 seconds of generated mono audio at
+44.1 kHz, encoded by FFmpeg's libmp3lame at 64 kb/s: a melody of tones that
+change every 250 ms, an upward chirp, a downward chirp and seeded pink noise,
+so its spectrum changes enough for a meaningful Chromaprint fingerprint. It
+contains no third-party media. The command that made it, run from
+`fixtures/audio` with FFmpeg 9.0.1:
+
+```sh
+ffmpeg -f lavfi -i "aevalsrc='0.3*sin(2*PI*(220*pow(2,mod(floor(t*4)*7,12)/12))*t)+0.25*sin(2*PI*(300*t+120*t*t))+0.15*sin(2*PI*(3000-250*t)*t)':s=44100:d=10" \
+  -f lavfi -i "anoisesrc=color=pink:seed=7:amplitude=0.08:sample_rate=44100:duration=10" \
+  -filter_complex "[0:a][1:a]amix=inputs=2:normalize=0,aformat=sample_fmts=s16:channel_layouts=mono" \
+  -c:a libmp3lame -b:a 64k -ar 44100 -ac 1 fingerprint-reference.mp3
+```
+
+`audio/fingerprint-reference.fpcalc.txt` is the output of Chromaprint 1.6.1's
+`fpcalc -raw -length 120 fingerprint-reference.mp3`: the duration and the raw
+fingerprint. The fingerprint parity test compares Orca's fingerprint of the
+MP3 with it. `audio/fingerprint-reference.lrc` is a synced sidecar for the MP3,
+with lines at 1, 3, 5.5 and 8 seconds.
+
+`audio/cbr-noxing-reference.mp3`, `audio/vbr-xing-reference.mp3` and
+`audio/truncated-reference.mp3` are generated with FFmpeg's libmp3lame: a
+constant-bit-rate stream with no VBR header, a variable-bit-rate stream with
+Xing and LAME headers, and a stream cut mid-frame so decoding must fail
+cleanly. None contains third-party media.
+
+`audio/midside-reference.flac` is a FLAC stream built from the deterministic
+integer sequence of `midSideProbeSample` in `liborca/codec/flac.zig`, with two
+near-opposite channels whose side signal is odd in every
+frame, so the encoder chooses mid-side stereo and a decoder that skips the
+low-bit restoration is wrong on every sample (see `docs/codecs.md`). The
+decoder test regenerates the expected samples from the same sequence. It
+contains no third-party media.
+
+`database/v7-library.sql` is the SQL script that generates
+`database/v7-library.db`, a version-7 library database with rows in every
+path-keyed table plus an analysis result and a health issue for paths no scan
+observed (see `docs/database.md`). Regenerate it with:
+
+```sh
+rm -f fixtures/database/v7-library.db
+sqlite3 fixtures/database/v7-library.db < fixtures/database/v7-library.sql
+```
+
+The rows are invented for the tests.
 
 `audio/lyrics-synced.flac` is `audio/generated-reference.flac` retagged with
 synced LRC in a `LYRICS` comment:

@@ -960,7 +960,7 @@ test "a parallel analysis interrupted part way commits what finished and resumes
     ));
 }
 
-const parity_audio = "fixtures/audio/chromaprint-test.mp3";
+const parity_audio = "fixtures/audio/fingerprint-reference.mp3";
 
 fn expectSameRows(
     first: database.sqlite.Database,
@@ -991,7 +991,7 @@ test "measuring on four threads stores exactly what measuring on one thread stor
     const names = [_][]const u8{
         "generated-reference.flac",
         "generated-reference.qoa",
-        "chromaprint-test.mp3",
+        "fingerprint-reference.mp3",
         "midside-reference.flac",
         "stereo-reference.qoa",
         "tagged-reference.ogg",
@@ -1041,7 +1041,7 @@ test "measuring on four threads stores exactly what measuring on one thread stor
 test "the pass stores the AcoustID fingerprint, so taking it again decodes nothing" {
     var fixture = try Fixture.init("file:orca-analysis-chromaprint?mode=memory&cache=shared");
     defer fixture.deinit();
-    try fixture.copyFixture("chromaprint-test.mp3", "song.mp3");
+    try fixture.copyFixture("fingerprint-reference.mp3", "song.mp3");
     try fixture.copyFixture("generated-reference.qoa", "blip.qoa");
     const song = try fixture.record("song.mp3");
     _ = try fixture.record("blip.qoa");

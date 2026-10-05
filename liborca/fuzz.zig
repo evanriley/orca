@@ -68,7 +68,7 @@ const mp3_stream_fixtures = [_][]const u8{
 const scanner_fixtures = id3v2_fixtures ++ mp4_fixtures ++ vorbis_comment_fixtures ++ wav_fixtures ++
     aiff_fixtures ++ adts_fixtures ++ mp3_stream_fixtures;
 const playlist_fixtures = [_][]const u8{ "relative.m3u8", "latin1.m3u", "bom.m3u8" };
-const lrc_fixtures = [_][]const u8{"chromaprint-test.lrc"};
+const lrc_fixtures = [_][]const u8{"fingerprint-reference.lrc"};
 const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner", "lrc" };
 const audio_fixture_dir = "fixtures/audio";
 

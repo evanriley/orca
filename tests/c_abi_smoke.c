@@ -2766,7 +2766,7 @@ static int lyrics_smoke(orca_runtime *runtime, orca_handle library) {
     memset(&tracks, 0, sizeof tracks);
     SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &tracks,
                                           collect_titled) == ORCA_STATUS_OK);
-    int64_t synced = titled_track(&tracks, "chromaprint-test");
+    int64_t synced = titled_track(&tracks, "fingerprint-reference");
     int64_t plain = titled_track(&tracks, "Plain M4A");
     SMOKE_CHECK(synced > 0 && plain > 0);
 
