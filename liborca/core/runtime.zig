@@ -3173,10 +3173,10 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.jobSnapshotSynced(self, job_handle);
     }
 
-    /// Holds a running Job at its next cancellation poll, keeping its thread
-    /// and any provider lease, until `resumeJob`. `error.JobNotPausable` for
-    /// a Job that is not running, or one of a kind that never polls: a tag
-    /// write, a projection, and the one-item fetches.
+    /// Holds a running Job at its next cancellation poll, between provider
+    /// requests, keeping its thread, until `resumeJob`.
+    /// `error.JobNotPausable` for a Job that is not running, or one of a kind
+    /// that never polls: a tag write, a projection, and the one-item fetches.
     pub fn pauseJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
         return runtime_jobs.pauseJob(self, job_handle);
     }

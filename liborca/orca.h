@@ -5320,11 +5320,11 @@ orca_status orca_job_details_get(
     orca_job_details_callback callback
 );
 
-/* Holds a running job at its next cancellation poll; it keeps its thread and
- * any provider lease, and orca_job_cancel still stops it. A paused job stays
- * paused. INVALID_STATE for a job that is waiting, cancelling or finished, or
- * of a kind that never polls: a tag write, a projection, and the one-item
- * fetches. */
+/* Holds a running job at its next cancellation poll, between provider
+ * requests; it keeps its thread, and orca_job_cancel still stops it. A paused
+ * job stays paused. INVALID_STATE for a job that is waiting, cancelling or
+ * finished, or of a kind that never polls: a tag write, a projection, and the
+ * one-item fetches. */
 orca_status orca_job_pause(orca_runtime *runtime, orca_handle job);
 /* A running job stays running. Resuming one job of a paused Library leaves
  * the rest held. INVALID_STATE as orca_job_pause. */

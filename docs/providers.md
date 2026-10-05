@@ -56,15 +56,18 @@ not a tuning choice.
   second process, or the next job's Gateway, obeys a block, a quota window
   and the request spacing another one received. Libraries do not share
   blocks.
-- **One process per service.** Before each request a Gateway claims the
-  service's lease in the Library (`provider_leases`) for 120 s, and it
-  releases the lease when its job ends. While another process holds the
-  lease, the request fails with `error.ProviderBusy` without being sent. A
-  matching or submission job then fails and names the busy service
-  (`MatchStats.busy`, `SubmissionOutcome.busy`); the listen worker reports
-  `busy` and tries again 120 s later; `orca-cli` prints, for example,
-  `MusicBrainz is in use by another Orca process`. The lease of a process
-  that crashed is free 120 s after its last request.
+- **One request at a time per service.** A Gateway claims the service's lease
+  in the Library (`provider_leases`) for each request, stores the next request
+  time before sending, and releases the lease when the request, one retry
+  attempt, or its redirect hops end. A request whose timeout would outlast the
+  lease extends it first. Another Gateway, in this or another process, waits
+  for the lease, polling every 250 ms, until its deadline or for at most 120
+  s, and then fails with `error.ProviderBusy` without sending. A matching or
+  submission job then fails and names the busy service (`MatchStats.busy`,
+  `SubmissionOutcome.busy`); the listen worker reports `busy` and tries again
+  120 s later; `orca-cli` prints, for example, `MusicBrainz is in use by
+  another Orca process`. The lease of a process that crashed is free once it
+  runs out, at most 120 s after it was claimed or extended.
 - **Jitter.** Every backoff Orca chooses lasts a random 0.5 to 1.5 times its
   nominal length: the retries inside a call, the rate-limit backoff,
   ListenBrainz delivery's backoff, and the waits of the job retries below.

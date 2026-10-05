@@ -308,8 +308,16 @@ pub const Config = struct {
 const cancel_poll_ms = 100;
 const lease_poll_ms = 250;
 const maximum_inline_hold_ms = 5_000;
+/// What a lease must have left when a request is sent or its state saved, so
+/// the save commits and the request ends before another Gateway may claim
+/// the service.
+const lease_margin_ms: i64 = 20_000;
 
-/// How long a service stays claimed after a Gateway's last request.
+/// How long a claim on a service lasts unless its holder releases it, as it
+/// does once its request ends. It covers the longest a request with the
+/// default timeout holds it, `maximum_inline_hold_ms`, the request and
+/// `max_redirects` hops, with `lease_margin_ms` to spare; a longer request
+/// extends its claim before it is sent.
 pub const lease_duration_ms: i64 = 120_000;
 
 /// A service's rate-limit state, as a `StateStore` keeps it. Times are Unix
@@ -321,9 +329,10 @@ pub const SharedState = struct {
     next_request_ms: ?i64 = null,
 };
 
-/// Where Gateways keep each service's rate-limit state and a lease on
-/// talking to it, so every Gateway over one store obeys the same block and
-/// only one at a time talks to a service. Times are Unix milliseconds.
+/// Where Gateways keep each service's rate-limit state and the lease a
+/// Gateway holds for each request, so every Gateway over one store obeys the
+/// same block and spacing and only one at a time sends to a service. Times
+/// are Unix milliseconds.
 pub const StateStore = struct {
     context: *anyopaque,
     load_fn: *const fn (*anyopaque, []const u8) anyerror!?SharedState,
@@ -391,11 +400,16 @@ pub const Gateway = struct {
     blocked_until_ms: ?i64 = null,
     rate_limit_backoff_ms: u64 = 0,
     lease_owner: ?i64 = null,
+    /// Unix time the lease this Gateway may still hold runs out; null once
+    /// it holds none.
+    lease_expires_ms: ?i64 = null,
+    lease_pinned: bool = false,
     deadline_ms: ?i64 = null,
 
-    /// With `sharing`, claims the service before each request and fails with
-    /// `error.ProviderBusy` while another Gateway over the store holds it,
-    /// at once or, with `deadline_ms`, once the deadline passes.
+    /// With `sharing`, claims the service for each request and releases it
+    /// once the request ends. While another Gateway over the store holds it,
+    /// waits for it, cancellably, until `deadline_ms`, or for at most
+    /// `lease_duration_ms` without one, then fails with `error.ProviderBusy`.
     pub fn execute(
         self: *Gateway,
         allocator: std.mem.Allocator,
@@ -414,10 +428,15 @@ pub const Gateway = struct {
         defer allocator.free(user_agent);
         var attempt: u8 = 0;
         var backoff = self.config.initial_backoff_ms;
-        while (attempt < self.config.maximum_attempts) : (attempt += 1) {
-            try self.claimLease();
-            try self.awaitTurn();
-            const timeout_ms = try self.requestTimeoutMs();
+        while (true) : (attempt += 1) {
+            if (attempt > 0) {
+                try self.sleepCancelable(jittered(self.random, backoff));
+                backoff = @min(backoff *| 2, 60_000);
+            }
+            const last_attempt = attempt + 1 == self.config.maximum_attempts;
+            const timeout_ms = try self.takeTurn();
+            var keep_lease = false;
+            defer if (!keep_lease) self.releaseLease();
             const response = self.transport.perform(allocator, .{
                 .method = method,
                 .url = url,
@@ -430,13 +449,7 @@ pub const Gateway = struct {
             }) catch |err| switch (err) {
                 error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout => return err,
                 error.ConcurrencyUnavailable => return error.InvalidNetworkConfiguration,
-                else => {
-                    if (attempt + 1 == self.config.maximum_attempts)
-                        return error.NetworkUnavailable;
-                    try self.sleepCancelable(jittered(self.random, backoff));
-                    backoff = @min(backoff *| 2, 60_000);
-                    continue;
-                },
+                else => if (last_attempt) return error.NetworkUnavailable else continue,
             };
             const refused = self.recordResponse(response) catch |err| {
                 response.deinit();
@@ -446,20 +459,19 @@ pub const Gateway = struct {
                 response.deinit();
                 return error.RateLimited;
             }
-            if (!retryableStatus(response.status) or attempt + 1 == self.config.maximum_attempts)
+            if (!retryableStatus(response.status) or last_attempt) {
+                keep_lease = self.lease_pinned;
                 return response;
+            }
             response.deinit();
-            try self.sleepCancelable(jittered(self.random, backoff));
-            backoff = @min(backoff *| 2, 60_000);
         }
-        unreachable;
     }
 
     /// A GET under the same rules as `execute` that follows at most
     /// `max_redirects` redirects, each one `allowance` permits from the URL
     /// before it, sending only the user agent to their targets. A redirect it
     /// does not permit fails with `error.RedirectRefused`; one past the limit
-    /// is returned as it came.
+    /// is returned as it came. One lease covers the request and its hops.
     pub fn fetch(
         self: *Gateway,
         allocator: std.mem.Allocator,
@@ -467,6 +479,11 @@ pub const Gateway = struct {
         headers: []const Header,
         allowance: RedirectAllowance,
     ) !Response {
+        self.lease_pinned = true;
+        defer {
+            self.lease_pinned = false;
+            self.releaseLease();
+        }
         var response = try self.execute(allocator, .get, url, null, headers);
         var current_url = try allocator.dupe(u8, url);
         defer allocator.free(current_url);
@@ -485,7 +502,8 @@ pub const Gateway = struct {
 
     fn follow(self: *Gateway, allocator: std.mem.Allocator, target: []const u8) !Response {
         try self.checkCanceled();
-        const timeout_ms = try self.requestTimeoutMs();
+        var timeout_ms = try self.requestTimeoutMs();
+        if (!try self.holdLease(timeout_ms)) timeout_ms = try self.takeTurn();
         const user_agent = try self.config.identity.userAgent(allocator);
         defer allocator.free(user_agent);
         const followed = self.transport.perform(allocator, .{
@@ -523,10 +541,12 @@ pub const Gateway = struct {
     }
 
     /// Holds every request to the service back for `milliseconds`, unless it
-    /// is already blocked for longer, for a failure the caller saw.
+    /// is already blocked for longer, for a failure the caller saw. With
+    /// `sharing`, claims the service to store the block, as a request would.
     pub fn blockFor(self: *Gateway, milliseconds: u64) !void {
         const until = self.clock.nowMs() +| std.math.lossyCast(i64, milliseconds);
         self.blocked_until_ms = if (self.blockedUntilMs()) |current| @max(current, until) else until;
+        defer if (!self.lease_pinned) self.releaseLease();
         try self.saveSharedState();
     }
 
@@ -545,28 +565,75 @@ pub const Gateway = struct {
         self.blocked_until_ms = if (self.blocked_until_ms) |current| @max(current, until) else until;
     }
 
-    /// Lets another Gateway claim the service at once. A lease that cannot be
-    /// released runs out `lease_duration_ms` after its last request.
+    /// Lets another Gateway claim the service at once. Each request releases
+    /// its own lease, so this only retries a release that failed; a lease
+    /// that is never released runs out by itself.
     pub fn releaseLease(self: *Gateway) void {
         const sharing = self.sharing orelse return;
         const owner = self.lease_owner orelse return;
-        sharing.store.release(sharing.service, owner) catch {};
+        if (self.lease_expires_ms == null) return;
+        sharing.store.release(sharing.service, owner) catch return;
+        self.lease_expires_ms = null;
     }
 
     fn claimLease(self: *Gateway) !void {
         const sharing = self.sharing orelse return;
         const owner = self.lease_owner orelse self.random.int(i64);
         self.lease_owner = owner;
+        const until = self.deadline_ms orelse self.clock.nowMs() +| lease_duration_ms;
         while (true) {
             const now = self.wall_clock.nowMs();
-            if (try sharing.store.claim(sharing.service, owner, now, now +| lease_duration_ms)) break;
-            const deadline = self.deadline_ms orelse return error.ProviderBusy;
-            const left = deadline -| self.clock.nowMs();
+            const expires = now +| lease_duration_ms;
+            if (try sharing.store.claim(sharing.service, owner, now, expires)) {
+                self.lease_expires_ms = expires;
+                return;
+            }
+            const left = until -| self.clock.nowMs();
             if (left <= 0) return error.ProviderBusy;
             try self.sleepCancelable(@intCast(@min(left, lease_poll_ms)));
         }
-        try self.loadSharedState();
-        if (self.blockedUntilMs() != null) return error.RateLimited;
+    }
+
+    /// True when this Gateway holds the service for `needed_ms` more with
+    /// `lease_margin_ms` to spare, extending a lease that is too short. False
+    /// when the lease may have run out, so what it loaded under it may be
+    /// stale.
+    fn holdLease(self: *Gateway, needed_ms: u64) !bool {
+        const sharing = self.sharing orelse return true;
+        const owner = self.lease_owner orelse return false;
+        const expires = self.lease_expires_ms orelse return false;
+        const now = self.wall_clock.nowMs();
+        if (expires -| now < lease_margin_ms) return false;
+        const until = now +| std.math.lossyCast(i64, needed_ms) +| lease_margin_ms;
+        if (until <= expires) return true;
+        const extended = @max(until, now +| lease_duration_ms);
+        if (!try sharing.store.claim(sharing.service, owner, now, extended)) {
+            self.lease_expires_ms = null;
+            return false;
+        }
+        self.lease_expires_ms = extended;
+        return true;
+    }
+
+    /// Claims the service and waits for its turn, returning the request's
+    /// timeout. The caller then holds the lease and releases it.
+    fn takeTurn(self: *Gateway) !u64 {
+        errdefer self.releaseLease();
+        while (true) {
+            try self.awaitOwnTurn();
+            try self.claimLease();
+            try self.loadSharedState();
+            if (self.blockedUntilMs() != null) return error.RateLimited;
+            try self.awaitTurn();
+            const timeout_ms = try self.requestTimeoutMs();
+            if (!try self.holdLease(timeout_ms)) continue;
+            self.last_request_ms = self.clock.nowMs();
+            // The next request time is stored before the request is sent, so
+            // a Gateway that claims the service after this one, even once its
+            // lease ran out, waits the interval.
+            try self.saveSharedState();
+            return timeout_ms;
+        }
     }
 
     fn requestTimeoutMs(self: *Gateway) error{Timeout}!u64 {
@@ -578,6 +645,15 @@ pub const Gateway = struct {
 
     fn saveSharedState(self: *Gateway) !void {
         const sharing = self.sharing orelse return;
+        if (!try self.holdLease(0)) {
+            // A save overwrites the stored state, so it is made only under a
+            // lease and over what the store holds; otherwise it could shorten
+            // the next request time or the block another Gateway stored.
+            const backoff_ms = self.rate_limit_backoff_ms;
+            try self.claimLease();
+            try self.loadSharedState();
+            self.rate_limit_backoff_ms = @max(self.rate_limit_backoff_ms, backoff_ms);
+        }
         try sharing.store.save(sharing.service, .{
             .blocked_until_ms = if (self.blocked_until_ms) |until| self.wallFromMonotonic(until) else null,
             .backoff_ms = self.rate_limit_backoff_ms,
@@ -642,21 +718,32 @@ pub const Gateway = struct {
         return @min(milliseconds, self.config.maximum_rate_limit_backoff_ms);
     }
 
-    fn awaitTurn(self: *Gateway) !void {
-        const now = self.clock.nowMs();
+    fn readyAtMs(self: *Gateway, now: i64) ?i64 {
         var ready = now;
         if (self.last_request_ms) |last|
             ready = @max(ready, last +| @as(i64, @intCast(self.config.minimum_interval_ms)));
         if (self.hold_until_ms) |hold| {
-            if (hold - now > maximum_inline_hold_ms) {
-                self.blocked_until_ms = @max(self.blocked_until_ms orelse hold, hold);
-                try self.saveSharedState();
-                return error.RateLimited;
-            }
+            if (hold - now > maximum_inline_hold_ms) return null;
             ready = @max(ready, hold);
         }
+        return ready;
+    }
+
+    fn awaitOwnTurn(self: *Gateway) !void {
+        const now = self.clock.nowMs();
+        const ready = self.readyAtMs(now) orelse return;
         if (ready > now) try self.sleepCancelable(@intCast(ready - now));
-        self.last_request_ms = self.clock.nowMs();
+    }
+
+    fn awaitTurn(self: *Gateway) !void {
+        const now = self.clock.nowMs();
+        const ready = self.readyAtMs(now) orelse {
+            const hold = self.hold_until_ms.?;
+            self.blocked_until_ms = @max(self.blocked_until_ms orelse hold, hold);
+            try self.saveSharedState();
+            return error.RateLimited;
+        };
+        if (ready > now) try self.sleepCancelable(@intCast(ready - now));
     }
 
     fn checkCanceled(self: *Gateway) error{Canceled}!void {

@@ -86,6 +86,109 @@ pub const OffsetClock = struct {
     }
 };
 
+/// A clock several threads share. Time stands still while any thread taking
+/// part runs, and moves to the earliest wake once all of them sleep, so the
+/// threads interleave in simulated time and nothing sleeps on the wall clock.
+/// Each thread taking part calls `leave`, or has it called for it, once it
+/// sleeps no more; none may wait on another while it is not asleep here.
+pub const SimClock = struct {
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    woken: std.Io.Condition = .init,
+    now_ms: i64,
+    wall_offset_ms: i64 = 0,
+    running: u32,
+    wakes: [8]?i64 = @splat(null),
+    rounds: [8]u64 = @splat(0),
+    finished: bool = false,
+
+    pub fn init(io: std.Io, now_ms: i64, wall_offset_ms: i64, participants: u32) SimClock {
+        return .{ .io = io, .now_ms = now_ms, .wall_offset_ms = wall_offset_ms, .running = participants };
+    }
+
+    pub fn clock(self: *SimClock) client.Clock {
+        return .{ .context = self, .now_ms_fn = readNow, .sleep_ms_fn = sleep };
+    }
+
+    pub fn wallClock(self: *SimClock) client.Clock {
+        return .{ .context = self, .now_ms_fn = readWall, .sleep_ms_fn = sleep };
+    }
+
+    pub fn now(self: *SimClock) i64 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.now_ms;
+    }
+
+    pub fn wallNow(self: *SimClock) i64 {
+        return self.wall_offset_ms + self.now();
+    }
+
+    pub fn leave(self: *SimClock) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.finished) return;
+        self.running -= 1;
+        if (self.running == 0) self.advance();
+    }
+
+    /// From now on every sleep passes at once, and the threads asleep wake,
+    /// so a test that stops early can join them.
+    pub fn finish(self: *SimClock) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.finished = true;
+        for (&self.wakes, &self.rounds) |*wake, *round| if (wake.* != null) {
+            wake.* = null;
+            round.* += 1;
+        };
+        self.woken.broadcast(self.io);
+    }
+
+    fn readNow(context: *anyopaque) i64 {
+        const self: *SimClock = @ptrCast(@alignCast(context));
+        return self.now();
+    }
+
+    fn readWall(context: *anyopaque) i64 {
+        const self: *SimClock = @ptrCast(@alignCast(context));
+        return self.wallNow();
+    }
+
+    fn sleep(context: *anyopaque, milliseconds: u64) anyerror!void {
+        const self: *SimClock = @ptrCast(@alignCast(context));
+        if (milliseconds == 0) return;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.finished) {
+            self.now_ms +|= @as(i64, @intCast(milliseconds));
+            return;
+        }
+        const slot = for (self.wakes, 0..) |wake, index| {
+            if (wake == null) break index;
+        } else return error.TooManySleepers;
+        self.wakes[slot] = self.now_ms +| @as(i64, @intCast(milliseconds));
+        const round = self.rounds[slot];
+        self.running -= 1;
+        if (self.running == 0) self.advance();
+        while (self.rounds[slot] == round) self.woken.waitUncancelable(self.io, &self.mutex);
+    }
+
+    fn advance(self: *SimClock) void {
+        var earliest: ?i64 = null;
+        for (self.wakes) |wake| if (wake) |at| {
+            earliest = if (earliest) |current| @min(current, at) else at;
+        };
+        self.now_ms = @max(self.now_ms, earliest orelse return);
+        for (&self.wakes, &self.rounds) |*wake, *round| if (wake.*) |at| if (at <= self.now_ms) {
+            wake.* = null;
+            round.* += 1;
+            self.running += 1;
+        };
+        self.woken.broadcast(self.io);
+    }
+};
+
 pub const Reply = union(enum) {
     respond: Answer,
     fail: anyerror,

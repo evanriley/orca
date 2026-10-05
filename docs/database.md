@@ -1012,11 +1012,13 @@ user edited is sent again for it.
 (`blocked_until_ms`), backoff (`backoff_ms`) and next request time
 (`next_request_ms`, version 24), keyed by service name, so
 every process that opens the Library obeys one block. `provider_leases`
-(version 19) records which process may talk to each service: `owner` is a
-random id and `expires_at` is when the claim lapses. Both tables keep Unix
-milliseconds. `ProviderStateRepository.claimLease` claims in one upsert that
-applies only when the row is absent, expired or already the claimant's, so two
-processes never both hold a service. See
+(version 19) records which Gateway may send the request in flight to each
+service: `owner` is a random id per Gateway and `expires_at` is when the
+claim lapses. A Gateway claims it for each request and deletes it when the
+request ends. Both tables keep Unix milliseconds.
+`ProviderStateRepository.claimLease` claims in one upsert that applies only
+when the row is absent, expired or already the claimant's, so two Gateways
+never both hold a service. See
 [providers.md](providers.md#rules-toward-providers).
 
 `provider_cache` keeps a provider's refusal of a query beside its answers: a

@@ -1427,9 +1427,11 @@ test "while another process holds ListenBrainz nothing is sent, the rows stay du
     defer fixture.stop();
     fixture.gateway.sharing = .{ .store = shared_state.store(&fixture.library.provider_state), .service = service };
     try fixture.enqueueListens(2);
-    try std.testing.expect(try fixture.library.provider_state.claimLease(service, 99, fixture.clock.now(), fixture.clock.now() + network.client.lease_duration_ms));
+    try std.testing.expect(try fixture.library.provider_state.claimLease(service, 99, fixture.clock.now(), fixture.clock.now() + 2 * network.client.lease_duration_ms));
 
+    const waited_from = fixture.clock.now();
     const busy = try fixture.step();
+    try std.testing.expect(fixture.clock.now() - waited_from >= network.client.lease_duration_ms);
     try std.testing.expectEqual(Outcome.deferred, busy.outcome);
     try std.testing.expectEqual(State.busy, fixture.delivery.status().state);
     try std.testing.expectEqual(@as(?u64, @intCast(network.client.lease_duration_ms)), busy.wake_after_ms);

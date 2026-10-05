@@ -139,8 +139,10 @@ names each `Runtime` method the C ABI does not reach and why.
   [providers.md](providers.md).
 - Provider blocks, backoffs, quota windows and request spacing for
   ListenBrainz, MusicBrainz and AcoustID are stored in the Library, so they persist across restarts and bind every
-  process using it, and a per-service lease lets one process at a time talk
-  to each service; another gets `ProviderBusy` without sending. See
+  process using it, and a per-service lease lets one request at a time talk
+  to each service; other jobs and processes wait their turn, and get
+  `ProviderBusy` without sending only when the service stays held past their
+  wait. See
   [providers.md](providers.md#rules-toward-providers).
 - Love and hate for songs, kept in the Library per recording and sent to
   ListenBrainz while scrobbling for recordings with a MusicBrainz recording
@@ -366,11 +368,8 @@ removed.
 
 ### Before 1.0
 
-- Providers take turns. A second job or process that wants a service in use
-  fails with `error.ProviderBusy` instead of waiting its turn, so artist
-  information fails while matching runs. Every request opens a new
-  connection. Back-off a provider asks for stays as it is. Checked by tests
-  with an injected clock.
+- Providers reuse connections. Every request opens a new connection. Back-off
+  a provider asks for stays as it is. Checked by tests with a local server.
 - Signal path truth. Unknown device details must not produce an unqualified
   bit-perfect verdict: zero known reasons currently means eligible, and a
   channel mismatch is not checked. A float32-to-integer device path is not by

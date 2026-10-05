@@ -1512,6 +1512,14 @@
 
 ### Fixed
 
+- **Jobs and processes take turns at a provider.** A Gateway claims a
+  service's lease for each request and releases it when the request ends,
+  instead of holding it for the whole job. A second job or process that wants
+  the service waits its turn, polling every 250 ms, cancellably, until its
+  deadline or for at most 120 s, instead of failing with `error.ProviderBusy`
+  at once. Artist information, lyrics and cover art no longer fail while
+  matching runs. Requests to a service stay at least its interval apart across
+  all of them, and a stored block still stops every one.
 - **Elsewhere on the Artist page lists albums and EPs, each with its cover.**
   It used to list every release group MusicBrainz knows, mostly singles, and
   asked the Cover Art Archive only about the first 24, so most tiles stayed

@@ -2025,7 +2025,7 @@ test "a search MusicBrainz refused counts as refused, and the next job counts it
     try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
 }
 
-test "a matching job fails as busy while another process holds MusicBrainz, and searches once it lets go" {
+test "a matching job waits for MusicBrainz while another process holds it, fails as busy when the hold outlasts the wait, and searches once it lets go" {
     var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -2039,7 +2039,7 @@ test "a matching job fails as busy while another process holds MusicBrainz, and 
         providers.musicbrainz.service,
         99,
         now_ms,
-        now_ms + network.client.lease_duration_ms,
+        now_ms + 2 * network.client.lease_duration_ms,
     ));
 
     const busy = try runtime.startLibraryMatching(library, .{});
@@ -2048,6 +2048,7 @@ test "a matching job fails as busy while another process holds MusicBrainz, and 
     try std.testing.expectEqual(BusyService.musicbrainz, busy_stats.busy);
     try std.testing.expectEqual(@as(u64, 0), busy_stats.tracks_examined);
     try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+    try std.testing.expect(fake.clock.now() >= network.client.lease_duration_ms);
 
     try library_database.provider_state.releaseLease(providers.musicbrainz.service, 99);
     runtime.reapFinishedJobs();
@@ -2738,7 +2739,7 @@ test "a file that fails to decode is not fingerprinted and its Track is still se
     try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM identification_searches WHERE provider = 'acoustid';"));
 }
 
-test "a submission fails as busy while another process holds AcoustID and marks nothing sent" {
+test "a submission fails as busy when another process holds AcoustID past its wait and marks nothing sent" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try writeToneWave(temporary.dir, "chosen.wav", 440);
@@ -2766,7 +2767,7 @@ test "a submission fails as busy while another process holds AcoustID and marks 
         providers.acoustid.service,
         99,
         now_ms,
-        now_ms + network.client.lease_duration_ms,
+        now_ms + 2 * network.client.lease_duration_ms,
     ));
 
     const busy = try runtime.startAcoustIdSubmission(library);
@@ -5086,7 +5087,7 @@ test "a provider block recorded in the Library defers the unit a full interval w
     try std.testing.expectEqual(@as(u32, 1), rig.verify.acoustid.lookups.load(.acquire));
 }
 
-test "a unit that finds AcoustID held by another process is blocked as provider busy for a full interval" {
+test "a unit that finds AcoustID held by another process past its wait is blocked as provider busy for a full interval" {
     var rig: MaintenanceRig = undefined;
     try rig.init("file:orca-maintenance-lease?mode=memory&cache=shared");
     defer rig.deinit();
@@ -5098,7 +5099,7 @@ test "a unit that finds AcoustID held by another process is blocked as provider 
         providers.acoustid.service,
         99,
         now_ms,
-        now_ms + network.client.lease_duration_ms,
+        now_ms + 2 * network.client.lease_duration_ms,
     ));
 
     try rig.enable(library);
@@ -7107,6 +7108,132 @@ test "an Artist's fetch waits for a service another Gateway holds, and is busy o
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.busy, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
     try std.testing.expectEqual(@as(u32, 1), fake.popularity_requests.load(.monotonic));
     try std.testing.expect(fake.clock.now() - started_ms <= artist_info.fetch_deadline_ms + 1_000);
+}
+
+/// MusicBrainz and the services an Artist's fetch asks, answering a
+/// matching job and an Artist's fetch that run at once on one simulated
+/// clock, and noting when each MusicBrainz request was sent and for which.
+const SharedMusicBrainz = struct {
+    matching: FakeMusicBrainz,
+    artist: FakeArtistInfo = .{},
+    http: network.testing.ScriptedTransport = .{},
+    sim: network.testing.SimClock,
+    mutex: std.Io.Mutex = .init,
+    sends: [64]Send = undefined,
+    send_count: usize = 0,
+
+    const Send = struct { at_ms: i64, matching: bool };
+
+    fn hooks(self: *SharedMusicBrainz) MatchingHooks {
+        self.http.responder = .{ .context = self, .respond_fn = respond };
+        return .{
+            .transport = .{ .context = self, .perform_fn = perform },
+            .clock = self.sim.clock(),
+            .wall_clock = self.sim.wallClock(),
+        };
+    }
+
+    fn deinit(self: *SharedMusicBrainz) void {
+        self.http.deinit();
+        self.artist.deinit();
+    }
+
+    fn musicBrainzSends(self: *SharedMusicBrainz) []const Send {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        return self.sends[0..@min(self.send_count, self.sends.len)];
+    }
+
+    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: network.client.Request) anyerror!network.client.Response {
+        const self: *SharedMusicBrainz = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        return self.http.transport().perform(allocator, request);
+    }
+
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, scripted: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *SharedMusicBrainz = @ptrCast(@alignCast(context));
+        const url = exchange.request.url;
+        const for_matching = std.mem.indexOf(u8, url, "/ws/2/recording?") != null or
+            std.mem.indexOf(u8, url, "/ws/2/release/" ++ bryter_layter_mbid) != null;
+        if (std.mem.startsWith(u8, url, providers.musicbrainz.default_server ++ "/")) {
+            if (self.send_count < self.sends.len)
+                self.sends[self.send_count] = .{ .at_ms = self.sim.now(), .matching = for_matching };
+            self.send_count += 1;
+        }
+        return if (for_matching)
+            FakeMusicBrainz.respond(&self.matching, exchange, scripted)
+        else
+            FakeArtistInfo.respond(&self.artist, exchange, scripted);
+    }
+};
+
+test "a matching job and an Artist's fetch take turns at MusicBrainz and both finish" {
+    var shared: SharedMusicBrainz = .{
+        .matching = .{ .answers = &.{
+            .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+            .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+        } },
+        .sim = .init(std.testing.io, 0, FakeMusicBrainz.wall_base_ms, 2),
+    };
+    defer shared.deinit();
+    try shared.artist.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    defer shared.sim.finish();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = shared.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-musicbrainz-turns?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+    _ = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    _ = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    _ = try addMatchTrack(library_database, "Unknown Song", "Nobody", null);
+
+    const fetch = try runtime.startArtistInfoFetch(library, artist, .{});
+    var first_request: runtime_tests.TestDeadline = .init(10_000);
+    while (shared.artist.musicbrainz_requests.load(.acquire) == 0) {
+        if (!first_request.tick()) return error.RequestNeverSent;
+    }
+    const matching = try runtime.startLibraryMatching(library, .{});
+
+    var states: [2]?job.State = .{ null, null };
+    const handles = [2]runtime_module.JobHandle{ fetch, matching };
+    var deadline: runtime_tests.TestDeadline = .init(20_000);
+    while (states[0] == null or states[1] == null) {
+        if (!deadline.tick()) return error.JobDidNotFinish;
+        runtime.reapFinishedJobs();
+        for (&states, handles) |*state, handle| {
+            if (state.* != null) continue;
+            const snapshot = try runtime.jobSnapshotSynced(handle);
+            switch (snapshot.state) {
+                .succeeded, .failed, .cancelled => {
+                    state.* = snapshot.state;
+                    shared.sim.leave();
+                },
+                else => {},
+            }
+        }
+    }
+
+    const stats = try runtime.jobMatchStats(matching);
+    try std.testing.expectEqual(BusyService.none, stats.busy);
+    try std.testing.expectEqual(job.State.succeeded, states[1].?);
+    try std.testing.expectEqual(@as(u64, 2), stats.matched);
+    try std.testing.expectEqual(job.State.succeeded, states[0].?);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runtime.jobArtistInfoOutcome(fetch));
+
+    const sends = shared.musicBrainzSends();
+    try std.testing.expect(sends.len == shared.send_count);
+    var first_matching: ?usize = null;
+    var last_artist: ?usize = null;
+    for (sends, 0..) |send, index| {
+        if (send.matching and first_matching == null) first_matching = index;
+        if (!send.matching) last_artist = index;
+        if (index > 0)
+            try std.testing.expect(send.at_ms - sends[index - 1].at_ms >= providers.musicbrainz.minimum_interval_ms);
+    }
+    try std.testing.expect(first_matching.? < last_artist.?);
 }
 
 test "an Artist's fetch stores its info and counts the store while related artists' photos and covers are still pending" {

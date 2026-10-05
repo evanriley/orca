@@ -108,8 +108,8 @@ defer page.deinit();
   Lyrics, artist info and single-Release info fetches never wait.
   `jobQueuePage(library, allocator)` returns the job holding the slot and the
   waiting ones as `QueuedJob`s, each with the job it waits `after`.
-  `pauseJob(job)` holds a running job at its next cancellation poll, keeping
-  its thread and any provider lease, and `resumeJob(job)` lets it carry on;
+  `pauseJob(job)` holds a running job at its next cancellation poll, between
+  provider requests, keeping its thread, and `resumeJob(job)` lets it carry on;
   a projection or tag write returns `error.JobNotPausable`, a finished job
   `error.JobAlreadyFinished`. `pauseAll(library)` pauses the Library's
   running jobs and holds its waiting jobs, watcher reconciles and idle

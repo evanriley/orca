@@ -170,9 +170,11 @@ waits `after`.
 
 `pauseJob` holds a running Job at its worker's next cancellation poll:
 `CancellationToken.checkpoint` sleeps in 50 ms steps while the token is paused
-and not cancelled. The Job keeps its thread, its place in the slot and any
-provider lease it holds, so nothing else can start in its Library or take its
-gateway lease while it is paused. `resumeJob` lets it carry on from that poll.
+and not cancelled. The Job keeps its thread and its place in the slot, so
+nothing else can start in its Library while it is paused. It pauses between
+provider requests, and a request holds its service's lease only while it runs,
+so other Jobs and processes keep using the services while it is paused.
+`resumeJob` lets it carry on from that poll.
 A projection and a tag write never poll while working, so they are not
 pausable (`error.JobNotPausable`). A Job already finished returns
 `error.JobAlreadyFinished`.
@@ -259,9 +261,9 @@ any other outcome puts it off one whole interval:
 
 At most one unit runs in the process. Each unit ends, however it ends,
 `interval_ms` before the next one is due. A unit that fails because another
-Orca process held a service's lease is reported `provider_busy`. Starting
-playback never cancels a running unit; it only keeps the next one from
-starting.
+Orca process held a service's lease past the unit's wait is reported
+`provider_busy`. Starting playback never cancels a running unit; it only keeps
+the next one from starting.
 
 A unit gives way to the host:
 
