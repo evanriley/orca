@@ -630,6 +630,9 @@ are sniffed or not recognized until then:
   for removing a duplicate copy after Merge Metadata, with trash rows in
   Activity and Change History.
 - Writing the chosen cover into the album folder as `cover.jpg`.
+- A frosted background for the Activity popover, as the command palette
+  and search have. A popover is its own surface, so the window behind it
+  cannot be snapshotted the way an overlay's can.
 - A database change log with inverse payloads, so Change History can undo
   Orca-only edits: metadata edits, accepted matches, chosen covers,
   playlist reorders and removed folders, each with an Undo Orca Edit Only
