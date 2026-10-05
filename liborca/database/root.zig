@@ -12,6 +12,7 @@ pub const RootBinding = library.RootBinding;
 pub const FileBinding = library.FileBinding;
 pub const TrackSummary = repository.TrackSummary;
 pub const TrackInput = repository.TrackInput;
+pub const TrackSeat = repository.TrackSeat;
 pub const TrackPage = repository.TrackPage;
 pub const TrackSort = repository.TrackSort;
 pub const SortDirection = repository.SortDirection;

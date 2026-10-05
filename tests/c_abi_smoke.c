@@ -180,6 +180,12 @@ struct track_capture {
     uint32_t with_rating;
 };
 
+#define PLAYABLE_MIN_MS 100
+
+static int playable(const orca_track_view *track) {
+    return track->has_file && track->has_duration && track->duration_ms >= PLAYABLE_MIN_MS;
+}
+
 static void capture_track(void *context, const orca_track_view *track) {
     struct track_capture *capture = context;
     capture->count += 1;
@@ -187,7 +193,7 @@ static void capture_track(void *context, const orca_track_view *track) {
     if (track->has_rating) capture->with_rating += 1;
     if (track->has_duration && track->duration_ms > 0) capture->with_duration += 1;
     if (track->artist.length != 0) capture->with_artist += 1;
-    if (track->has_file && capture->first_playable_id == 0)
+    if (playable(track) && capture->first_playable_id == 0)
         capture->first_playable_id = track->id;
 }
 
@@ -1012,7 +1018,7 @@ static void capture_queued_track(void *context, const orca_track_view *track) {
 }
 
 static void collect_playable(void *context, const orca_track_view *track) {
-    if (track->has_file) capture_queued_track(context, track);
+    if (playable(track)) capture_queued_track(context, track);
 }
 
 struct queue_order {
@@ -1208,7 +1214,7 @@ struct track_ids {
 
 static void collect_playable_ids(void *context, const orca_track_view *track) {
     struct track_ids *capture = context;
-    if (track->has_file && capture->count < 64) {
+    if (playable(track) && capture->count < 64) {
         capture->ids[capture->count] = track->id;
         capture->count += 1;
     }

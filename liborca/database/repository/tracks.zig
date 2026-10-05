@@ -17,7 +17,7 @@ const WriteLane = @import("write_lane.zig").WriteLane;
 const search_text = @import("search.zig");
 const releases = @import("releases.zig");
 
-/// The projection's input. A Track is a position on a Release, so this is
+/// The projection's input: a Track's values at its position on a Release,
 /// written by `library/projection.zig` after resolving artists, releases and
 /// recordings — never by the scanner, which only observes files.
 pub const TrackInput = struct {
@@ -41,6 +41,30 @@ pub const TrackInput = struct {
     disc_total: ?i64 = null,
     explicit: metadata.Explicit = .unknown,
 };
+
+/// A Track `TrackRepository.seatTracksLocked` writes: the row `id` names,
+/// wherever it stands, or a new row when `id` is null.
+pub const TrackSeat = struct {
+    id: ?i64 = null,
+    track: TrackInput,
+};
+
+fn bindSeated(statement: sqlite.Statement, track: TrackInput) !void {
+    try statement.bindOptionalInt64(2, track.recording_id);
+    try statement.bindOptionalInt64(3, track.release_id);
+    try statement.bindText(4, track.title);
+    try statement.bindText(5, track.artist);
+    try statement.bindText(6, track.album);
+    try statement.bindText(7, track.album_artist);
+    try statement.bindOptionalInt64(8, track.duration_ms);
+    try statement.bindOptionalInt64(9, track.track_number);
+    try statement.bindOptionalInt64(10, track.disc_number);
+    try statement.bindOptionalInt64(11, track.preferred_file_id);
+    try statement.bindOptionalInt64(12, track.artist_id);
+    try statement.bindOptionalInt64(13, track.track_total);
+    try statement.bindOptionalInt64(14, track.disc_total);
+    try statement.bindInt64(15, @intFromEnum(track.explicit));
+}
 
 /// Everything playback needs to open a Track's bytes without a second query.
 pub const ResolvedLocation = struct {
@@ -268,11 +292,12 @@ pub const TrackRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
-    /// Upsert by position, because a Track *is* a position on a Release: the
-    /// same `(release_id, disc, track)` re-projected must update the row it
-    /// already has rather than duplicate it. Rows without a Release or a track
-    /// number have no position to collide on and always insert, which is what
-    /// `tracks_position` (`COALESCE(track_number, -id)`) encodes.
+    /// Upsert by position: a row already at `(release_id, disc, track)` takes
+    /// the new values, whatever it presented before, and anything else
+    /// inserts. Rows without a Release or a track number have no position to
+    /// collide on and always insert, which is what `tracks_position`
+    /// (`COALESCE(track_number, -id)`) encodes. The projection does not use
+    /// this: it keeps a Track with its file through `seatTracksLocked`.
     pub fn upsertTracks(self: *TrackRepository, tracks: []const TrackInput) !void {
         if (tracks.len == 0) return;
         self.write_lane.acquire();
@@ -284,8 +309,7 @@ pub const TrackRepository = struct {
     }
 
     /// Same as `upsertTracks` for a caller that already holds the write lane
-    /// and an open transaction. The projection resolves artists, releases,
-    /// recordings and tracks for one folder as a single bounded commit.
+    /// and an open transaction.
     pub fn upsertTracksLocked(self: *TrackRepository, tracks: []const TrackInput) !void {
         if (tracks.len == 0) return;
         var update = try self.db.prepare(
@@ -341,6 +365,60 @@ pub const TrackRepository = struct {
             try insert.bindInt64(14, @intFromEnum(track.explicit));
             if (try insert.step() != .done) return error.SqlFailed;
             try insert.reset();
+        }
+    }
+
+    /// Writes each Track by id at the position its `track` states, inserting
+    /// those without an id and storing the id each got. Rows changing
+    /// position are parked first with no track number, which
+    /// `tracks_position` keeps unique by id, so rows trading positions never
+    /// collide. Every position written must be vacant or held by a row in
+    /// `seats`. The caller holds the write lane and an open transaction.
+    pub fn seatTracksLocked(self: *TrackRepository, seats: []TrackSeat) !void {
+        if (seats.len == 0) return;
+        var park = try self.db.prepare(
+            \\UPDATE tracks SET release_id = ?2, disc_number = ?3, track_number = NULL
+            \\WHERE id = ?1 AND NOT (release_id IS ?2 AND COALESCE(disc_number, 1) = COALESCE(?3, 1)
+            \\  AND track_number IS ?4);
+        );
+        defer park.deinit();
+        for (seats) |seat| {
+            const id = seat.id orelse continue;
+            try park.bindInt64(1, id);
+            try park.bindOptionalInt64(2, seat.track.release_id);
+            try park.bindOptionalInt64(3, seat.track.disc_number);
+            try park.bindOptionalInt64(4, seat.track.track_number);
+            if (try park.step() != .done) return error.SqlFailed;
+            try park.reset();
+        }
+
+        var update = try self.db.prepare(
+            \\UPDATE tracks SET
+            \\    recording_id=?2, release_id=?3, title=?4, artist=?5, album=?6, album_artist=?7,
+            \\    duration_ms=?8, track_number=?9, disc_number=?10, preferred_file_id=?11, artist_id=?12,
+            \\    track_total=?13, disc_total=?14, explicit=?15
+            \\WHERE id=?1;
+        );
+        defer update.deinit();
+        var insert = try self.db.prepare(
+            \\INSERT INTO tracks(
+            \\    recording_id, release_id, title, artist, album, album_artist,
+            \\    duration_ms, track_number, disc_number, preferred_file_id, artist_id,
+            \\    track_total, disc_total, explicit
+            \\) VALUES (?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);
+        );
+        defer insert.deinit();
+        for (seats) |*seat| {
+            const statement = if (seat.id != null) update else insert;
+            if (seat.id) |id| try statement.bindInt64(1, id);
+            try bindSeated(statement, seat.track);
+            if (try statement.step() != .done) return error.SqlFailed;
+            if (seat.id == null) {
+                seat.id = self.db.lastInsertRowId();
+            } else if (self.db.changes() == 0) {
+                return error.TrackNotFound;
+            }
+            try statement.reset();
         }
     }
 
@@ -1932,4 +2010,53 @@ test "quotes and FTS5 operators in Track search text are matched as text, never 
     }
     const too_long: [search_text.max_search_text + 1]u8 = @splat('a');
     try std.testing.expectError(error.SearchTextTooLong, library.tracks.search(std.testing.allocator, &too_long, .{ .limit = 8 }));
+}
+
+test "seating Tracks by id lets them trade positions and keep their ids, and refuses an id with no row" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-seat?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const release_id = try library.releases.upsert(.{ .release_key = "seat", .title = "Seat" });
+    try library.tracks.upsertTracks(&.{
+        .{ .title = "One", .release_id = release_id, .track_number = 1 },
+        .{ .title = "Two", .release_id = release_id, .track_number = 2 },
+    });
+    var by_number = try library.database.prepare("SELECT id FROM tracks ORDER BY track_number;");
+    defer by_number.deinit();
+    var ids: [2]i64 = undefined;
+    for (&ids) |*id| {
+        try std.testing.expectEqual(sqlite.Step.row, try by_number.step());
+        id.* = by_number.columnInt64(0);
+    }
+    try by_number.reset();
+
+    var seats = [_]TrackSeat{
+        .{ .id = ids[0], .track = .{ .title = "One", .release_id = release_id, .track_number = 2 } },
+        .{ .id = ids[1], .track = .{ .title = "Two", .release_id = release_id, .track_number = 1 } },
+        .{ .track = .{ .title = "Three", .release_id = release_id, .track_number = 3 } },
+    };
+    library.write_lane.acquire();
+    defer library.write_lane.release();
+    try library.database.exec("BEGIN IMMEDIATE;");
+    errdefer library.database.exec("ROLLBACK;") catch {};
+    try library.tracks.seatTracksLocked(&seats);
+    var missing = [_]TrackSeat{.{ .id = seats[2].id.? + 1, .track = .{ .title = "Gone", .release_id = release_id } }};
+    try std.testing.expectError(error.TrackNotFound, library.tracks.seatTracksLocked(&missing));
+    try library.database.exec("COMMIT;");
+
+    var number_of = try library.database.prepare("SELECT track_number FROM tracks WHERE id = ?1;");
+    defer number_of.deinit();
+    for ([_]i64{ ids[0], ids[1], seats[2].id.? }, [_]i64{ 2, 1, 3 }) |id, number| {
+        try number_of.bindInt64(1, id);
+        try std.testing.expectEqual(sqlite.Step.row, try number_of.step());
+        try std.testing.expectEqual(number, number_of.columnInt64(0));
+        try number_of.reset();
+    }
+    var count = try library.database.prepare("SELECT count(*) FROM tracks;");
+    defer count.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 3), count.columnInt64(0));
 }

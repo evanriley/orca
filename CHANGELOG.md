@@ -1498,6 +1498,12 @@
 
 ### Fixed
 
+- **Track ids follow their song.** Projection claims each Track by its file,
+  then by its recording, and seats it by id, so files that swap, rotate or
+  shift track numbers, as Match Album corrections do, keep their Tracks with
+  their queue entries, ratings, love and hate, playlist entries, lyrics and
+  user genres. A file moving onto a position another Track holds keeps its own
+  Track, and the Track it displaces is removed.
 - **Tag writes, undo and recovery prove a file unchanged by its whole
   content.** A file's identity now ends in a BLAKE3-256 hash of every byte,
   stored in the mutation journal (migration 56). A plan approved for one

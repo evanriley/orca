@@ -45,9 +45,11 @@ pub const Result = struct {
     /// Files re-seated because a different performance already held the track
     /// number they stated.
     displaced_positions: u64 = 0,
-    /// Rows moved, id kept, to the vacant position their file now projects to.
+    /// Tracks that kept their id and changed position or Release, because the
+    /// file they present now projects there.
     tracks_moved: u64 = 0,
-    /// Rows deleted because the files that backed them now project elsewhere.
+    /// Rows deleted because no position claimed them: their files now present
+    /// other Tracks or none, or another Track took their position.
     tracks_pruned: u64 = 0,
     releases_pruned: u64 = 0,
     artists_pruned: u64 = 0,
@@ -148,106 +150,124 @@ fn exists(statement: *database.sqlite.Statement, id: i64) !bool {
     return try statement.step() == .row;
 }
 
-/// A Track position this run wrote, which pruning must leave alone.
-const WrittenPosition = struct { release_id: i64, disc: i64, number: i64 };
-
-fn containsPosition(written: []const WrittenPosition, position: WrittenPosition) bool {
-    for (written) |candidate| if (std.meta.eql(candidate, position)) return true;
-    return false;
-}
-
 const Vacated = struct {
     releases: std.ArrayList(i64) = .empty,
     artists: std.ArrayList(i64) = .empty,
     moved: std.ArrayList(MovedTrack) = .empty,
 
-    fn record(self: *Vacated, allocator: std.mem.Allocator, file_id: i64, release_id: i64, artist_id: ?i64) !void {
-        try self.releases.append(allocator, release_id);
-        try self.moved.append(allocator, .{ .from_release_id = release_id, .file_id = file_id });
+    fn record(self: *Vacated, allocator: std.mem.Allocator, file_id: ?i64, release_id: ?i64, artist_id: ?i64) !void {
+        if (release_id) |id| {
+            try self.releases.append(allocator, id);
+            if (file_id) |file| try self.moved.append(allocator, .{ .from_release_id = id, .file_id = file });
+        }
         if (artist_id) |id| try self.artists.append(allocator, id);
     }
 };
 
-/// Moves a file's existing Track to the vacant position the file now projects
-/// to, so a retag or a regrouping keeps the Track id every queue, listen,
-/// lyric and frontend holds.
-const TrackMover = struct {
-    occupied: database.sqlite.Statement,
-    candidates: database.sqlite.Statement,
-    move: database.sqlite.Statement,
+/// An existing Track a position claimed, and where it stood before.
+const Claim = struct {
+    track_id: i64,
+    release_id: ?i64,
+    disc: i64,
+    number: ?i64,
+    artist_id: ?i64,
+    recording_id: ?i64,
 
-    fn prepare(db: database.sqlite.Database) !TrackMover {
-        var occupied = try db.prepare(
-            "SELECT 1 FROM tracks WHERE release_id = ?1 AND COALESCE(disc_number, 1) = ?2 AND track_number = ?3;",
-        );
-        errdefer occupied.deinit();
-        var candidates = try db.prepare(
-            \\SELECT id, release_id, COALESCE(disc_number, 1), track_number, artist_id
-            \\FROM tracks WHERE preferred_file_id = ?1 ORDER BY id;
-        );
-        errdefer candidates.deinit();
+    fn moves(self: Claim, seat: Seat) bool {
+        return self.release_id != seat.release_id or self.disc != seat.disc or self.number != seat.number;
+    }
+};
+
+/// Matches a folder's positions to the Tracks they already have. A Track
+/// follows the file it presents: a position takes the Track whose preferred
+/// file is one of its members, on any Release, and failing that a Track on its
+/// own Release presenting the same recording. Each Track is claimed at most
+/// once per folder, so no two positions share a row, and pruning leaves every
+/// claimed one alone.
+const TrackClaims = struct {
+    claimed: std.AutoHashMapUnmanaged(i64, void) = .empty,
+    by_file: database.sqlite.Statement,
+    by_recording: database.sqlite.Statement,
+
+    const select_claim =
+        "SELECT id, release_id, COALESCE(disc_number, 1), track_number, artist_id, recording_id FROM tracks ";
+
+    fn prepare(db: database.sqlite.Database) !TrackClaims {
+        var by_file = try db.prepare(select_claim ++ "WHERE preferred_file_id = ?1 ORDER BY id;");
+        errdefer by_file.deinit();
         return .{
-            .occupied = occupied,
-            .candidates = candidates,
-            .move = try db.prepare(
-                "UPDATE tracks SET release_id = ?2, disc_number = ?3, track_number = ?4 WHERE id = ?1;",
-            ),
+            .by_file = by_file,
+            .by_recording = try db.prepare(select_claim ++ "WHERE release_id = ?1 AND recording_id = ?2 ORDER BY id;"),
         };
     }
 
-    fn deinit(self: *TrackMover) void {
-        self.occupied.deinit();
-        self.candidates.deinit();
-        self.move.deinit();
+    fn deinit(self: *TrackClaims) void {
+        self.by_file.deinit();
+        self.by_recording.deinit();
     }
 
-    /// The row moved is the file's lowest-id Track at a position this run has
-    /// not written, and only onto a position no row holds, so `tracks_position`
-    /// cannot be violated. Returns whether a row moved.
-    fn moveOnto(
-        self: *TrackMover,
-        allocator: std.mem.Allocator,
-        file_id: i64,
-        target: WrittenPosition,
-        written: []const WrittenPosition,
-        vacated: *Vacated,
-    ) !bool {
-        try self.occupied.bindInt64(1, target.release_id);
-        try self.occupied.bindInt64(2, target.disc);
-        try self.occupied.bindInt64(3, target.number);
-        const taken = try self.occupied.step() == .row;
-        try self.occupied.reset();
-        if (taken) return false;
+    fn contains(self: *const TrackClaims, track_id: i64) bool {
+        return self.claimed.contains(track_id);
+    }
 
-        const Candidate = struct { track_id: i64, from: WrittenPosition, artist_id: ?i64 };
-        var chosen: ?Candidate = null;
-        try self.candidates.bindInt64(1, file_id);
-        while (try self.candidates.step() == .row) {
-            const from: WrittenPosition = .{
-                .release_id = self.candidates.columnInt64(1),
-                .disc = self.candidates.columnInt64(2),
-                .number = self.candidates.columnInt64(3),
-            };
-            if (containsPosition(written, from)) continue;
-            chosen = .{
-                .track_id = self.candidates.columnInt64(0),
-                .from = from,
-                .artist_id = if (self.candidates.columnIsNull(4)) null else self.candidates.columnInt64(4),
-            };
-            break;
+    /// The preferred member's Track first, then the other members' in order.
+    fn byMembers(self: *TrackClaims, allocator: std.mem.Allocator, entries: []const Entry, members: []const usize) !?Claim {
+        const preferred = bestEncoding(entries, members);
+        if (try self.byFile(allocator, entries[preferred].file_id)) |claim| return claim;
+        for (members) |index| {
+            if (index == preferred) continue;
+            if (try self.byFile(allocator, entries[index].file_id)) |claim| return claim;
         }
-        try self.candidates.reset();
-        const candidate = chosen orelse return false;
-
-        try vacated.record(allocator, file_id, candidate.from.release_id, candidate.artist_id);
-        try self.move.bindInt64(1, candidate.track_id);
-        try self.move.bindInt64(2, target.release_id);
-        try self.move.bindInt64(3, target.disc);
-        try self.move.bindInt64(4, target.number);
-        if (try self.move.step() != .done) return error.SqlFailed;
-        try self.move.reset();
-        return true;
+        return null;
     }
+
+    fn byFile(self: *TrackClaims, allocator: std.mem.Allocator, file_id: i64) !?Claim {
+        try self.by_file.bindInt64(1, file_id);
+        return self.first(allocator, &self.by_file);
+    }
+
+    fn byRecording(self: *TrackClaims, allocator: std.mem.Allocator, release_id: i64, recording_id: i64) !?Claim {
+        try self.by_recording.bindInt64(1, release_id);
+        try self.by_recording.bindInt64(2, recording_id);
+        return self.first(allocator, &self.by_recording);
+    }
+
+    fn first(self: *TrackClaims, allocator: std.mem.Allocator, statement: *database.sqlite.Statement) !?Claim {
+        defer statement.reset() catch {};
+        while (try statement.step() == .row) {
+            const track_id = statement.columnInt64(0);
+            if (self.claimed.contains(track_id)) continue;
+            try self.claimed.put(allocator, track_id, {});
+            return .{
+                .track_id = track_id,
+                .release_id = optionalInt64(statement.*, 1),
+                .disc = statement.columnInt64(2),
+                .number = optionalInt64(statement.*, 3),
+                .artist_id = optionalInt64(statement.*, 4),
+                .recording_id = optionalInt64(statement.*, 5),
+            };
+        }
+        return null;
+    }
+};
+
+/// One position a folder projects to, matched before any Track is written.
+const Seat = struct {
+    release_id: i64,
+    disc: i64,
+    number: i64,
+    claim: ?Claim,
+    genres: []const []const u8,
+};
+
+/// A `(folder, album key)` group resolved to its positions and the Tracks its
+/// files claimed, before any Track is written.
+const GroupPlan = struct {
+    identity: ReleaseIdentity,
+    release_id: i64,
+    entries: []Entry,
+    positions: []Position,
+    claims: []?Claim,
 };
 
 /// A `(folder, album key)` group's resolved release identity.
@@ -477,31 +497,24 @@ pub const Projection = struct {
         return result;
     }
 
-    /// Deletes the Tracks this folder's files used to back and no longer do.
-    ///
-    /// A Track is a position on a Release. A file whose tags now put it on a
-    /// vacant position takes its row along (`TrackMover`), but one that lands
-    /// on a position another row already holds takes that row over, and the
-    /// row it backed before would otherwise stay listed with nothing behind
-    /// it. Only rows whose preferred file is in this folder are candidates,
-    /// and only if this run did not just write their position. Releases and
-    /// Artists those rows, or the moved ones, referenced are then deleted if
-    /// nothing else still references them. Everything deleted here is derived,
-    /// and the next projection rebuilds it.
+    /// Deletes the Tracks this folder's files used to back and no longer do:
+    /// rows whose preferred file is one of `entries` and which no position
+    /// claimed, because that file now presents another Track or none.
+    /// Releases and Artists those rows, or the moved and evicted ones,
+    /// referenced are then deleted if nothing else still references them.
+    /// Everything deleted here is derived, and the next projection rebuilds
+    /// it.
     fn pruneStale(
         self: *Projection,
         allocator: std.mem.Allocator,
         entries: []const Entry,
-        written: []const WrittenPosition,
+        claims: *const TrackClaims,
         vacated: *Vacated,
         genres: *database.GenreWriter,
         result: *Result,
     ) !void {
         const db = self.library.database;
-        var candidates = try db.prepare(
-            \\SELECT id, release_id, COALESCE(disc_number, 1), track_number, artist_id
-            \\FROM tracks WHERE preferred_file_id = ?1;
-        );
+        var candidates = try db.prepare("SELECT id, release_id, artist_id FROM tracks WHERE preferred_file_id = ?1;");
         defer candidates.deinit();
         var delete_track = try db.prepare("DELETE FROM tracks WHERE id = ?1;");
         defer delete_track.deinit();
@@ -510,15 +523,10 @@ pub const Projection = struct {
             try candidates.bindInt64(1, entry.file_id);
             var stale: std.ArrayList(i64) = .empty;
             while (try candidates.step() == .row) {
-                const position: WrittenPosition = .{
-                    .release_id = candidates.columnInt64(1),
-                    .disc = candidates.columnInt64(2),
-                    .number = candidates.columnInt64(3),
-                };
-                if (containsPosition(written, position)) continue;
-                try stale.append(allocator, candidates.columnInt64(0));
-                const artist_id: ?i64 = if (candidates.columnIsNull(4)) null else candidates.columnInt64(4);
-                try vacated.record(allocator, entry.file_id, position.release_id, artist_id);
+                const track_id = candidates.columnInt64(0);
+                if (claims.contains(track_id)) continue;
+                try stale.append(allocator, track_id);
+                try vacated.record(allocator, entry.file_id, optionalInt64(candidates, 1), optionalInt64(candidates, 2));
             }
             try candidates.reset();
             for (stale.items) |track_id| {
@@ -671,25 +679,32 @@ pub const Projection = struct {
         errdefer self.library.database.exec("ROLLBACK;") catch {};
         var genres: database.GenreWriter = try .init(self.library.database);
         defer genres.deinit();
+        var claims: TrackClaims = try .prepare(self.library.database);
+        defer claims.deinit();
 
-        var mover: TrackMover = try .prepare(self.library.database);
-        defer mover.deinit();
-
-        var written: std.ArrayList(WrittenPosition) = .empty;
-        var vacated: Vacated = .{};
-        var foreign: std.ArrayList(Entry) = .empty;
+        // Every group claims its files' Tracks before any group claims by
+        // recording or writes: a file can leave one group's Release for
+        // another's in one edit, and the group handled first would otherwise
+        // take or evict the Track that file still presents.
+        var plans: std.ArrayList(GroupPlan) = .empty;
         var start: usize = 0;
         while (start < projected.len) {
             var end = start + 1;
             while (end < projected.len and
                 std.mem.eql(u8, projected[end].album_key, projected[start].album_key)) end += 1;
-            try self.projectGroup(allocator, folder, projected[start..end], entries, &foreign, &written, &mover, &vacated, &genres, result);
+            try plans.append(allocator, try self.planGroup(allocator, folder, projected[start..end], entries, &claims, result));
             result.groups_projected += 1;
             start = end;
         }
+        var seats: std.ArrayList(Seat) = .empty;
+        var writes: std.ArrayList(database.TrackSeat) = .empty;
+        var foreign: std.ArrayList(Entry) = .empty;
+        for (plans.items) |plan| try self.resolveGroup(allocator, plan, &claims, &seats, &writes, &foreign, result);
+        var vacated: Vacated = .{};
+        try self.writeTracks(allocator, seats.items, writes.items, &claims, &vacated, &genres, result);
         for (entries) |entry| if (entry.unreadable) try self.clearProjectionIssues(entry.file_id);
         const backing = try std.mem.concat(allocator, Entry, &.{ entries, foreign.items });
-        try self.pruneStale(allocator, backing, written.items, &vacated, &genres, result);
+        try self.pruneStale(allocator, backing, &claims, &vacated, &genres, result);
         try self.settleArtwork(allocator, projected, vacated.releases.items);
         try self.library.database.exec("COMMIT;");
     }
@@ -728,6 +743,8 @@ pub const Projection = struct {
             \\WHERE l.file_id IN (
             \\  SELECT f2.id FROM tracks r JOIN files f2 ON f2.recording_id = r.recording_id
             \\  WHERE r.release_id = ?1
+            \\  UNION ALL
+            \\  SELECT r.preferred_file_id FROM tracks r WHERE r.release_id = ?1
             \\)
             \\AND NOT (l.volume_id = ?2 AND rtrim(l.uri, replace(l.uri, '/', '')) = ?3)
             \\ORDER BY l.file_id, l.state = 'present' DESC, l.uri;
@@ -875,20 +892,17 @@ pub const Projection = struct {
         return entries.toOwnedSlice(allocator);
     }
 
-    /// Resolve and write one `(folder, album key)` group.
-    fn projectGroup(
+    /// Resolves one `(folder, album key)` group's Release and positions, and
+    /// claims the Tracks its files present.
+    fn planGroup(
         self: *Projection,
         allocator: std.mem.Allocator,
         folder: Folder,
         local: []Entry,
         folder_files: []const Entry,
-        foreign_files: *std.ArrayList(Entry),
-        written: *std.ArrayList(WrittenPosition),
-        mover: *TrackMover,
-        vacated: *Vacated,
-        genres: *database.GenreWriter,
+        claims: *TrackClaims,
         result: *Result,
-    ) !void {
+    ) !GroupPlan {
         const identity = try self.resolveRelease(allocator, folder, local);
         // The album artist is resolved *before* the release, because the
         // release now carries the Artist row it is filed under rather than
@@ -922,47 +936,71 @@ pub const Projection = struct {
         };
         try assignPositions(allocator, entries);
         const positions = try groupByPosition(allocator, entries);
+        const held = try allocator.alloc(?Claim, positions.len);
+        for (positions, held) |position, *claim|
+            claim.* = try claims.byMembers(allocator, entries, position.entries.items);
+        return .{
+            .identity = identity,
+            .release_id = release_id,
+            .entries = entries,
+            .positions = positions,
+            .claims = held,
+        };
+    }
 
-        var tracks: std.ArrayList(database.TrackInput) = .empty;
-        var track_genres: std.ArrayList([]const []const u8) = .empty;
-        for (positions) |position| {
+    /// Resolves each of a group's positions to the Track it writes, and
+    /// settles its files' recordings and health issues.
+    fn resolveGroup(
+        self: *Projection,
+        allocator: std.mem.Allocator,
+        plan: GroupPlan,
+        claims: *TrackClaims,
+        seats: *std.ArrayList(Seat),
+        writes: *std.ArrayList(database.TrackSeat),
+        foreign_files: *std.ArrayList(Entry),
+        result: *Result,
+    ) !void {
+        const entries = plan.entries;
+        const identity = plan.identity;
+        for (plan.positions, plan.claims) |position, held| {
             const members = position.entries.items;
             const lead = &entries[members[0]];
             const artist_id = try self.ensureArtist(allocator, lead.artist, lead.artist_mbid);
 
-            const recording_id = try self.resolveRecording(allocator, entries, members, .{
-                .release_id = release_id,
-                .disc = position.disc,
-                .number = position.number,
-            });
+            const recording_id = try self.resolveRecording(entries, members, if (held) |claim| claim.recording_id else null);
+            const claim = held orelse try claims.byRecording(allocator, plan.release_id, recording_id);
             const preferred = &entries[bestEncoding(entries, members)];
-            try written.append(allocator, .{
-                .release_id = release_id,
+            try seats.append(allocator, .{
+                .release_id = plan.release_id,
                 .disc = position.disc,
                 .number = position.number,
+                .claim = claim,
+                .genres = statedGenres(entries, members, preferred),
             });
-            try tracks.append(allocator, .{
-                .recording_id = recording_id,
-                .release_id = release_id,
-                .artist_id = artist_id,
-                .title = lead.title,
-                .artist = lead.artist,
-                .album = identity.title,
-                .album_artist = identity.album_artist,
-                .duration_ms = preferred.duration_ms,
-                .track_number = position.number,
-                .disc_number = position.disc,
-                .preferred_file_id = preferred.file_id,
-                .track_total = statedTotal(entries, members, preferred, .track) orelse
-                    countedTrackTotal(positions, position.disc),
-                .disc_total = statedTotal(entries, members, preferred, .disc) orelse identity.disc_count,
-                .explicit = statedAdvisory(entries, members, preferred),
+            try writes.append(allocator, .{
+                .id = if (claim) |existing| existing.track_id else null,
+                .track = .{
+                    .recording_id = recording_id,
+                    .release_id = plan.release_id,
+                    .artist_id = artist_id,
+                    .title = lead.title,
+                    .artist = lead.artist,
+                    .album = identity.title,
+                    .album_artist = identity.album_artist,
+                    .duration_ms = preferred.duration_ms,
+                    .track_number = position.number,
+                    .disc_number = position.disc,
+                    .preferred_file_id = preferred.file_id,
+                    .track_total = statedTotal(entries, members, preferred, .track) orelse
+                        countedTrackTotal(plan.positions, position.disc),
+                    .disc_total = statedTotal(entries, members, preferred, .disc) orelse identity.disc_count,
+                    .explicit = statedAdvisory(entries, members, preferred),
+                },
             });
-            try track_genres.append(allocator, statedGenres(entries, members, preferred));
 
             for (members) |index| {
                 const entry = &entries[index];
-                entry.release_id = release_id;
+                entry.release_id = plan.release_id;
                 try self.library.files.setRecordingLocked(entry.file_id, recording_id);
                 try self.library.health_issues.settleLocked(
                     entry.file_id,
@@ -1009,15 +1047,71 @@ pub const Projection = struct {
                 result.files_projected += 1;
             }
         }
-        for (positions, tracks.items) |position, track| {
-            const target: WrittenPosition = .{ .release_id = release_id, .disc = position.disc, .number = position.number };
-            if (try mover.moveOnto(allocator, track.preferred_file_id.?, target, written.items, vacated))
-                result.tracks_moved += 1;
+    }
+
+    /// Writes every position the folder projects to. A row standing on one
+    /// that no position claimed is parked, and deleted as pruning would once
+    /// the rest are seated by id, so each Track keeps the file it presents
+    /// wherever that file now lands.
+    fn writeTracks(
+        self: *Projection,
+        allocator: std.mem.Allocator,
+        seats: []const Seat,
+        writes: []database.TrackSeat,
+        claims: *TrackClaims,
+        vacated: *Vacated,
+        genres: *database.GenreWriter,
+        result: *Result,
+    ) !void {
+        const db = self.library.database;
+        var occupant = try db.prepare(
+            \\SELECT id, preferred_file_id, artist_id FROM tracks
+            \\WHERE release_id = ?1 AND COALESCE(disc_number, 1) = ?2 AND track_number = ?3;
+        );
+        defer occupant.deinit();
+        var park = try db.prepare("UPDATE tracks SET track_number = NULL WHERE id = ?1;");
+        defer park.deinit();
+        var delete_track = try db.prepare("DELETE FROM tracks WHERE id = ?1;");
+        defer delete_track.deinit();
+        const Resident = struct { track_id: i64, file_id: ?i64, artist_id: ?i64 };
+        var evicted: std.ArrayList(Resident) = .empty;
+        for (seats) |seat| {
+            try occupant.bindInt64(1, seat.release_id);
+            try occupant.bindInt64(2, seat.disc);
+            try occupant.bindInt64(3, seat.number);
+            const found: ?Resident = if (try occupant.step() == .row) .{
+                .track_id = occupant.columnInt64(0),
+                .file_id = optionalInt64(occupant, 1),
+                .artist_id = optionalInt64(occupant, 2),
+            } else null;
+            try occupant.reset();
+            const resident = found orelse continue;
+            if (claims.contains(resident.track_id)) continue;
+            try vacated.record(allocator, resident.file_id, seat.release_id, resident.artist_id);
+            try park.bindInt64(1, resident.track_id);
+            if (try park.step() != .done) return error.SqlFailed;
+            try park.reset();
+            try evicted.append(allocator, resident);
         }
-        try self.library.tracks.upsertTracksLocked(tracks.items);
-        for (positions, track_genres.items) |position, values|
-            try genres.projectAt(allocator, release_id, position.disc, position.number, values);
-        result.tracks_written += @intCast(tracks.items.len);
+        for (seats, writes) |seat, write| {
+            const claim = seat.claim orelse continue;
+            if (!claim.moves(seat)) continue;
+            try vacated.record(allocator, write.track.preferred_file_id, claim.release_id, claim.artist_id);
+            result.tracks_moved += 1;
+        }
+        try self.library.tracks.seatTracksLocked(writes);
+        for (seats, writes) |seat, write| {
+            try claims.claimed.put(allocator, write.id.?, {});
+            try genres.projectAt(allocator, seat.release_id, seat.disc, seat.number, seat.genres);
+        }
+        for (evicted.items) |resident| {
+            if (resident.file_id) |file_id| try genres.carryUser(resident.track_id, file_id);
+            try delete_track.bindInt64(1, resident.track_id);
+            if (try delete_track.step() != .done) return error.SqlFailed;
+            try delete_track.reset();
+            result.tracks_pruned += 1;
+        }
+        result.tracks_written += @intCast(writes.len);
     }
 
     /// Resolve one Artist row and hand back its id.
@@ -1145,13 +1239,11 @@ pub const Projection = struct {
     /// what keeps a reprojection from orphaning analysis attached to them.
     fn resolveRecording(
         self: *Projection,
-        allocator: std.mem.Allocator,
         entries: []const Entry,
         members: []const usize,
-        position: WrittenPosition,
+        claimed: ?i64,
     ) !i64 {
-        _ = allocator;
-        const held = try self.heldRecording(entries, members, position);
+        const held = heldRecording(entries, members, claimed);
         for (members) |index| {
             if (entries[index].recording_id) |existing| {
                 if (held != null and held != existing) continue;
@@ -1169,26 +1261,12 @@ pub const Projection = struct {
         });
     }
 
-    /// The recording the Track at `position` already presents, when members
-    /// disagree on their recording and one of them is it, so the ratings and
-    /// listens kept on that recording stay with the Track.
-    fn heldRecording(self: *Projection, entries: []const Entry, members: []const usize, position: WrittenPosition) !?i64 {
-        var first: ?i64 = null;
-        const disagree = for (members) |index| {
-            const recording_id = entries[index].recording_id orelse continue;
-            if (first == null) first = recording_id else if (first != recording_id) break true;
-        } else false;
-        if (!disagree) return null;
-        var statement = try self.library.database.prepare(
-            "SELECT recording_id FROM tracks WHERE release_id = ?1 AND COALESCE(disc_number, 1) = ?2 AND track_number = ?3;",
-        );
-        defer statement.deinit();
-        try statement.bindInt64(1, position.release_id);
-        try statement.bindInt64(2, position.disc);
-        try statement.bindInt64(3, position.number);
-        if (try statement.step() != .row or statement.columnIsNull(0)) return null;
-        const held = statement.columnInt64(0);
-        for (members) |index| if (entries[index].recording_id == held) return held;
+    /// The recording the claimed Track already presents, when one of the
+    /// members carries it, so the ratings and listens kept on that recording
+    /// stay with the Track.
+    fn heldRecording(entries: []const Entry, members: []const usize, claimed: ?i64) ?i64 {
+        const recording_id = claimed orelse return null;
+        for (members) |index| if (entries[index].recording_id == recording_id) return recording_id;
         return null;
     }
 };
@@ -2957,7 +3035,7 @@ fn positionOf(library: *database.LibraryDatabase, file_id: i64) !i64 {
     ));
 }
 
-test "two files swapping track numbers each end at the position they now state" {
+test "two files swapping track numbers each keep their Track at the position they now state" {
     var library = try openTestLibrary("file:orca-projection-swap?mode=memory&cache=shared");
     defer library.close();
     var files: [2]i64 = undefined;
@@ -2970,23 +3048,57 @@ test "two files swapping track numbers each end at the position they now state" 
     try library.observed_tags.upsert(.{ .file_id = files[1], .values = albumTags("Album", 1) });
     const result = try projection.run(.all);
 
+    for (files, tracks) |file_id, track| try testing.expectEqual(track, try trackOf(&library, file_id));
     try testing.expectEqual(@as(i64, 2), try positionOf(&library, files[0]));
     try testing.expectEqual(@as(i64, 1), try positionOf(&library, files[1]));
+    try testing.expectEqual(@as(u64, 2), result.tracks_moved);
     try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
     try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM tracks;"));
-    var ids = [_]i64{ try trackOf(&library, files[0]), try trackOf(&library, files[1]) };
-    std.mem.sort(i64, &ids, {}, std.sort.asc(i64));
-    try testing.expectEqualSlices(i64, &tracks, &ids);
+    try expectNoForeignKeyViolations(&library);
 }
 
-test "a file moving onto a position another Track holds takes that row and its own old row is pruned" {
+/// Projects `files` as tracks 1 to n of one album, renumbers them to
+/// `numbers`, and checks every file kept its Track and lost none.
+fn expectRenumberingKeepsTracks(name: [:0]const u8, comptime numbers: []const u32) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    var files: [numbers.len]i64 = undefined;
+    try observeAlbum(&library, &files, "Album");
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    var tracks: [numbers.len]i64 = undefined;
+    for (files, &tracks) |file_id, *track| track.* = try trackOf(&library, file_id);
+
+    for (files, numbers) |file_id, number|
+        try library.observed_tags.upsert(.{ .file_id = file_id, .values = albumTags("Album", number) });
+    const result = try projection.run(.all);
+
+    for (files, tracks, numbers) |file_id, track, number| {
+        try testing.expectEqual(track, try trackOf(&library, file_id));
+        try testing.expectEqual(@as(i64, number), try positionOf(&library, file_id));
+    }
+    try testing.expectEqual(@as(u64, numbers.len), result.tracks_moved);
+    try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, numbers.len), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "three files rotating track numbers each keep their Track" {
+    try expectRenumberingKeepsTracks("file:orca-projection-rotate?mode=memory&cache=shared", &.{ 2, 3, 1 });
+}
+
+test "files shifted one track number up each keep their Track" {
+    try expectRenumberingKeepsTracks("file:orca-projection-shift?mode=memory&cache=shared", &.{ 2, 3, 4 });
+}
+
+test "a file moving onto a position another Track holds keeps its own Track and the occupant is pruned" {
     var library = try openTestLibrary("file:orca-projection-takeover?mode=memory&cache=shared");
     defer library.close();
     var files: [2]i64 = undefined;
     try observeAlbum(&library, &files, "Album");
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
-    const held = try trackOf(&library, files[1]);
+    const own = try trackOf(&library, files[0]);
 
     try library.observed_tags.upsert(.{ .file_id = files[0], .values = albumTags("Album", 2) });
     try library.database.exec("DELETE FROM locations;");
@@ -2998,12 +3110,137 @@ test "a file moving onto a position another Track holds takes that row and its o
     });
     const result = try projection.run(.all);
 
-    try testing.expectEqual(held, try trackOf(&library, files[0]));
-    try testing.expectEqual(@as(u64, 0), result.tracks_moved);
+    try testing.expectEqual(own, try trackOf(&library, files[0]));
+    try testing.expectEqual(@as(u64, 1), result.tracks_moved);
     try testing.expectEqual(@as(u64, 1), result.tracks_pruned);
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
     try testing.expectEqual(@as(i64, 2), try positionOf(&library, files[0]));
     try expectNoForeignKeyViolations(&library);
+}
+
+test "a Track evicted from its position hands its user genres to the Track its file joins" {
+    var library = try openTestLibrary("file:orca-projection-evict-genres?mode=memory&cache=shared");
+    defer library.close();
+    const mp3 = try observe(&library, "/m/Artist/Album/1.mp3", .mp3, albumTags("Album", 1));
+    const second = try observe(&library, "/m/Artist/Album/2.flac", .flac, albumTags("Album", 2));
+    const flac = try observe(&library, "/m/Artist/Album/3.flac", .flac, albumTags("Album", 3));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const evicted = try trackOf(&library, mp3);
+    const moving = try trackOf(&library, second);
+    const joined = try trackOf(&library, flac);
+    try library.genres.setTrackGenres(testing.allocator, &.{evicted}, &.{"Shoegaze"});
+
+    try library.observed_tags.upsert(.{ .file_id = mp3, .values = albumTags("Album", 3) });
+    try library.observed_tags.upsert(.{ .file_id = second, .values = albumTags("Album", 1) });
+    const result = try projection.run(.all);
+
+    try testing.expectEqual(moving, try trackOf(&library, second));
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, second));
+    try testing.expectEqual(joined, try trackOf(&library, flac));
+    try testing.expectEqual(@as(i64, 3), try positionOf(&library, flac));
+    try expectGenres(&library, joined, "Shoegaze");
+    try testing.expectEqual(@as(u64, 1), result.tracks_moved);
+    try testing.expectEqual(@as(u64, 1), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    var buffer: [64]u8 = undefined;
+    const gone = try std.fmt.bufPrintSentinel(&buffer, "SELECT count(*) FROM tracks WHERE id = {d};", .{evicted}, 0);
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, gone));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a file leaving its album keeps its Track while a sibling takes its old position" {
+    var library = try openTestLibrary("file:orca-projection-leave-and-fill?mode=memory&cache=shared");
+    defer library.close();
+    var files: [2]i64 = undefined;
+    try observeAlbum(&library, &files, "First");
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const tracks: [2]i64 = .{ try trackOf(&library, files[0]), try trackOf(&library, files[1]) };
+    const first = try releaseOf(&library, files[0]);
+
+    try library.observed_tags.upsert(.{ .file_id = files[0], .values = albumTags("Second", 1) });
+    try library.observed_tags.upsert(.{ .file_id = files[1], .values = albumTags("First", 1) });
+    const result = try projection.run(.all);
+
+    for (files, tracks) |file_id, track| try testing.expectEqual(track, try trackOf(&library, file_id));
+    try testing.expectEqual(first, try releaseOf(&library, files[1]));
+    try testing.expect(try releaseOf(&library, files[0]) != first);
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, files[0]));
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, files[1]));
+    try testing.expectEqual(@as(u64, 2), result.tracks_moved);
+    try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a Track whose preferred file goes missing follows its other encoding to a new Release" {
+    var library = try openTestLibrary("file:orca-projection-preferred-flip?mode=memory&cache=shared");
+    defer library.close();
+    var tags = albumTags("Album", 1);
+    const flac = try observe(&library, "/m/Artist/Album/one.flac", .flac, tags);
+    const mp3 = try observe(&library, "/m/Artist/Album/one.mp3", .mp3, tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const track = try trackOf(&library, flac);
+    const old = try releaseOf(&library, flac);
+    const recording = try scalar(library.database, "SELECT recording_id FROM tracks;");
+
+    _ = try library.locations.upsert(.{
+        .file_id = flac,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = "/m/Artist/Album/one.flac",
+        .state = .missing,
+    });
+    tags.album = "Other";
+    try library.observed_tags.upsert(.{ .file_id = flac, .values = tags });
+    try library.observed_tags.upsert(.{ .file_id = mp3, .values = tags });
+    const result = try projection.run(.all);
+
+    try testing.expectEqual(track, try trackOf(&library, mp3));
+    try testing.expect(try releaseOf(&library, mp3) != old);
+    try testing.expectEqual(recording, try scalar(library.database, "SELECT recording_id FROM tracks;"));
+    try testing.expectEqual(@as(u64, 1), result.tracks_moved);
+    try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a Track's rating, love and playlist entries stay with its song when the songs swap positions" {
+    var library = try openTestLibrary("file:orca-projection-swap-recording-state?mode=memory&cache=shared");
+    defer library.close();
+    var one = albumTags("Album", 1);
+    one.title = "One";
+    var two = albumTags("Album", 2);
+    two.title = "Two";
+    const first = try observe(&library, "/m/Artist/Album/a.flac", .flac, one);
+    const second = try observe(&library, "/m/Artist/Album/b.flac", .flac, two);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const track_one = try trackOf(&library, first);
+    const track_two = try trackOf(&library, second);
+    _ = try library.ratings.set(&.{track_one}, 100);
+    _ = try library.ratings.set(&.{track_two}, 20);
+    _ = try library.feedback.set(&.{track_one}, .loved);
+    const playlist = try library.playlists.create("Mix");
+    _ = try library.playlists.insert(playlist, &.{track_one}, null);
+
+    one.track_number = 2;
+    two.track_number = 1;
+    try library.observed_tags.upsert(.{ .file_id = first, .values = one });
+    try library.observed_tags.upsert(.{ .file_id = second, .values = two });
+    _ = try projection.run(.all);
+
+    try testing.expectEqual(track_one, try trackOf(&library, first));
+    try testing.expectEqual(@as(?u8, 100), try library.ratings.forTrack(track_one));
+    try testing.expectEqual(@as(?u8, 20), try library.ratings.forTrack(track_two));
+    try testing.expectEqual(database.repository.Feedback.loved, try library.feedback.forTrack(track_one));
+    try testing.expectEqual(database.repository.Feedback.none, try library.feedback.forTrack(track_two));
+    const listed = try library.playlists.trackIds(testing.allocator, playlist, .{ .now = 0, .seed = 0 });
+    defer testing.allocator.free(listed);
+    try testing.expectEqualSlices(i64, &.{track_one}, listed);
+    var buffer: [64]u8 = undefined;
+    const title = try std.fmt.bufPrintSentinel(&buffer, "SELECT track_number FROM tracks WHERE id = {d};", .{track_one}, 0);
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, title));
 }
 
 test "a Track's lyrics survive its file moving it to another Release" {
@@ -3028,14 +3265,19 @@ test "a Track's lyrics survive its file moving it to another Release" {
     try expectNoForeignKeyViolations(&library);
 }
 
-test "a moved album keeps its Track ids and hands its cover and love to the new Release" {
+test "a moved album keeps its Track ids, even onto positions the new Release holds, and hands it its cover and love" {
     var library = try openTestLibrary("file:orca-projection-move-carry?mode=memory&cache=shared");
     defer library.close();
     var files: [3]i64 = undefined;
     try observeAlbum(&library, &files, "Old Title");
+    var resident_tags = albumTags("New Title", 1);
+    resident_tags.title = "Resident";
+    const resident = try observe(&library, "/m/Artist/Old Title/resident.flac", .flac, resident_tags);
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
     const old = try releaseOf(&library, files[0]);
+    const resident_release = try releaseOf(&library, resident);
+    const resident_track = try trackOf(&library, resident);
     var tracks: [3]i64 = undefined;
     for (files, &tracks) |file_id, *track| track.* = try trackOf(&library, file_id);
     _ = try library.release_loves.set(&.{old}, true);
@@ -3045,12 +3287,17 @@ test "a moved album keeps its Track ids and hands its cover and love to the new 
     }, 1_800_000_000);
 
     try retag(&library, &files, "New Title");
+    resident_tags.track_number = 4;
+    try library.observed_tags.upsert(.{ .file_id = resident, .values = resident_tags });
     const result = try projection.run(.all);
 
     const moved = try releaseOf(&library, files[0]);
     try testing.expect(moved != old);
+    try testing.expectEqual(resident_release, moved);
     for (files, tracks) |file_id, track| try testing.expectEqual(track, try trackOf(&library, file_id));
-    try testing.expectEqual(@as(u64, 3), result.tracks_moved);
+    try testing.expectEqual(resident_track, try trackOf(&library, resident));
+    try testing.expectEqual(@as(i64, 4), try positionOf(&library, resident));
+    try testing.expectEqual(@as(u64, 4), result.tracks_moved);
     try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
     try testing.expectEqual(@as(u64, 1), result.releases_pruned);
     try testing.expect(try library.release_loves.isLoved(moved));

@@ -281,9 +281,9 @@ defer page.deinit();
   `error.InvalidGenre` for a blank name, or `error.TrackNotFound`. See
   [database.md](database.md#genres).
 - `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
-  back afterwards. An edit that moves a track to another album or a free
-  position keeps its id; one that moves it onto a position another Track
-  holds takes that Track's id.
+  back afterwards. An edit that moves a track to another album or position
+  keeps its id, even onto a position another Track held; that Track is
+  pruned unless its own file moved it elsewhere in the same edit.
 - `libraryTrackFieldStates` returns `TrackFieldStates` for up to 512 Tracks:
   per `EditableTrackField` the value they share, whether they are `mixed`, and
   whether Orca's value is `edited` (differs from a file's tag), the disc

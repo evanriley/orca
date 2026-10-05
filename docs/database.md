@@ -113,19 +113,29 @@ the folder no longer writes, and its `missing_metadata`,
 retired. The scanner and property backfill reproject a file when they record
 or clear that issue, so it projects again once its new bytes open.
 
-Reprojecting a folder keeps a Track's id when its file moves. A Track is a
-position on a Release; a file whose tags now place it on another Release or
-position that no row holds takes its row there (`Result.tracks_moved`), so a
-queue, a pending listen, lyrics or a frontend holding the Track id still
-resolve after an edit, an accepted match or a retag. The row moved is the
-file's lowest-id Track at a position the run has not written. A file that lands
-on a position another row holds takes that row over instead, and the row it
-backed before is pruned (`Result.tracks_pruned`). A Release or Artist left with
-nothing referencing it goes with it. Only Tracks whose preferred file is in
-the folder are candidates, found through `tracks_by_preferred_file` (version
-14). Everything pruned is derived and is rebuilt by the next projection, so an
-id handed out for a pruned row does not come back: a client holding Release or
-Artist ids, or a Track id across a takeover, must look them up again.
+Reprojecting a folder keeps each Track with its file. The run matches every
+position it writes to a Track in this order: the Track whose preferred file is
+one of the position's files, on any Release; otherwise a Track on the same
+Release that presents the same recording; otherwise a new row. Every group in
+the folder claims by file before any claims by recording, because one edit can
+move a file onto another group's Release, and a Track is claimed at most once
+per run. A Track whose file now projects at another position or Release moves
+there and keeps its id (`Result.tracks_moved`), so a queue, a saved player
+state, lyrics, user genres, a pending proposal or a frontend holding the Track
+id still resolve after an edit, a scan, an accepted match, Match Album or an
+undo. Ratings, feedback, playlist entries and listens follow the recording and
+are not affected. A row at a target position that no file claimed is pruned,
+handing its user genres to the Track its file backs now, and so is a Track
+whose preferred file is in the folder but that no position claimed
+(`Result.tracks_pruned`). Rows changing position are parked first with a null
+track number, which `tracks_position` keeps unique by id, and are then written
+by id, so files that swap or rotate positions never collide. A Release or
+Artist left with nothing referencing it goes with them. Candidates are the
+Tracks whose preferred file the run positions, found through
+`tracks_by_preferred_file` (version 14), and those on a Release the run
+writes. Everything pruned is derived and is rebuilt by the next projection, so
+an id handed out for a pruned row does not come back: a client holding Release
+or Artist ids, or the id of a pruned Track, must look them up again.
 
 Two source-data defects are common enough that the projection must survive both
 without losing a song. A file with no track number takes the lowest free
@@ -140,9 +150,9 @@ back Tracks on that Release and still name its album, orders them all by path,
 and applies the same rules, so the result does not depend on which folder
 projects first and no file is left without a Track. When the files at a
 position disagree on their recording, the recording the Track already presents
-is kept, with its ratings and listens. Positions are never left null:
-`tracks_position` collapses a null onto `-id`, so a null-positioned row has
-nothing to upsert against and every reprojection would duplicate it.
+is kept, with its ratings and listens. Positions are never left null once a
+run commits: `tracks_position` collapses a null onto `-id`, which the
+projection uses only to park rows while they change places.
 
 Artist and release keys fold case, width and whitespace. That folding is not
 full NFKC plus full Unicode case folding — it covers ASCII, Latin-1, Latin

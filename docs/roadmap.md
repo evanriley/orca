@@ -334,14 +334,6 @@ removed.
 
 ### Before the public preview
 
-- Track ids follow their song. A file keeps its Track id only when it moves to
-  a position no row holds. When two files of a Release swap positions, their
-  Track ids trade files, so a queued id plays the other song. When numbers
-  shift, such as 1 to 2 and 2 to 3, the file landing on the occupied position
-  takes that Track's id and the other file gets a new one. Match Album
-  correcting track numbers does this. Ids must follow their song through
-  corrections, swaps and longer cycles. Checked by projection tests of each
-  case.
 - Quick hashes only nominate candidates. Two files of the same length whose
   first and last 64 KiB are equal merge into one File in the scanner
   (`liborca/database/repository/files.zig`) and `duplicate_pass.zig` calls
@@ -503,6 +495,11 @@ To release:
 
 Small defects that are not yet scheduled:
 
+- A file that leaves a Release loses its Track id when another folder on that
+  Release projects first and one of its files now states the old position:
+  that folder prunes the Track, and the leaving file gets a new one.
+- A FLAC seek past the end of the stream fails as a decode error, while WAV
+  clamps to the last frame; the other decoders are unchecked.
 - A `technical_anomaly` Health issue for a displaced track position is
   never cleared once the position is fixed; only dismissing it hides it.
 - `orca-cli` exits 0 after printing usage for a wrong argument count.

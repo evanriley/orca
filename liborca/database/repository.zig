@@ -43,6 +43,7 @@ const columns = @import("columns.zig");
 
 pub const WriteLane = write_lane.WriteLane;
 pub const TrackInput = tracks.TrackInput;
+pub const TrackSeat = tracks.TrackSeat;
 pub const ArtistUpsert = artists.ArtistUpsert;
 pub const ReleaseUpsert = releases.ReleaseUpsert;
 pub const RecordingInput = recordings.RecordingInput;
