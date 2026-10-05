@@ -525,7 +525,14 @@ fn duplicatesSubtitle(buffer: []u8, self: *App) [:0]const u8 {
     return strings.format(buffer, "Compares audio · last scan {s}", .{activity.agoText(&ago_buffer, now, scanned)});
 }
 
+fn showDuplicates(self: *App) void {
+    const row = self.settings_page.duplicates_row orelse return;
+    var buffer: [96]u8 = undefined;
+    setSubtitle(row, duplicatesSubtitle(&buffer, self));
+}
+
 pub fn refreshLibrary(self: *App) void {
+    if (self.current_page != .settings) return;
     showMeasure(self);
     const slot = self.settings_page.folder_slot orelse return;
     const library = self.library orelse return;
@@ -583,9 +590,10 @@ fn maintenanceCard(self: *App) *gtk.Widget {
     ));
     showThreads(self);
 
-    var duplicates_buffer: [96]u8 = undefined;
-    const duplicates = actionRow("Find duplicates", duplicatesSubtitle(&duplicates_buffer, self).ptr);
+    const duplicates = actionRow("Find duplicates", "");
     _ = suffixButton(duplicates, "Find", null, gtk.callback(duplicatesClicked), self);
+    self.settings_page.duplicates_row = duplicates;
+    showDuplicates(self);
     maintenance_card.add(duplicates);
 
     const idle = switchRow("Idle maintenance", "", self.idle_maintenance, gtk.callback(maintenanceSwitched), self);
@@ -977,11 +985,16 @@ fn fixedRow(title: [*:0]const u8, subtitle: [*:0]const u8) *gtk.Widget {
 
 fn valueRow(title: [*:0]const u8, subtitle: [*:0]const u8, value: [*:0]const u8) *gtk.Widget {
     const row = actionRow(title, subtitle);
+    _ = addValue(row, value);
+    return row;
+}
+
+fn addValue(row: *gtk.Widget, value: [*:0]const u8) *gtk.Label {
     const label = gtk.gtk_label_new(value);
     gtk.gtk_widget_add_css_class(label, "settings-value");
     gtk.gtk_widget_set_valign(label, gtk.ALIGN_CENTER);
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), label);
-    return row;
+    return gtk.cast(gtk.Label, label);
 }
 
 fn queueEndIndex(mode: liborca.RepeatMode) c_uint {
@@ -1850,6 +1863,14 @@ fn CredentialRows(comptime credential: Credential) type {
             check(self, credential.first_check);
         }
 
+        fn forget(self: *App) void {
+            const controls = credential.controls(self);
+            controls.checked = false;
+            if (controls.reveal_button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.false_);
+            if (controls.entry_row) |row| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, row), "");
+            if (controls.entry_box) |box| gtk.gtk_widget_set_visible(box, gtk.false_);
+        }
+
         fn add(self: *App, target: Card) void {
             const stored_row = actionRow(credential.row_title, credential.absent_subtitle);
             const open_button = suffixButton(stored_row, credential.open_label, null, gtk.callback(openClicked), self);
@@ -1993,7 +2014,7 @@ fn showListeningStatus(self: *App) void {
 }
 
 pub fn tick(self: *App) void {
-    if (self.settings_page.tabs == null) return;
+    if (self.settings_page.tabs == null or self.current_page != .settings) return;
     showListeningStatus(self);
     showWatchStatus(self);
     showMaintenanceStatus(self);
@@ -2439,10 +2460,7 @@ fn resetSettings(self: *App) void {
         browse.reload(self);
     }
     settings.save(self);
-    const which = self.settings_page.tab;
-    leave(self);
-    show(self);
-    selectTab(self, which);
+    rebuildPage(self);
     self.requestTick();
     self.toast("Settings reset");
 }
@@ -2488,12 +2506,14 @@ fn libraryProblemRow(problem: libraries.Problem) *gtk.Widget {
     return row;
 }
 
+/// Builds the page again from current state, at once when it is shown and
+/// on its next visit otherwise, for changes that alter which rows it has.
 pub fn rebuildPage(self: *App) void {
     if (self.settings_page.tabs == null) return;
-    const which = self.settings_page.tab;
-    leave(self);
+    teardown(self);
+    if (self.current_page != .settings) return;
     show(self);
-    selectTab(self, which);
+    page_ui.showWindowTitle(self);
 }
 
 fn signalPath(self: *App) ?liborca.SignalPath {
@@ -2505,11 +2525,19 @@ fn bufferText(buffer: []u8, path: ?liborca.SignalPath) [:0]const u8 {
     return strings.format(buffer, "{f} frames · set by PipeWire", .{strings.grouped(frames)});
 }
 
+fn showBuffer(self: *App) void {
+    const label = self.settings_page.buffer_value orelse return;
+    var buffer: [64]u8 = undefined;
+    gtk.gtk_label_set_text(label, bufferText(&buffer, signalPath(self)).ptr);
+}
+
 fn advancedTab(self: *App) *gtk.Widget {
     const engine = flatCard("orca-engine-symbolic", "Audio Engine", "Changes apply when playback restarts.");
     engine.add(valueRow("Backend", "", signal_path.audio_backend));
-    var buffer_text: [64]u8 = undefined;
-    engine.add(valueRow("Buffer size", "Larger is safer, smaller responds faster", bufferText(&buffer_text, signalPath(self)).ptr));
+    const buffer_size = actionRow("Buffer size", "Larger is safer, smaller responds faster");
+    self.settings_page.buffer_value = addValue(buffer_size, "");
+    showBuffer(self);
+    engine.add(buffer_size);
     engine.add(valueRow("Internal format", "", "32-bit float"));
 
     const collections = flatCard("orca-folders-symbolic", "Libraries", "Keep separate collections, each with its own database.");
@@ -2613,7 +2641,12 @@ fn writeDsp(writer: *std.Io.Writer, maybe_path: ?liborca.SignalPath) std.Io.Writ
     if (stages == 0) try writer.writeAll("none");
 }
 
-fn writeDiagnostics(writer: *std.Io.Writer, self: *App) std.Io.Writer.Error!void {
+fn libraryStats(self: *App) ?liborca.LibraryStats {
+    const library = self.library orelse return null;
+    return self.runtime.libraryStats(library) catch null;
+}
+
+fn writeDiagnostics(writer: *std.Io.Writer, self: *App, stats: ?liborca.LibraryStats) std.Io.Writer.Error!void {
     const path = signalPath(self);
     try writer.print("{s: <11}{f} (liborca {f})\n", .{ "orca", liborca.version, liborca.version });
     try writer.print("{s: <11}", .{"os"});
@@ -2625,20 +2658,20 @@ fn writeDiagnostics(writer: *std.Io.Writer, self: *App) std.Io.Writer.Error!void
     try writer.print(" · resampler off\n{s: <11}", .{"dsp"});
     try writeDsp(writer, path);
     try writer.print("\n{s: <11}", .{"library"});
-    if (self.library) |library| {
-        if (self.runtime.libraryStats(library)) |stats| {
-            try writer.print("{f} tracks · {f} albums", .{ strings.grouped(stats.tracks), strings.grouped(stats.releases) });
-        } else |_| try writer.writeAll("unavailable");
-    } else try writer.writeAll("none open");
+    if (self.library == null) {
+        try writer.writeAll("none open");
+    } else if (stats) |value| {
+        try writer.print("{f} tracks · {f} albums", .{ strings.grouped(value.tracks), strings.grouped(value.releases) });
+    } else try writer.writeAll("unavailable");
     try writer.print("\n{s: <11}", .{"database"});
     if (self.library_path) |database| try writeHomePath(writer, database, true) else try writer.writeAll("none");
     try writer.print("\n{s: <11}redacted", .{"paths"});
 }
 
-fn diagnosticsText(buffer: []u8, self: *App) [:0]const u8 {
+fn diagnosticsText(buffer: []u8, self: *App, stats: ?liborca.LibraryStats) [:0]const u8 {
     var raw: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&raw);
-    writeDiagnostics(&writer, self) catch {};
+    writeDiagnostics(&writer, self, stats) catch {};
     const text = raw[0..writer.end];
     const user = std.mem.span(gtk.g_get_user_name());
     var output = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
@@ -2657,7 +2690,7 @@ fn diagnosticsText(buffer: []u8, self: *App) [:0]const u8 {
 fn copyDiagnosticsClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     var buffer: [4096]u8 = undefined;
-    copyText(self, diagnosticsText(&buffer, self).ptr);
+    copyText(self, diagnosticsText(&buffer, self, libraryStats(self)).ptr);
 }
 
 fn aboutButton(label: [*:0]const u8, icon: ?[*:0]const u8, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
@@ -2717,7 +2750,7 @@ const Facts = struct {
         return .{ .section = section, .grid = gtk.cast(gtk.Grid, grid) };
     }
 
-    fn add(facts: *Facts, key: [*:0]const u8, value: [*:0]const u8) void {
+    fn add(facts: *Facts, key: [*:0]const u8, value: [*:0]const u8) *gtk.Label {
         const key_label = gtk.gtk_label_new(key);
         gtk.gtk_widget_add_css_class(key_label, "about-key");
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, key_label), 0);
@@ -2731,6 +2764,7 @@ const Facts = struct {
         gtk.gtk_grid_attach(facts.grid, key_label, 0, facts.rows, 1, 1);
         gtk.gtk_grid_attach(facts.grid, value_label, 1, facts.rows, 1, 1);
         facts.rows += 1;
+        return gtk.cast(gtk.Label, value_label);
     }
 };
 
@@ -2778,8 +2812,8 @@ fn diagnosticsCard(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(aside, "about-aside");
     gtk.gtk_widget_set_valign(aside, gtk.ALIGN_CENTER);
     gtk.gtk_box_append(gtk.cast(gtk.Box, section.body), aside);
-    var buffer: [4096]u8 = undefined;
-    const preview = gtk.gtk_label_new(diagnosticsText(&buffer, self).ptr);
+    const preview = gtk.gtk_label_new("");
+    self.settings_page.diagnostics = gtk.cast(gtk.Label, preview);
     gtk.gtk_widget_add_css_class(preview, "mono");
     gtk.gtk_widget_add_css_class(preview, "about-diagnostics");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, preview), 0);
@@ -2793,36 +2827,51 @@ fn diagnosticsCard(self: *App) *gtk.Widget {
     return section.widget;
 }
 
-fn aboutTab(self: *App) *gtk.Widget {
+fn showAbout(self: *App) void {
+    const page = &self.settings_page;
+    if (page.contents[@intFromEnum(app.SettingsTab.about)] == null) return;
+    if (page.about_device) |label| gtk.gtk_label_set_text(label, transport.deviceName(self).ptr);
     var text_buffer: [512]u8 = undefined;
+    if (page.about_formats) |label| gtk.gtk_label_set_text(label, deviceFormatsText(&text_buffer, self).ptr);
+    const stats = libraryStats(self);
+    var count_buffer: [32]u8 = undefined;
+    if (page.about_tracks) |label|
+        gtk.gtk_label_set_text(label, if (stats) |value| strings.format(&count_buffer, "{f}", .{strings.grouped(value.tracks)}).ptr else "—");
+    var scan_buffer: [64]u8 = undefined;
+    if (page.about_scan) |label|
+        gtk.gtk_label_set_text(label, details.recentMomentText(&scan_buffer, if (stats) |value| value.last_scan_finished_at else null).ptr);
+    var diagnostics_buffer: [4096]u8 = undefined;
+    if (page.diagnostics) |label| gtk.gtk_label_set_text(label, diagnosticsText(&diagnostics_buffer, self, stats).ptr);
+}
 
+fn aboutTab(self: *App) *gtk.Widget {
+    const page = &self.settings_page;
     var audio = Facts.init("audio-headphones-symbolic", "Audio");
-    audio.add("Backend", signal_path.audio_backend);
-    audio.add("Output device", transport.deviceName(self).ptr);
-    audio.add("Device formats", deviceFormatsText(&text_buffer, self).ptr);
-    audio.add("Engine", "32-bit float · no resampling");
+    _ = audio.add("Backend", signal_path.audio_backend);
+    page.about_device = audio.add("Output device", "");
+    page.about_formats = audio.add("Device formats", "");
+    _ = audio.add("Engine", "32-bit float · no resampling");
 
     var library = Facts.init("orca-folders-symbolic", "Library");
-    library.add("Library", libraries.activeName(self).ptr);
-    var count_buffer: [32]u8 = undefined;
-    var scan_buffer: [64]u8 = undefined;
-    const stats = if (self.library) |handle| self.runtime.libraryStats(handle) catch null else null;
-    library.add("Tracks", if (stats) |value| strings.format(&count_buffer, "{f}", .{strings.grouped(value.tracks)}).ptr else "—");
+    _ = library.add("Library", libraries.activeName(self).ptr);
+    page.about_tracks = library.add("Tracks", "");
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    library.add("Database", if (self.library_path) |database| homePath(&path_buffer, database).ptr else "No library open");
-    library.add("Last scan", details.recentMomentText(&scan_buffer, if (stats) |value| value.last_scan_finished_at else null).ptr);
+    _ = library.add("Database", if (self.library_path) |database| homePath(&path_buffer, database).ptr else "No library open");
+    page.about_scan = library.add("Last scan", "");
 
     var system = Facts.init("orca-engine-symbolic", "System");
     var os_buffer: [256]u8 = undefined;
     var os_writer = std.Io.Writer.fixed(os_buffer[0 .. os_buffer.len - 1]);
     writeOs(&os_writer, self) catch {};
     os_buffer[os_writer.end] = 0;
-    system.add("OS", os_buffer[0..os_writer.end :0].ptr);
-    system.add("Desktop portal", "Not used");
+    _ = system.add("OS", os_buffer[0..os_writer.end :0].ptr);
+    _ = system.add("Desktop portal", "Not used");
     var logs_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var logs_home: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    system.add("Logs", if (logging.directory(&logs_buffer)) |logs| homePath(&logs_home, logs).ptr else "Unavailable");
-    return tab(self, .about, aboutHeader(self), &.{ audio.section.widget, library.section.widget, system.section.widget }, &.{ formatsCard(), diagnosticsCard(self) });
+    _ = system.add("Logs", if (logging.directory(&logs_buffer)) |logs| homePath(&logs_home, logs).ptr else "Unavailable");
+    const view = tab(self, .about, aboutHeader(self), &.{ audio.section.widget, library.section.widget, system.section.widget }, &.{ formatsCard(), diagnosticsCard(self) });
+    showAbout(self);
+    return view;
 }
 
 const Filter = struct {
@@ -2891,6 +2940,7 @@ pub fn setFilter(self: *App, text: []const u8) void {
     for (page.filter_hidden[0..page.filter_hidden_len]) |widget| gtk.gtk_widget_set_visible(widget, gtk.true_);
     page.filter_hidden_len = 0;
     const needle = std.mem.trim(u8, text, " ");
+    if (needle.len != 0) for (std.enums.values(app.SettingsTab)) |which| buildTab(self, which);
     var first: ?app.SettingsTab = null;
     var current_matches = false;
     for (std.enums.values(app.SettingsTab)) |which| {
@@ -3053,6 +3103,11 @@ const tab_info = std.EnumArray(app.SettingsTab, TabInfo).init(.{
 
 fn syncTabs(self: *App) void {
     const page = &self.settings_page;
+    buildTab(self, page.tab);
+    if (page.stale[@intFromEnum(page.tab)] and self.current_page == .settings) {
+        page.stale[@intFromEnum(page.tab)] = false;
+        refreshTab(self, page.tab);
+    }
     page.syncing = true;
     defer page.syncing = false;
     for (page.tab_buttons, 0..) |maybe, index| {
@@ -3139,28 +3194,58 @@ fn tabBar(self: *App) *gtk.Widget {
     return bar;
 }
 
+fn buildTab(self: *App, which: app.SettingsTab) void {
+    const page = &self.settings_page;
+    const stack = page.tabs orelse return;
+    if (page.contents[@intFromEnum(which)] != null) return;
+    const content = switch (which) {
+        .general => generalTab(self),
+        .library => libraryTab(self),
+        .playback => playbackTab(self),
+        .sound => soundTab(self),
+        .listening => listeningTab(self),
+        .appearance => appearanceTab(self),
+        .advanced => advancedTab(self),
+        .about => aboutTab(self),
+    };
+    const info = tab_info.get(which);
+    _ = adw.adw_view_stack_add_titled_with_icon(stack, content, info.name, info.label, info.icon);
+    page.stale[@intFromEnum(which)] = false;
+}
+
+/// Brings a tab built on an earlier visit in line with what may have changed
+/// while the page was away.
+fn refreshTab(self: *App, which: app.SettingsTab) void {
+    switch (which) {
+        .library => {
+            refreshLibrary(self);
+            showDuplicates(self);
+            if (self.watch_row) |row| adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), @intFromBool(self.watch_folders));
+            AcoustIdKey.checkOnce(self);
+        },
+        .playback => transport.refreshDevices(self),
+        .advanced => {
+            showBuffer(self);
+            showCache(self);
+        },
+        .about => showAbout(self),
+        .general, .sound, .listening, .appearance => {},
+    }
+}
+
 pub fn show(self: *App) void {
     const page = &self.settings_page;
     const host = page.host orelse return;
-    if (page.tabs != null) return;
-    const views = adw.adw_view_stack_new();
-    const stack = gtk.cast(adw.ViewStack, views);
-    page.tabs = stack;
-    adw.adw_view_stack_set_hhomogeneous(stack, gtk.false_);
-    for (std.enums.values(app.SettingsTab)) |which| {
-        const content = switch (which) {
-            .general => generalTab(self),
-            .library => libraryTab(self),
-            .playback => playbackTab(self),
-            .sound => soundTab(self),
-            .listening => listeningTab(self),
-            .appearance => appearanceTab(self),
-            .advanced => advancedTab(self),
-            .about => aboutTab(self),
-        };
-        const info = tab_info.get(which);
-        _ = adw.adw_view_stack_add_titled_with_icon(stack, content, info.name, info.label, info.icon);
+    if (page.tabs != null) {
+        if (page.away_maintenance_row) |row| self.maintenance_row = row;
+        page.away_maintenance_row = null;
+        syncTabs(self);
+        tick(self);
+        return;
     }
+    const views = adw.adw_view_stack_new();
+    page.tabs = gtk.cast(adw.ViewStack, views);
+    adw.adw_view_stack_set_hhomogeneous(page.tabs.?, gtk.false_);
     gtk.gtk_widget_set_vexpand(views, gtk.true_);
 
     const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -3196,9 +3281,23 @@ pub fn shutdown(self: *App) void {
     if (pending) settings.save(self);
 }
 
+/// Keeps the page's widgets for the next visit; saves and applies what is
+/// pending, and drops a typed secret, as closing the page did.
 pub fn leave(self: *App) void {
     const page = &self.settings_page;
     if (page.tabs == null) return;
+    flushPending(self);
+    if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
+    if (self.parametric.apply_timer != 0) parametric.applyNow(self);
+    if (self.maintenance_row) |row| page.away_maintenance_row = row;
+    self.maintenance_row = null;
+    page.stale = @splat(true);
+    ListenBrainzToken.forget(self);
+    AcoustIdKey.forget(self);
+}
+
+fn teardown(self: *App) void {
+    const page = &self.settings_page;
     flushPending(self);
     if (page.host) |host| if (page.body) |body| gtk.gtk_box_remove(host, body);
     page.* = .{ .host = page.host, .subtitle = page.subtitle, .tab = page.tab, .fit = page.fit };

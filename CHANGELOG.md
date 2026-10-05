@@ -1470,6 +1470,14 @@
 
 ### Fixed
 
+- **Settings opens at once.** orca-gtk's Settings page rebuilt all eight
+  tabs on every visit, about 60 ms each time. It now builds each tab the
+  first time it is selected and keeps it, along with the selected tab.
+  Returning refreshes only the shown tab's values that can change elsewhere
+  (output device, library folders and counts, duplicates, folder watching,
+  buffer and cache size, About facts), and each other tab when it is next
+  selected. Leaving still saves pending changes and applies the equalizer.
+
 - **Page changes no longer stutter.** In orca-gtk, opening Now Playing, an
   album, an artist or a playlist, going Back from one, and scrolling an
   album page past its top each froze the window for about a quarter of a
