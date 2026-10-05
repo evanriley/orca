@@ -22,6 +22,7 @@ pub const runtime_consistency = @import("runtime_consistency.zig");
 pub const runtime_duplicates = @import("runtime_duplicates.zig");
 pub const runtime_folder_tests = @import("runtime_folder_tests.zig");
 pub const runtime_genres = @import("runtime_genres.zig");
+pub const runtime_identity_tests = @import("runtime_identity_tests.zig");
 pub const runtime_playlists = @import("runtime_playlists.zig");
 pub const runtime_provider_tests = @import("runtime_provider_tests.zig");
 pub const runtime_queue = @import("runtime_queue.zig");
@@ -71,6 +72,7 @@ test {
     _ = @import("runtime_duplicates.zig");
     _ = @import("runtime_folder_tests.zig");
     _ = @import("runtime_genres.zig");
+    _ = @import("runtime_identity_tests.zig");
     _ = @import("runtime_playlists.zig");
     _ = @import("runtime_provider_tests.zig");
     _ = @import("runtime_queue.zig");

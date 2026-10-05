@@ -3952,7 +3952,7 @@ test "a Release's cover release ID is the one most of its accepted matches name"
     try std.testing.expectEqualStrings(bryter_layter_mbid, &(try library_database.release_artwork.coverReleaseMbid(std.testing.allocator, album)).?);
 }
 
-fn id3v23Frame(bytes: *std.ArrayList(u8), identifier: *const [4]u8, payload: []const u8) !void {
+pub fn id3v23Frame(bytes: *std.ArrayList(u8), identifier: *const [4]u8, payload: []const u8) !void {
     try bytes.appendSlice(std.testing.allocator, identifier);
     var size: [4]u8 = undefined;
     std.mem.writeInt(u32, &size, @intCast(payload.len), .big);
@@ -4476,7 +4476,9 @@ test "a Release whose files carry each other's tags is proposed one album correc
     try projectAll(library_database);
     const album = try releaseOfFile(library_database, sounds_northern);
     try std.testing.expectEqual(album, try releaseOfFile(library_database, sounds_pink));
-    const northern_first = try trackOfFile(library_database, sounds_northern) < try trackOfFile(library_database, sounds_pink);
+    const northern_track = try trackOfFile(library_database, sounds_northern);
+    const pink_track = try trackOfFile(library_database, sounds_pink);
+    const northern_first = northern_track < pink_track;
     const heard_northern = comptime heardResult("0.97", northern_sky_heard);
     const heard_pink = comptime heardResult("0.96", pink_moon_heard);
     rig.acoustid.lookup_body = if (northern_first)
@@ -4522,6 +4524,8 @@ test "a Release whose files carry each other's tags is proposed one album correc
     try std.testing.expectEqual(@as(u64, 2), acceptance.accepted);
     try std.testing.expectEqual(@as(i64, 0), try rig.fileMismatchCount(sounds_northern));
     try std.testing.expectEqual(@as(i64, 0), try rig.fileMismatchCount(sounds_pink));
+    try std.testing.expectEqual(northern_track, try trackOfFile(library_database, sounds_northern));
+    try std.testing.expectEqual(pink_track, try trackOfFile(library_database, sounds_pink));
     for ([_]struct { file: i64, recording: []const u8, title: []const u8, position: []const u8, track_mbid: []const u8 }{
         .{ .file = sounds_northern, .recording = northern_sky_mbid, .title = "Northern Sky", .position = "3", .track_mbid = northern_sky_track_mbid },
         .{ .file = sounds_pink, .recording = pink_moon_mbid, .title = "Pink Moon", .position = "4", .track_mbid = pink_moon_track_mbid },

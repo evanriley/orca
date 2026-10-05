@@ -2827,7 +2827,7 @@ fn expectJournaledError(library_database: *database.LibraryDatabase, group_id: u
     try std.testing.expectEqualStrings(expected, statement.columnText(0));
 }
 
-fn rescan(runtime: *OrcaRuntime, library: LibraryHandle) !void {
+pub fn rescan(runtime: *OrcaRuntime, library: LibraryHandle) !void {
     var roots = try runtime.libraryRootPage(library, 1, 0);
     defer roots.deinit();
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(runtime, try runtime.startLibraryScan(library, .{ .root_id = roots.items[0].id })));
