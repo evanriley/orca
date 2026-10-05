@@ -1517,6 +1517,9 @@
 
 ### Fixed
 
+- **Artist info is fetched in optimized builds.** A `ReleaseFast` or
+  `ReleaseSmall` build read every Artist's MusicBrainz ID as missing, so the
+  fetch ended `no_musicbrainz_id` without asking any provider.
 - **Jobs and processes take turns at a provider.** A Gateway claims a
   service's lease for each request and releases it when the request ends,
   instead of holding it for the whole job. A second job or process that wants

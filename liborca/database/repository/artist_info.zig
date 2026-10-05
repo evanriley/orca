@@ -770,10 +770,7 @@ pub const ArtistInfoRepository = struct {
         var result: ArtistSubject = .{};
         if (!statement.columnIsNull(0)) {
             const text = statement.columnText(0);
-            if (metadata.isMusicBrainzId(text)) {
-                result.musicbrainz_artist_id = undefined;
-                @memcpy(&result.musicbrainz_artist_id.?, text[0..36]);
-            }
+            if (metadata.isMusicBrainzId(text)) result.musicbrainz_artist_id = text[0..36].*;
         }
         return result;
     }
