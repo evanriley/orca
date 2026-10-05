@@ -170,6 +170,49 @@ Release. When a reprojection leaves a Release without Tracks, its fetched
 cover moves to the Release that took most of them, unless that one has a
 cover of its own.
 
+#### Release alignment
+
+Match Review compares a Release with one MusicBrainz release's own
+tracklist, the snapshot every matching lookup of that release stores (see
+[providers.md](providers.md#musicbrainz-release-lookup)), not only with
+what the Tracks' proposals say. `Runtime.libraryReleaseAlignment` and
+`orca-cli release-alignment` compute it on each call; nothing is stored.
+
+Each release track, in disc and position order, gets at most one Track and
+a status:
+
+- `automatic`: the release track lists a recording ID the Track holds,
+  from the play file's recording ID in effect (tag or user edit), an
+  accepted match, or a pending match. `recording_source` says which.
+- `suggested`: no recording ID places them, but at least two of three
+  agree: the titles are equal after `text_key` normalization, the lengths
+  are within 2000 ms, and the Track's disc (1 when unset) and track number
+  are the release track's. The pair is suggested only when the release
+  track is the Track's single best by that count and the Track the release
+  track's single best; any tie suggests nothing. A person confirms it.
+- `not_in_files`: no Track is on it.
+
+Tracks placed on no release track are listed as not on the release. Every
+row carries its evidence flags and the length delta, automatic ones
+included.
+
+Automatic placement runs in four passes: recording IDs in effect and
+accepted first, then pending ones; within each, a Track first takes a free
+release track listing its recording at its own disc and track number, then
+the first free one listing it. Tracks go in disc, track number (unset
+last), then Track ID order, so:
+
+- a recording the release lists twice places a Track at its own track
+  number, else on the first listing;
+- of two Tracks holding a recording listed once, the one at that track
+  number wins, else the earlier by track number, then by lower Track ID;
+  the other is suggested elsewhere or not on the release;
+- a recording ID in effect or accepted outranks another Track's pending
+  match for the same release track.
+
+The alignment reads only. Apply and the conditions under
+[Applying a release](#applying-a-release) do not use it yet.
+
 #### Corrections
 
 A pending proposal is a correction when its file has a recording ID in

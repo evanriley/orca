@@ -154,6 +154,7 @@ zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
 zig build run -- apply-release DATABASE RELEASE_ID [--fields=album,album_artist,date,release_id,track_titles]   # the album's values once every Track names one release; --fields stores only those of the best candidate, locked, also from proposals on it
 zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album; release= is the album's Release afterwards
+zig build run -- release-alignment DATABASE RELEASE_ID [RELEASE_MBID]   # the release's tracklist snapshot (default: the best candidate) against the Tracks: a line per release track, DISC-POSITION status track= source= title_equal= length_close= position_equal= delta_ms=, then not_on_release lines
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
 # localhost); stores the cover in the library, never in a file

@@ -710,12 +710,14 @@ const ReleaseCredit = struct {
 
 const ReleaseRecording = struct {
     id: []const u8 = "",
+    length: ?u64 = null,
 };
 
 const ReleaseTrack = struct {
     id: []const u8 = "",
     position: ?u32 = null,
     title: []const u8 = "",
+    length: ?u64 = null,
     @"artist-credit": []const ReleaseCredit = &.{},
     recording: ?ReleaseRecording = null,
 };
@@ -794,6 +796,58 @@ pub const ReleaseLookup = struct {
             .track_number = chosen.track.position,
             .disc_number = chosen.medium.position,
         };
+    }
+
+    /// The release's own tracklist, fetched at `fetched_at`; null over the
+    /// snapshot bound. A medium or track with no position takes its index
+    /// from 1; a track without well-formed IDs, or at a disc and position
+    /// already taken, is left out. Strings live as long as the lookup.
+    pub fn tracklist(self: *const ReleaseLookup, fetched_at: i64) !?database.ReleaseTracklistRecord {
+        const release = self.parsed.value;
+        if (release.media.len > database.release_tracklist_max_media) return null;
+        var count: usize = 0;
+        for (release.media) |medium| count += medium.tracks.len;
+        if (count > database.release_tracklist_max_tracks) return null;
+        const arena = self.parsed.arena.allocator();
+        var tracks: std.ArrayList(database.ReleaseTracklistTrack) = .empty;
+        try tracks.ensureTotalCapacity(arena, count);
+        for (release.media, 1..) |medium, medium_index| {
+            const disc = medium.position orelse @as(u32, @intCast(medium_index));
+            for (medium.tracks, 1..) |track, track_index| {
+                const recording = track.recording orelse continue;
+                if (!metadata.isMusicBrainzId(recording.id) or !metadata.isMusicBrainzId(track.id)) continue;
+                const position = track.position orelse @as(u32, @intCast(track_index));
+                if (disc == 0 or position == 0) continue;
+                const taken = for (tracks.items) |each| {
+                    if (each.disc == disc and each.position == position) break true;
+                } else false;
+                if (taken) continue;
+                tracks.appendAssumeCapacity(.{
+                    .disc = disc,
+                    .position = position,
+                    .title = track.title,
+                    .artist_credit = try creditedArtist(arena, track.@"artist-credit"),
+                    .length_ms = track.length orelse recording.length,
+                    .recording_mbid = recording.id,
+                    .release_track_mbid = track.id,
+                });
+            }
+        }
+        std.mem.sort(database.ReleaseTracklistTrack, tracks.items, {}, trackBefore);
+        return .{
+            .release_mbid = release.id,
+            .title = release.title,
+            .artist_credit = try creditedArtist(arena, release.@"artist-credit"),
+            .release_date = nonEmpty(release.date orelse ""),
+            .release_group_mbid = if (release.@"release-group") |group| validId(group.id) else null,
+            .medium_count = @intCast(release.media.len),
+            .fetched_at = fetched_at,
+            .tracks = tracks.items,
+        };
+    }
+
+    fn trackBefore(_: void, a: database.ReleaseTracklistTrack, b: database.ReleaseTracklistTrack) bool {
+        return if (a.disc != b.disc) a.disc < b.disc else a.position < b.position;
     }
 
     const Placed = struct { medium: *const ReleaseMedium, track: *const ReleaseTrack };
@@ -1260,6 +1314,47 @@ test "a recording on a release twice takes the track at the file's tagged number
     try testing.expectEqual(@as(?u32, 1), untagged.track_number);
     const elsewhere = (try release.enrichment(duet_mbid, 9)).?;
     try testing.expectEqual(@as(?u32, 1), elsewhere.track_number);
+}
+
+test "a release's tracklist keeps every track in disc and position order with its own length and IDs" {
+    const body = try readReleaseFixture();
+    defer testing.allocator.free(body);
+    const release = try parseRelease(body);
+    defer release.deinit();
+
+    const tracklist = (try release.tracklist(1_700_000_000)).?;
+    try testing.expectEqualStrings(hot_space_mbid, tracklist.release_mbid);
+    try testing.expectEqualStrings("Hot Space", tracklist.title);
+    try testing.expectEqualStrings("Queen", tracklist.artist_credit);
+    try testing.expectEqualStrings("3918b90b-340e-3779-9d7e-ba1593653498", tracklist.release_group_mbid.?);
+    try testing.expectEqual(@as(u32, 2), tracklist.medium_count);
+    try testing.expectEqual(@as(usize, 19), tracklist.tracks.len);
+    const first = tracklist.tracks[0];
+    try testing.expectEqual(@as(u32, 1), first.disc);
+    try testing.expectEqual(@as(u32, 1), first.position);
+    try testing.expectEqualStrings("Staying Power", first.title);
+    try testing.expectEqual(@as(?u64, 252479), first.length_ms);
+    try testing.expectEqualStrings("82795f50-6f55-42ad-b86d-60cf500073d2", first.recording_mbid);
+    try testing.expectEqualStrings("7938be9a-8cd9-40d0-b17f-9555cf5168c2", first.release_track_mbid);
+    try testing.expectEqual(@as(u32, 2), tracklist.tracks[11].disc);
+    try testing.expectEqual(@as(u32, 1), tracklist.tracks[11].position);
+}
+
+test "a release's tracklist numbers unplaced tracks by their index and keeps one track per position" {
+    const release = try parseRelease(
+        \\{"id":"047a4aae-27f8-4f2d-92fb-214fd8dc865a","title":"Twice","media":[{"tracks":[
+        \\  {"id":"7938be9a-8cd9-40d0-b17f-9555cf5168c2","title":"One","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9","length":1000}},
+        \\  {"id":"23600855-11bc-4dca-89bd-b71cf2232d25","position":1,"title":"Again","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9"}},
+        \\  {"id":"not-an-id","position":3,"title":"Broken","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9"}}]}]}
+    );
+    defer release.deinit();
+
+    const tracklist = (try release.tracklist(0)).?;
+    try testing.expectEqual(@as(usize, 1), tracklist.tracks.len);
+    try testing.expectEqual(@as(u32, 1), tracklist.tracks[0].disc);
+    try testing.expectEqualStrings("One", tracklist.tracks[0].title);
+    try testing.expectEqual(@as(?u64, 1000), tracklist.tracks[0].length_ms);
+    try testing.expectEqual(@as(?[]const u8, null), tracklist.release_date);
 }
 
 test "a release credited to two artists names them both and gives no album-artist ID, and blanks stay unset" {

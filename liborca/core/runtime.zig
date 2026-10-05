@@ -479,6 +479,12 @@ pub const MatchEvidence = library_pass.matching.MatchEvidence;
 pub const ReleaseFieldDiff = library_pass.matching.ReleaseFieldDiff;
 pub const ReleaseTrackAlignment = library_pass.matching.ReleaseTrackAlignment;
 pub const ReleaseMatchDiff = library_pass.matching.ReleaseMatchDiff;
+pub const ReleaseAlignment = library_pass.release_alignment.ReleaseAlignment;
+pub const ReleaseTrackPlacement = library_pass.release_alignment.ReleaseTrackPlacement;
+pub const PlacementStatus = library_pass.release_alignment.PlacementStatus;
+pub const PlacementEvidence = library_pass.release_alignment.PlacementEvidence;
+pub const RecordingSource = library_pass.release_alignment.RecordingSource;
+pub const AlignedTrack = library_pass.release_alignment.AlignedTrack;
 pub const ArtworkSize = database.ArtworkSize;
 pub const MatchAcceptance = database.ProposalAcceptance;
 
@@ -1629,6 +1635,21 @@ pub const OrcaRuntime = struct {
         release_mbid: ?[]const u8,
     ) !ReleaseMatchDiff {
         return runtime_listens.libraryReleaseMatchDiff(self, library, allocator, release_id, release_mbid);
+    }
+
+    /// The Release's Tracks placed on the tracklist snapshot of
+    /// `release_mbid`, or of its best candidate when that is null.
+    /// `error.NoReleaseTracklist` until a lookup snapshotted that release;
+    /// `error.ReleaseTooLarge` for a Release of more than
+    /// `max_page` Tracks.
+    pub fn libraryReleaseAlignment(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+        release_mbid: ?[]const u8,
+    ) !ReleaseAlignment {
+        return runtime_listens.libraryReleaseAlignment(self, library, allocator, release_id, release_mbid);
     }
 
     /// "Not This Release": `release_mbid` is never the Release's candidate

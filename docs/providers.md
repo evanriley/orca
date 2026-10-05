@@ -410,7 +410,8 @@ explicit user action, never run by a job.
   The ID is checked to be a lowercase UUID first.
 - **When.** Before a file's search is recorded, the release of its most
   confident MusicBrainz proposal is looked up, once per run, and every
-  proposal naming that release is filled in. A failure that would stop a
+  proposal naming that release or no release (found only by AcoustID) whose
+  recording it holds is filled in. A failure that would stop a
   search stops the job the same way, before that file is recorded, so it is
   searched again next time from the cache. A refused or missing release
   (`404`), an answer that is not a release, or a release without the
@@ -422,7 +423,18 @@ explicit user action, never run by a job.
   used), and the release's title, artist credit, date and release-group ID,
   with the album-artist ID only when the credit names one artist. A proposal
   found again on another release loses these values. Proposals found only by
-  AcoustID carry no release.
+  AcoustID carry no release until a release holding their recording fills
+  them in.
+- **Tracklist snapshot.** Every successful lookup during matching also
+  replaces the release's snapshot in `musicbrainz_releases` and
+  `musicbrainz_release_tracks` in one transaction: its title, artist credit,
+  date, release-group ID, medium count and every track with its disc,
+  position, title, artist credit, length, recording ID and track ID. A
+  track whose position is missing takes its index; one with an invalid ID,
+  or at a disc and position already taken, is left out. A release of more
+  than 512 media or 512 tracks is not snapshotted, and the lookup still
+  counts. `fetched_at` is when the lookup ran, even when the answer came
+  from the cache.
 - **Match Album.** After its search pass, which may search nothing, each
   file of the Release votes once for every release its stored proposals that
   are not dismissed list. The release with most votes wins, a tie going to
@@ -432,8 +444,14 @@ explicit user action, never run by a job.
   count and date are what the search said about each release, first seen
   per release; a release a stored payload says none of them about ranks as
   unofficial, of another length and undated. It is looked up once, and
-  every proposal listing it is pointed at it and filled in
-  (`updatePayload`). A rerun after a failure completes from the cache.
+  every stored proposal whose recording it holds, whether or not it lists
+  the release, is pointed at it and filled in (`updatePayload`). Then the
+  Release's best candidate, as Match Review ranks it before any acceptance,
+  is looked up unless its tracklist snapshot is younger than the 30-day
+  cache, so a release the tags or accepted matches already name gets a
+  snapshot too. That is at most one more request per run, none when it is
+  the winner or the cache holds it. A rerun after a failure completes from
+  the cache.
 
 ### AcoustID lookup
 
@@ -606,6 +624,7 @@ orca-cli accept-matches DATABASE --min-score=0.9
 orca-cli apply-release DATABASE RELEASE_ID [--fields=album,album_artist,date,release_id,track_titles]
 orca-cli matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9]
 orca-cli matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff | --dismiss=MBID)
+orca-cli release-alignment DATABASE RELEASE_ID [RELEASE_MBID]
 orca-cli fingerprint DATABASE TRACK_ID
 ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 ```

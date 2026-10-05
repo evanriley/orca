@@ -3261,8 +3261,8 @@ test "Match Album breaks a tie between editions for the Official one with the al
 
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
     try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(job_handle)).accepted);
-    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
-    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bootleg) != null);
     try expectOrcaValue(library_database, northern_sky, .musicbrainz_release_id, bryter_layter_mbid);
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
 }
@@ -7643,4 +7643,206 @@ test "release evidence counts Tracks heard by fingerprint and compares dates as 
     try std.testing.expectEqualStrings("Pink Moon", diff.tracks[1].candidate_title);
     try std.testing.expectEqual(@as(?i64, 1900), diff.tracks[1].delta_ms);
     try std.testing.expect(!diff.tracks[1].fingerprint);
+}
+
+const nightcall_mbid = "9c1d999f-b225-37d4-9347-1c4ccb2b45d8";
+const nightcall_recordings = [_][]const u8{
+    "3a2f5805-565f-433f-a92d-d1ac7aee6575",
+    "4b3a6916-676a-4440-8b3e-e2bd8bff7686",
+    "5c4b7a27-787b-4551-9c4f-f3ce9c008797",
+    "6d5c8b38-898c-4662-8d50-04df0d1198a8",
+};
+const nightcall_track_mbids = [_][]const u8{
+    "7e6d9c49-9a9d-4773-8e61-15e01e22a9b9",
+    "8f7e0d5a-ab0e-4884-9f72-26f12f33bac0",
+    "908f1e6b-bc1f-4995-8083-370230440bd1",
+    "a1902f7c-cd20-4aa6-8194-481341551ce2",
+};
+const nightcall_titles = [_][]const u8{ "Nightcall", "Nightcall (Dustin N'Guyen Remix)", "Nightcall (Breakbot Remix)", "Nightcall (Lovefoxxx Remix)" };
+
+fn nightcallTrack(comptime index: usize) []const u8 {
+    return comptime "{\"id\":\"" ++ nightcall_track_mbids[index] ++ "\",\"position\":" ++ std.fmt.comptimePrint("{d}", .{index + 1}) ++
+        ",\"title\":\"" ++ nightcall_titles[index] ++ "\",\"length\":258000,\"artist-credit\":[{\"name\":\"Kavinsky\",\"joinphrase\":\"\"}]," ++
+        "\"recording\":{\"id\":\"" ++ nightcall_recordings[index] ++ "\"}}";
+}
+
+fn nightcallRelease(comptime count: usize) []const u8 {
+    comptime var tracks: []const u8 = "";
+    inline for (0..count) |index| tracks = tracks ++ (if (index == 0) "" else ",") ++ comptime nightcallTrack(index);
+    return comptime "{\"id\":\"" ++ nightcall_mbid ++ "\",\"title\":\"Nightcall\",\"date\":\"2010-11-08\"," ++
+        "\"artist-credit\":[{\"name\":\"Kavinsky\",\"joinphrase\":\"\"}],\"media\":[{\"position\":1,\"tracks\":[" ++ tracks ++ "]}]}";
+}
+
+fn observeNightcall(library_database: *database.LibraryDatabase, comptime index: usize, tagged: bool) !i64 {
+    const file_id = try observeFile(library_database, "/music/kavinsky/nightcall/" ++ std.fmt.comptimePrint("{d}", .{index + 1}) ++ ".flac", nightcall_titles[index], "Kavinsky");
+    if (tagged) try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = nightcall_titles[index],
+        .artist = "Kavinsky",
+        .track_number = index + 1,
+        .musicbrainz_recording_id = nightcall_recordings[index],
+        .musicbrainz_release_id = nightcall_mbid,
+    } });
+    return file_id;
+}
+
+fn storedPayload(library_database: *database.LibraryDatabase, arena: std.mem.Allocator, proposal_id: i64) !database.ProposalPayload {
+    var statement = try library_database.database.prepare("SELECT payload FROM identification_proposals WHERE id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, proposal_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return (try database.ProposalPayload.parse(arena, statement.columnBlob(0))).value;
+}
+
+fn proposalOfFile(library_database: *database.LibraryDatabase, file_id: i64) !i64 {
+    var statement = try library_database.database.prepare("SELECT id FROM identification_proposals WHERE file_id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+test "Match Album enriches an accepted AcoustID match that names no release on the winning release, and every Track places automatically" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-nightcall?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeNightcall(library_database, index, false);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    for (files[1..]) |file| try std.testing.expectEqual(album, try releaseOfFile(library_database, file));
+
+    const heard = [_]database.ProposalEvidence{.{
+        .recording_mbid = nightcall_recordings[0],
+        .found_by = .{ .acoustid = true },
+        .payload = .{ .title = "Nightcall", .artist = "Kavinsky", .acoustid_score = 0.97, .acoustid_confidence = 0.97 },
+    }};
+    _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, files[0], .{ .acoustid = true }, &heard);
+    const acoustid_only = try proposalOfFile(library_database, files[0]);
+    _ = try runtime.libraryAcceptMatch(library, acoustid_only);
+    const editions = [_][]const u8{nightcall_mbid};
+    inline for (1..4) |index| {
+        const found = [_]database.ProposalEvidence{.{
+            .recording_mbid = nightcall_recordings[index],
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{
+                .title = nightcall_titles[index],
+                .artist = "Kavinsky",
+                .release_mbid = nightcall_mbid,
+                .release_mbids = &editions,
+                .mb_score = 100,
+                .musicbrainz_confidence = 0.95,
+            },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, files[index], .{ .musicbrainz = true }, &found);
+    }
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const enriched = try storedPayload(library_database, arena.allocator(), acoustid_only);
+    try std.testing.expectEqualStrings(nightcall_mbid, enriched.release_mbid orelse return error.TestExpectedEnrichment);
+    try std.testing.expectEqualStrings(nightcall_track_mbids[0], enriched.release_track_mbid orelse return error.TestExpectedEnrichment);
+    try std.testing.expectEqual(@as(?u32, 1), enriched.track_number);
+
+    const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, album, null);
+    defer alignment.deinit();
+    try std.testing.expectEqualStrings(nightcall_mbid, alignment.release_mbid);
+    try std.testing.expectEqual(@as(usize, 4), alignment.rows.len);
+    for (alignment.rows, files) |row, file| {
+        try std.testing.expectEqual(runtime_module.PlacementStatus.automatic, row.status);
+        try std.testing.expectEqual(try trackOfFile(library_database, file), row.track.?.track_id);
+    }
+    try std.testing.expectEqual(@as(?runtime_module.RecordingSource, .in_effect), alignment.rows[0].evidence.recording_source);
+    try std.testing.expectEqual(@as(?runtime_module.RecordingSource, .pending_match), alignment.rows[1].evidence.recording_source);
+    try std.testing.expectEqual(@as(usize, 0), alignment.not_on_release.len);
+}
+
+test "a release lookup snapshots the release's tracklist, and a lookup after the cache expires replaces it" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(3) };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-snapshot?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const file = try observeNightcall(library_database, 0, false);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, file);
+    const editions = [_][]const u8{nightcall_mbid};
+    const found = [_]database.ProposalEvidence{.{
+        .recording_mbid = nightcall_recordings[0],
+        .found_by = .{ .musicbrainz = true },
+        .payload = .{ .title = "Nightcall", .artist = "Kavinsky", .release_mbid = nightcall_mbid, .release_mbids = &editions, .mb_score = 100, .musicbrainz_confidence = 0.95 },
+    }};
+    _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &found);
+
+    try std.testing.expectError(error.NoReleaseTracklist, runtime.libraryReleaseAlignment(library, std.testing.allocator, album, null));
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{ .release_id = album })));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    {
+        var snapshot = (try library_database.release_tracklists.get(std.testing.allocator, nightcall_mbid)).?;
+        defer snapshot.deinit();
+        try std.testing.expectEqual(@as(usize, 3), snapshot.record.tracks.len);
+        try std.testing.expectEqualStrings("Kavinsky", snapshot.record.artist_credit);
+        try std.testing.expectEqualStrings("2010-11-08", snapshot.record.release_date.?);
+        try std.testing.expectEqual(@as(?u64, 258_000), snapshot.record.tracks[2].length_ms);
+    }
+
+    fake.release_body = nightcallRelease(4);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{ .release_id = album })));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try library_database.database.exec("UPDATE provider_cache SET expires_at = 0;");
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{ .release_id = album })));
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
+    var snapshot = (try library_database.release_tracklists.get(std.testing.allocator, nightcall_mbid)).?;
+    defer snapshot.deinit();
+    try std.testing.expectEqual(@as(usize, 4), snapshot.record.tracks.len);
+    try std.testing.expectEqualStrings(nightcall_recordings[3], snapshot.record.tracks[3].recording_mbid);
+    try std.testing.expectEqual(@as(i64, 4), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_release_tracks;"));
+}
+
+test "Match Album looks up a release the tags already name, and every Track places by its tagged recording ID" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-tagged?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeNightcall(library_database, index, true);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{ .release_id = album })));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ nightcall_mbid) != null);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM identification_proposals;"));
+
+    const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, album, null);
+    defer alignment.deinit();
+    try std.testing.expectEqual(@as(usize, 4), alignment.rows.len);
+    for (alignment.rows, files) |row, file| {
+        try std.testing.expectEqual(runtime_module.PlacementStatus.automatic, row.status);
+        try std.testing.expectEqual(@as(?runtime_module.RecordingSource, .in_effect), row.evidence.recording_source);
+        try std.testing.expectEqual(try trackOfFile(library_database, file), row.track.?.track_id);
+        try std.testing.expect(row.evidence.position_equal);
+    }
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{ .release_id = album })));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+}
+
+fn scalarOf(library_database: *database.LibraryDatabase, sql: [:0]const u8) !i64 {
+    var statement = try library_database.database.prepare(sql);
+    defer statement.deinit();
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
 }

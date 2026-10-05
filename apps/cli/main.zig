@@ -46,7 +46,9 @@ fn describe(err: anyerror) []const u8 {
         error.OwnNeedsArtist => "--own needs --artist",
         error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release; --reidentify needs --track or --release and takes no --accept-min-score; --track and --release do not go together",
         error.UnknownRelease => "no release with that id",
-        error.NoReleaseCandidate => "no MusicBrainz release is proposed for that release; run match --release=ID first, or pass --candidate=MBID",
+        error.NoReleaseCandidate => "no MusicBrainz release is proposed for that release; run match --release=ID first, or name a candidate release ID",
+        error.NoReleaseTracklist => "MusicBrainz has not been asked for that release's tracklist yet; run match --release=ID first",
+        error.ReleaseTooLarge => "a release of more than 512 tracks has no alignment",
         error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
         error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -308,6 +310,7 @@ const commands = [_]Command{
     .{ .name = "dismiss-match", .usage = "dismiss-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = dismissMatch, .shares_usage_line = true },
     .{ .name = "accept-matches", .usage = "accept-matches DATABASE --min-score=SCORE", .min_arguments = 2, .max_arguments = 2, .run = acceptConfidentMatches },
     .{ .name = "apply-release", .usage = "apply-release DATABASE RELEASE_ID [--fields=FIELD,...]", .min_arguments = 2, .max_arguments = 3, .run = applyMatchedRelease, .shares_usage_line = true },
+    .{ .name = "release-alignment", .usage = "release-alignment DATABASE RELEASE_ID [RELEASE_MBID]", .min_arguments = 2, .max_arguments = 3, .run = printReleaseAlignment, .shares_usage_line = true },
     .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
@@ -2457,6 +2460,40 @@ fn applyMatchedRelease(context: Context) !void {
     const fields: ?liborca.ReleaseFieldSet = if (context.arguments.len == 3) try parseReleaseFields(context.arguments[2]) else null;
     const values_written = try runtime.libraryApplyMatchedRelease(library, release_id, fields);
     try context.stdout.print("values_written={d}\n", .{values_written});
+}
+
+fn printReleaseAlignment(context: Context) !void {
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const release_mbid: ?[]const u8 = if (context.arguments.len == 3) context.arguments[2] else null;
+    const alignment = try runtime.libraryReleaseAlignment(library, context.allocator, release_id, release_mbid);
+    defer alignment.deinit();
+    try stdout.print("release={s}\tmedia={d}\ttracks={d}\tfetched_at={d}\ttitle={s}\tartist={s}\n", .{
+        alignment.release_mbid, alignment.medium_count, alignment.rows.len, alignment.fetched_at, alignment.title, alignment.artist_credit,
+    });
+    for (alignment.rows) |row| {
+        try stdout.print("{d}-{d}\t{s}\ttrack=", .{ row.disc, row.position, @tagName(row.status) });
+        if (row.track) |track| try stdout.print("{d}", .{track.track_id}) else try stdout.writeAll("-");
+        const evidence = row.evidence;
+        try stdout.print("\tsource={s}\ttitle_equal={s}\tlength_close={s}\tposition_equal={s}\tdelta_ms=", .{
+            if (evidence.recording_source) |source| @tagName(source) else "-",
+            flag(evidence.title_equal),
+            flag(evidence.length_close),
+            flag(evidence.position_equal),
+        });
+        if (evidence.length_delta_ms) |delta| try stdout.print("{d}", .{delta}) else try stdout.writeAll("-");
+        try stdout.print("\trecording={s}\trelease_title={s}\tlocal_title={s}\n", .{
+            row.recording_mbid,
+            row.title,
+            if (row.track) |track| track.title else "",
+        });
+    }
+    for (alignment.not_on_release) |track| {
+        try stdout.print("not_on_release\ttrack={d}\tlocal_title={s}\n", .{ track.track_id, track.title });
+    }
 }
 
 fn parseReleaseFields(argument: []const u8) !liborca.ReleaseFieldSet {

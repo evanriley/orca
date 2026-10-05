@@ -27,6 +27,7 @@ const ReleaseFieldSet = runtime.ReleaseFieldSet;
 const ReleaseMatchBucket = runtime.ReleaseMatchBucket;
 const ReleaseMatchCounts = runtime.ReleaseMatchCounts;
 const ReleaseMatchDiff = runtime.ReleaseMatchDiff;
+const ReleaseAlignment = runtime.ReleaseAlignment;
 const ReleaseMatchPage = runtime.ReleaseMatchPage;
 const OrcaRuntime = runtime.OrcaRuntime;
 const PlayStats = runtime.PlayStats;
@@ -332,6 +333,23 @@ pub fn libraryReleaseMatchDiff(
     defer view.deinit();
     const compared = try library_pass.matching.comparedRelease(&view, allocator, release_mbid);
     return library_pass.matching.releaseMatchDiff(allocator, &view, compared);
+}
+
+pub fn libraryReleaseAlignment(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    release_id: i64,
+    release_mbid: ?[]const u8,
+) !ReleaseAlignment {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const view = try library_database.identification_proposals.releaseMatchView(allocator, release_id, false);
+    defer view.deinit();
+    if (view.track_count > database.repository.max_page) return error.ReleaseTooLarge;
+    const compared = try library_pass.matching.comparedRelease(&view, allocator, release_mbid);
+    var tracklist = try library_database.release_tracklists.get(allocator, compared) orelse return error.NoReleaseTracklist;
+    defer tracklist.deinit();
+    return library_pass.release_alignment.alignRelease(allocator, release_id, view.tracks, &tracklist.record);
 }
 
 pub fn libraryDismissReleaseCandidate(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: []const u8) !void {

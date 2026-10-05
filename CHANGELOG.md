@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Release alignment.** Match Album keeps a snapshot of each MusicBrainz
+  release's own tracklist it looks up, including a release the tags already
+  name. `Runtime.libraryReleaseAlignment` and `orca-cli release-alignment`
+  place each Track on the release automatically (by recording ID from any
+  source) or as a suggestion with its evidence, and list release tracks
+  missing from the files and Tracks not on the release.
 - **Identical audio is its own duplicate verdict.** The duplicate scan
   reports `identical_audio` (`ORCA_HEALTH_ISSUE_KIND_IDENTICAL_AUDIO = 13`,
   a warning) when different bytes decode to the same lossless audio.
@@ -1547,6 +1553,10 @@
 
 ### Fixed
 
+- **Match Album places a Track matched by AcoustID alone.** A match that
+  names no release is enriched with the release Match Album chose when that
+  release lists its recording, so an EP whose title track was matched by
+  fingerprint can be applied.
 - **Library roots are always absolute.** `orca_library_add_root` and
   `orca_library_relocate_root` refuse a relative path with
   `ORCA_STATUS_INVALID_ARGUMENT`; `orca-cli add-root`, `relocate-root`,

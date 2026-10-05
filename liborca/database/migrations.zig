@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 57;
+pub const current_version = 58;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1591,6 +1591,32 @@ const migration_57 =
     \\
 ;
 
+const migration_58 =
+    \\CREATE TABLE musicbrainz_releases (
+    \\    musicbrainz_release_id TEXT PRIMARY KEY NOT NULL,
+    \\    title TEXT NOT NULL,
+    \\    artist_credit TEXT NOT NULL,
+    \\    release_date TEXT,
+    \\    release_group_id TEXT,
+    \\    medium_count INTEGER NOT NULL CHECK (medium_count >= 0),
+    \\    track_count INTEGER NOT NULL CHECK (track_count >= 0),
+    \\    fetched_at INTEGER NOT NULL
+    \\) WITHOUT ROWID;
+    \\CREATE TABLE musicbrainz_release_tracks (
+    \\    musicbrainz_release_id TEXT NOT NULL
+    \\        REFERENCES musicbrainz_releases(musicbrainz_release_id) ON DELETE CASCADE,
+    \\    disc INTEGER NOT NULL CHECK (disc >= 1),
+    \\    position INTEGER NOT NULL CHECK (position >= 1),
+    \\    title TEXT NOT NULL,
+    \\    artist_credit TEXT NOT NULL,
+    \\    length_ms INTEGER CHECK (length_ms IS NULL OR length_ms >= 0),
+    \\    recording_id TEXT NOT NULL,
+    \\    release_track_id TEXT NOT NULL,
+    \\    PRIMARY KEY (musicbrainz_release_id, disc, position)
+    \\) WITHOUT ROWID;
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2132,6 +2158,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 55 and target_version >= 55) try db.exec(migration_55);
     if (version < 56 and target_version >= 56) try db.exec(migration_56);
     if (version < 57 and target_version >= 57) try db.exec(migration_57);
+    if (version < 58 and target_version >= 58) try db.exec(migration_58);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(

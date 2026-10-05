@@ -893,6 +893,22 @@ defer page.deinit();
   `candidate_artwork_size` hold the `ArtworkSize`s, the archive's from the
   stored cover candidates' front cover or the cover fetched from that
   release.
+  `libraryReleaseAlignment(library, allocator, release_id, release_mbid)`
+  returns a `ReleaseAlignment`, freed with `deinit`: the Release laid
+  against `release_mbid`'s tracklist snapshot, or the best candidate's when
+  null. It holds the release's title, artist credit, date, release-group
+  ID, medium count and `fetched_at`; a `ReleaseTrackPlacement` per release
+  track in disc and position order (its title, artist credit, length,
+  recording and release-track IDs, a `PlacementStatus` of `automatic`,
+  `suggested` or `not_in_files`, the placed `AlignedTrack` and its
+  `PlacementEvidence`: the `RecordingSource` that placed it automatically,
+  `title_equal`, `length_close`, `position_equal` and `length_delta_ms`);
+  and `not_on_release`, the Tracks placed nowhere.
+  [metadata.md](metadata.md#release-alignment) gives the rules. Without a
+  snapshot it is `error.NoReleaseTracklist` (Match Album writes one); a
+  Release of more than 512 Tracks is `error.ReleaseTooLarge`, and one
+  without a candidate `error.NoReleaseCandidate`, and an ID that is not a
+  MusicBrainz ID `error.InvalidMusicBrainzId`. It reads only.
   `libraryDismissReleaseCandidate(library, release_id, release_mbid)` marks
   a release as not the Release; it stops being a candidate for it. An ID
   that is not a MusicBrainz ID is `error.InvalidMusicBrainzId`, an unknown

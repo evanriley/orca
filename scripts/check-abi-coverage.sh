@@ -69,6 +69,7 @@ declare -A reasons=(
     [librarySkipMetadataIssue]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
     [libraryMetadataIssueStatus]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
     [libraryApplyMetadataIssues]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [libraryReleaseAlignment]="pending: the C ABI arrives with track pairing and partial Apply, which build on the alignment"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

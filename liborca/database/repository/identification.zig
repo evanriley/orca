@@ -884,6 +884,8 @@ pub const ReleaseMatchTrack = struct {
     disc_number: ?u32,
     /// The play file's MusicBrainz release tag, when it is an ID.
     tagged_release: ?[]const u8,
+    /// The play file's recording ID in effect, when it is an ID.
+    recording_mbid: ?[]const u8 = null,
     /// Accepted and pending, most confident first.
     proposals: []const ReleaseMatchProposal,
 
@@ -1569,8 +1571,9 @@ pub const IdentificationProposalRepository = struct {
         for (tracks) |*list| list.* = .empty;
         {
             var statement = try self.db.prepare(
-                "SELECT release_id, id, play, title, artist, duration_ms, track_number, disc_number,\n" ++
-                    "       (SELECT musicbrainz_release_id FROM observed_file_tags WHERE observed_file_tags.file_id = play)\n" ++
+                comptime "SELECT release_id, id, play, title, artist, duration_ms, track_number, disc_number,\n" ++
+                    "       (SELECT musicbrainz_release_id FROM observed_file_tags WHERE observed_file_tags.file_id = play),\n" ++
+                    "       " ++ effectiveRecordingMbid("play") ++ "\n" ++
                     "FROM (SELECT tracks.release_id, tracks.id, tracks.title, tracks.artist, tracks.duration_ms,\n" ++
                     "             tracks.track_number, tracks.disc_number, " ++ track_play_file ++ " AS play\n" ++
                     "      FROM tracks WHERE tracks.release_id IN " ++ json_release_ids ++ ")\n" ++
@@ -1581,6 +1584,7 @@ pub const IdentificationProposalRepository = struct {
             while (try statement.step() == .row) {
                 const index = index_of.get(statement.columnInt64(0)) orelse continue;
                 const tag = statement.columnText(8);
+                const recording = statement.columnText(9);
                 try tracks[index].append(owned, .{
                     .track_id = statement.columnInt64(1),
                     .play_file = optionalInt64(statement, 2),
@@ -1590,6 +1594,7 @@ pub const IdentificationProposalRepository = struct {
                     .track_number = if (optionalInt64(statement, 6)) |number| std.math.cast(u32, number) else null,
                     .disc_number = if (optionalInt64(statement, 7)) |number| std.math.cast(u32, number) else null,
                     .tagged_release = if (metadata.isMusicBrainzId(tag)) try owned.dupe(u8, tag) else null,
+                    .recording_mbid = if (metadata.isMusicBrainzId(recording)) try owned.dupe(u8, recording) else null,
                     .proposals = &.{},
                 });
             }

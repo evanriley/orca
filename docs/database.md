@@ -682,6 +682,20 @@ length, so 32-bit integer sources one LSB apart and the same samples at another
 rate hashed alike. Temporal fingerprint version 3 re-selects every file, and
 the analysis pass stores an ORAH version 2 hash with its tier.
 
+Migration 58 adds the MusicBrainz release tracklist snapshots Match Review
+aligns Releases against (see
+[metadata.md](metadata.md#release-alignment)):
+`musicbrainz_releases` (`musicbrainz_release_id` primary key, `title`,
+`artist_credit`, `release_date`, `release_group_id`, `medium_count`,
+`track_count`, `fetched_at` in Unix seconds) and `musicbrainz_release_tracks`
+(primary key `(musicbrainz_release_id, disc, position)`, `title`,
+`artist_credit`, `length_ms`, `recording_id`, `release_track_id`), both
+`WITHOUT ROWID`, the tracks deleted with their release. They hold release
+metadata only, keyed by MusicBrainz ID, never by Release id.
+`ReleaseTracklistRepository.replace` swaps a release's header and tracks in
+one transaction and refuses one of more than 512 media or 512 tracks
+(`error.ReleaseTracklistTooLarge`); `get` reads at most 512 tracks.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the
@@ -1647,8 +1661,9 @@ Clearing deletes those rows in one transaction under the write lane. An
 with every fetched field nulled and `fetched_at = 0`, so the next look fetches
 again. Embedded and folder covers are read from the files and
 `releases.has_folder_cover`, and local lyrics from the files, so neither is
-touched. `provider_cache`, the HTTP response cache, is not counted or
-cleared.
+touched. `provider_cache`, the HTTP response cache, and the release
+tracklist snapshots (`musicbrainz_releases`), which Match Review needs, are not
+counted or cleared.
 
 ## Saved playback
 

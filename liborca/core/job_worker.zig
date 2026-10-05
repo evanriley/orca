@@ -1489,6 +1489,7 @@ pub const JobWorker = struct {
         var pass: library_pass.LibraryMatching = .{
             .allocator = self.allocator,
             .proposals = &self.database.identification_proposals,
+            .tracklists = &self.database.release_tracklists,
             .verifications = &self.database.recording_verifications,
             .musicbrainz = &musicbrainz,
             .acoustid = if (acoustid) |*service| service else null,

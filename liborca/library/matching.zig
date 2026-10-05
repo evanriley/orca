@@ -153,6 +153,8 @@ const LookupOutcome = union(enum) {
 pub const LibraryMatching = struct {
     allocator: std.mem.Allocator,
     proposals: *database.IdentificationProposalRepository,
+    /// Every release a lookup answers is snapshotted here.
+    tracklists: *database.ReleaseTracklistRepository,
     /// Needed by `.verify`.
     verifications: ?*const database.RecordingVerificationRepository = null,
     musicbrainz: *providers.musicbrainz.MusicBrainz,
@@ -519,7 +521,8 @@ pub const LibraryMatching = struct {
     }
 
     /// Fills in what the release of the most confident MusicBrainz
-    /// proposal says, on every proposal naming that release.
+    /// proposal says, on every proposal naming that release or no release
+    /// whose recording it holds.
     fn enrich(self: *LibraryMatching, items: []database.ProposalEvidence, tagged_track_number: ?u32) !ReleaseStep {
         var best: ?*const database.ProposalEvidence = null;
         for (items) |*item| {
@@ -537,8 +540,7 @@ pub const LibraryMatching = struct {
             .busy => return .busy,
         };
         for (items) |*item| {
-            const named = item.payload.release_mbid orelse continue;
-            if (!std.mem.eql(u8, named, release.id())) continue;
+            if (item.payload.release_mbid) |named| if (!std.mem.eql(u8, named, release.id())) continue;
             const enrichment = try release.enrichment(item.recording_mbid, tagged_track_number) orelse continue;
             item.payload.enrich(release.id(), enrichment);
         }
@@ -547,8 +549,16 @@ pub const LibraryMatching = struct {
 
     /// Match Album's second phase. Each file votes once for every release
     /// its stored proposals list; the winner is looked up, and every proposal
-    /// listing it is pointed at it with what it says.
+    /// whose recording it holds is pointed at it with what it says. Then the
+    /// Release's best candidate is snapshotted when it has no current
+    /// snapshot.
     fn alignRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
+        const step = try self.voteRelease(release_id);
+        if (step != .done) return step;
+        return self.snapshotBestCandidate(release_id);
+    }
+
+    fn voteRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
         const list = try self.proposals.releaseProposals(self.allocator, release_id);
         defer list.deinit();
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -590,7 +600,6 @@ pub const LibraryMatching = struct {
         };
         for (list.items, payloads) |item, slot| {
             var payload = slot orelse continue;
-            if (!payload.listsRelease(&winner)) continue;
             const enrichment = try release.enrichment(item.recording_mbid, item.tagged_track_number) orelse continue;
             payload.enrich(release.id(), enrichment);
             const encoded = try payload.encode(scratch);
@@ -600,8 +609,25 @@ pub const LibraryMatching = struct {
         return .done;
     }
 
+    fn snapshotBestCandidate(self: *LibraryMatching, release_id: i64) !ReleaseStep {
+        const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
+        defer view.deinit();
+        const best = try view.best(self.allocator) orelse return .done;
+        if (try self.tracklists.fetchedAt(best.release_mbid)) |fetched_at| {
+            const now_s = @divFloor(self.musicbrainz.wall_clock.nowMs(), 1000);
+            if (now_s - fetched_at < self.musicbrainz.cache_ttl_seconds) return .done;
+        }
+        return switch (try self.lookUpRelease(best.release_mbid)) {
+            .found, .unusable => .done,
+            .cancelled => .cancelled,
+            .unavailable => .unavailable,
+            .busy => .busy,
+        };
+    }
+
     /// A release, from this run's memory when it asked already. Transient
-    /// failures are waited out and retried as searches are.
+    /// failures are waited out and retried as searches are. Each answer
+    /// replaces the release's tracklist snapshot.
     fn lookUpRelease(self: *LibraryMatching, release_mbid: []const u8) !ReleaseOutcome {
         if (self.last_release) |*last| {
             if (std.mem.eql(u8, last.id(), release_mbid)) return .{ .found = last };
@@ -626,6 +652,9 @@ pub const LibraryMatching = struct {
                 },
                 else => return err,
             };
+            errdefer lookup.deinit();
+            const fetched_at = @divFloor(self.musicbrainz.wall_clock.nowMs(), 1000);
+            if (try lookup.tracklist(fetched_at)) |snapshot| try self.tracklists.replace(&snapshot);
             if (self.last_release) |previous| previous.deinit();
             self.last_release = lookup;
             return .{ .found = &self.last_release.? };
