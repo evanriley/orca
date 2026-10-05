@@ -1509,6 +1509,18 @@
 
 ### Fixed
 
+- **A brief provider outage costs seconds, not minutes.** Matching, AcoustID
+  submission, cover art, lyrics and artist information ask again after about 5
+  s, then about 30 s, then report the service unavailable; matching and
+  submission used to wait 60 s, and the others did not retry. Rate limits are
+  still waited out as before. An artist fetch that includes its Releases stops
+  at the first Release a service could not answer instead of retrying every
+  Release; a later fetch asks for the rest.
+- **Transient failures are no longer stored as results.** A cover candidate
+  whose image or thumbnail the archive could not serve is left out and
+  measured by the next listing instead of being stored as missing or
+  unmeasured, and an artist fetch moves on past a release group the Cover Art
+  Archive could not answer for instead of ending the cover step.
 - **Scans in two processes no longer interleave.** A scan, reconcile or root
   relocation holds an exclusive lock on `<database>.orca-scan.lock` until its
   walk has swept. A walk in another runtime or process is refused at once with

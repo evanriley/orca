@@ -12,10 +12,6 @@ pub const CancellationToken = scanner.CancellationToken;
 const acoustid = providers.acoustid;
 const ReleaseLookup = providers.musicbrainz.ReleaseLookup;
 
-const initial_backoff_ms: u64 = 60_000;
-const maximum_attempts = 3;
-const cancel_poll_ms: u64 = 100;
-
 /// Whether AcoustID took part in a matching pass, and why not.
 pub const AcoustIdUse = enum(u8) {
     searched,
@@ -623,10 +619,10 @@ pub const LibraryMatching = struct {
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
                 error.ProviderBusy => return .busy,
-                error.RateLimited, error.ProviderUnavailable, error.Timeout => {
-                    if (attempt + 1 >= maximum_attempts) return .unavailable;
-                    if (!self.backOff(self.musicbrainz.gateway, attempt)) return .cancelled;
-                    continue;
+                error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(self.musicbrainz.gateway, err, attempt, .wait, self)) {
+                    .again => continue,
+                    .give_up => return .unavailable,
+                    .cancelled => return .cancelled,
                 },
                 else => return err,
             };
@@ -715,10 +711,10 @@ pub const LibraryMatching = struct {
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
                 error.ProviderBusy => return .busy,
-                error.RateLimited, error.ProviderUnavailable, error.Timeout => {
-                    if (attempt + 1 >= maximum_attempts) return .unavailable;
-                    if (!self.backOff(service.gateway, attempt)) return .cancelled;
-                    continue;
+                error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(service.gateway, err, attempt, .wait, self)) {
+                    .again => continue,
+                    .give_up => return .unavailable,
+                    .cancelled => return .cancelled,
                 },
                 else => return err,
             };
@@ -741,27 +737,14 @@ pub const LibraryMatching = struct {
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
                 error.ProviderBusy => return .busy,
-                error.RateLimited, error.ProviderUnavailable, error.Timeout => {
-                    if (attempt + 1 >= maximum_attempts) return .unavailable;
-                    if (!self.backOff(self.musicbrainz.gateway, attempt)) return .cancelled;
-                    continue;
+                error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(self.musicbrainz.gateway, err, attempt, .wait, self)) {
+                    .again => continue,
+                    .give_up => return .unavailable,
+                    .cancelled => return .cancelled,
                 },
                 else => return err,
             };
             return .{ .answered = list };
-        }
-    }
-
-    /// False when cancelled while waiting.
-    fn backOff(self: *LibraryMatching, gateway: *network.Gateway, attempt: u32) bool {
-        const backoff_ms = network.client.jittered(gateway.random, initial_backoff_ms << @intCast(attempt));
-        var until = gateway.clock.nowMs() +| @as(i64, @intCast(backoff_ms));
-        if (gateway.blockedUntilMs()) |blocked| until = @max(until, blocked);
-        while (true) {
-            if (self.isCancelled()) return false;
-            const now = gateway.clock.nowMs();
-            if (now >= until) return true;
-            gateway.clock.sleepMs(@min(cancel_poll_ms, @as(u64, @intCast(until - now)))) catch return false;
         }
     }
 
@@ -772,7 +755,7 @@ pub const LibraryMatching = struct {
         progress.verified.store(result.verified, .release);
     }
 
-    fn isCancelled(self: *const LibraryMatching) bool {
+    pub fn isCancelled(self: *const LibraryMatching) bool {
         if (self.cancellation) |token| if (token.checkpoint()) return true;
         if (self.musicbrainz.gateway.cancel) |flag| if (flag.load(.acquire)) return true;
         return false;

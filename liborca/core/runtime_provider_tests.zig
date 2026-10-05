@@ -1877,7 +1877,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
 
     try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
-    try std.testing.expect(fake.transport.request_times_ms[1] - fake.transport.request_times_ms[0] >= 30_000);
+    try expectWaited(&fake.transport, 1, 5_000);
     try std.testing.expect(fake.transport.request_times_ms[2] - fake.transport.request_times_ms[1] >= 60_000);
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer proposals.deinit();
@@ -1896,6 +1896,104 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     const retried_stats = try runtime.jobMatchStats(retried);
     try std.testing.expectEqual(@as(u64, 1), retried_stats.tracks_examined);
     try std.testing.expectEqual(@as(u64, 1), retried_stats.requests);
+}
+
+/// That request `index` followed the one before it by a jittered `nominal_ms`.
+fn expectWaited(transport: *const network.testing.ScriptedTransport, index: usize, nominal_ms: i64) !void {
+    try expectJittered(transport.request_times_ms[index] - transport.request_times_ms[index - 1], nominal_ms);
+}
+
+fn expectJittered(waited_ms: i64, nominal_ms: i64) !void {
+    try std.testing.expect(waited_ms >= @divFloor(nominal_ms, 2) and waited_ms <= nominal_ms + @divFloor(nominal_ms, 2));
+}
+
+fn matchAfterOutages(fake: *FakeMusicBrainz, name: [:0]const u8) !job.State {
+    fake.answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, name);
+    const library_database = try libraryDatabase(&runtime, library);
+    _ = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    const state = try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{}));
+    const unmarked: u64 = if (state == .succeeded) 0 else 1;
+    try std.testing.expectEqual(unmarked, try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
+    return state;
+}
+
+test "a search MusicBrainz could not answer is asked again after about 5 s, then about 30 s, and a third failure stops the job without marking the Track" {
+    var once: FakeMusicBrainz = .{ .refusals = &.{503} };
+    try std.testing.expectEqual(job.State.succeeded, try matchAfterOutages(&once, "file:orca-matching-outage-once?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 3), once.requestCount());
+    try expectWaited(&once.transport, 1, 5_000);
+
+    var twice: FakeMusicBrainz = .{ .refusals = &.{ 503, 503 } };
+    try std.testing.expectEqual(job.State.succeeded, try matchAfterOutages(&twice, "file:orca-matching-outage-twice?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 4), twice.requestCount());
+    try expectWaited(&twice.transport, 1, 5_000);
+    try expectWaited(&twice.transport, 2, 30_000);
+
+    var thrice: FakeMusicBrainz = .{ .refusals = &.{ 503, 503, 503 } };
+    try std.testing.expectEqual(job.State.failed, try matchAfterOutages(&thrice, "file:orca-matching-outage-thrice?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 3), thrice.requestCount());
+    try std.testing.expect(thrice.clock.slept() <= 7_500 + 45_000);
+}
+
+/// A test clock whose sleeps, once `armed_after` requests were sent, hold
+/// until the test releases them, so it can act during a wait.
+const GatedClock = struct {
+    base: *network.testing.TestClock,
+    transport: *const network.testing.ScriptedTransport,
+    armed_after: u32,
+    waiting: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
+
+    fn clock(self: *GatedClock) network.client.Clock {
+        return .{ .context = self, .now_ms_fn = now, .sleep_ms_fn = sleep };
+    }
+
+    fn now(context: *anyopaque) i64 {
+        const self: *GatedClock = @ptrCast(@alignCast(context));
+        return self.base.now();
+    }
+
+    fn sleep(context: *anyopaque, milliseconds: u64) anyerror!void {
+        const self: *GatedClock = @ptrCast(@alignCast(context));
+        if (self.transport.requestCount() >= self.armed_after and !self.released.load(.acquire)) {
+            self.waiting.store(true, .release);
+            var deadline: runtime_tests.TestDeadline = .init(10_000);
+            while (!self.released.load(.acquire) and deadline.tick()) {}
+        }
+        self.base.advance(@intCast(milliseconds));
+    }
+
+    fn awaitWaiting(self: *const GatedClock) !void {
+        var deadline: runtime_tests.TestDeadline = .init(5_000);
+        while (!self.waiting.load(.acquire)) if (!deadline.tick()) return error.NeverWaited;
+    }
+};
+
+test "a matching job cancelled during the 30 s wait after an outage ends within a poll" {
+    var fake: FakeMusicBrainz = .{ .refusals = &.{ 503, 503, 503 } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    var gate: GatedClock = .{ .base = &fake.clock, .transport = &fake.transport, .armed_after = 2 };
+    runtime.matching_hooks.clock = gate.clock();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-outage-cancel?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    _ = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+
+    const handle = try runtime.startLibraryMatching(library, .{});
+    try gate.awaitWaiting();
+    const cancelled_at = fake.clock.now();
+    try runtime.cancelJob(handle);
+    gate.released.store(true, .release);
+    try std.testing.expectEqual(job.State.cancelled, try runtime_tests.awaitJob(&runtime, handle));
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
+    try std.testing.expect(fake.clock.now() - cancelled_at <= 250);
 }
 
 test "a search MusicBrainz refused counts as refused, and the next job counts it again without asking" {
@@ -2431,6 +2529,8 @@ pub const FakeAcoustId = struct {
     lookup_body: []const u8 = "{\"status\":\"ok\",\"fingerprints\":[]}",
     submit_status: u16 = 200,
     submit_body: []const u8 = "{\"status\":\"ok\",\"submissions\":[]}",
+    /// Statuses the first submissions are answered with, in order.
+    submit_outages: []const u16 = &.{},
     lookups: std.atomic.Value(u32) = .init(0),
     submissions: std.atomic.Value(u32) = .init(0),
 
@@ -2452,7 +2552,8 @@ pub const FakeAcoustId = struct {
             while (self.held.load(.acquire) and deadline.tick()) {}
             return .{ .respond = .{ .status = self.lookup_status, .body = self.lookup_body } };
         }
-        _ = self.submissions.fetchAdd(1, .acq_rel);
+        const index = self.submissions.fetchAdd(1, .acq_rel);
+        if (index < self.submit_outages.len) return .{ .respond = .{ .status = self.submit_outages[index], .body = "" } };
         return .{ .respond = .{ .status = self.submit_status, .body = self.submit_body } };
     }
 };
@@ -2673,6 +2774,64 @@ test "a submission fails as busy while another process holds AcoustID and marks 
     try std.testing.expectEqual(SubmissionOutcome.busy, (try runtime.jobSubmissionStats(busy)).outcome);
     try std.testing.expectEqual(@as(u32, 0), acoustid.submissions.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), try runtime.libraryAcoustIdSubmittableCount(library));
+}
+
+fn submitAfterOutages(musicbrainz: *FakeMusicBrainz, acoustid: *FakeAcoustId, name: [:0]const u8) !SubmissionOutcome {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "chosen.wav", 440);
+    acoustid.submit_body = "{\"status\":\"ok\",\"submissions\":[{\"id\":71,\"status\":\"pending\",\"index\":\"0\"}]}";
+    var user: AcoustIdUserKey = .{ .key = "user key" };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    acoustid.http.clock = &musicbrainz.clock;
+    try runtime.setAcoustIdClientKey("test-client");
+    try runtime.setCredentialStore(user.store());
+    const library = try runtime.openLibrary(std.testing.io, name);
+    const library_database = try libraryDatabase(&runtime, library);
+    const chosen = try addAudioTrack(library_database, &temporary, "chosen.wav", "Northern Sky", "Nick Drake");
+    try proposeMatch(library_database, chosen, northern_sky_mbid, 0.95, "{\"title\":\"Northern Sky\",\"duration_ms\":15000}");
+    {
+        const page = try runtime.libraryMatchProposals(library, chosen, 1);
+        defer page.deinit();
+        _ = try runtime.libraryAcceptMatch(library, page.items[0].id);
+    }
+
+    const submission = try runtime.startAcoustIdSubmission(library);
+    const state = try runtime_tests.awaitJob(&runtime, submission);
+    const outcome = (try runtime.jobSubmissionStats(submission)).outcome;
+    try std.testing.expectEqual(outcome == .completed, state == .succeeded);
+    const unsent: u64 = if (outcome == .completed) 0 else 1;
+    try std.testing.expectEqual(unsent, try runtime.libraryAcoustIdSubmittableCount(library));
+    return outcome;
+}
+
+test "a submission AcoustID could not take is sent again after about 5 s, then about 30 s, and a third failure marks nothing sent" {
+    var musicbrainz: FakeMusicBrainz = .{};
+    var once: FakeAcoustId = .{ .submit_outages = &.{503} };
+    try std.testing.expectEqual(SubmissionOutcome.completed, try submitAfterOutages(&musicbrainz, &once, "file:orca-acoustid-submit-outage-once?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 2), once.submissions.load(.acquire));
+    try expectWaited(&once.http, 1, 5_000);
+
+    var twice: FakeAcoustId = .{ .submit_outages = &.{ 503, 503 } };
+    try std.testing.expectEqual(SubmissionOutcome.completed, try submitAfterOutages(&musicbrainz, &twice, "file:orca-acoustid-submit-outage-twice?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 3), twice.submissions.load(.acquire));
+    try expectWaited(&twice.http, 1, 5_000);
+    try expectWaited(&twice.http, 2, 30_000);
+
+    var thrice: FakeAcoustId = .{ .submit_outages = &.{ 503, 503, 503 } };
+    try std.testing.expectEqual(SubmissionOutcome.unavailable, try submitAfterOutages(&musicbrainz, &thrice, "file:orca-acoustid-submit-outage-thrice?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 3), thrice.submissions.load(.acquire));
+    try expectWaited(&thrice.http, 2, 30_000);
+
+    var limited: FakeAcoustId = .{ .submit_outages = &.{ 503, 429 } };
+    try std.testing.expectEqual(SubmissionOutcome.completed, try submitAfterOutages(&musicbrainz, &limited, "file:orca-acoustid-submit-outage-limited?mode=memory&cache=shared"));
+    try std.testing.expectEqual(@as(u32, 3), limited.submissions.load(.acquire));
+    try expectWaited(&limited.http, 1, 5_000);
+    try std.testing.expect(limited.http.request_times_ms[2] - limited.http.request_times_ms[1] >= 60_000);
 }
 
 test "a submission sends a chosen recording ID once, fails without marking anything when the user key is missing or refused, and cannot run beside matching" {
@@ -3483,6 +3642,9 @@ fn candidatePng(comptime width: u32, comptime height: u32) []const u8 {
 const FakeCandidateArchive = struct {
     http: network.testing.ScriptedTransport = .{},
     group_status: u16 = 200,
+    /// Statuses image 102's thumbnail is answered with, in order, before it.
+    thumbnail_statuses: []const u16 = &.{},
+    thumbnail_requests: usize = 0,
 
     fn attach(self: *FakeCandidateArchive, hooks: *MatchingHooks) void {
         self.http.keep_history = true;
@@ -3507,6 +3669,11 @@ const FakeCandidateArchive = struct {
         }
         const name = url[std.mem.lastIndexOfScalar(u8, url, '/').? + 1 ..];
         if (name.len == 0) return .{ .respond = .{ .body = candidate_release_index } };
+        if (std.mem.eql(u8, name, "102-250")) {
+            defer self.thumbnail_requests += 1;
+            if (self.thumbnail_requests < self.thumbnail_statuses.len)
+                return .{ .respond = .{ .status = self.thumbnail_statuses[self.thumbnail_requests], .body = "" } };
+        }
         if (std.mem.endsWith(u8, name, "-250")) return .{ .respond = .{ .body = jpeg_cover } };
         const body: []const u8 = if (std.mem.eql(u8, name, "101"))
             candidatePng(1200, 1200)
@@ -3597,6 +3764,62 @@ test "a release group index that will not come keeps the release's own candidate
         try std.testing.expectEqual(caa_id, candidate.caa_id);
         try std.testing.expectEqualStrings(bryter_layter_mbid, &candidate.musicbrainz_release_id);
     }
+}
+
+fn expectCandidates(runtime: *OrcaRuntime, library: LibraryHandle, album: i64, expected: []const struct { caa_id: i64, thumbnail: bool }) !void {
+    const candidates = try runtime.libraryCoverArtCandidates(library, std.testing.allocator, album);
+    defer {
+        for (candidates) |candidate| candidate.deinit(std.testing.allocator);
+        std.testing.allocator.free(candidates);
+    }
+    try std.testing.expectEqual(expected.len, candidates.len);
+    for (expected, candidates) |want, candidate| {
+        try std.testing.expectEqual(want.caa_id, candidate.caa_id);
+        try std.testing.expectEqual(want.thumbnail, candidate.thumbnail != null);
+    }
+}
+
+test "a candidate whose thumbnail the archive could not serve is left unrecorded and measured by the next listing, and one it does not have is kept without" {
+    var fake: FakeMusicBrainz = .{};
+    var archive: FakeCandidateArchive = .{ .thumbnail_statuses = &.{ 503, 503, 503 } };
+    defer archive.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const listed = try listCandidates(&runtime, &archive, &fake, "file:orca-cover-candidates-outage?mode=memory&cache=shared");
+
+    const stats = try runtime.jobMatchStats(listed.listing);
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.partial, stats.cover_art);
+    try std.testing.expectEqual(@as(u64, 2), stats.cover_art_candidates_examined);
+    try std.testing.expectEqual(@as(usize, 3), archive.thumbnail_requests);
+    try expectCandidates(&runtime, listed.library, listed.album, &.{ .{ .caa_id = 101, .thumbnail = true }, .{ .caa_id = 201, .thumbnail = true } });
+
+    archive.thumbnail_statuses = &.{503};
+    archive.thumbnail_requests = 0;
+    runtime.reapFinishedJobs();
+    const again = try runtime.startCoverArtCandidates(listed.library, listed.album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, again));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, (try runtime.jobMatchStats(again)).cover_art);
+    try std.testing.expectEqual(@as(usize, 2), archive.thumbnail_requests);
+    try expectCandidates(&runtime, listed.library, listed.album, &.{
+        .{ .caa_id = 101, .thumbnail = true },
+        .{ .caa_id = 201, .thumbnail = true },
+        .{ .caa_id = 102, .thumbnail = true },
+        .{ .caa_id = 103, .thumbnail = true },
+    });
+
+    archive.thumbnail_statuses = &.{404};
+    archive.thumbnail_requests = 0;
+    runtime.reapFinishedJobs();
+    const missing = try runtime.startCoverArtCandidates(listed.library, listed.album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, missing));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, (try runtime.jobMatchStats(missing)).cover_art);
+    try std.testing.expectEqual(@as(usize, 1), archive.thumbnail_requests);
+    try expectCandidates(&runtime, listed.library, listed.album, &.{
+        .{ .caa_id = 101, .thumbnail = true },
+        .{ .caa_id = 201, .thumbnail = true },
+        .{ .caa_id = 102, .thumbnail = false },
+        .{ .caa_id = 103, .thumbnail = true },
+    });
 }
 
 test "a candidate used as a Release's front is fetched again in full and outranks every other cover, and one the archive lost stores nothing" {
@@ -5274,6 +5497,8 @@ pub const FakeLrclib = struct {
     status: u16 = 200,
     body: []const u8 = northern_sky_lyrics,
     retry_after_s: ?u64 = null,
+    /// Requests from the next one on answered 503 before the status.
+    outages: u32 = 0,
 
     pub fn hooks(self: *FakeLrclib) MatchingHooks {
         self.http.clock = &self.clock;
@@ -5296,6 +5521,10 @@ pub const FakeLrclib = struct {
 
     fn respond(context: *anyopaque, _: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
         const self: *FakeLrclib = @ptrCast(@alignCast(context));
+        if (self.outages > 0) {
+            self.outages -= 1;
+            return .{ .respond = .{ .status = 503, .body = "" } };
+        }
         return .{ .respond = .{
             .status = self.status,
             .body = self.body,
@@ -5444,6 +5673,38 @@ test "a lyrics fetch told to wait by LRCLIB is unavailable, and one inside the w
         try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
     }
     try std.testing.expect(try library_database.track_lyrics.get(std.testing.allocator, track) == null);
+}
+
+test "a lyrics fetch asks LRCLIB again after an outage, and three outages store nothing a later fetch would trust" {
+    var lrclib: FakeLrclib = .{ .outages = 1 };
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-outage?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    const pink_moon = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+
+    const recovered = try runLyrics(&runtime, library, northern_sky, true);
+    defer recovered.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, recovered.outcome);
+    try std.testing.expectEqual(@as(usize, 2), recovered.lyrics.?.lines.len);
+    try std.testing.expectEqual(@as(u32, 2), lrclib.requestCount());
+    try expectWaited(&lrclib.http, 1, 5_000);
+
+    lrclib.outages = 3;
+    const failed = try runLyrics(&runtime, library, pink_moon, true);
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.unavailable, failed.outcome);
+    try std.testing.expect(failed.lyrics == null);
+    try std.testing.expectEqual(@as(u32, 5), lrclib.requestCount());
+    try std.testing.expect(try library_database.track_lyrics.get(std.testing.allocator, pink_moon) == null);
+
+    const later = try runLyrics(&runtime, library, pink_moon, true);
+    defer later.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, later.outcome);
+    try std.testing.expectEqual(@as(u32, 6), lrclib.requestCount());
 }
 
 test "a lyrics fetch waits for LRCLIB while another Gateway holds it, and is busy only once its deadline passes" {
@@ -5637,6 +5898,15 @@ const FakeArtistInfo = struct {
     group_cover_requests: std.atomic.Value(u32) = .init(0),
     /// A related artist whose MusicBrainz lookup answers 503.
     related_unavailable: ?[]const u8 = null,
+    /// The Artist's own MusicBrainz lookups from the next one on answered 503.
+    musicbrainz_outages: u32 = 0,
+    /// When each of the Artist's own MusicBrainz lookups was sent.
+    musicbrainz_times_ms: [8]i64 = @splat(0),
+    /// Every MusicBrainz release lookup answers 503.
+    releases_unavailable: bool = false,
+    /// The release ID and send time of each release lookup.
+    release_mbids: [8][36]u8 = undefined,
+    release_times_ms: [8]i64 = @splat(0),
     /// A related artist MusicBrainz names no image or Wikidata item for.
     related_without_photo: ?[]const u8 = null,
     related_body: [512]u8 = undefined,
@@ -5736,6 +6006,27 @@ const FakeArtistInfo = struct {
         if (std.mem.startsWith(u8, url, artist_prefix) and !std.mem.startsWith(u8, url, artist_prefix ++ amine_mbid) and
             url.len >= artist_prefix.len + 36)
             return self.respondRelatedArtist(url[artist_prefix.len..][0..36]);
+        if (std.mem.startsWith(u8, url, artist_prefix ++ amine_mbid)) {
+            const index = self.musicbrainz_requests.load(.monotonic);
+            if (index < self.musicbrainz_times_ms.len) self.musicbrainz_times_ms[index] = self.clock.now();
+            if (self.musicbrainz_outages > 0) {
+                self.musicbrainz_outages -= 1;
+                _ = self.musicbrainz_requests.fetchAdd(1, .monotonic);
+                return .{ .respond = .{ .status = 503, .body = "{}" } };
+            }
+        }
+        const release_prefix = "https://musicbrainz.org/ws/2/release/";
+        if (std.mem.startsWith(u8, url, release_prefix) and url.len >= release_prefix.len + 36) {
+            const index = self.release_requests.load(.monotonic);
+            if (index < self.release_times_ms.len) {
+                self.release_mbids[index] = url[release_prefix.len..][0..36].*;
+                self.release_times_ms[index] = self.clock.now();
+            }
+            if (self.releases_unavailable) {
+                _ = self.release_requests.fetchAdd(1, .monotonic);
+                return .{ .respond = .{ .status = 503, .body = "{}" } };
+            }
+        }
         const counter: *std.atomic.Value(u32), const body: []const u8 = if (std.mem.startsWith(u8, url, artist_prefix))
             .{ &self.musicbrainz_requests, self.musicbrainz }
         else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/area/" ++ portland_area_id ++ "?"))
@@ -6686,6 +6977,102 @@ test "an Artist's fetch from services that stop answering ends by its deadline w
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.unavailable, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
     try std.testing.expect(fake.clock.now() - started_ms <= artist_info.fetch_deadline_ms);
     try std.testing.expect(fake.requestCount() - requests_before <= 2);
+}
+
+test "an Artist's fetch that MusicBrainz could not answer three times stores nothing a later fetch trusts, and one outage costs about 5 s" {
+    var fake: FakeArtistInfo = .{ .musicbrainz_outages = 3 };
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-outage?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.unavailable, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 3), fake.musicbrainz_requests.load(.monotonic));
+
+    fake.musicbrainz_outages = 1;
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 5), fake.musicbrainz_requests.load(.monotonic));
+    const waited = fake.musicbrainz_times_ms[4] - fake.musicbrainz_times_ms[3];
+    try std.testing.expect(waited >= 2_500 and waited <= 7_500);
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqualStrings("Q27830860", info.record.wikidata_id.?);
+}
+
+fn addAmineRelease(library_database: *database.LibraryDatabase, root_id: i64, album: []const u8, release_mbid: []const u8) !i64 {
+    const uri = try std.fmt.allocPrint(std.testing.allocator, "/nonexistent/orca-music/Aminé/{s}/01.flac", .{album});
+    defer std.testing.allocator.free(uri);
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .root_id = root_id,
+        .uri = uri,
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "One",
+        .artist = "Aminé",
+        .album = album,
+        .album_artist = "Aminé",
+        .musicbrainz_album_artist_id = amine_mbid,
+        .musicbrainz_release_id = release_mbid,
+    } });
+    try projectAll(library_database);
+    var statement = try library_database.database.prepare("SELECT id FROM releases WHERE title = ?1;");
+    defer statement.deinit();
+    try statement.bindText(1, album);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+test "an Artist's fetch with its Releases stops at the first Release MusicBrainz could not answer, and a later fetch asks the rest" {
+    var fake: FakeArtistInfo = .{ .releases_unavailable = true };
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-releases-outage?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const root_id = try library_database.library_roots.add(database.LibraryDatabase.null_volume, "/nonexistent/orca-music");
+    const release_mbids = [_][]const u8{
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    };
+    var releases: [release_mbids.len]i64 = undefined;
+    for (&releases, release_mbids, [_][]const u8{ "Good for You", "OnePointFive", "Limbo" }) |*release, release_mbid, album|
+        release.* = try addAmineRelease(library_database, root_id, album, release_mbid);
+    var statement = try library_database.database.prepare("SELECT album_artist_id FROM releases WHERE id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, releases[0]);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    const artist = statement.columnInt64(0);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.unavailable, try runArtistInfo(&runtime, library, artist, .{ .include_releases = true }));
+    try std.testing.expectEqual(@as(u32, 3), fake.release_requests.load(.monotonic));
+    for (fake.release_mbids[0..3]) |*sent| try std.testing.expectEqualStrings(release_mbids[0], sent);
+    try expectJittered(fake.release_times_ms[1] - fake.release_times_ms[0], 5_000);
+    try expectJittered(fake.release_times_ms[2] - fake.release_times_ms[1], 30_000);
+    try std.testing.expectEqual(@as(?database.ReleaseInfo, null), try runtime.libraryReleaseInfo(library, releases[1]));
+    try std.testing.expectEqual(@as(?database.ReleaseInfo, null), try runtime.libraryReleaseInfo(library, releases[2]));
+
+    fake.releases_unavailable = false;
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{ .include_releases = true }));
+    try std.testing.expectEqual(@as(u32, 6), fake.release_requests.load(.monotonic));
+    for (fake.release_mbids[3..6], release_mbids) |*sent, release_mbid| try std.testing.expectEqualStrings(release_mbid, sent);
+    for (releases) |release| {
+        var info = (try runtime.libraryReleaseInfo(library, release)).?;
+        defer info.deinit();
+        try std.testing.expectEqual(@intFromEnum(runtime_module.ReleaseInfoOutcome.fetched), info.record.outcome);
+    }
 }
 
 test "an Artist's fetch waits for a service another Gateway holds, and is busy only once its deadline passes" {

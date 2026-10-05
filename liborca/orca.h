@@ -3260,7 +3260,8 @@ typedef enum orca_artist_link_kind {
  * photo to a local image. `offline` 1 makes no request and uses only the
  * local image and answers already cached. `include_releases` 1 then fetches
  * the info of each of the Artist's Releases with a MusicBrainz release ID,
- * at most 64, as orca_library_start_release_info does. */
+ * at most 64, as orca_library_start_release_info does, stopping at the
+ * first Release a service could not answer. */
 typedef struct orca_artist_info_options {
     orca_string_view language;
     uint8_t force;

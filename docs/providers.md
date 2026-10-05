@@ -67,9 +67,16 @@ not a tuning choice.
   that crashed is free 120 s after its last request.
 - **Jitter.** Every backoff Orca chooses lasts a random 0.5 to 1.5 times its
   nominal length: the retries inside a call, the rate-limit backoff,
-  ListenBrainz delivery's backoff, and the waits of matching and submission.
+  ListenBrainz delivery's backoff, and the waits of the job retries below.
   Processes that failed together therefore do not retry together. A time the
   server gave is never shortened.
+- **Job retries.** After an outage (a `5xx` or `408` without `Retry-After`)
+  or a timeout, matching, AcoustID submission, cover art, lyrics and artist
+  information ask again after a jittered 5 s, then a jittered 30 s, then
+  report the service unavailable (`network.retry`). Each wait uses the
+  Gateway's random source and clock, ends within 100 ms of a cancel, and is
+  not begun if it would end past the job's deadline. A transient failure is
+  never stored as a result.
 - **No retries inside a call.** By default (`Config.maximum_attempts = 1`) a
   request is made once. A failure goes back to the caller, which retries on
   its own schedule. The gateway has a 30 s
@@ -313,9 +320,10 @@ metadata; see [metadata.md](metadata.md#accepting-a-match).
   `1 − (1 − c_musicbrainz)(1 − c_acoustid)` over the services that found it, so
   two services agreeing rank above either alone. Candidates below 0.5 are
   dropped.
-- **Failures.** A `429`, a `5xx` or a timeout waits out the longer of the
-  service's block and a backoff of 60 s doubling per attempt, cancellably,
-  then asks again. After three attempts, or at once when the network cannot
+- **Failures.** A rate limit waits out the longer of the service's block and
+  a backoff of 60 s doubling per attempt, cancellably, then asks again. An
+  outage or a timeout is asked again after about 5 s, then about 30 s. After
+  three attempts of either kind, or at once when the network cannot
   be reached or another process holds the service, the job stops and reports
   `failed`. Cached answers are still used without a network. A query answered
   with something that is not a search result is counted and skipped.
@@ -569,8 +577,8 @@ be identified. It is started only by a person; no job starts it.
   AcoustID refuses (`401`, `403`, or error code 6) fails it with
   `invalid_user_key`. Nothing is marked sent in either case.
 - **Failures.** Another `4xx` rejects that batch: its files are counted in
-  `rejected` and stay unsent. `429`, `5xx` and network errors use the same
-  backoff as matching, and after three attempts the job fails with
+  `rejected` and stay unsent. Rate limits, outages and timeouts are retried
+  as in matching, and after three attempts the job fails with
   `unavailable`. While another process holds AcoustID it fails with `busy`.
 - **Record.** Each accepted item's submission ID is stored in
   `acoustid_submissions` with the file and recording ID.
@@ -657,9 +665,14 @@ under the same rate, backoff, identity and redirect rules:
 
 An index is at most 1 MiB and lists at most 64 images; an image is at most
 12 MiB, the bound on a cover a person sets, and only a JPEG or PNG by its
-bytes. A full image that fails, is too large or will not read leaves its
-candidate without a size, and `MatchStats.cover_art_candidates_unmeasured`
-counts it; a missing thumbnail leaves it without one. Progress counts
+bytes. A full image that is refused, missing, too large or will not read
+leaves its candidate without a size, and
+`MatchStats.cover_art_candidates_unmeasured` counts it; a missing thumbnail
+leaves it without one. An image or thumbnail that fails transiently (an
+outage, a timeout, a rate limit, a busy service or no network) ends the
+listing: the candidates measured before it are stored and the outcome is
+`partial`, and with none measured the stored list is kept and the Job fails
+`unavailable` or `busy`. Progress counts
 candidates. The list replaces the Release's last one in
 `cover_art_candidates` ([database.md](database.md#release-artwork)). When
 the release's index was read but the release group's would not come, the
@@ -712,9 +725,11 @@ the Track's own is in [metadata.md](metadata.md#lyrics).
 - **The answer.** At most 512 KiB of JSON. A record's `syncedLyrics` and
   `plainLyrics` are parsed as LRC; `instrumental: true` is kept as an
   instrumental with no lines. A `404`, or a record with neither text that is
-  not instrumental, is a miss. `408` and `5xx` are `unavailable`; any other
-  status, a redirect, or a body that is not a record is `refused`, and
-  nothing is stored.
+  not instrumental, is a miss. `408`, `5xx` and timeouts are asked again
+  after about 5 s, then about 30 s, within the 60 s deadline, and then are
+  `unavailable`; a rate limit is `unavailable` at once. Any other status, a
+  redirect, or a body that is not a record is `refused`. Nothing is stored
+  for a failure.
 - **Reuse.** Each answer is stored with a BLAKE3 digest of the title,
   artist, album and duration it was asked with. While the digest matches,
   lyrics and instrumentals are reused for ever and a miss for 7 days of wall
@@ -834,14 +849,18 @@ what was kept.
      ([Cover Art Archive](#cover-art-archive)). A cover is kept in
      `release_group_covers` by group ID and not asked for again, `force`
      included; a `404` or refusal keeps a row without an image, asked about
-     again after 30 days. An unavailable or busy archive ends the step and
-     keeps nothing for the groups left. `options.offline` skips the step.
+     again after 30 days. Each group is asked once; one the archive could
+     not answer for keeps nothing and the next group is asked.
+     `options.offline` skips the step.
      None of these change the outcome. A cover goes when no Artist's
      release groups name its group any more. The artwork loader serves it
      for the subject `.{ .release_group = mbid }`, without a request.
   11. **Releases.** With `options.include_releases`, each of up to 64 of the
      Artist's Releases with a MusicBrainz release ID gets its
-     [release info](#release-info).
+     [release info](#release-info). The first Release that ends
+     unavailable, busy or offline ends the fetch with that outcome: Releases
+     already fetched stay stored, and a later fetch asks for the rest. A
+     refused Release is recorded and the next one is asked.
 - **Years active.** For a `Group`, `Orchestra` or `Choir`, MusicBrainz's
   life span is formation to dissolution and is used as it is. For any
   other type, a person among them, the life span is a lifetime, so its
@@ -870,8 +889,11 @@ what was kept.
   ([Genres from MusicBrainz](#genres-from-musicbrainz)). ListenBrainz's
   listener counts and related artists are shown as from ListenBrainz. A
   local image carries no licence or credit.
-- **Failures.** A step that fails leaves what an earlier fetch stored for
-  that step, and the rest still run. The outcome is then the first failure:
+- **Failures.** The Artist's own lookups are asked again after an outage or
+  a timeout, as in [Job retries](#rules-toward-providers); related-artist
+  photos and release group covers are asked once per fetch, so one cannot
+  spend the deadline. A step that fails leaves what an earlier fetch stored
+  for that step, and the rest still run. The outcome is then the first failure:
   `refused` (a `4xx`, a redirect off the service or a body Orca does not
   accept), `unavailable` (`408`, `5xx`, a network failure or a block) or
   `busy` (another Gateway still holds a service's lease when the deadline

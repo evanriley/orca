@@ -13,10 +13,6 @@ pub const CancellationToken = scanner.CancellationToken;
 
 const acoustid = providers.acoustid;
 
-const initial_backoff_ms: u64 = 60_000;
-const maximum_attempts = 3;
-const cancel_poll_ms: u64 = 100;
-
 pub const Outcome = enum {
     completed,
     cancelled,
@@ -155,10 +151,10 @@ pub const AcoustIdSubmission = struct {
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
                 error.ProviderBusy => return .busy,
-                error.RateLimited, error.ProviderUnavailable, error.Timeout => {
-                    if (attempt + 1 >= maximum_attempts) return .unavailable;
-                    if (!self.backOff(attempt)) return .cancelled;
-                    continue;
+                error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(self.acoustid.gateway, err, attempt, .wait, self)) {
+                    .again => continue,
+                    .give_up => return .unavailable,
+                    .cancelled => return .cancelled,
                 },
                 else => return err,
             };
@@ -204,21 +200,7 @@ pub const AcoustIdSubmission = struct {
         self.pending.clearRetainingCapacity();
     }
 
-    /// False when cancelled while waiting.
-    fn backOff(self: *AcoustIdSubmission, attempt: u32) bool {
-        const gateway = self.acoustid.gateway;
-        const backoff_ms = network.client.jittered(gateway.random, initial_backoff_ms << @intCast(attempt));
-        var until = gateway.clock.nowMs() +| @as(i64, @intCast(backoff_ms));
-        if (gateway.blockedUntilMs()) |blocked| until = @max(until, blocked);
-        while (true) {
-            if (self.isCancelled()) return false;
-            const now = gateway.clock.nowMs();
-            if (now >= until) return true;
-            gateway.clock.sleepMs(@min(cancel_poll_ms, @as(u64, @intCast(until - now)))) catch return false;
-        }
-    }
-
-    fn isCancelled(self: *const AcoustIdSubmission) bool {
+    pub fn isCancelled(self: *const AcoustIdSubmission) bool {
         if (self.cancellation) |token| if (token.checkpoint()) return true;
         if (self.acoustid.gateway.cancel) |flag| if (flag.load(.acquire)) return true;
         return false;

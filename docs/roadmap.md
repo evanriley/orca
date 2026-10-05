@@ -374,16 +374,11 @@ removed.
 
 ### Before 1.0
 
-- Provider pacing matches published limits. Every service is spaced 1 s
-  apart, although AcoustID allows 3 requests a second, the Wikimedia APIs
-  200 a minute, and the Cover Art Archive and LRCLIB publish no limit. A
-  timeout or a 503 without `Retry-After` makes matching wait 60 s, and cover
-  art, lyrics and artist information never retry; cover candidates store a
-  failed download as missing. A second job or process that wants a service
-  in use fails with `error.ProviderBusy` instead of waiting its turn, so
-  artist information fails while matching runs. Every request opens a new
+- Providers take turns. A second job or process that wants a service in use
+  fails with `error.ProviderBusy` instead of waiting its turn, so artist
+  information fails while matching runs. Every request opens a new
   connection. Back-off a provider asks for stays as it is. Checked by tests
-  with an injected clock for each.
+  with an injected clock.
 - Signal path truth. Unknown device details must not produce an unqualified
   bit-perfect verdict: zero known reasons currently means eligible, and a
   channel mismatch is not checked. A float32-to-integer device path is not by

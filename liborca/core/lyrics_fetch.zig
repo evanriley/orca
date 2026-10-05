@@ -81,7 +81,7 @@ pub const Fetch = struct {
             if (!row.record.isMiss()) return .{ .outcome = .cached, .lyrics = (try self.pick(local, row.record)).lyrics };
             if (now_s - row.fetched_at < retry_missing_after_s) return .{ .outcome = .cached_miss, .lyrics = local };
         }
-        const answer = archive.get(self.allocator, query) catch |err| {
+        const answer = network.retry.call(archive.gateway, .report, null, lrclib.Lrclib.get, .{ archive, self.allocator, query }) catch |err| {
             const outcome: Outcome = switch (err) {
                 error.Canceled => .cancelled,
                 error.ProviderBusy => .busy,

@@ -75,14 +75,14 @@ pub const Fetch = struct {
         var progress: Progress = .{};
 
         var article: Known(Article) = .unknown;
-        const release = progress.step(try lookUp(self.services.musicbrainz.lookUpRelease(arena, release_mbid)));
+        const release = progress.step(try lookUp(self.services.musicbrainz.gateway, musicbrainz.MusicBrainz.lookUpRelease, .{ self.services.musicbrainz, arena, release_mbid }));
         if (progress.cancelled) return .cancelled;
         if (release) |found| {
             record.musicbrainz_release_group_id = found.releaseGroupId();
             if (record.musicbrainz_release_group_id == null) article = .none;
         }
         if (record.musicbrainz_release_group_id) |group_mbid| {
-            const group = progress.step(try lookUp(self.services.musicbrainz.lookUpReleaseGroup(arena, group_mbid)));
+            const group = progress.step(try lookUp(self.services.musicbrainz.gateway, musicbrainz.MusicBrainz.lookUpReleaseGroup, .{ self.services.musicbrainz, arena, group_mbid }));
             if (progress.cancelled) return .cancelled;
             if (group) |found| {
                 if (found.primary_type) |primary_type| _ = try self.library.releases.fillReleaseType(release_id, primary_type);
@@ -100,13 +100,13 @@ pub const Fetch = struct {
             .unknown => .unknown,
             .none => .none,
             .some => |found| found: {
-                const summary = progress.step(try lookUp(wikipedia.summary(
+                const summary = progress.step(try lookUp(self.services.wikipedia.gateway, wikipedia.summary, .{
                     self.services.wikipedia,
                     arena,
                     self.services.wikipedia_server,
                     found.language,
                     found.title,
-                )));
+                }));
                 if (progress.cancelled) return .cancelled;
                 break :found if (summary) |maybe_summary| .from(maybe_summary) else .unknown;
             },
@@ -138,13 +138,13 @@ pub const Fetch = struct {
     /// else in English, or failing an item the group's Wikipedia link.
     fn findArticle(self: *Fetch, arena: std.mem.Allocator, progress: *Progress, group: musicbrainz.ReleaseGroupLookup) !Known(Article) {
         if (group.wikidata_id) |item_id| {
-            const found = progress.step(try lookUp(wikidata.entity(
+            const found = progress.step(try lookUp(self.services.wikidata.gateway, wikidata.entity, .{
                 self.services.wikidata,
                 arena,
                 self.services.wikidata_server,
                 item_id,
                 self.language,
-            ))) orelse return .unknown;
+            })) orelse return .unknown;
             const entity = found orelse return .none;
             const title = entity.article_title orelse return .none;
             return .{ .some = .{ .title = title, .language = entity.article_language.? } };

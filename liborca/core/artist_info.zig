@@ -59,7 +59,8 @@ pub const Options = struct {
     /// Make no request; use the local image and answers already cached.
     offline: bool = false,
     /// Then fetch the info of each of the Artist's Releases with a
-    /// MusicBrainz release ID, at most `database.artist_releases_max`.
+    /// MusicBrainz release ID, at most `database.artist_releases_max`,
+    /// stopping at the first Release a service could not answer.
     include_releases: bool = false,
 };
 
@@ -162,7 +163,11 @@ pub const Fetch = struct {
                 switch (release_outcome) {
                     .fetched, .cached, .no_musicbrainz_id, .not_found => {},
                     .cancelled => return .cancelled,
-                    else => failure = failure orelse release_outcome,
+                    .refused => failure = failure orelse release_outcome,
+                    .unavailable, .busy, .offline, .not_requested => {
+                        failure = failure orelse release_outcome;
+                        break;
+                    },
                 }
             }
         }
@@ -181,19 +186,19 @@ pub const Fetch = struct {
         if (!self.force) if (fetched_at) |at| if (now_s - at < listenbrainz_refresh_after_s) return null;
         var progress: Progress = .{};
         var update: database.ArtistListenBrainzUpdate = .{};
-        if (progress.step(try lookUp(providers.listenbrainz.artistListeners(
+        if (progress.step(try lookUp(self.services.listenbrainz, providers.listenbrainz.artistListeners, .{
             self.services.listenbrainz,
             self.allocator,
             self.services.listenbrainz_server,
             artist_mbid,
-        )))) |listeners| update.listeners = if (listeners) |count| .{ .count = count } else .unknown;
+        }))) |listeners| update.listeners = if (listeners) |count| .{ .count = count } else .unknown;
         if (progress.cancelled) return .cancelled;
-        var similar = progress.step(try lookUp(listenbrainz_labs.similarArtists(
+        var similar = progress.step(try lookUp(self.services.labs.gateway, listenbrainz_labs.similarArtists, .{
             self.services.labs,
             self.allocator,
             self.services.labs_server,
             artist_mbid,
-        )));
+        }));
         defer if (similar) |*maybe| if (maybe.*) |*found| found.deinit();
         if (progress.cancelled) return .cancelled;
         var records: [listenbrainz_labs.max_similar]database.RelatedArtistRecord = undefined;
@@ -211,8 +216,9 @@ pub const Fetch = struct {
     /// Photos for the first `related_photos_per_fetch` related artists
     /// outside the Library with none kept, nor a marker that they have none,
     /// newer than `refresh_after_s`; with `force`, for the first that many
-    /// outside it. An artist whose lookup fails keeps what it had and does
-    /// not fail the fetch. False when cancelled.
+    /// outside it. Each artist is asked once, so one cannot spend the fetch's
+    /// deadline; one whose lookup fails keeps what it had and does not fail
+    /// the fetch. False when cancelled.
     fn fetchRelatedPhotos(self: *Fetch, artist_id: i64, now_s: i64) !bool {
         const info = &self.library.artist_info;
         var related = try info.related(self.allocator, artist_id);
@@ -251,9 +257,10 @@ pub const Fetch = struct {
     /// Front covers from the Cover Art Archive for the first
     /// `release_group_covers_per_fetch` groups Elsewhere lists, skipping a
     /// group whose cover is kept or that was found to have none less than
-    /// `cover_art.retry_missing_after_s` ago. A refusal is kept as none; an
-    /// unavailable or busy archive ends the step. Neither fails the fetch.
-    /// False when cancelled.
+    /// `cover_art.retry_missing_after_s` ago. Each group is asked once, so one
+    /// cannot spend the fetch's deadline. A refusal is kept as none; a group
+    /// the archive could not answer for keeps nothing and the next is asked.
+    /// Neither fails the fetch. False when cancelled.
     fn fetchReleaseGroupCovers(self: *Fetch, artist_id: i64, now_s: i64) !bool {
         if (self.offline) return true;
         const info = &self.library.artist_info;
@@ -266,7 +273,7 @@ pub const Fetch = struct {
             if (!metadata.isMusicBrainzId(group.mbid)) continue;
             if (try info.releaseGroupCoverMark(group.mbid)) |mark|
                 if (mark.has_image or now_s - mark.fetched_at < cover_art.retry_missing_after_s) continue;
-            switch (try lookUp(self.services.coverartarchive.releaseGroupFrontCover(self.allocator, group.mbid))) {
+            switch (try askedOnce(self.services.coverartarchive.releaseGroupFrontCover(self.allocator, group.mbid))) {
                 .value => |cover| switch (cover) {
                     .missing => try info.storeReleaseGroupCover(group.mbid, null, now_s),
                     .image => |image| {
@@ -277,7 +284,7 @@ pub const Fetch = struct {
                 .failed => |outcome| switch (outcome) {
                     .cancelled => return false,
                     .refused => try info.storeReleaseGroupCover(group.mbid, null, now_s),
-                    else => return true,
+                    else => {},
                 },
             }
         }
@@ -293,7 +300,7 @@ pub const Fetch = struct {
         if (isTopArea(artist.origin_area_type)) return name;
         var area_id = artist.origin_area_id orelse return name;
         for (0..max_origin_area_lookups) |looked| {
-            const area = progress.step(try lookUp(self.services.musicbrainz.lookUpArea(arena, area_id))) orelse return name;
+            const area = progress.step(try lookUp(self.services.musicbrainz.gateway, MusicBrainz.lookUpArea, .{ self.services.musicbrainz, arena, area_id })) orelse return name;
             if (looked == 0 and isTopArea(area.area.type)) return name;
             const parent = containingArea(area.parents) orelse return name;
             if (isTopArea(parent.type)) return try std.fmt.allocPrint(arena, "{s}, {s}", .{ name, parent.name });
@@ -316,13 +323,13 @@ pub const Fetch = struct {
     /// As `fetchInfo` finds a photo: the Commons file Wikidata's P18 names,
     /// else the one MusicBrainz's image relationship names.
     fn relatedPhoto(self: *Fetch, arena: std.mem.Allocator, mbid: []const u8) !RelatedPhoto {
-        const artist = switch (try lookUp(self.services.musicbrainz.lookUpArtist(arena, mbid))) {
+        const artist = switch (try askedOnce(self.services.musicbrainz.lookUpArtist(arena, mbid))) {
             .value => |value| value,
             .failed => |outcome| return relatedPhotoFailure(outcome),
         };
         var commons_file = artist.commons_image_file;
         if (artist.wikidata_id) |item_id| {
-            switch (try lookUp(wikidata.entity(
+            switch (try askedOnce(wikidata.entity(
                 self.services.wikidata,
                 arena,
                 self.services.wikidata_server,
@@ -337,7 +344,7 @@ pub const Fetch = struct {
             }
         }
         const file = commons_file orelse return .none;
-        const image_info = switch (try lookUp(wikimedia_commons.imageInfo(
+        const image_info = switch (try askedOnce(wikimedia_commons.imageInfo(
             self.services.commons,
             arena,
             self.services.commons_server,
@@ -346,7 +353,7 @@ pub const Fetch = struct {
             .value => |maybe_info| maybe_info orelse return .none,
             .failed => |outcome| return relatedPhotoFailure(outcome),
         };
-        return switch (try lookUp(wikimedia_commons.fetchImage(
+        return switch (try askedOnce(wikimedia_commons.fetchImage(
             self.services.commons.gateway,
             self.allocator,
             self.services.commons_server,
@@ -417,7 +424,7 @@ pub const Fetch = struct {
         var work_period: WorkPeriod = .{};
         var commons_file: Known([]const u8) = .unknown;
         var article: Known(Article) = .unknown;
-        if (progress.step(try lookUp(self.services.musicbrainz.lookUpArtist(arena, artist_mbid)))) |artist| {
+        if (progress.step(try lookUp(self.services.musicbrainz.gateway, MusicBrainz.lookUpArtist, .{ self.services.musicbrainz, arena, artist_mbid }))) |artist| {
             record.artist_type = artist.artist_type;
             life_span = .{ .begin_year = artist.begin_year, .end_year = artist.end_year, .ended = artist.ended };
             record.wikidata_id = artist.wikidata_id;
@@ -436,13 +443,13 @@ pub const Fetch = struct {
         if (progress.cancelled) return .cancelled;
 
         if (record.wikidata_id) |item_id| {
-            const found = progress.step(try lookUp(wikidata.entity(
+            const found = progress.step(try lookUp(self.services.wikidata.gateway, wikidata.entity, .{
                 self.services.wikidata,
                 arena,
                 self.services.wikidata_server,
                 item_id,
                 self.language,
-            )));
+            }));
             if (progress.cancelled) return .cancelled;
             if (found) |maybe_entity| {
                 article = .none;
@@ -465,19 +472,19 @@ pub const Fetch = struct {
             },
             .unknown => {},
             .some => |file| {
-                const described = progress.step(try lookUp(wikimedia_commons.imageInfo(
+                const described = progress.step(try lookUp(self.services.commons.gateway, wikimedia_commons.imageInfo, .{
                     self.services.commons,
                     arena,
                     self.services.commons_server,
                     file,
-                )));
+                }));
                 if (described) |maybe_image| if (maybe_image) |image_info| {
-                    if (progress.step(try lookUp(wikimedia_commons.fetchImage(
+                    if (progress.step(try lookUp(self.services.commons.gateway, wikimedia_commons.fetchImage, .{
                         self.services.commons.gateway,
                         self.allocator,
                         self.services.commons_server,
                         image_info.thumbnail_url,
-                    )))) |image| {
+                    }))) |image| {
                         commons_image = image;
                         photo = .{ .set = .{ .bytes = image.bytes, .mime_type = image.mime_type } };
                         setPhotoDetails(&record, .commons, commonsPhotoDetails(&image_info));
@@ -494,13 +501,13 @@ pub const Fetch = struct {
             .unknown => .unknown,
             .none => .none,
             .some => |found| found: {
-                const summary = progress.step(try lookUp(wikipedia.summary(
+                const summary = progress.step(try lookUp(self.services.wikipedia.gateway, wikipedia.summary, .{
                     self.services.wikipedia,
                     arena,
                     self.services.wikipedia_server,
                     found.language,
                     found.title,
-                )));
+                }));
                 if (progress.cancelled) return .cancelled;
                 break :found if (summary) |maybe_summary| .from(maybe_summary) else .unknown;
             },
@@ -528,7 +535,7 @@ pub const Fetch = struct {
                 if (link.kind == .wikipedia and std.mem.eql(u8, link.url, page)) break;
             } else try found.append(arena, .{ .kind = .wikipedia, .url = page });
         };
-        if (progress.step(try lookUp(self.services.musicbrainz.browseReleaseGroups(arena, artist_mbid)))) |browse| {
+        if (progress.step(try lookUp(self.services.musicbrainz.gateway, MusicBrainz.browseReleaseGroups, .{ self.services.musicbrainz, arena, artist_mbid }))) |browse| {
             try info.storeReleaseGroups(artist_id, browse.groups);
         } else if (progress.cancelled) {
             return .cancelled;
@@ -725,9 +732,16 @@ fn Step(comptime T: type) type {
     return union(enum) { value: T, failed: Outcome };
 }
 
-/// A provider call's value, or the outcome its failure maps to. Errors that
-/// are not a provider's answer are returned.
-pub fn lookUp(result: anytype) !Step(@typeInfo(@TypeOf(result)).error_union.payload) {
+/// What `function` called with `args` returned, or the outcome its failure
+/// maps to, after the retries `network.retry` allows a failure that may
+/// pass. Errors that are not a provider's answer are returned.
+pub fn lookUp(gateway: *network.Gateway, function: anytype, args: anytype) !Step(@typeInfo(@TypeOf(@call(.auto, function, args))).error_union.payload) {
+    return askedOnce(network.retry.call(gateway, .report, null, function, args));
+}
+
+/// `result`'s value, or the outcome its failure maps to. Errors that are not
+/// a provider's answer are returned.
+fn askedOnce(result: anytype) !Step(@typeInfo(@TypeOf(result)).error_union.payload) {
     const value = result catch |err| return .{ .failed = switch (@as(anyerror, err)) {
         error.Canceled => .cancelled,
         error.ProviderBusy => .busy,

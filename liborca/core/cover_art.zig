@@ -13,6 +13,7 @@ const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
 
 const coverartarchive = providers.coverartarchive;
+const CoverArtArchive = coverartarchive.CoverArtArchive;
 
 /// What fetching a Release's cover came to.
 pub const Outcome = enum(u8) {
@@ -77,7 +78,8 @@ pub const Fetch = struct {
                 if (now_s - stored.fetched_at < retry_missing_after_s) return .cached_miss;
             }
         }
-        const cover = self.archive.frontCover(self.allocator, &release_mbid) catch |err| return outcomeOf(err);
+        const cover = retried(self.archive, CoverArtArchive.frontCover, .{ self.archive, self.allocator, &release_mbid }) catch |err|
+            return outcomeOf(err);
         switch (cover) {
             .missing => {
                 try self.library.release_artwork.put(release_id, &release_mbid, null, now_s);
@@ -95,13 +97,25 @@ pub const Fetch = struct {
     }
 };
 
-fn outcomeOf(err: anyerror) anyerror!Outcome {
+fn retried(archive: *CoverArtArchive, function: anytype, args: anytype) @TypeOf(@call(.auto, function, args)) {
+    return network.retry.call(archive.gateway, .report, null, function, args);
+}
+
+/// The outcome of a failure that says nothing about the image, so nothing
+/// may be stored for it; null for an answer.
+fn interruption(err: anyerror) ?Outcome {
     return switch (err) {
         error.Canceled => .cancelled,
         error.ProviderBusy => .busy,
         error.NetworkUnavailable, error.Offline, error.Timeout, error.RateLimited, error.ProviderUnavailable => .unavailable,
+        else => null,
+    };
+}
+
+fn outcomeOf(err: anyerror) anyerror!Outcome {
+    return switch (err) {
         error.RedirectRefused, error.ProviderRejectedRequest, error.InvalidProviderResponse, error.ResponseTooLarge => .refused,
-        else => err,
+        else => interruption(err) orelse err,
     };
 }
 
@@ -142,7 +156,8 @@ pub const Candidates = struct {
         var found: std.ArrayList(Found) = .empty;
         defer found.deinit(self.allocator);
         if (release_mbid) |mbid| {
-            const listed = self.archive.releaseIndex(self.allocator, &mbid) catch |err| return outcomeOf(err);
+            const listed = retried(self.archive, CoverArtArchive.releaseIndex, .{ self.archive, self.allocator, &mbid }) catch |err|
+                return outcomeOf(err);
             if (listed) |index| {
                 defer index.deinit(self.allocator);
                 for (index.images) |indexed| try appendUnique(self.allocator, &found, .{
@@ -155,7 +170,7 @@ pub const Candidates = struct {
         }
         var group_missing = false;
         if (group_mbid) |mbid| group: {
-            const listed = self.archive.releaseGroupIndex(self.allocator, &mbid) catch |err| {
+            const listed = retried(self.archive, CoverArtArchive.releaseGroupIndex, .{ self.archive, self.allocator, &mbid }) catch |err| {
                 const outcome = try outcomeOf(err);
                 if (outcome == .cancelled or found.items.len == 0) return outcome;
                 group_missing = true;
@@ -181,52 +196,59 @@ pub const Candidates = struct {
         var inputs: [database.repository.max_cover_art_candidates]database.CoverArtCandidateInput = undefined;
         var thumbnails: [database.repository.max_cover_art_candidates]?[]u8 = @splat(null);
         defer for (thumbnails) |thumbnail| if (thumbnail) |bytes| self.allocator.free(bytes);
-        for (chosen, 0..) |candidate, at| {
-            inputs[at] = .{
+        var kept: usize = 0;
+        var interrupted: ?Outcome = null;
+        for (chosen) |*candidate| {
+            var input: database.CoverArtCandidateInput = .{
                 .caa_id = candidate.caa_id,
-                .musicbrainz_release_id = &chosen[at].release_mbid,
+                .musicbrainz_release_id = &candidate.release_mbid,
                 .kind = candidate.kind,
                 .approved = candidate.approved,
             };
-            const full = self.measure(candidate) catch |err| switch (err) {
-                error.Canceled => return .cancelled,
-                else => return err,
+            const full = self.measure(candidate.*) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    interrupted = try outcomeOf(err);
+                    break;
+                },
             };
             if (full) |measured| {
-                inputs[at].width = measured.width;
-                inputs[at].height = measured.height;
-                inputs[at].mime = measured.mime_type;
-            } else {
-                _ = self.progress.unmeasured.fetchAdd(1, .acq_rel);
+                input.width = measured.width;
+                input.height = measured.height;
+                input.mime = measured.mime_type;
             }
-            const small = self.archive.thumbnail(self.allocator, &candidate.release_mbid, candidate.caa_id) catch |err| switch (err) {
-                error.Canceled => return .cancelled,
-                error.OutOfMemory => return err,
-                else => coverartarchive.FrontCover.missing,
+            const small = retried(self.archive, CoverArtArchive.thumbnail, .{ self.archive, self.allocator, &candidate.release_mbid, candidate.caa_id }) catch |err| small: {
+                if (err == error.OutOfMemory) return err;
+                interrupted = interruption(err) orelse break :small coverartarchive.FrontCover.missing;
+                break;
             };
             switch (small) {
                 .image => |thumbnail| {
-                    thumbnails[at] = thumbnail.bytes;
-                    inputs[at].thumbnail = thumbnail.bytes;
+                    thumbnails[kept] = thumbnail.bytes;
+                    input.thumbnail = thumbnail.bytes;
                 },
                 .missing => {},
             }
+            if (full == null) _ = self.progress.unmeasured.fetchAdd(1, .acq_rel);
+            inputs[kept] = input;
+            kept += 1;
             _ = self.progress.examined.fetchAdd(1, .acq_rel);
         }
+        if (interrupted) |outcome| if (outcome == .cancelled or kept == 0) return outcome;
         const now_s = @divFloor(self.wall_clock.nowMs(), 1000);
-        try self.library.release_artwork.replaceCandidates(release_id, inputs[0..chosen.len], now_s);
-        if (group_missing) return .partial;
-        return if (chosen.len == 0) .not_found else .fetched;
+        try self.library.release_artwork.replaceCandidates(release_id, inputs[0..kept], now_s);
+        if (group_missing or interrupted != null) return .partial;
+        return if (kept == 0) .not_found else .fetched;
     }
 
     const Measured = struct { width: ?u32, height: ?u32, mime_type: []const u8 };
 
-    /// Null when the full image would not come, or is too large to hold.
+    /// Null when the archive refused the full image or it is too large to
+    /// hold. A failure that says nothing about the image is returned.
     fn measure(self: *Candidates, candidate: Found) !?Measured {
-        const full = self.archive.image(self.allocator, &candidate.release_mbid, candidate.caa_id) catch |err| switch (err) {
-            error.Canceled => return err,
-            error.OutOfMemory => return err,
-            else => return null,
+        const full = retried(self.archive, CoverArtArchive.image, .{ self.archive, self.allocator, &candidate.release_mbid, candidate.caa_id }) catch |err| {
+            if (err == error.OutOfMemory or interruption(err) != null) return err;
+            return null;
         };
         switch (full) {
             .missing => return null,
@@ -288,7 +310,8 @@ pub const Use = struct {
     /// archive no longer holds the image.
     pub fn run(self: *Use, release_id: i64, caa_id: i64, kind: database.ReleaseArtworkKind) !Outcome {
         const release_mbid = try self.library.release_artwork.candidateRelease(release_id, caa_id) orelse return .not_found;
-        const full = self.archive.image(self.allocator, &release_mbid, caa_id) catch |err| return outcomeOf(err);
+        const full = retried(self.archive, CoverArtArchive.image, .{ self.archive, self.allocator, &release_mbid, caa_id }) catch |err|
+            return outcomeOf(err);
         switch (full) {
             .missing => return .not_found,
             .image => |image| {
