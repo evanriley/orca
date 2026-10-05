@@ -627,7 +627,7 @@ test "FLAC replacement writes a comment block longer than one length byte with i
     const prefix = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
     const source_path = try std.fmt.allocPrint(allocator, "{s}/source.flac", .{prefix});
     const stage_path = try std.fmt.allocPrint(allocator, "{s}/stage.flac", .{prefix});
-    const long_entry = try std.mem.concat(allocator, u8, &.{ "CUSTOM=", "x" ** 70_000 });
+    const long_entry = try std.mem.concat(allocator, u8, &.{ "CUSTOM=", &@as([70_000]u8, @splat('x')) });
 
     var comments: std.ArrayList(u8) = .empty;
     var length: [4]u8 = undefined;

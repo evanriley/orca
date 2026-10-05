@@ -244,7 +244,7 @@ fn candidateText(buffer: []u8, diff: liborca.ReleaseMatchDiff, each: liborca.Rel
 }
 
 fn checkedFields(self: *App) liborca.ReleaseFieldSet {
-    var fields: liborca.ReleaseFieldSet = .initEmpty();
+    var fields: liborca.ReleaseFieldSet = .empty;
     for (std.enums.values(Field)) |field| {
         const check = self.match_review.checks.get(field) orelse continue;
         if (!applicable(field)) continue;

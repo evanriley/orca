@@ -272,7 +272,7 @@ test "a tagged AIFF reports its layout and length" {
 test "the sample rate is read from an 80-bit extended float" {
     try std.testing.expectEqual(@as(?u32, 44_100), extendedToRate("\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00"));
     try std.testing.expectEqual(@as(?u32, 48_000), extendedToRate("\x40\x0e\xbb\x80\x00\x00\x00\x00\x00\x00"));
-    try std.testing.expectEqual(@as(?u32, null), extendedToRate("\x00" ** 10));
+    try std.testing.expectEqual(@as(?u32, null), extendedToRate(&@as([10]u8, @splat(0))));
 }
 
 test "integer AIFF samples read left-justified and agree with the float read" {

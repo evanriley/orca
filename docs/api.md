@@ -668,7 +668,7 @@ defer page.deinit();
   `setClientIdentity` names the host to every provider and in the listen
   history; see [Client identity](#client-identity).
   `setListenBrainzServer` points them at a compatible server: `https`, or
-  `http` only to `127.0.0.1`, `[::1]` or `localhost`, and
+  `http` only to `127.0.0.1` or `localhost`, and
   `error.InvalidServerUrl` otherwise. The three setters may be called at any
   time; each listen worker adopts the new values on its next pass.
   `listenbrainz_token_service` and `listenbrainz_token_account` name the

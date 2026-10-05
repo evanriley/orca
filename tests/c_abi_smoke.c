@@ -3827,7 +3827,7 @@ static int provider_settings_steps(orca_runtime *runtime) {
     static const char *const accepted[] = {
         "https://lb.example.org",
         "http://127.0.0.1:8080",
-        "http://[::1]:8080",
+        "https://acoustid.example.org/v2",
         "http://localhost:8080",
     };
     for (uint8_t service = ORCA_PROVIDER_SERVICE_LISTENBRAINZ; service <= ORCA_PROVIDER_SERVICE_COVER_ART_ARCHIVE;
@@ -3837,6 +3837,8 @@ static int provider_settings_steps(orca_runtime *runtime) {
                     ORCA_STATUS_INVALID_ARGUMENT);
         SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_runtime_set_provider_server: InvalidServerUrl") == 0);
         SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://example.org") ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://[::1]:8080") ==
                     ORCA_STATUS_INVALID_ARGUMENT);
         SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, 0) == ORCA_STATUS_OK);
     }

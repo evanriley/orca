@@ -589,7 +589,12 @@ pub fn gzip(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 const testing = std.testing;
 
 test "a gzipped body decompresses to the form it was made from" {
-    const form = "client=key&format=json" ++ "&fingerprint.0=AQADtMmSJEm" ** 200;
+    const form = comptime form: {
+        const repeated = "&fingerprint.0=AQADtMmSJEm";
+        var bytes: []const u8 = "client=key&format=json";
+        for (0..200) |_| bytes = bytes ++ repeated;
+        break :form bytes;
+    };
     const compressed = try gzip(testing.allocator, form);
     defer testing.allocator.free(compressed);
     try testing.expect(compressed.len < form.len / 4);

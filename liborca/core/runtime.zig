@@ -1328,7 +1328,7 @@ pub const OrcaRuntime = struct {
 
     /// Points scrobbling at a self-hosted or compatible ListenBrainz server,
     /// from each listen worker's next pass. `https` anywhere, or `http` to
-    /// `127.0.0.1`, `[::1]` or `localhost` only, because the user token
+    /// `127.0.0.1` or `localhost` only, because the user token
     /// travels in every request; at most `providers.url.max_server_bytes`.
     /// `base_url` is copied; null restores the default server.
     pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {

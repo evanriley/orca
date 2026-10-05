@@ -254,7 +254,7 @@ pub const HealthKindSummary = struct {
 /// One entry per kind with at least one visible issue, highest severity
 /// first, then in kind order.
 pub const HealthSummary = struct {
-    buffer: [std.meta.fields(HealthIssueKind).len]HealthKindSummary = undefined,
+    buffer: [@typeInfo(HealthIssueKind).@"enum".field_names.len]HealthKindSummary = undefined,
     len: usize = 0,
 
     pub fn items(self: *const HealthSummary) []const HealthKindSummary {

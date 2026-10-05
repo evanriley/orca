@@ -1402,7 +1402,7 @@ pub const IdentificationProposalRepository = struct {
                 if (std.mem.eql(u8, candidate.release_mbid.?, &agreed)) break candidate;
             } else continue;
             for (try self.filesOfTracks(scratch, &.{release_track.id}, release_track.play_file)) |file_id|
-                try writeReleaseValues(&writer, file_id, payload, &agreed, .initFull());
+                try writeReleaseValues(&writer, file_id, payload, &agreed, .full);
         }
         return writer.values_written;
     }

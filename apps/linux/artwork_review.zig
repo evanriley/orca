@@ -90,7 +90,7 @@ const ListLoader = struct {
         for (self.albums.items) |*album| {
             const summary = (self.runtime.libraryRelease(self.library, album.release_id) catch null) orelse continue;
             defer summary.deinit(self.runtime.allocator);
-            album.title = try self.allocator.dupeZ(u8, summary.title);
+            album.title = try self.allocator.dupeSentinel(u8, summary.title, 0);
             album.artist = try self.allocator.dupe(u8, summary.album_artist);
             if (summary.release_date) |date| if (date.len >= 4) {
                 album.year = date[0..4].*;
@@ -1123,7 +1123,7 @@ fn readImage(self: *App, path: []const u8, choice: Choice) void {
         self.allocator.free(choice.releases);
         return self.toast("Still reading the last image");
     }
-    const path_copy = self.allocator.dupeZ(u8, path) catch {
+    const path_copy = self.allocator.dupeSentinel(u8, path, 0) catch {
         self.allocator.free(choice.releases);
         return self.toast("Out of memory");
     };

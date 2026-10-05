@@ -63,7 +63,7 @@ const WatchFixture = struct {
         self.root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
         errdefer std.testing.allocator.free(self.root);
         const database_path = switch (location) {
-            .memory => |name| try std.testing.allocator.dupeZ(u8, name),
+            .memory => |name| try std.testing.allocator.dupeSentinel(u8, name, 0),
             .file_outside_root => try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/library.db", .{self.data.sub_path}, 0),
             .file_inside_root => try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/library.db", .{self.root}, 0),
         };

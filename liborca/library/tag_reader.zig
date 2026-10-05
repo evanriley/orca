@@ -204,7 +204,7 @@ fn mpegStream(allocator: std.mem.Allocator, frames: []const []const u8, trailer:
 }
 
 fn frontCover(allocator: std.mem.Allocator) ![]u8 {
-    return id3v23Frame(allocator, "APIC", "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    return id3v23Frame(allocator, "APIC", "\x00image/png\x00\x03\x00" ++ @as([32]u8, @splat(0x5a)));
 }
 
 fn songTrailer() ![128]u8 {

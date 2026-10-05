@@ -20,6 +20,7 @@ shift 3
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cache=$work/cache
+export ZIG_GLOBAL_CACHE_DIR=$cache
 mkdir -p "$cache/p"
 for seed in "$@"; do
     if [[ -f $seed ]]; then
@@ -43,20 +44,20 @@ consumer=$work/consumer
 mkdir "$consumer"
 cp "$root/examples/embed/build.zig" "$root/examples/embed/main.zig" "$consumer/"
 sed '/\.orca = /d' "$root/examples/embed/build.zig.zon" >"$consumer/build.zig.zon"
-(cd "$consumer" && "$zig" fetch --global-cache-dir "$cache" --save-exact=orca "file://$work/orca.tar.gz")
+(cd "$consumer" && "$zig" fetch --save-exact=orca "file://$work/orca.tar.gz")
 if grep -q '\.path = ' "$consumer/build.zig.zon"; then
     echo "check-package: examples/embed/build.zig.zon still has a path dependency after its .orca line was removed; update this script to match it" >&2
     exit 1
 fi
 rm -rf "$consumer/zig-pkg" "$cache/p"/orca-*
-(cd "$consumer" && "$zig" build --global-cache-dir "$cache")
+(cd "$consumer" && "$zig" build)
 
 packages=("$consumer"/zig-pkg/orca-*)
 if [[ ${#packages[@]} -ne 1 || ! -d ${packages[0]} ]]; then
     echo "check-package: expected one fetched orca package in $consumer/zig-pkg" >&2
     exit 1
 fi
-(cd "${packages[0]}" && "$zig" build --global-cache-dir "$cache" --prefix "$work/prefix")
+(cd "${packages[0]}" && "$zig" build --prefix "$work/prefix")
 
 reported=$("$work/prefix/bin/orca-cli" --version)
 if [[ $reported != "orca-cli $version" ]]; then

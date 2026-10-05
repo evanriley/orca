@@ -1,7 +1,7 @@
 {
   lib,
   stdenv,
-  zig,
+  zig_0_17,
   pkg-config,
   wrapGAppsHook4,
   sqlite,
@@ -38,13 +38,13 @@ stdenv.mkDerivation (finalAttrs: {
     );
   };
 
-  deps = zig.fetchDeps {
+  deps = zig_0_17.fetchDeps {
     inherit (finalAttrs) pname version src;
     hash = "sha256-PagG6fv96840UDWtKFWP6tnRGahU8hMZTLjJtyFu23U=";
   };
 
   nativeBuildInputs = [
-    zig.hook
+    zig_0_17.hook
     pkg-config
   ]
   ++ lib.optionals stdenv.hostPlatform.isLinux [ wrapGAppsHook4 ];

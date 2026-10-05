@@ -638,7 +638,7 @@ fn yearOf(date: ?[]const u8) ?i32 {
 fn commonsFileName(arena: std.mem.Allocator, resource: []const u8) !?[]const u8 {
     const uri = std.Uri.parse(resource) catch return null;
     var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (uri.getHost(&host_buffer) catch return null).bytes;
+    const host = (std.Io.net.HostName.fromUri(uri, &host_buffer) catch return null).bytes;
     if (!std.ascii.eqlIgnoreCase(host, "commons.wikimedia.org")) return null;
     const path = switch (uri.path) {
         .raw, .percent_encoded => |text| text,
@@ -668,7 +668,7 @@ fn linkKind(relation_type: []const u8, resource: []const u8) database.ArtistLink
     for (by_type) |entry| if (std.mem.eql(u8, relation_type, entry[0])) return entry[1];
     const uri = std.Uri.parse(resource) catch return .other;
     var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (uri.getHost(&host_buffer) catch return .other).bytes;
+    const host = (std.Io.net.HostName.fromUri(uri, &host_buffer) catch return .other).bytes;
     const by_host = [_]struct { []const u8, database.ArtistLinkKind }{
         .{ "spotify.com", .spotify },
         .{ "music.apple.com", .apple_music },
@@ -1385,7 +1385,7 @@ test "an artist lookup yields the life span, type, Wikidata item, Commons image 
     try testing.expectEqualStrings("Q27830860", artist.wikidata_id.?);
     try testing.expectEqualStrings("Amine performing on Jimmy Fallon in 2017 (crop).png", artist.commons_image_file.?);
     try testing.expectEqual(@as(usize, 19), artist.links.len);
-    var seen: std.EnumSet(database.ArtistLinkKind) = .initEmpty();
+    var seen: std.EnumSet(database.ArtistLinkKind) = .empty;
     for (artist.links) |link| seen.insert(link.kind);
     for ([_]database.ArtistLinkKind{
         .official, .wikidata, .discogs,   .lastfm, .soundcloud, .youtube, .spotify, .apple_music,

@@ -520,7 +520,7 @@ Small defects that are not yet scheduled:
   as the one they were built against. A system newer than Orca's
   `flake.lock` therefore leaves `orca-gtk` without a Vulkan device, and GTK
   renders in software. To examine: build the default from the consumer's
-  `pkgs` when its `zig` is 0.16, and document `inputs.nixpkgs.follows` and
+  `pkgs` when it has `zig_0_17`, and document `inputs.nixpkgs.follows` and
   nixGL for `nix run` outside NixOS.
 - Re-identifying a Release turns its pending album correction into
   single-file corrections, which can then be accepted one at a time and

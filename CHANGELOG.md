@@ -1139,6 +1139,19 @@
 
 ### Changed
 
+- **Orca builds with Zig 0.17.0.** `minimum_zig_version` is `0.17.0`, the
+  flake and `nix/package.nix` use `zig_0_17`, and the overlay needs
+  `pkgs.zig_0_17` from the consumer's nixpkgs. The dev shell no longer
+  provides zls, which nixpkgs does not build for Zig 0.17.
+- **A plain-HTTP provider server must be `127.0.0.1` or `localhost`.** Zig
+  0.17's HTTP client accepts only RFC 1123 host names, so a server named by
+  a bracketed IPv6 literal such as `http://[::1]:8080` is refused, over
+  `http` or `https`, as is a host longer than 253 bytes.
+- **`orca.pc` is relocatable.** Its `prefix` is `${pcfiledir}/../..`
+  instead of the absolute install prefix, which Zig 0.17 build scripts can
+  no longer read.
+- The Chromaprint licence check runs as a host tool, `build/licence_check.zig`,
+  and still fails the build when a compiled source names the GPL or LGPL.
 - Provider GET requests reuse connections within a job, with at most 16 idle
   connections, all closed when the job ends. A GET that fails on a reused
   connection before any response arrives is sent again once, at once, on a

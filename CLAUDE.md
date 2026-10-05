@@ -25,15 +25,17 @@ Its build-time licence check must remain enabled. See
 
 ## Toolchain
 
-- Use Zig 0.16.0 from `nix develop` or direnv. This codebase uses `std.Io`,
+- Use Zig 0.17.0 from `nix develop` or direnv. This codebase uses `std.Io`,
   not the older `std.fs` and `std.io` APIs.
 - The dev shell supplies SQLite, the codec libraries, PipeWire, GTK4, and
   libsecret. Do not assume paths under `/usr`.
-- When `build.zig.zon` dependencies change, update the `zig.fetchDeps` hash in
-  `nix/package.nix`; set it to `lib.fakeHash` and rebuild to obtain the hash.
+- When `build.zig.zon` dependencies change, update the
+  `zig_0_17.fetchDeps` hash in `nix/package.nix`; set it to `lib.fakeHash`
+  and rebuild to obtain the hash.
 - GTK4 is hand-bound because `translate-C` cannot parse its headers.
+- nixpkgs has no zls for Zig 0.17, so the dev shell does not provide one.
 
-Zig 0.16 constraints that affect correctness:
+Zig 0.17 constraints that affect correctness:
 
 - A by-value struct parameter is a copy. Pass `*const T` when a pointer into
   the argument must outlive the call.
@@ -42,9 +44,14 @@ Zig 0.16 constraints that affect correctness:
 - `std.Io.Dir` cannot fsync a directory. Open the directory path as a file for
   durable renames.
 - Convert signed durations to unsigned before zero-padded formatting.
-- Give the inner cast in `@enumFromInt` an explicit enum-tag result type.
-- Sentinel formatting uses `std.fmt.bufPrintSentinel` and
-  `std.fmt.allocPrintSentinel`.
+- Sentinel strings use `std.fmt.bufPrintSentinel`,
+  `std.fmt.allocPrintSentinel` and `Allocator.dupeSentinel`.
+- `@typeInfo` returns parallel arrays (`field_names`, `field_types`,
+  `field_attrs`), not a `fields` slice; `std.meta.fields` does not exist.
+- `std.http.Client` and `std.Io.net.HostName` accept only RFC 1123 host
+  names, so a bracketed IPv6 literal URL cannot be requested.
+- Build scripts cannot read `zig build -- ARGS` or the install prefix; use
+  `Run.addPassthruArgs` and install-relative `LazyPath`s.
 
 ## Architecture invariants
 

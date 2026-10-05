@@ -79,10 +79,11 @@ pub const Status = struct {
     dropped: u64 = 0,
 
     fn eql(a: Status, b: Status) bool {
-        inline for (@typeInfo(Status).@"struct".fields) |field| {
-            const left = @field(a, field.name);
-            const right = @field(b, field.name);
-            const same = if (field.type == listenbrainz.BoundedText)
+        const info = @typeInfo(Status).@"struct";
+        inline for (info.field_names, info.field_types) |name, FieldType| {
+            const left = @field(a, name);
+            const right = @field(b, name);
+            const same = if (FieldType == listenbrainz.BoundedText)
                 std.mem.eql(u8, left.slice(), right.slice())
             else
                 std.meta.eql(left, right);

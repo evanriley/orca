@@ -1610,9 +1610,9 @@ fn checkConsistency(context: Context) !void {
         stats.batches_committed,
         if (stats.cancelled) "yes" else "no",
     });
-    inline for (std.meta.fields(liborca.IssueCategory)) |field| {
-        const category: liborca.IssueCategory = @fromBackingInt(@intCast(field.value));
-        try stdout.print("{s}={d} ", .{ field.name, try runtime.libraryMetadataIssueCount(library_handle, category) });
+    inline for (@typeInfo(liborca.IssueCategory).@"enum".field_names) |name| {
+        const category = @field(liborca.IssueCategory, name);
+        try stdout.print("{s}={d} ", .{ name, try runtime.libraryMetadataIssueCount(library_handle, category) });
     }
     try stdout.print("open={d}\n", .{try runtime.libraryMetadataIssueCount(library_handle, null)});
 }
@@ -2443,7 +2443,7 @@ fn applyMatchedRelease(context: Context) !void {
 
 fn parseReleaseFields(argument: []const u8) !liborca.ReleaseFieldSet {
     if (!std.mem.startsWith(u8, argument, "--fields=")) return error.UnknownOption;
-    var fields: liborca.ReleaseFieldSet = .initEmpty();
+    var fields: liborca.ReleaseFieldSet = .empty;
     var names = std.mem.splitScalar(u8, argument["--fields=".len..], ',');
     while (names.next()) |name| {
         const field = std.meta.stringToEnum(liborca.ReleaseField, name) orelse
@@ -5647,9 +5647,9 @@ fn searchLibrary(context: Context) !void {
     while (index < options.len) : (index += 2) {
         if (index + 1 >= options.len) return error.MissingOptionValue;
         const cap = try std.fmt.parseInt(u8, options[index + 1], 10);
-        inline for (std.meta.fields(liborca.SearchLimits)) |field| {
-            if (std.mem.eql(u8, options[index], "--" ++ field.name)) {
-                @field(limits, field.name) = cap;
+        inline for (@typeInfo(liborca.SearchLimits).@"struct".field_names) |name| {
+            if (std.mem.eql(u8, options[index], "--" ++ name)) {
+                @field(limits, name) = cap;
                 break;
             }
         } else return error.UnknownOption;

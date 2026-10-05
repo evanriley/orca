@@ -85,7 +85,7 @@ pub const Ui = struct {
     plus: ?*gtk.Widget = null,
     totals: ?*gtk.Label = null,
     save: ?*gtk.Widget = null,
-    tokens_cell: [std.meta.fields(Token).len]TokenCell = undefined,
+    tokens_cell: [@typeInfo(Token).@"enum".field_names.len]TokenCell = undefined,
     large: bool = false,
 
     pub fn deinit(self: *Ui, allocator: std.mem.Allocator) void {
@@ -124,7 +124,7 @@ fn changed(self: *App) void {
     }
     if (ui.codec) |dropdown| {
         const index = gtk.gtk_drop_down_get_selected(dropdown);
-        if (index != 0 and index != gtk.INVALID_LIST_POSITION and index - 1 < std.meta.fields(Codec).len)
+        if (index != 0 and index != gtk.INVALID_LIST_POSITION and index - 1 < @typeInfo(Codec).@"enum".field_names.len)
             filters.codec = @fromBackingInt(@intCast(index - 1));
     }
     if (ui.sample_rate) |dropdown| {

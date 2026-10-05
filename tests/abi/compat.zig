@@ -48,22 +48,22 @@ fn compareTypes(comptime Released: type, comptime Current: type, comptime path: 
                     .{ path, @alignOf(Released), @alignOf(Current) },
                 );
             }
-            for (released_struct.fields) |field| {
-                if (isReservedField(field.name)) continue;
-                const field_path = path ++ "." ++ field.name;
-                if (!@hasField(Current, field.name)) {
+            for (released_struct.field_names, released_struct.field_types) |field_name, FieldType| {
+                if (isReservedField(field_name)) continue;
+                const field_path = path ++ "." ++ field_name;
+                if (!@hasField(Current, field_name)) {
                     problems = problems ++ field_path ++ ": removed\n";
                     continue;
                 }
-                const released_offset = @offsetOf(Released, field.name);
-                const current_offset = @offsetOf(Current, field.name);
+                const released_offset = @offsetOf(Released, field_name);
+                const current_offset = @offsetOf(Current, field_name);
                 if (released_offset != current_offset) {
                     problems = problems ++ std.fmt.comptimePrint(
                         "{s}: offsetof was {d}, is now {d}\n",
                         .{ field_path, released_offset, current_offset },
                     );
                 }
-                problems = problems ++ compareTypes(field.type, @FieldType(Current, field.name), field_path);
+                problems = problems ++ compareTypes(FieldType, @FieldType(Current, field_name), field_path);
             }
             return problems;
         },
@@ -89,13 +89,13 @@ fn compareTypes(comptime Released: type, comptime Current: type, comptime path: 
                     .{ path, @alignOf(Released), @alignOf(Current) },
                 );
             }
-            for (released_union.fields) |field| {
-                const field_path = path ++ "." ++ field.name;
-                if (!@hasField(Current, field.name)) {
+            for (released_union.field_names, released_union.field_types) |field_name, FieldType| {
+                const field_path = path ++ "." ++ field_name;
+                if (!@hasField(Current, field_name)) {
                     problems = problems ++ field_path ++ ": removed\n";
                     continue;
                 }
-                problems = problems ++ compareTypes(field.type, @FieldType(Current, field.name), field_path);
+                problems = problems ++ compareTypes(FieldType, @FieldType(Current, field_name), field_path);
             }
             return problems;
         },
@@ -111,7 +111,7 @@ fn compareTypes(comptime Released: type, comptime Current: type, comptime path: 
         .pointer => |released_pointer| {
             const current_pointer = current_info.pointer;
             if (released_pointer.size != current_pointer.size or
-                released_pointer.is_const != current_pointer.is_const)
+                released_pointer.attrs.@"const" != current_pointer.attrs.@"const")
             {
                 return std.fmt.comptimePrint("{s}: was {s}, is now {s}\n", .{ path, @typeName(Released), @typeName(Current) });
             }
@@ -127,17 +127,17 @@ fn compareTypes(comptime Released: type, comptime Current: type, comptime path: 
         .optional => |released_optional| return compareTypes(released_optional.child, current_info.optional.child, path),
         .@"fn" => |released_fn| {
             const current_fn = current_info.@"fn";
-            if (released_fn.params.len != current_fn.params.len) {
+            if (released_fn.param_types.len != current_fn.param_types.len) {
                 return std.fmt.comptimePrint(
                     "{s}: took {d} parameters, now takes {d}\n",
-                    .{ path, released_fn.params.len, current_fn.params.len },
+                    .{ path, released_fn.param_types.len, current_fn.param_types.len },
                 );
             }
             var problems: []const u8 = "";
-            for (released_fn.params, current_fn.params, 0..) |released_param, current_param, index| {
+            for (released_fn.param_types, current_fn.param_types, 0..) |released_param, current_param, index| {
                 problems = problems ++ compareTypes(
-                    released_param.type.?,
-                    current_param.type.?,
+                    released_param.?,
+                    current_param.?,
                     std.fmt.comptimePrint("{s}(parameter {d})", .{ path, index }),
                 );
             }
@@ -162,21 +162,21 @@ fn compareValues(comptime released_value: anytype, comptime current_value: anyty
 const incompatibilities = blk: {
     @setEvalBranchQuota(10_000_000);
     var problems: []const u8 = "";
-    for (@typeInfo(released).@"struct".decls) |decl| {
-        if (!isOrcaName(decl.name)) continue;
-        if (!@hasDecl(current, decl.name)) {
-            problems = problems ++ decl.name ++ ": removed from orca.h\n";
+    for (@typeInfo(released).@"struct".decl_names) |decl_name| {
+        if (!isOrcaName(decl_name)) continue;
+        if (!@hasDecl(current, decl_name)) {
+            problems = problems ++ decl_name ++ ": removed from orca.h\n";
             continue;
         }
-        const released_decl = @field(released, decl.name);
-        const current_decl = @field(current, decl.name);
+        const released_decl = @field(released, decl_name);
+        const current_decl = @field(current, decl_name);
         const Released = @TypeOf(released_decl);
         if (Released == type) {
-            problems = problems ++ compareTypes(released_decl, current_decl, decl.name);
+            problems = problems ++ compareTypes(released_decl, current_decl, decl_name);
         } else if (@typeInfo(Released) == .@"fn") {
-            problems = problems ++ compareTypes(Released, @TypeOf(current_decl), decl.name);
+            problems = problems ++ compareTypes(Released, @TypeOf(current_decl), decl_name);
         } else {
-            problems = problems ++ compareValues(released_decl, current_decl, decl.name);
+            problems = problems ++ compareValues(released_decl, current_decl, decl_name);
         }
     }
     break :blk problems;
@@ -185,9 +185,9 @@ const incompatibilities = blk: {
 const released_function_names = blk: {
     @setEvalBranchQuota(10_000_000);
     var names: []const []const u8 = &.{};
-    for (@typeInfo(released).@"struct".decls) |decl| {
-        if (isOrcaName(decl.name) and @typeInfo(@TypeOf(@field(released, decl.name))) == .@"fn") {
-            names = names ++ .{decl.name};
+    for (@typeInfo(released).@"struct".decl_names) |decl_name| {
+        if (isOrcaName(decl_name) and @typeInfo(@TypeOf(@field(released, decl_name))) == .@"fn") {
+            names = names ++ .{decl_name};
         }
     }
     break :blk names;

@@ -1096,7 +1096,7 @@ pub fn releaseMatchDiff(
     const release = candidateRelease(view, release_mbid);
     diff.local_artwork_size = view.artwork_size;
     diff.candidate_artwork_size = coverArtSize(view, release_mbid);
-    const fields = try owned.alloc(ReleaseFieldDiff, std.meta.fields(database.ReleaseField).len);
+    const fields = try owned.alloc(ReleaseFieldDiff, @typeInfo(database.ReleaseField).@"enum".field_names.len);
     for (fields, 0..) |*field_diff, index| {
         const field: database.ReleaseField = @fromBackingInt(@intCast(index));
         const local: []const u8, const candidate: []const u8 = switch (field) {

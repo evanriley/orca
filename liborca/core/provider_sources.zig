@@ -114,7 +114,7 @@ test "every provider source names itself, its url, what it supplies and its lice
         try std.testing.expect(source.licence.len > 0);
         if (source.licence_url) |licence_url| try std.testing.expect(licence_url.len > 0);
     }
-    var seen = std.EnumSet(ProviderSourceId).initEmpty();
+    var seen = std.EnumSet(ProviderSourceId).empty;
     for (provider_sources) |source| {
         try std.testing.expect(!seen.contains(source.id));
         seen.insert(source.id);

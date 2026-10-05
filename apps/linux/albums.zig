@@ -151,7 +151,7 @@ const column_keys = std.enums.EnumArray(Column, [*:0]const u8).init(.{
 
 /// `rating,format` as settings keep it; names it does not know are skipped.
 pub fn parseColumns(text: []const u8) ColumnSet {
-    var result: ColumnSet = .initEmpty();
+    var result: ColumnSet = .empty;
     var names = std.mem.splitScalar(u8, text, ',');
     while (names.next()) |name| {
         const column = std.meta.stringToEnum(Column, std.mem.trim(u8, name, " ")) orelse continue;
@@ -3078,7 +3078,7 @@ fn showInfo(page: *AlbumPage) bool {
     const text = std.mem.trim(u8, record.description orelse "", " \n");
     gtk.gtk_widget_set_visible(about, @intFromBool(text.len != 0));
     if (text.len == 0) return true;
-    const owned = self.allocator.dupeZ(u8, text) catch return true;
+    const owned = self.allocator.dupeSentinel(u8, text, 0) catch return true;
     defer self.allocator.free(owned);
     if (page.description) |label| gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), owned.ptr);
     collapseDescription(page);

@@ -2437,7 +2437,7 @@ test "re-identify searches a Track its tag already identifies, confirms that rec
     try std.testing.expectEqual(@as(u64, 0), again_stats.matched);
     try std.testing.expectEqual(@as(u64, 0), again_stats.unmatched);
     try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, northern_sky));
-    try std.testing.expectEqual(@as(i64, @intFromEnum(database.ProposalState.dismissed)), try proposalState(library_database, northern_sky_remaster_mbid));
+    try std.testing.expectEqual(@as(i64, @backingInt(database.ProposalState.dismissed)), try proposalState(library_database, northern_sky_remaster_mbid));
 }
 
 test "re-identify is refused for the whole library and with bulk acceptance, and nothing is sent" {
@@ -4155,7 +4155,7 @@ const VerifyRig = struct {
         );
         defer count.deinit();
         try count.bindInt64(1, file_id);
-        try count.bindInt64(2, @intFromEnum(database.HealthIssueKind.recording_mismatch));
+        try count.bindInt64(2, @backingInt(database.HealthIssueKind.recording_mismatch));
         if (try count.step() != .row) return error.TestExpectedRow;
         return count.columnInt64(0);
     }
@@ -4304,7 +4304,7 @@ test "a verified file is looked up again only when its bytes or its recording ID
     );
     defer raised.deinit();
     try raised.bindInt64(1, agreeing_file);
-    try raised.bindInt64(2, @intFromEnum(database.HealthIssueKind.recording_mismatch));
+    try raised.bindInt64(2, @backingInt(database.HealthIssueKind.recording_mismatch));
     try std.testing.expectEqual(database.sqlite.Step.done, try raised.step());
     const after_edit = try rig.verify(.{});
     try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(reidentified));
@@ -6177,7 +6177,7 @@ test "an Artist's photo, biography, years and links come from MusicBrainz, Wikid
     try std.testing.expectEqualStrings("CC BY-SA 4.0", record.biography_licence.?);
     try std.testing.expectEqualStrings("en", record.biography_language.?);
     try std.testing.expectEqualStrings("en", record.requested_language.?);
-    try std.testing.expectEqual(@intFromEnum(runtime_module.ArtistInfoOutcome.fetched), record.outcome);
+    try std.testing.expectEqual(@backingInt(runtime_module.ArtistInfoOutcome.fetched), record.outcome);
     try std.testing.expectEqual(started_s, record.fetched_at);
     try std.testing.expectEqual(@as(?u64, 9025), record.listeners);
     var related = try runtime.libraryRelatedArtists(library, artist);
@@ -6227,7 +6227,7 @@ test "an offline fetch makes no request, keeps the outcome offline, and keeps th
     try std.testing.expectEqual(@as(u32, 0), fake.artistInfoRequests());
     var first = (try runtime.libraryArtistInfo(library, artist)).?;
     defer first.deinit();
-    try std.testing.expectEqual(@intFromEnum(runtime_module.ArtistInfoOutcome.offline), first.record.outcome);
+    try std.testing.expectEqual(@backingInt(runtime_module.ArtistInfoOutcome.offline), first.record.outcome);
     try std.testing.expectEqualStrings(amine_mbid, first.record.musicbrainz_artist_id.?);
     try std.testing.expect(first.record.photo_source == null);
 
@@ -6539,7 +6539,7 @@ test "a Release's description comes from its release group's Wikipedia article, 
         try std.testing.expectEqualStrings("en", record.description_language.?);
         try std.testing.expectEqualStrings(hot_space_mbid, record.musicbrainz_release_id.?);
         try std.testing.expectEqualStrings("3918b90b-340e-3779-9d7e-ba1593653498", record.musicbrainz_release_group_id.?);
-        try std.testing.expectEqual(@intFromEnum(runtime_module.ReleaseInfoOutcome.fetched), record.outcome);
+        try std.testing.expectEqual(@backingInt(runtime_module.ReleaseInfoOutcome.fetched), record.outcome);
     }
     try expectTrackGenres(&runtime, library, bare, .provider, &.{ "rock", "funk", "pop rock", "synth-pop" });
     try expectTrackGenres(&runtime, library, tagged, .observed_file, &.{"Jazz"});
@@ -7079,7 +7079,7 @@ test "an Artist's fetch with its Releases stops at the first Release MusicBrainz
     for (releases) |release| {
         var info = (try runtime.libraryReleaseInfo(library, release)).?;
         defer info.deinit();
-        try std.testing.expectEqual(@intFromEnum(runtime_module.ReleaseInfoOutcome.fetched), info.record.outcome);
+        try std.testing.expectEqual(@backingInt(runtime_module.ReleaseInfoOutcome.fetched), info.record.outcome);
     }
 }
 
@@ -7372,18 +7372,18 @@ test "release match pages and counts across many Releases agree with weighing ea
             const view = try repository.releaseMatchView(std.testing.allocator, releases.columnInt64(0), false);
             defer view.deinit();
             const bucket = @import("../database/repository/identification.zig").releaseMatchBucket(try view.best(std.testing.allocator), 0.9);
-            try expected[@intFromEnum(bucket)].append(std.testing.allocator, view.release_id);
+            try expected[@backingInt(bucket)].append(std.testing.allocator, view.release_id);
         }
     }
     try std.testing.expectEqual(ReleaseMatchCounts{
-        .confident = expected[@intFromEnum(ReleaseMatchBucket.confident)].items.len,
-        .needs_review = expected[@intFromEnum(ReleaseMatchBucket.needs_review)].items.len,
-        .unmatched = expected[@intFromEnum(ReleaseMatchBucket.unmatched)].items.len,
+        .confident = expected[@backingInt(ReleaseMatchBucket.confident)].items.len,
+        .needs_review = expected[@backingInt(ReleaseMatchBucket.needs_review)].items.len,
+        .unmatched = expected[@backingInt(ReleaseMatchBucket.unmatched)].items.len,
     }, try runtime.libraryReleaseMatchCounts(library, 0.9, null));
-    try std.testing.expectEqual(@as(usize, 187), expected[@intFromEnum(ReleaseMatchBucket.confident)].items.len);
-    try std.testing.expectEqual(@as(usize, 200), expected[@intFromEnum(ReleaseMatchBucket.needs_review)].items.len);
+    try std.testing.expectEqual(@as(usize, 187), expected[@backingInt(ReleaseMatchBucket.confident)].items.len);
+    try std.testing.expectEqual(@as(usize, 200), expected[@backingInt(ReleaseMatchBucket.needs_review)].items.len);
     for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched }) |bucket| {
-        const all = expected[@intFromEnum(bucket)].items;
+        const all = expected[@backingInt(bucket)].items;
         for ([_]u32{ 0, 1, 150, 199, 250 }) |offset| for ([_]u32{ 7, 512 }) |limit| {
             var page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, null, limit, offset);
             defer page.deinit();
@@ -7471,7 +7471,7 @@ test "a filter keeps the Releases whose title or album artist has a word startin
     var none = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .unmatched, 0.9, "drake", 512, 0);
     defer none.deinit();
     try std.testing.expectEqual(@as(usize, 0), none.items.len);
-    try std.testing.expectError(error.SearchTextTooLong, runtime.libraryReleaseMatchCounts(library, 0.9, "x" ** 257));
+    try std.testing.expectError(error.SearchTextTooLong, runtime.libraryReleaseMatchCounts(library, 0.9, &@as([257]u8, @splat('x'))));
 }
 
 test "applying only the album artist from pending proposals stores it locked over the file's tag, keeps a user's lock, leaves the rest and the proposals alone, and yields to a later edit" {
@@ -7555,7 +7555,7 @@ test "the release diff sizes the embedded cover and the archive's front cover, a
     {
         const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, bryter_layter_mbid);
         defer diff.deinit();
-        const artwork = diff.fields[@intFromEnum(ReleaseField.artwork)];
+        const artwork = diff.fields[@backingInt(ReleaseField.artwork)];
         try std.testing.expectEqualStrings("", artwork.local);
         try std.testing.expectEqualStrings("", artwork.candidate);
         try std.testing.expect(!artwork.differs);
@@ -7571,7 +7571,7 @@ test "the release diff sizes the embedded cover and the archive's front cover, a
     {
         const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, bryter_layter_mbid);
         defer diff.deinit();
-        const artwork = diff.fields[@intFromEnum(ReleaseField.artwork)];
+        const artwork = diff.fields[@backingInt(ReleaseField.artwork)];
         try std.testing.expectEqualStrings("embedded · 1200 × 1200", artwork.local);
         try std.testing.expectEqualStrings("Cover Art Archive · 1200 × 1200", artwork.candidate);
         try std.testing.expect(!artwork.differs);
@@ -7581,7 +7581,7 @@ test "the release diff sizes the embedded cover and the archive's front cover, a
     {
         const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, northern_sky_mbid);
         defer diff.deinit();
-        try std.testing.expectEqualStrings("Cover Art Archive · —", diff.fields[@intFromEnum(ReleaseField.artwork)].candidate);
+        try std.testing.expectEqualStrings("Cover Art Archive · —", diff.fields[@backingInt(ReleaseField.artwork)].candidate);
         try std.testing.expectEqual(@as(?ArtworkSize, null), diff.candidate_artwork_size);
     }
 }
@@ -7619,16 +7619,16 @@ test "release evidence counts Tracks heard by fingerprint and compares dates as 
     const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, bryter_layter_mbid);
     defer diff.deinit();
     try std.testing.expectEqual(@as(u32, 2), diff.aligned);
-    const date = diff.fields[@intFromEnum(ReleaseField.release_date)];
+    const date = diff.fields[@backingInt(ReleaseField.release_date)];
     try std.testing.expectEqualStrings("1971", date.local);
     try std.testing.expectEqualStrings("1971-03-01", date.candidate);
     try std.testing.expect(date.differs);
-    try std.testing.expect(!diff.fields[@intFromEnum(ReleaseField.album)].differs);
-    const release_type = diff.fields[@intFromEnum(ReleaseField.release_type)];
+    try std.testing.expect(!diff.fields[@backingInt(ReleaseField.album)].differs);
+    const release_type = diff.fields[@backingInt(ReleaseField.release_type)];
     try std.testing.expectEqualStrings("", release_type.local);
     try std.testing.expectEqualStrings("Mixtape", release_type.candidate);
     try std.testing.expect(release_type.differs);
-    const titles = diff.fields[@intFromEnum(ReleaseField.track_titles)];
+    const titles = diff.fields[@backingInt(ReleaseField.track_titles)];
     try std.testing.expectEqualStrings("1 of 2 differ", titles.local);
     try std.testing.expect(titles.differs);
     try std.testing.expectEqual(@as(usize, 2), diff.tracks.len);

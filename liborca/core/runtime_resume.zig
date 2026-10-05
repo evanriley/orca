@@ -188,7 +188,7 @@ const Plan = struct {
     }
 
     fn isPermutation(allocator: std.mem.Allocator, entries: []const database.repository.RestoredQueueEntry) !bool {
-        var seen = try std.DynamicBitSetUnmanaged.initEmpty(allocator, entries.len);
+        var seen = try std.bit_set.Dynamic.initEmpty(allocator, entries.len);
         defer seen.deinit(allocator);
         for (entries) |entry| {
             if (entry.entry >= entries.len or seen.isSet(entry.entry)) return false;

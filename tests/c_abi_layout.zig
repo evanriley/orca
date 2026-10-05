@@ -819,19 +819,19 @@ const FieldLayout = struct {
 
 fn fieldLayouts(comptime T: type) []const FieldLayout {
     return switch (@typeInfo(T)) {
-        .@"struct" => |info| layoutsOf(T, info.fields),
-        .@"union" => |info| layoutsOf(T, info.fields),
+        .@"struct" => |info| layoutsOf(T, info.field_names, info.field_types),
+        .@"union" => |info| layoutsOf(T, info.field_names, info.field_types),
         else => @compileError(@typeName(T) ++ " is neither a struct nor a union"),
     };
 }
 
-fn layoutsOf(comptime T: type, comptime fields: anytype) []const FieldLayout {
+fn layoutsOf(comptime T: type, comptime names: []const [:0]const u8, comptime types: []const type) []const FieldLayout {
     comptime {
-        var layouts: [fields.len]FieldLayout = undefined;
-        for (fields, 0..) |field, index| layouts[index] = .{
-            .name = field.name,
-            .offset = if (@typeInfo(T) == .@"union") 0 else @offsetOf(T, field.name),
-            .Type = field.type,
+        var layouts: [names.len]FieldLayout = undefined;
+        for (names, types, 0..) |name, FieldType, index| layouts[index] = .{
+            .name = name,
+            .offset = if (@typeInfo(T) == .@"union") 0 else @offsetOf(T, name),
+            .Type = FieldType,
         };
         const final = layouts;
         return &final;
@@ -920,8 +920,8 @@ fn isMappedConstant(comptime name: []const u8) bool {
     }
     inline for (export_mappings) |mapping| {
         if (@hasDecl(mapping, "fallback") and comptime std.mem.eql(u8, mapping.fallback, name)) return true;
-        inline for (@typeInfo(mapping.Tag).@"enum".fields) |field| {
-            if (comptime std.mem.eql(u8, constantName(mapping.prefix, field.name), name)) return true;
+        inline for (@typeInfo(mapping.Tag).@"enum".field_names) |tag_name| {
+            if (comptime std.mem.eql(u8, constantName(mapping.prefix, tag_name), name)) return true;
         }
     }
     inline for (import_mappings) |mapping| {
@@ -938,10 +938,10 @@ test "every C ABI struct has the layout orca.h declares" {
 
 test "every public extern type in c_api.zig is paired with an orca.h type" {
     var unpaired: usize = 0;
-    inline for (@typeInfo(c_api).@"struct".decls) |decl| {
-        const value = @field(c_api, decl.name);
+    inline for (@typeInfo(c_api).@"struct".decl_names) |decl_name| {
+        const value = @field(c_api, decl_name);
         if (@TypeOf(value) == type and isExternContainer(value) and !isPaired(value, 0)) {
-            std.debug.print("c_api.{s} has no orca.h counterpart in struct_pairs\n", .{decl.name});
+            std.debug.print("c_api.{s} has no orca.h counterpart in struct_pairs\n", .{decl_name});
             unpaired += 1;
         }
     }
@@ -951,11 +951,11 @@ test "every public extern type in c_api.zig is paired with an orca.h type" {
 test "every orca.h struct and union is paired with a c_api.zig type" {
     @setEvalBranchQuota(100_000);
     var unpaired: usize = 0;
-    inline for (@typeInfo(c).@"struct".decls) |decl| {
-        if (comptime !std.mem.startsWith(u8, decl.name, "orca_")) continue;
-        const value = @field(c, decl.name);
+    inline for (@typeInfo(c).@"struct".decl_names) |decl_name| {
+        if (comptime !std.mem.startsWith(u8, decl_name, "orca_")) continue;
+        const value = @field(c, decl_name);
         if (@TypeOf(value) == type and isExternContainer(value) and !isPaired(value, 1)) {
-            std.debug.print("{s} has no c_api.zig counterpart in struct_pairs\n", .{decl.name});
+            std.debug.print("{s} has no c_api.zig counterpart in struct_pairs\n", .{decl_name});
             unpaired += 1;
         }
     }
@@ -966,8 +966,8 @@ test "every value the C API produces equals the orca.h constant of the same name
     @setEvalBranchQuota(100_000);
     var mismatches: usize = 0;
     inline for (export_mappings) |mapping| {
-        inline for (@typeInfo(mapping.Tag).@"enum".fields) |field| {
-            const name = comptime constantName(mapping.prefix, field.name);
+        inline for (@typeInfo(mapping.Tag).@"enum".field_names) |tag_name| {
+            const name = comptime constantName(mapping.prefix, tag_name);
             const expected_name = if (@hasDecl(c, name))
                 name
             else if (@hasDecl(mapping, "fallback"))
@@ -975,10 +975,10 @@ test "every value the C API produces equals the orca.h constant of the same name
             else
                 @compileError(name ++ " is not declared in orca.h");
             const expected: i64 = @field(c, expected_name);
-            if (mapping.produce(@field(mapping.Tag, field.name))) |actual| {
+            if (mapping.produce(@field(mapping.Tag, tag_name))) |actual| {
                 if (actual != expected) {
                     std.debug.print("{s}.{s} produces {d}, orca.h {s} = {d}\n", .{
-                        @typeName(mapping.Tag), field.name, actual, expected_name, expected,
+                        @typeName(mapping.Tag), tag_name, actual, expected_name, expected,
                     });
                     mismatches += 1;
                 }
@@ -992,20 +992,20 @@ test "every orca.h constant the C API accepts imports as the Zig value of the sa
     @setEvalBranchQuota(1_000_000);
     var mismatches: usize = 0;
     inline for (import_mappings) |mapping| {
-        inline for (@typeInfo(c).@"struct".decls) |decl| {
-            if (comptime !std.mem.startsWith(u8, decl.name, mapping.prefix)) continue;
+        inline for (@typeInfo(c).@"struct".decl_names) |decl_name| {
+            if (comptime !std.mem.startsWith(u8, decl_name, mapping.prefix)) continue;
             const tag_name = comptime blk: {
-                var lower: [decl.name.len - mapping.prefix.len]u8 = undefined;
-                for (decl.name[mapping.prefix.len..], 0..) |character, index| lower[index] = std.ascii.toLower(character);
+                var lower: [decl_name.len - mapping.prefix.len]u8 = undefined;
+                for (decl_name[mapping.prefix.len..], 0..) |character, index| lower[index] = std.ascii.toLower(character);
                 const final = lower;
                 break :blk &final;
             };
-            const value: u8 = @field(c, decl.name);
+            const value: u8 = @field(c, decl_name);
             const imported = mapping.consume(value);
             const expected = std.meta.stringToEnum(mapping.Tag, tag_name);
             if (expected == null or imported != expected) {
                 std.debug.print("{s} = {d} imports as {?t}, expected {s}.{s}\n", .{
-                    decl.name, value, imported, @typeName(mapping.Tag), tag_name,
+                    decl_name, value, imported, @typeName(mapping.Tag), tag_name,
                 });
                 mismatches += 1;
             }
@@ -1017,11 +1017,11 @@ test "every orca.h constant the C API accepts imports as the Zig value of the sa
 test "every orca.h enum constant is checked against liborca" {
     @setEvalBranchQuota(4_000_000);
     var unchecked: usize = 0;
-    inline for (@typeInfo(c).@"struct".decls) |decl| {
-        if (comptime !std.mem.startsWith(u8, decl.name, "ORCA_")) continue;
-        if (comptime !isIntegerConstant(decl.name)) continue;
-        if (comptime !isMappedConstant(decl.name)) {
-            std.debug.print("{s} is not checked by any mapping in c_abi_layout.zig\n", .{decl.name});
+    inline for (@typeInfo(c).@"struct".decl_names) |decl_name| {
+        if (comptime !std.mem.startsWith(u8, decl_name, "ORCA_")) continue;
+        if (comptime !isIntegerConstant(decl_name)) continue;
+        if (comptime !isMappedConstant(decl_name)) {
+            std.debug.print("{s} is not checked by any mapping in c_abi_layout.zig\n", .{decl_name});
             unchecked += 1;
         }
     }

@@ -147,7 +147,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cli = b.addRunArtifact(cli);
     run_cli.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cli.addArgs(args);
+    run_cli.addPassthruArgs();
     const run_step = b.step("run", "Run orca-cli");
     run_step.dependOn(&run_cli.step);
 
@@ -291,11 +291,16 @@ pub fn build(b: *std.Build) void {
     const manifest = @import("build.zig.zon");
     const check_package = b.addSystemCommand(&.{"bash"});
     check_package.addFileArg(b.path("scripts/check-package.sh"));
-    check_package.addArgs(&.{ b.graph.zig_exe, b.pathFromRoot("."), manifest.version });
-    inline for (@typeInfo(@TypeOf(manifest.dependencies)).@"struct".fields) |field| {
-        const dependency = @field(manifest.dependencies, field.name);
+    check_package.addArg(b.graph.zig_exe);
+    check_package.addDirectoryArg2(b.path("."), .{ .make_absolute = true });
+    check_package.addArg(manifest.version);
+    inline for (@typeInfo(@TypeOf(manifest.dependencies)).@"struct".field_names) |field_name| {
+        const dependency = @field(manifest.dependencies, field_name);
         if (@hasField(@TypeOf(dependency), "hash")) {
-            check_package.addArg(b.graph.global_cache_root.join(b.allocator, &.{ "p", dependency.hash ++ ".tar.gz" }) catch @panic("OOM"));
+            check_package.addDirectoryArg2(
+                b.graph.path(.global_cache, "p/" ++ dependency.hash ++ ".tar.gz"),
+                .{ .make_absolute = true },
+            );
         }
     }
     check_package.has_side_effects = true;
@@ -394,12 +399,15 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "Newsreader[opsz,wght].ttf", "Newsreader-Italic[opsz,wght].ttf", "Geist[wght].ttf", "GeistMono[wght].ttf", "Newsreader-OFL.txt", "Geist-OFL.txt", "GeistMono-OFL.txt" }) |font_file| {
             b.installFile(b.fmt("apps/linux/data/fonts/{s}", .{font_file}), b.fmt("share/orca/fonts/{s}", .{font_file}));
         }
-        const run_linux_app = b.addRunArtifact(linux_app);
+        const run_linux_app = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            "XDG_DATA_DIRS=\"$0:${XDG_DATA_DIRS-/usr/local/share:/usr/share}\" exec \"$1\"",
+        });
+        run_linux_app.setName("run exe orca-gtk");
+        run_linux_app.addDirectoryArg2(b.graph.path(.install_prefix, "share"), .{ .make_absolute = true });
+        run_linux_app.addArtifactArg2(linux_app, .{});
         run_linux_app.step.dependOn(b.getInstallStep());
-        run_linux_app.setEnvironmentVariable("XDG_DATA_DIRS", if (b.graph.environ_map.get("XDG_DATA_DIRS")) |existing|
-            b.fmt("{s}/share:{s}", .{ b.install_prefix, existing })
-        else
-            b.fmt("{s}/share:/usr/local/share:/usr/share", .{b.install_prefix}));
         const run_linux_step = b.step("run-linux", "Run the native GTK4 frontend");
         run_linux_step.dependOn(&run_linux_app.step);
 
@@ -452,7 +460,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_benchmark = b.addRunArtifact(benchmark);
-    if (b.args) |args| run_benchmark.addArgs(args);
+    run_benchmark.addPassthruArgs();
     const benchmark_step = b.step("bench", "Run Orca benchmarks");
     benchmark_step.dependOn(&run_benchmark.step);
 
@@ -466,7 +474,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_dsp_benchmark = b.addRunArtifact(dsp_benchmark);
-    if (b.args) |args| run_dsp_benchmark.addArgs(args);
+    run_dsp_benchmark.addPassthruArgs();
     const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
     dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
 }
@@ -509,7 +517,7 @@ fn versionScript(b: *std.Build, header: []const u8) []const u8 {
 
 fn pkgConfigFile(b: *std.Build, os: std.Target.Os.Tag) []const u8 {
     return b.fmt(
-        \\prefix={s}
+        \\prefix=${{pcfiledir}}/../..
         \\libdir=${{prefix}}/lib
         \\includedir=${{prefix}}/include
         \\
@@ -522,7 +530,6 @@ fn pkgConfigFile(b: *std.Build, os: std.Target.Os.Tag) []const u8 {
         \\Libs.private: -lc++ -lm
         \\
     , .{
-        b.install_prefix,
         @import("build.zig.zon").version,
         if (os == .linux) " libpipewire-0.3" else "",
     });

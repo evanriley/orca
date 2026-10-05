@@ -99,7 +99,7 @@ home-manager.lib.homeManagerConfiguration {
 ### Overlay
 
 `orca.overlays.default` adds `pkgs.orca`, built against the nixpkgs it is
-applied to. That nixpkgs must provide Zig 0.16 as `pkgs.zig`. The modules'
+applied to. That nixpkgs must provide Zig 0.17 as `pkgs.zig_0_17`. The modules'
 default package and `orca.packages.<system>.orca` are built against the
 nixpkgs pinned in this flake's `flake.lock` instead.
 
@@ -118,7 +118,7 @@ nixpkgs pinned in this flake's `flake.lock` instead.
 
 Every platform:
 
-- Zig `0.16.0`. Zig compiles the C and C++ sources (the codec shims, ALAC,
+- Zig `0.17.0`. Zig compiles the C and C++ sources (the codec shims, ALAC,
   libxaac and Chromaprint) with its bundled Clang, so no separate C or C++
   compiler is needed.
 - `pkg-config`

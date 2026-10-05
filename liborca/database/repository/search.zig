@@ -224,7 +224,7 @@ const track_hits_sql = "SELECT " ++ kindNumber(.track) ++
 
 const ranked_hits_sql = blk: {
     var arms: []const u8 = "";
-    for (0..std.meta.fields(SearchKind).len) |kind| {
+    for (0..@typeInfo(SearchKind).@"enum".field_names.len) |kind| {
         if (kind == @backingInt(SearchKind.track)) continue;
         arms = arms ++ (if (arms.len == 0) "" else "    UNION ALL\n") ++ std.fmt.comptimePrint(
             \\    SELECT * FROM (
@@ -262,8 +262,8 @@ pub const SearchRepository = struct {
     db: sqlite.Database,
 
     pub fn find(self: *const SearchRepository, allocator: std.mem.Allocator, text: []const u8, limits: SearchLimits) !SearchResults {
-        inline for (std.meta.fields(SearchLimits)) |field| {
-            if (@field(limits, field.name) > max_search_hits_per_kind) return error.InvalidSearchLimits;
+        inline for (@typeInfo(SearchLimits).@"struct".field_names) |name| {
+            if (@field(limits, name) > max_search_hits_per_kind) return error.InvalidSearchLimits;
         }
         var buffer: [max_match_expression]u8 = undefined;
         const expression = try matchExpression(&buffer, text) orelse
@@ -509,8 +509,8 @@ test "inserting, renaming and deleting each searched table keeps its search inde
         \\DELETE FROM playlists WHERE id = 1;
         \\DELETE FROM genres WHERE id = 1;
     );
-    inline for (std.meta.fields(SearchKind)) |field| {
-        try expectIndexRow(&library, @field(SearchKind, field.name), 1, null, "");
+    inline for (@typeInfo(SearchKind).@"enum".field_names) |name| {
+        try expectIndexRow(&library, @field(SearchKind, name), 1, null, "");
     }
     try std.testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM search_index;"));
     try expectHits(&library, "hidden", .{}, &.{});

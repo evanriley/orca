@@ -1744,7 +1744,7 @@ typedef enum orca_provider_service {
 
 /*
  * Points one provider at a self-hosted or compatible server. `base_url` is
- * `https` to any host, or `http` to 127.0.0.1, [::1] or localhost only,
+ * `https` to any host name, or `http` to 127.0.0.1 or localhost only,
  * because tokens and the user's library travel in its requests; it carries no
  * user name, password, query or fragment and is at most 2048 bytes. Anything
  * else is ORCA_STATUS_INVALID_ARGUMENT and leaves the server unchanged. The

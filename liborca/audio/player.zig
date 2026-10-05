@@ -41,7 +41,7 @@ pub const OpenFailure = struct {
 /// counter only lets hosts read the track and error as one pair. The render
 /// callback never touches it.
 pub const OpenFailureSlot = struct {
-    const ErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+    const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
 
     sequence: std.atomic.Value(u64) = .init(0),
     track_id: std.atomic.Value(i64) = .init(0),

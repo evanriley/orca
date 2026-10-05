@@ -342,8 +342,8 @@ The boundary covers the whole engine, not a fragment of it:
   host to MusicBrainz, AcoustID, ListenBrainz, LRCLIB, Wikidata, Wikimedia
   Commons and Wikipedia.
   `orca_runtime_set_provider_server` points one `orca_provider_service` at
-  another server: `https`, or `http` to `127.0.0.1`, `[::1]` or `localhost`
-  only, copied, and `NULL` restores the public one.
+  another server: `https`, or `http` to `127.0.0.1` or `localhost` only,
+  copied, and `NULL` restores the public one.
   `orca_runtime_set_acoustid_client_key` sets the AcoustID application key.
   `orca_runtime_set_credential_callback` is how liborca reads tokens and keys
   from the host's secure store, and

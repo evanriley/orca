@@ -186,7 +186,7 @@ pub const State = struct {
 
     fn setOpenName(self: *State, allocator: std.mem.Allocator, name: ?[]const u8) void {
         if (self.open_name) |old| allocator.free(old);
-        self.open_name = if (name) |text| allocator.dupeZ(u8, text) catch null else null;
+        self.open_name = if (name) |text| allocator.dupeSentinel(u8, text, 0) catch null else null;
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -258,7 +258,7 @@ fn playlistQuery(self: *const App, pinned: bool, limit: u32, offset: u32) liborc
 
 fn appendCard(self: *App, summary: liborca.PlaylistSummary) !void {
     if (findCard(self, summary.id) != null) return;
-    const name = try self.allocator.dupeZ(u8, summary.name);
+    const name = try self.allocator.dupeSentinel(u8, summary.name, 0);
     errdefer self.allocator.free(name);
     try self.playlists.cards.append(self.allocator, .{
         .id = summary.id,
@@ -300,7 +300,7 @@ fn readChoices(self: *App, library: liborca.LibraryHandle) void {
         const page = self.runtime.libraryPlaylistPage(library, .{ .kind = .manual, .sort = .name, .limit = app.page_size, .offset = offset }) catch return;
         defer page.deinit();
         for (page.items) |summary| {
-            const name = self.allocator.dupeZ(u8, summary.name) catch return;
+            const name = self.allocator.dupeSentinel(u8, summary.name, 0) catch return;
             self.playlists.choices.append(self.allocator, .{ .id = summary.id, .name = name }) catch {
                 self.allocator.free(name);
                 return;
@@ -1548,7 +1548,7 @@ pub fn setFilter(self: *App, text: []const u8) void {
     if (std.mem.eql(u8, text, current)) return;
     if (self.playlists.query) |query| self.allocator.free(query);
     self.playlists.query = null;
-    if (text.len != 0) self.playlists.query = self.allocator.dupeZ(u8, text) catch null;
+    if (text.len != 0) self.playlists.query = self.allocator.dupeSentinel(u8, text, 0) catch null;
     refresh(self);
 }
 
@@ -2508,7 +2508,7 @@ fn importFile(self: *App, path: []const u8) void {
     defer imported.deinit();
     self.playlists.clearUnmatched(self.allocator);
     for (imported.unmatched_lines) |line| {
-        const copy = self.allocator.dupeZ(u8, line) catch break;
+        const copy = self.allocator.dupeSentinel(u8, line, 0) catch break;
         self.playlists.unmatched.append(self.allocator, copy) catch {
             self.allocator.free(copy);
             break;

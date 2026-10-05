@@ -70,7 +70,7 @@
         {
           inherit orca;
 
-          zig-fmt = pkgs.runCommand "orca-zig-fmt" { nativeBuildInputs = [ pkgs.zig ]; } ''
+          zig-fmt = pkgs.runCommand "orca-zig-fmt" { nativeBuildInputs = [ pkgs.zig_0_17 ]; } ''
             export HOME="$TMPDIR"
             cd ${self}
             zig fmt --check liborca apps benchmarks tests build build.zig
@@ -131,8 +131,7 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [
-            pkgs.zig
-            pkgs.zls
+            pkgs.zig_0_17
             pkgs.pkg-config
             pkgs.python3
             pkgs.ffmpeg-headless

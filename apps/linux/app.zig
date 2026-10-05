@@ -163,7 +163,7 @@ pub const max_device_preset_rows = 33;
 
 pub const SettingsTab = enum { general, library, playback, sound, listening, appearance, advanced, about };
 
-pub const settings_tab_count = @typeInfo(SettingsTab).@"enum".fields.len;
+pub const settings_tab_count = @typeInfo(SettingsTab).@"enum".field_names.len;
 
 pub const SettingsFit = enum { wide, icons };
 
@@ -454,7 +454,7 @@ pub const App = struct {
     album_added: albums.Added = .{},
     album_sections: albums.Sections = .{},
     album_sort_control: ?*gtk.DropDown = null,
-    album_chips: [std.meta.fields(albums.Chip).len]?*gtk.ToggleButton = @splat(null),
+    album_chips: [@typeInfo(albums.Chip).@"enum".field_names.len]?*gtk.ToggleButton = @splat(null),
     album_filters: album_filters.Filters = .{},
     album_filters_ui: album_filters.Ui = .{},
     album_search: OwnedText = .{},
@@ -462,13 +462,13 @@ pub const App = struct {
     album_artist_name: OwnedText = .{},
     album_artist_chip: ?*gtk.Widget = null,
     album_layout: albums.Layout = .grid,
-    album_layout_toggles: [2][std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(@splat(null)),
+    album_layout_toggles: [2][@typeInfo(albums.Layout).@"enum".field_names.len]?*gtk.ToggleButton = @splat(@splat(null)),
     album_grid: ?*gtk.GridView = null,
     album_grid_columns: c_uint = 0,
     album_grid_idle: c_uint = 0,
     album_tile_pixels: c_int = default_album_tile_pixels,
     album_cover_scale: ?*gtk.Range = null,
-    album_columns: albums.ColumnSet = .initEmpty(),
+    album_columns: albums.ColumnSet = .empty,
     album_info: albums.Info = .{},
     albums_empty: ?*adw.StatusPage = null,
     albums_syncing_controls: bool = false,
@@ -551,7 +551,7 @@ pub const App = struct {
     artist_sort: liborca.ArtistSort = .name,
     artist_sort_control: ?*gtk.DropDown = null,
     artist_layout: albums.Layout = .grid,
-    artist_layout_toggles: [std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(null),
+    artist_layout_toggles: [@typeInfo(albums.Layout).@"enum".field_names.len]?*gtk.ToggleButton = @splat(null),
     artist_grid: ?*gtk.GridView = null,
     artist_grid_columns: c_uint = 0,
     artist_grid_idle: c_uint = 0,

@@ -2880,7 +2880,7 @@ const Filter = struct {
 
     fn matches(filter: Filter, text: ?[*:0]const u8) bool {
         const value = text orelse return false;
-        return std.ascii.indexOfIgnoreCase(std.mem.span(value), filter.needle) != null;
+        return std.ascii.findIgnoreCase(std.mem.span(value), filter.needle) != null;
     }
 
     fn hide(filter: Filter, widget: *gtk.Widget) void {

@@ -239,7 +239,7 @@ pub const PlaybackQueue = struct {
         if (refs.len != 0 and cursor >= refs.len) return error.PositionOutOfRange;
         if (order) |permutation| {
             if (permutation.len != refs.len) return error.InvalidQueueOrder;
-            var seen = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, refs.len);
+            var seen = try std.bit_set.Dynamic.initEmpty(self.allocator, refs.len);
             defer seen.deinit(self.allocator);
             for (permutation) |entry| {
                 if (entry >= refs.len or seen.isSet(entry)) return error.InvalidQueueOrder;

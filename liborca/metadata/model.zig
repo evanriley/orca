@@ -302,8 +302,8 @@ pub const ObservedTags = struct {
     pub fn isEmpty(self: ObservedTags) bool {
         if (self.genres.len != 0) return false;
         const info = @typeInfo(ObservedTags).@"struct";
-        inline for (info.fields) |field| {
-            if (@typeInfo(field.type) == .optional and @field(self, field.name) != null)
+        inline for (info.field_names, info.field_types) |name, FieldType| {
+            if (@typeInfo(FieldType) == .optional and @field(self, name) != null)
                 return false;
         }
         return true;

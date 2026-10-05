@@ -1112,7 +1112,7 @@ fn showInfo(page: *ArtistPage) bool {
     if (page.biography_text) |old| self.allocator.free(old);
     page.biography_text = null;
     if (text.len == 0) return true;
-    page.biography_text = self.allocator.dupeZ(u8, text) catch return true;
+    page.biography_text = self.allocator.dupeSentinel(u8, text, 0) catch return true;
     if (page.biography_label) |label| {
         gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), page.biography_text.?.ptr);
         gtk.gtk_label_set_lines(gtk.cast(gtk.Label, label), biography_lines);

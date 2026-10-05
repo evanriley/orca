@@ -7,7 +7,7 @@ anything larger than a fix.
 
 ## Development environment
 
-Use Zig 0.16.0 from the Nix dev shell, which supplies every library and tool:
+Use Zig 0.17.0 from the Nix dev shell, which supplies every library and tool:
 
 ```sh
 nix develop

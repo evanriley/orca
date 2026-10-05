@@ -171,7 +171,7 @@ pub const State = struct {
     issues_shown: u64 = 0,
     unanalysed_shown: u64 = 0,
     restore_scroll: ?f64 = null,
-    expanded: std.EnumSet(Row) = .initEmpty(),
+    expanded: std.EnumSet(Row) = .empty,
     shown_loaded: std.EnumArray(Row, u32) = .initFill(0),
     then_duplicates: bool = false,
 };
@@ -320,7 +320,7 @@ pub fn revealPath(self: *App, path: ?[]const u8) void {
         std.debug.print("orca-gtk reveal: {s}\n", .{location});
         return;
     }
-    const terminated = self.allocator.dupeZ(u8, location) catch return;
+    const terminated = self.allocator.dupeSentinel(u8, location, 0) catch return;
     defer self.allocator.free(terminated);
     const file = gtk.g_file_new_for_path(terminated.ptr);
     defer gtk.g_object_unref(file);

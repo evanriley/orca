@@ -258,7 +258,7 @@ test "an Ogg stream of another codec yields no tags" {
 test "bytes that are not Ogg pages are rejected" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var memory = source.MemorySource{ .bytes = "fLaC" ++ "\x00" ** 40 };
+    var memory = source.MemorySource{ .bytes = "fLaC" ++ @as([40]u8, @splat(0)) };
     try std.testing.expectError(error.InvalidOggStream, read(arena.allocator(), memory.readable()));
 }
 
@@ -276,7 +276,7 @@ test "a page that claims more bytes than the stream holds is truncated, not read
 test "a stream of empty pages is abandoned after a bounded number of them" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const empty_page = "OggS" ++ "\x00" ** (page_header_bytes - 4);
+    const empty_page = "OggS" ++ @as([page_header_bytes - 4]u8, @splat(0));
     const pages = try arena.allocator().alloc(u8, empty_page.len * (max_pages + 1));
     for (0..max_pages + 1) |index|
         @memcpy(pages[index * empty_page.len ..][0..empty_page.len], empty_page);

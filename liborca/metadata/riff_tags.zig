@@ -177,7 +177,7 @@ test "an AIFF ID3 chunk yields tags and its cover" {
 
 fn withCoverOnlyId3Chunk(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const original = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 20));
-    const picture = "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32;
+    const picture = "\x00image/png\x00\x03\x00" ++ @as([32]u8, @splat(0x5a));
     var frame: [10]u8 = .{ 'A', 'P', 'I', 'C', 0, 0, 0, picture.len, 0, 0 };
     var header: [10]u8 = .{ 'I', 'D', '3', 3, 0, 0, 0, 0, 0, frame.len + picture.len };
     var chunk_header: [8]u8 = .{ 'i', 'd', '3', ' ', 0, 0, 0, 0 };

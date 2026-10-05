@@ -19,11 +19,11 @@ pub fn validateServer(base_url: []const u8) error{InvalidServerUrl}!void {
     if (uri.user != null or uri.password != null or uri.query != null or uri.fragment != null)
         return error.InvalidServerUrl;
     var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (uri.getHost(&host_buffer) catch return error.InvalidServerUrl).bytes;
+    const host = (std.Io.net.HostName.fromUri(uri, &host_buffer) catch return error.InvalidServerUrl).bytes;
     if (host.len == 0) return error.InvalidServerUrl;
     if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return;
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidServerUrl;
-    for ([_][]const u8{ "127.0.0.1", "[::1]", "localhost" }) |loopback| {
+    for ([_][]const u8{ "127.0.0.1", "localhost" }) |loopback| {
         if (std.ascii.eqlIgnoreCase(host, loopback)) return;
     }
     return error.InvalidServerUrl;
@@ -63,10 +63,21 @@ test "a server is copied, and one too long or invalid is refused" {
     @memset(&caller, 'x');
     try std.testing.expectEqualStrings("http://127.0.0.1:8080/lb", owned.view());
 
+    const long_path_prefix = "https://example.org/";
     var long: [max_server_bytes + 1]u8 = @splat('a');
-    @memcpy(long[0.."https://".len], "https://");
+    @memcpy(long[0..long_path_prefix.len], long_path_prefix);
     try std.testing.expectError(error.InvalidServerUrl, OwnedServer.init(&long));
     try std.testing.expectEqual(max_server_bytes, (try OwnedServer.init(long[0..max_server_bytes])).view().len);
+
+    const host_prefix = "https://";
+    var long_host: [host_prefix.len + std.Io.net.HostName.max_len + 1]u8 = @splat('a');
+    @memcpy(long_host[0..host_prefix.len], host_prefix);
+    for (long_host[host_prefix.len..], 0..) |*byte, offset| {
+        if (offset % 64 == 63) byte.* = '.';
+    }
+    try std.testing.expectError(error.InvalidServerUrl, OwnedServer.init(&long_host));
+    try std.testing.expectError(error.InvalidServerUrl, OwnedServer.init(long_host[0 .. long_host.len - 1]));
+    _ = try OwnedServer.init(long_host[0 .. long_host.len - 2]);
     try std.testing.expectError(error.InvalidServerUrl, OwnedServer.init("http://127.0.0.1@example.org"));
 }
 
@@ -77,11 +88,12 @@ test "plain HTTP is accepted only for a loopback server" {
         "http://127.0.0.1:8080",
         "http://localhost",
         "http://LOCALHOST:9/lb",
-        "http://[::1]:8080",
     }) |accepted| try validateServer(accepted);
     for ([_][]const u8{
         "http://api.listenbrainz.org",
         "http://192.168.1.10:8080",
+        "http://[::1]:8080",
+        "https://[::1]:8080",
         "http://127.0.0.1.example.org",
         "http://127.0.0.1@example.org/",
         "https://user:secret@example.org",

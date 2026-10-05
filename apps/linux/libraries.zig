@@ -169,9 +169,9 @@ pub fn append(self: *App, name: []const u8, path: []const u8, tracks: ?u64) !usi
     if (libraries.entries.items.len == max_entries) return error.TooManyLibraries;
     const shown = clipped(std.mem.trim(u8, name, " "));
     var name_buffer: [max_name_chars * 4 + 8]u8 = undefined;
-    const owned_name = try self.allocator.dupeZ(u8, uniqueName(libraries, if (shown.len == 0) nameFromPath(path) else shown, &name_buffer));
+    const owned_name = try self.allocator.dupeSentinel(u8, uniqueName(libraries, if (shown.len == 0) nameFromPath(path) else shown, &name_buffer), 0);
     errdefer self.allocator.free(owned_name);
-    const owned_path = try self.allocator.dupeZ(u8, path);
+    const owned_path = try self.allocator.dupeSentinel(u8, path, 0);
     errdefer self.allocator.free(owned_path);
     try libraries.entries.append(self.allocator, .{ .name = owned_name, .path = owned_path, .tracks = tracks });
     return libraries.entries.items.len - 1;
@@ -199,11 +199,11 @@ fn exists(self: *App, path: []const u8) bool {
 }
 
 fn absolute(allocator: std.mem.Allocator, path: []const u8) ?[:0]u8 {
-    const terminated = allocator.dupeZ(u8, path) catch return null;
+    const terminated = allocator.dupeSentinel(u8, path, 0) catch return null;
     defer allocator.free(terminated);
     const canonical = gtk.g_canonicalize_filename(terminated.ptr, null);
     defer gtk.g_free(canonical);
-    return allocator.dupeZ(u8, std.mem.span(canonical)) catch null;
+    return allocator.dupeSentinel(u8, std.mem.span(canonical), 0) catch null;
 }
 
 pub fn resolve(self: *App, environ: *std.process.Environ.Map) ?[:0]u8 {
@@ -217,12 +217,12 @@ pub fn resolve(self: *App, environ: *std.process.Environ.Map) ?[:0]u8 {
         defer self.allocator.free(path);
         const index = find(libraries, path) orelse transient: {
             const index = append(self, nameFromPath(path), path, null) catch
-                return self.allocator.dupeZ(u8, path) catch null;
+                return self.allocator.dupeSentinel(u8, path, 0) catch null;
             libraries.entries.items[index].transient = true;
             break :transient index;
         };
         libraries.active = index;
-        return self.allocator.dupeZ(u8, path) catch null;
+        return self.allocator.dupeSentinel(u8, path, 0) catch null;
     };
     if (libraries.entries.items.len == 0) addDefault(self);
     const chosen = libraries.chosen orelse 0;
@@ -230,7 +230,7 @@ pub fn resolve(self: *App, environ: *std.process.Environ.Map) ?[:0]u8 {
     const entry = libraries.entries.items[chosen];
     if (isDefault(entry.path) and !exists(self, entry.path)) {
         if (std.fs.path.dirname(entry.path)) |directory| {
-            const owned = self.allocator.dupeZ(u8, directory) catch return null;
+            const owned = self.allocator.dupeSentinel(u8, directory, 0) catch return null;
             defer self.allocator.free(owned);
             _ = gtk.g_mkdir_with_parents(owned.ptr, 0o700);
         }
@@ -238,14 +238,14 @@ pub fn resolve(self: *App, environ: *std.process.Environ.Map) ?[:0]u8 {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (isDefault(entry.path) or exists(self, entry.path)) {
         libraries.active = chosen;
-        return self.allocator.dupeZ(u8, entry.path) catch null;
+        return self.allocator.dupeSentinel(u8, entry.path, 0) catch null;
     }
     const shown = preferences.homePath(&path_buffer, entry.path);
     for (libraries.entries.items, 0..) |other, index| {
         if (index == chosen or !exists(self, other.path)) continue;
         reportProblem(self, "Could not open {s}", .{entry.name}, "No database at {s}. {s} is open instead.", .{ shown, other.name });
         libraries.active = index;
-        return self.allocator.dupeZ(u8, other.path) catch null;
+        return self.allocator.dupeSentinel(u8, other.path, 0) catch null;
     }
     reportProblem(self, "Could not open {s}", .{entry.name}, "No database at {s}", .{shown});
     return null;
@@ -297,7 +297,7 @@ fn switchTo(self: *App, index: usize, create: bool) bool {
         fail(self, index, .missing);
         return false;
     }
-    const path = self.allocator.dupeZ(u8, entry.path) catch {
+    const path = self.allocator.dupeSentinel(u8, entry.path, 0) catch {
         self.toast("Out of memory");
         return false;
     };
@@ -626,7 +626,7 @@ fn renameResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) ca
     for (libraries.entries.items, 0..) |other, at| {
         if (at != index and std.mem.eql(u8, other.name, name)) return self.toast("Another library has that name");
     }
-    const owned = self.allocator.dupeZ(u8, name) catch return self.toast("Out of memory");
+    const owned = self.allocator.dupeSentinel(u8, name, 0) catch return self.toast("Out of memory");
     self.allocator.free(libraries.entries.items[index].name);
     libraries.entries.items[index].name = owned;
     changed(self);
@@ -751,7 +751,7 @@ fn chosenPath(self: *App, file: *gtk.GFile) ?[:0]u8 {
         return null;
     };
     defer gtk.g_free(pointer);
-    return self.allocator.dupeZ(u8, std.mem.span(pointer)) catch null;
+    return self.allocator.dupeSentinel(u8, std.mem.span(pointer), 0) catch null;
 }
 
 fn existingChosen(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {

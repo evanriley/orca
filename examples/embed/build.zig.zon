@@ -2,7 +2,7 @@
     .name = .orca_embed_example,
     .version = "0.0.0",
     .fingerprint = 0xb8aab4914abacbb8,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .orca = .{ .path = "../.." },
     },

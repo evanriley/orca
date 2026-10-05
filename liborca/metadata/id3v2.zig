@@ -2135,7 +2135,7 @@ test "a recording id written to a cover-only ID3v2.3 tag keeps the cover byte fo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const cover = try buildFrame(allocator, "APIC", 3, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const cover = try buildFrame(allocator, "APIC", 3, "\x00image/png\x00\x03\x00" ++ @as([32]u8, @splat(0x5a)));
     const trailer = try legacyTrailer("1999");
     const original = try std.mem.concat(allocator, u8, &.{
         try buildTag(allocator, 3, 0, cover),
@@ -2162,7 +2162,7 @@ test "a title change to a cover-only ID3v2 tag is checked against the trailer ti
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const cover = try buildFrame(allocator, "APIC", 4, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const cover = try buildFrame(allocator, "APIC", 4, "\x00image/png\x00\x03\x00" ++ @as([32]u8, @splat(0x5a)));
     const trailer = try legacyTrailer("1999");
     const original = try std.mem.concat(allocator, u8, &.{
         try buildTag(allocator, 4, 0, cover),
@@ -2260,7 +2260,7 @@ fn expectReleaseIdRewrite(comptime major: u8) !void {
     const release_group = try buildFrame(allocator, "TXXX", major, "\x00MusicBrainz Release Group Id\x00" ++ release_group_id);
     const recording = try buildFrame(allocator, "TXXX", major, "\x00MusicBrainz Track Id\x00" ++ recording_id);
     const replay_gain = try buildFrame(allocator, "TXXX", major, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
-    const cover = try buildFrame(allocator, "APIC", major, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const cover = try buildFrame(allocator, "APIC", major, "\x00image/png\x00\x03\x00" ++ @as([32]u8, @splat(0x5a)));
     var frames: std.ArrayList(u8) = .empty;
     try frames.appendSlice(allocator, title);
     try frames.appendSlice(allocator, foreign_ufid);
@@ -2336,7 +2336,7 @@ test "release ids written to a cover-only ID3v2.3 tag keep the cover and ReplayG
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const cover = try buildFrame(allocator, "APIC", 3, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const cover = try buildFrame(allocator, "APIC", 3, "\x00image/png\x00\x03\x00" ++ @as([32]u8, @splat(0x5a)));
     const replay_gain = try buildFrame(allocator, "TXXX", 3, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
     const trailer = try legacyTrailer("1999");
     const original = try std.mem.concat(allocator, u8, &.{

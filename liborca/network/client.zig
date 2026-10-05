@@ -141,7 +141,7 @@ fn parseImfFixdate(text: []const u8) ?i64 {
     const hour = twoDigits(text[17..19]) orelse return null;
     const minute = twoDigits(text[20..22]) orelse return null;
     const second = twoDigits(text[23..25]) orelse return null;
-    if (day == 0 or day > std.time.epoch.getDaysInMonth(year, @enumFromInt(month))) return null;
+    if (day == 0 or day > std.time.epoch.getDaysInMonth(year, @fromBackingInt(@intCast(month)))) return null;
     if (hour > 23 or minute > 59 or second > 60) return null;
     return daysSinceUnixEpoch(year, month, day) * std.time.s_per_day +
         @as(i64, hour) * std.time.s_per_hour + @as(i64, minute) * std.time.s_per_min + second;
@@ -207,7 +207,7 @@ fn isRedirect(status: u16) bool {
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
 }
 
-const loopback_hosts = [_][]const u8{ "127.0.0.1", "[::1]", "localhost" };
+const loopback_hosts = [_][]const u8{ "127.0.0.1", "localhost" };
 
 /// The absolute URL a redirect from `request_url` to `location` leads to,
 /// when `allowance` permits it.
@@ -219,7 +219,7 @@ pub fn redirectTarget(
 ) ![]u8 {
     const origin = std.Uri.parse(request_url) catch return error.RedirectRefused;
     var origin_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const origin_host = (origin.getHost(&origin_host_buffer) catch return error.RedirectRefused).bytes;
+    const origin_host = (std.Io.net.HostName.fromUri(origin, &origin_host_buffer) catch return error.RedirectRefused).bytes;
     const target_url = if (std.mem.startsWith(u8, location, "/") and !std.mem.startsWith(u8, location, "//"))
         try absoluteOnOrigin(allocator, origin, origin_host, location)
     else
@@ -228,7 +228,7 @@ pub fn redirectTarget(
     const target = std.Uri.parse(target_url) catch return error.RedirectRefused;
     if (target.user != null or target.password != null) return error.RedirectRefused;
     var target_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const target_host = (target.getHost(&target_host_buffer) catch return error.RedirectRefused).bytes;
+    const target_host = (std.Io.net.HostName.fromUri(target, &target_host_buffer) catch return error.RedirectRefused).bytes;
     if (std.ascii.eqlIgnoreCase(target.scheme, "https") and isWithinHost(target_host, allowance.host))
         return target_url;
     if (isLoopback(origin_host) and std.ascii.eqlIgnoreCase(target.scheme, origin.scheme) and
@@ -919,7 +919,7 @@ pub const StandardTransport = struct {
             if (location == null and std.ascii.eqlIgnoreCase(header.name, "location"))
                 location = try allocator.dupe(u8, header.value);
         }
-        const status = @intFromEnum(response.head.status);
+        const status = @backingInt(response.head.status);
         if (!statusHasBody(response.head.status)) {
             http_request.connection.?.closing = true;
             return .{
@@ -969,7 +969,7 @@ pub const StandardTransport = struct {
         const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
         var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
         const criteria: std.http.Client.ConnectionPool.Criteria = .{
-            .host = try uri.getHost(&host_buffer),
+            .host = try std.Io.net.HostName.fromUri(uri, &host_buffer),
             .port = uri.port orelse switch (protocol) {
                 .plain => 80,
                 .tls => 443,
@@ -977,7 +977,7 @@ pub const StandardTransport = struct {
             .protocol = protocol,
         };
         if (choice == .pooled) {
-            if (pool.findConnection(io, criteria)) |connection| {
+            if (try pool.findConnection(io, criteria)) |connection| {
                 errdefer {
                     connection.closing = true;
                     pool.release(connection, io);
@@ -991,7 +991,7 @@ pub const StandardTransport = struct {
         var set_aside_len: usize = 0;
         defer for (set_aside[0..set_aside_len]) |connection| pool.release(connection, io);
         while (set_aside_len < set_aside.len) : (set_aside_len += 1)
-            set_aside[set_aside_len] = pool.findConnection(io, criteria) orelse break;
+            set_aside[set_aside_len] = (try pool.findConnection(io, criteria)) orelse break;
         return .{ .request = try self.client.request(method, uri, options), .reused = false };
     }
 
@@ -1094,7 +1094,7 @@ test "identities with empty fields, line breaks or parentheses are rejected" {
         .{ .name = "App (x)", .version = "1", .contact = "a@b.c" },
         .{ .name = "App", .version = "1)", .contact = "a@b.c" },
         .{ .name = "App", .version = "1", .contact = "(a@b.c" },
-        .{ .name = "A" ** 200, .version = "1", .contact = "a" ** 56 },
+        .{ .name = &@as([200]u8, @splat('A')), .version = "1", .contact = &@as([56]u8, @splat('a')) },
     };
     for (invalid) |identity| {
         var net: TestGateway = undefined;
@@ -1686,7 +1686,7 @@ const KeepAliveServer = struct {
                     try writer.interface.flush();
                     return self.io.sleep(.fromSeconds(30), .awake);
                 },
-                .oversized => try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n" ++ "x" ** 32),
+                .oversized => try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n" ++ @as([32]u8, @splat('x'))),
                 .no_content => try writer.interface.writeAll("HTTP/1.1 204 No Content\r\n\r\n"),
                 .redirect => try writer.interface.writeAll("HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n"),
             }

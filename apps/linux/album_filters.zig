@@ -50,7 +50,7 @@ pub const Ui = struct {
     year_from: ?*gtk.Editable = null,
     year_to: ?*gtk.Editable = null,
     formats: [2]?*gtk.ToggleButton = @splat(null),
-    artwork: [std.meta.fields(Artwork).len]?*gtk.ToggleButton = @splat(null),
+    artwork: [@typeInfo(Artwork).@"enum".field_names.len]?*gtk.ToggleButton = @splat(null),
     facets: Facets = .{},
 
     pub fn deinit(self: *Ui, allocator: std.mem.Allocator) void {
@@ -63,7 +63,7 @@ pub const Facets = struct {
     lossless_clear: ?*gtk.Widget = null,
     added: ?*gtk.MenuButton = null,
     added_popover: ?*gtk.Widget = null,
-    added_checks: [std.meta.fields(albums.Added.Window).len]?*gtk.CheckButton = @splat(null),
+    added_checks: [@typeInfo(albums.Added.Window).@"enum".field_names.len]?*gtk.CheckButton = @splat(null),
     genre: ?*gtk.MenuButton = null,
     genre_popover: ?*gtk.Widget = null,
     genre_selection: ?*gtk.SingleSelection = null,
@@ -73,8 +73,8 @@ pub const Facets = struct {
     decade_checks: [max_decades]?*gtk.CheckButton = @splat(null),
     more: ?*gtk.MenuButton = null,
     more_popover: ?*gtk.Widget = null,
-    shelf_checks: [std.meta.fields(albums.Shelf).len]?*gtk.CheckButton = @splat(null),
-    artwork_checks: [std.meta.fields(Artwork).len]?*gtk.CheckButton = @splat(null),
+    shelf_checks: [@typeInfo(albums.Shelf).@"enum".field_names.len]?*gtk.CheckButton = @splat(null),
+    artwork_checks: [@typeInfo(Artwork).@"enum".field_names.len]?*gtk.CheckButton = @splat(null),
 };
 
 const Decade = struct {
@@ -495,16 +495,16 @@ fn newDecadeFacet(self: *App) *gtk.MenuButton {
     var group: ?*gtk.CheckButton = null;
     var count: usize = 0;
     facets.decades[count] = .{};
-    _ = std.fmt.bufPrintZ(&facets.decades[count].label, "Any year", .{}) catch {};
+    _ = std.mem.printSentinel(&facets.decades[count].label, "Any year", .{}, 0) catch {};
     count += 1;
     var start = currentYear(self) - @mod(currentYear(self), 10);
     while (start >= earliest_decade and count < max_decades - 1) : (start -= 10) {
         facets.decades[count] = .{ .from = start, .to = start + 9 };
-        _ = std.fmt.bufPrintZ(&facets.decades[count].label, "{d}s", .{@as(u32, @intCast(start))}) catch {};
+        _ = std.mem.printSentinel(&facets.decades[count].label, "{d}s", .{@as(u32, @intCast(start))}, 0) catch {};
         count += 1;
     }
     facets.decades[count] = .{ .to = earliest_decade - 1 };
-    _ = std.fmt.bufPrintZ(&facets.decades[count].label, "Before {d}", .{@as(u32, earliest_decade)}) catch {};
+    _ = std.mem.printSentinel(&facets.decades[count].label, "Before {d}", .{@as(u32, earliest_decade)}, 0) catch {};
     count += 1;
     for (facets.decades[0..count], 0..) |*decade, index|
         facets.decade_checks[index] = radio(self, list, &decade.label, &group, index, decadeChecked);

@@ -118,7 +118,7 @@ pub const TrackQueryV2View = extern struct {
     has_genre_id: u8,
     has_year_min: u8 = 0,
     has_year_max: u8 = 0,
-    format: u8 = @intFromEnum(TrackFormatFilter.any),
+    format: u8 = @backingInt(TrackFormatFilter.any),
     explicit_only: u8 = 0,
     _reserved: [2]u8 = @splat(0),
     limit: u32,
@@ -330,8 +330,8 @@ pub const ReleaseQueryV2View = extern struct {
     lossless_only: u8 = 0,
     has_year_min: u8 = 0,
     has_year_max: u8 = 0,
-    artwork: u8 = @intFromEnum(ReleaseArtworkFilter.any),
-    kind: u8 = @intFromEnum(ReleaseKindFilter.any),
+    artwork: u8 = @backingInt(ReleaseArtworkFilter.any),
+    kind: u8 = @backingInt(ReleaseKindFilter.any),
     has_appearing_artist_id: u8 = 0,
     own_releases_only: u8 = 0,
     _reserved: [3]u8 = @splat(0),
@@ -1740,7 +1740,7 @@ const RuntimeBox = struct {
     /// builds never report a violation: the check exists to catch the mistake
     /// during development, not to make the boundary thread-safe.
     fn foreignThread(self: *const RuntimeBox) bool {
-        if (builtin.mode != .Debug) return false;
+        if (builtin.mode != .debug) return false;
         return std.Thread.getCurrentId() != self.owner_thread;
     }
 };
@@ -1878,8 +1878,8 @@ pub export fn orca_library_query_health_issues(
     defer page.deinit();
     for (page.items) |item| {
         const view: HealthIssueView = .{
-            .kind = @intFromEnum(item.kind),
-            .severity = @intFromEnum(item.severity),
+            .kind = @backingInt(item.kind),
+            .severity = @backingInt(item.severity),
             .path = stringView(item.path),
             .details = stringView(item.details),
         };
@@ -3201,8 +3201,8 @@ fn playlistFactsView(item: database.PlaylistSummary) PlaylistFactsView {
         .description = stringView(item.description),
         .pinned = @intFromBool(item.pinned),
         .loved = @intFromBool(item.loved),
-        .kind = @intFromEnum(item.kind),
-        .creator = @intFromEnum(item.creator),
+        .kind = @backingInt(item.kind),
+        .creator = @backingInt(item.creator),
         .mixed_artists = @intFromBool(item.mixed_artists),
         .tag_count = @intCast(item.tags.len),
     };
@@ -3813,7 +3813,7 @@ pub export fn orca_job_artist_info_outcome(runtime: ?*Runtime, job_handle: Handl
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const outcome = box.runtime.jobArtistInfoOutcome(importJob(job_handle)) catch |err| return box.fail(@src(), err);
-    destination.* = @intFromEnum(outcome);
+    destination.* = @backingInt(outcome);
     return .ok;
 }
 
@@ -3845,7 +3845,7 @@ pub export fn orca_library_artist_info(
         .has_end_year = @intFromBool(record.end_year != null),
         .ended = @intFromBool(record.ended),
         .has_photo = @intFromBool(record.photo_source != null),
-        .photo_source = if (record.photo_source) |source| @intFromEnum(source) else 0,
+        .photo_source = if (record.photo_source) |source| @backingInt(source) else 0,
         .has_biography = @intFromBool(record.biography != null),
         .outcome = record.outcome,
         .musicbrainz_artist_id = stringView(record.musicbrainz_artist_id orelse ""),
@@ -3930,7 +3930,7 @@ pub export fn orca_library_related_artist_photo_info(
     const record = &found.record;
     const view: RelatedArtistPhotoInfoView = .{
         .fetched_at = record.fetched_at,
-        .photo_source = @intFromEnum(record.source),
+        .photo_source = @backingInt(record.source),
         .photo_url = stringView(record.url orelse ""),
         .photo_licence = stringView(record.licence orelse ""),
         .photo_licence_url = stringView(record.licence_url orelse ""),
@@ -3967,7 +3967,7 @@ pub export fn orca_job_release_info_outcome(runtime: ?*Runtime, job_handle: Hand
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const outcome = box.runtime.jobReleaseInfoOutcome(importJob(job_handle)) catch |err| return box.fail(@src(), err);
-    destination.* = @intFromEnum(outcome);
+    destination.* = @backingInt(outcome);
     return .ok;
 }
 
@@ -3987,7 +3987,7 @@ pub export fn orca_library_release_info(
     const view: ReleaseInfoView = .{
         .fetched_at = record.fetched_at,
         .has_description = @intFromBool(record.description != null),
-        .description_source = if (record.description_source) |source| @intFromEnum(source) else 0,
+        .description_source = if (record.description_source) |source| @backingInt(source) else 0,
         .outcome = record.outcome,
         .description = stringView(record.description orelse ""),
         .description_url = stringView(record.description_url orelse ""),
@@ -4067,7 +4067,7 @@ pub export fn orca_library_artist_links(
     defer links.deinit();
     var views: [database.artist_links_max]ArtistLinkView = undefined;
     for (views[0..links.items.len], links.items) |*view, link| view.* = .{
-        .kind = @intFromEnum(link.kind),
+        .kind = @backingInt(link.kind),
         .url = stringView(link.url),
     };
     visit(context, &views, links.items.len);
@@ -4475,7 +4475,7 @@ pub export fn orca_runtime_poll_event(
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = event orelse return box.reject(@src(), .invalid_argument, "event is null");
-    destination.* = .{ .kind = @intFromEnum(EventKind.none), .payload = undefined };
+    destination.* = .{ .kind = @backingInt(EventKind.none), .payload = undefined };
     // Lossless completions first, coalesced hints second: a host must never
     // learn that a job finished before it learns the command that started it
     // succeeded.
@@ -4569,9 +4569,9 @@ fn hostCredential(
 ) anyerror!?[]u8 {
     const slot: *const CredentialSlot = @ptrCast(@alignCast(context));
     const callback = slot.callback orelse return null;
-    const service_text = try allocator.dupeZ(u8, service);
+    const service_text = try allocator.dupeSentinel(u8, service, 0);
     defer allocator.free(service_text);
-    const account_text = try allocator.dupeZ(u8, account);
+    const account_text = try allocator.dupeSentinel(u8, account, 0);
     defer allocator.free(account_text);
     const scratch = try allocator.alloc(u8, credential_max_bytes);
     defer providers.credentials.wipeAndFree(allocator, scratch);
@@ -5014,9 +5014,9 @@ pub export fn orca_library_apply_matched_release_fields(
 }
 
 fn releaseFieldSet(bits: u32) ?database.ReleaseFieldSet {
-    const field_count = std.meta.fields(database.ReleaseField).len;
+    const field_count = @typeInfo(database.ReleaseField).@"enum".field_names.len;
     if (bits >> field_count != 0) return null;
-    var set: database.ReleaseFieldSet = .initEmpty();
+    var set: database.ReleaseFieldSet = .empty;
     for (0..field_count) |index| {
         if (bits & (@as(u32, 1) << @intCast(index)) != 0) set.insert(importReleaseField(@intCast(index)) orelse return null);
     }
@@ -5050,7 +5050,7 @@ pub export fn orca_library_query_release_matches(
         const view: ReleaseMatchView = .{
             .release_id = item.release_id,
             .track_count = item.track_count,
-            .bucket = @intFromEnum(item.bucket),
+            .bucket = @backingInt(item.bucket),
             .has_best = @intFromBool(best != null),
             .has_candidate_track_count = @intFromBool(best != null and best.?.track_count != null),
             .title = stringView(item.title),
@@ -5122,7 +5122,7 @@ pub export fn orca_library_release_match_diff(
     const fields = allocator.alloc(ReleaseFieldDiffView, diff.fields.len) catch |err| return box.fail(@src(), err);
     defer allocator.free(fields);
     for (fields, diff.fields) |*view, field| view.* = .{
-        .field = @intFromEnum(field.field),
+        .field = @backingInt(field.field),
         .differs = @intFromBool(field.differs),
         .local = stringView(field.local),
         .candidate = stringView(field.candidate),
@@ -5822,7 +5822,7 @@ pub export fn orca_job_snapshot_get(
         return box.fail(@src(), err);
     destination.* = .{
         .kind = exportJobKind(snapshot.kind),
-        .state = @intFromEnum(snapshot.state),
+        .state = @backingInt(snapshot.state),
         .has_total = @intFromBool(snapshot.total_units != null),
         .completed_units = snapshot.completed_units,
         .total_units = snapshot.total_units orelse 0,
@@ -6042,7 +6042,7 @@ pub export fn orca_library_query_job_history(
             .total_units = entry.total_units orelse 0,
             .undo_group_id = entry.undo_group_id orelse 0,
             .kind = exportJobKind(entry.kind),
-            .state = @intFromEnum(entry.state),
+            .state = @backingInt(entry.state),
             .has_total = @intFromBool(entry.total_units != null),
             .has_undo_group_id = @intFromBool(entry.undo_group_id != null),
             .retryable = @intFromBool(entry.retryable),
@@ -6209,7 +6209,7 @@ pub export fn orca_player_set_repeat(
     if (mode > 2) return box.reject(@src(), .invalid_argument, "mode must be 0, 1 or 2");
     box.runtime.playerSetRepeat(
         importPlayer(player),
-        @enumFromInt(mode),
+        @fromBackingInt(@intCast(mode)),
     ) catch |err| return box.fail(@src(), err);
     return .ok;
 }
@@ -6273,7 +6273,7 @@ pub export fn orca_player_replay_gain_mode(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const mode = box.runtime.playerReplayGainMode(importPlayer(player)) catch |err|
         return box.fail(@src(), err);
-    destination.* = @intFromEnum(mode);
+    destination.* = @backingInt(mode);
     return .ok;
 }
 
@@ -6323,7 +6323,7 @@ pub export fn orca_player_replay_gain_settings(
         return box.fail(@src(), err);
     destination.* = .{
         .preamp_db = settings.preamp_db,
-        .mode = @intFromEnum(settings.mode),
+        .mode = @backingInt(settings.mode),
         .fallback = exportUntaggedFallback(settings.fallback),
         .peak_protection = @intFromBool(settings.peak_protection),
     };
@@ -6623,8 +6623,8 @@ pub fn exportPlaybackFailureReason(reason: core.runtime.PlaybackFailure.Reason) 
 
 fn exportPlayerStatus(status: core.runtime.PlayerStatus) PlayerStatus {
     return .{
-        .transport = @intFromEnum(status.transport),
-        .repeat = @intFromEnum(status.repeat),
+        .transport = @backingInt(status.transport),
+        .repeat = @backingInt(status.repeat),
         .shuffle = @intFromBool(status.shuffle),
         .has_track = @intFromBool(status.track_id != null),
         .epoch = status.epoch,
@@ -6748,7 +6748,7 @@ pub export fn orca_player_query_queue_history(
             return box.fail(@src(), err)) orelse continue;
         defer summary.deinit(box.runtime.allocator);
         const view = trackSummaryView(summary);
-        visit(context, &view, entry.ended_at_ms, @intFromEnum(entry.reason));
+        visit(context, &view, entry.ended_at_ms, @backingInt(entry.reason));
     }
     return .ok;
 }
@@ -7032,7 +7032,7 @@ pub export fn orca_zone_status_get(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const stats = box.runtime.zoneStats(importZone(zone)) catch |err| return box.fail(@src(), err);
     destination.* = .{
-        .output_state = @intFromEnum(stats.output_state),
+        .output_state = @backingInt(stats.output_state),
         .recovery_attempts = stats.recovery_attempts,
         .backend_quantum_frames = stats.backend_quantum_frames,
         .rendered_entry_serial = stats.rendered_entry_serial,
@@ -7212,15 +7212,15 @@ fn importTrackSort(sort: u8) ?database.TrackSort {
 }
 
 pub fn exportSearchKind(kind: database.SearchKind) u8 {
-    return @intFromEnum(kind);
+    return @backingInt(kind);
 }
 
 pub fn exportFolderEntryKind(kind: database.FolderEntryKind) u8 {
-    return @intFromEnum(kind);
+    return @backingInt(kind);
 }
 
 pub fn exportExplicit(advisory: metadata.Explicit) u8 {
-    return @intFromEnum(advisory);
+    return @backingInt(advisory);
 }
 
 const invalid_release_query = "query limit must be between 1 and 512 and sort a known orca_release_sort";
@@ -7515,11 +7515,11 @@ fn trackDetailsView(details: *const core.track_details.TrackDetails) TrackDetail
         .feedback_syncable = @intFromBool(details.feedback_syncable),
         .has_rating = @intFromBool(details.rating != null),
         .rating = details.rating orelse 0,
-        .musicbrainz_recording_id_source = @intFromEnum(exportIdSource(details.musicbrainz_recording_id_source)),
-        .musicbrainz_release_id_source = @intFromEnum(exportIdSource(details.musicbrainz_release_id_source)),
-        .musicbrainz_release_group_id_source = @intFromEnum(exportIdSource(details.musicbrainz_release_group_id_source)),
-        .musicbrainz_release_track_id_source = @intFromEnum(exportIdSource(details.musicbrainz_release_track_id_source)),
-        .musicbrainz_album_artist_id_source = @intFromEnum(exportIdSource(details.musicbrainz_album_artist_id_source)),
+        .musicbrainz_recording_id_source = @backingInt(exportIdSource(details.musicbrainz_recording_id_source)),
+        .musicbrainz_release_id_source = @backingInt(exportIdSource(details.musicbrainz_release_id_source)),
+        .musicbrainz_release_group_id_source = @backingInt(exportIdSource(details.musicbrainz_release_group_id_source)),
+        .musicbrainz_release_track_id_source = @backingInt(exportIdSource(details.musicbrainz_release_track_id_source)),
+        .musicbrainz_album_artist_id_source = @backingInt(exportIdSource(details.musicbrainz_album_artist_id_source)),
     };
 }
 
@@ -8023,7 +8023,7 @@ fn exportMaintenanceStatus(status: core.runtime.MaintenanceStatus) MaintenanceSt
         .has_next_due_ms = @intFromBool(status.next_due_ms != null),
         .has_last = @intFromBool(last != null),
         .has_last_release_id = @intFromBool(last_release_id != null),
-        .last_state = if (last) |unit| @intFromEnum(unit.state) else 0,
+        .last_state = if (last) |unit| @backingInt(unit.state) else 0,
     };
 }
 
@@ -8133,10 +8133,10 @@ pub fn exportCompletion(event: control.Event) Event {
             completed.object = exportHandle(value);
         },
         .job_finished => |value| return .{
-            .kind = @intFromEnum(EventKind.job_finished),
+            .kind = @backingInt(EventKind.job_finished),
             .payload = .{ .job_finished = .{
                 .job = exportJobHandle(value.job),
-                .state = @intFromEnum(value.state),
+                .state = @backingInt(value.state),
             } },
         },
         .failed => |failure| {
@@ -8145,7 +8145,7 @@ pub fn exportCompletion(event: control.Event) Event {
         },
     }
     return .{
-        .kind = @intFromEnum(EventKind.command_completed),
+        .kind = @backingInt(EventKind.command_completed),
         .payload = .{ .command_completed = completed },
     };
 }
@@ -8153,14 +8153,14 @@ pub fn exportCompletion(event: control.Event) Event {
 fn exportTelemetry(telemetry: control.Telemetry) ?Event {
     return switch (telemetry) {
         .player_position => |position| .{
-            .kind = @intFromEnum(EventKind.player_position),
+            .kind = @backingInt(EventKind.player_position),
             .payload = .{ .player_position = .{
                 .player = exportHandle(position.player),
                 .frames = position.frames,
             } },
         },
         .job_progress => |progress| .{
-            .kind = @intFromEnum(EventKind.job_progress),
+            .kind = @backingInt(EventKind.job_progress),
             .payload = .{ .job_progress = .{
                 .job = exportJobHandle(progress.job),
                 .has_total = @intFromBool(progress.total_units != null),
@@ -8169,7 +8169,7 @@ fn exportTelemetry(telemetry: control.Telemetry) ?Event {
             } },
         },
         .library_changed => |changed| .{
-            .kind = @intFromEnum(EventKind.library_changed),
+            .kind = @backingInt(EventKind.library_changed),
             .payload = .{ .library_changed = .{ .library = exportLibraryHandle(changed.library) } },
         },
     };
@@ -8396,8 +8396,8 @@ test "the wake callback fires on a submitted command and the pump timeout follow
     var completed = false;
     while (true) {
         try std.testing.expectEqual(Status.ok, orca_runtime_poll_event(runtime, &event, null));
-        if (event.kind == @intFromEnum(EventKind.none)) break;
-        if (event.kind == @intFromEnum(EventKind.command_completed) and
+        if (event.kind == @backingInt(EventKind.none)) break;
+        if (event.kind == @backingInt(EventKind.command_completed) and
             event.payload.command_completed.request_id == request_id) completed = true;
     }
     try std.testing.expect(completed);
@@ -8437,7 +8437,7 @@ test "a failing call leaves its function and reason as the last error, and the n
 }
 
 test "a call refused for its thread leaves the owner's last error untouched" {
-    if (builtin.mode != .Debug) return error.SkipZigTest;
+    if (builtin.mode != .debug) return error.SkipZigTest;
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
     var library: Handle = undefined;
@@ -8459,7 +8459,7 @@ test "a last error longer than its buffer is truncated and stays terminated" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
     const box = runtimeBox(runtime).?;
-    box.recordError("orca_library_open", "x" ** 400);
+    box.recordError("orca_library_open", &@as([400]u8, @splat('x')));
     const message = std.mem.span(orca_runtime_last_error(runtime));
     try std.testing.expectEqual(@as(usize, last_error_capacity), message.len);
     try std.testing.expect(std.mem.startsWith(u8, message, "orca_library_open: xxx"));
@@ -8508,12 +8508,12 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
 
     var tracks: TrackQueryView = .{ .artist_id = -1, .release_id = -1, .sort = 12, .descending = 0, .loved_only = 1, .limit = 8, .offset = 0 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks(runtime, library, &tracks, &visited, countTrack));
-    tracks.sort = @intFromEnum(TrackSortKey.loved);
+    tracks.sort = @backingInt(TrackSortKey.loved);
     try std.testing.expectEqual(Status.ok, orca_library_track_match_count(runtime, library, &tracks, &count));
 
     var tracks_v2: TrackQueryV2View = .{ .artist_id = 0, .release_id = 0, .genre_id = 0, .sort = 12, .descending = 0, .loved_only = 0, .has_artist_id = 0, .has_release_id = 0, .has_genre_id = 0, .limit = 8, .offset = 0 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
-    tracks_v2.sort = @intFromEnum(TrackSortKey.year);
+    tracks_v2.sort = @backingInt(TrackSortKey.year);
     tracks_v2.has_genre_id = 1;
     tracks_v2.genre_id = 1;
     try std.testing.expectEqual(Status.ok, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
@@ -8524,7 +8524,7 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, null, &visited, countSummaryFacts));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, null));
     try std.testing.expectEqual(Status.ok, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
-    tracks_v2.format = @intFromEnum(TrackFormatFilter.lossless);
+    tracks_v2.format = @backingInt(TrackFormatFilter.lossless);
     tracks_v2.has_year_min = 1;
     tracks_v2.year_min = 1990;
     tracks_v2.min_sample_rate = 44_100;
@@ -8536,7 +8536,7 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     tracks_v2.format = 3;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_match_count_v2(runtime, library, &tracks_v2, &count));
-    tracks_v2.format = @intFromEnum(TrackFormatFilter.any);
+    tracks_v2.format = @backingInt(TrackFormatFilter.any);
 
     var releases_v2: ReleaseQueryV2View = .{ .album_artist_id = 0, .genre_id = 1, .sort = 6, .loved_only = 0, .has_album_artist_id = 0, .has_genre_id = 1, .limit = 8, .offset = 0 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases_v2(runtime, library, &releases_v2, &visited, countReleaseFacts));
@@ -8547,10 +8547,10 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     releases_v2.artwork = 3;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases_v2(runtime, library, &releases_v2, &visited, countReleaseFacts));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
-    releases_v2.artwork = @intFromEnum(ReleaseArtworkFilter.absent);
+    releases_v2.artwork = @backingInt(ReleaseArtworkFilter.absent);
     releases_v2.kind = 4;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
-    releases_v2.kind = @intFromEnum(ReleaseKindFilter.ep_or_single);
+    releases_v2.kind = @backingInt(ReleaseKindFilter.ep_or_single);
     releases_v2.has_appearing_artist_id = 1;
     releases_v2.appearing_artist_id = 1;
     try std.testing.expectEqual(Status.ok, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
@@ -8571,7 +8571,7 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
 
     var artists_v2: ArtistQueryV2View = .{ .filter = .{ .pointer = null, .length = 0 }, .genre_id = 1, .limit = 8, .offset = 0, .sort = 4, .has_genre_id = 1, .loved_only = 0 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_query_artists_v2(runtime, library, &artists_v2, &visited, countArtistV2));
-    artists_v2.sort = @intFromEnum(ArtistSortKey.track_count);
+    artists_v2.sort = @backingInt(ArtistSortKey.track_count);
     try std.testing.expectEqual(Status.ok, orca_library_query_artists_v2(runtime, library, &artists_v2, &visited, countArtistV2));
     artists_v2.loved_only = 2;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching_v2(runtime, library, &artists_v2, &count));
@@ -8584,12 +8584,12 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     try std.testing.expectEqual(Status.not_found, orca_library_artist_totals(runtime, library, 1, &totals));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_totals(runtime, library, 1, null));
     artists_v2.filter.length = 0;
-    artists_v2.sort = @intFromEnum(ArtistSortKey.recently_added);
+    artists_v2.sort = @backingInt(ArtistSortKey.recently_added);
     try std.testing.expectEqual(Status.ok, orca_library_query_artists_v2(runtime, library, &artists_v2, &visited, countArtistV2));
 
     var genres: GenreQueryView = .{ .filter = .{ .pointer = null, .length = 0 }, .limit = 8, .offset = 0, .sort = 2 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_query_genres(runtime, library, &genres, &visited, countGenre));
-    genres.sort = @intFromEnum(GenreSortKey.track_count);
+    genres.sort = @backingInt(GenreSortKey.track_count);
     try std.testing.expectEqual(Status.ok, orca_library_query_genres(runtime, library, &genres, &visited, countGenre));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_query_genres(runtime, library, null, &visited, countGenre));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_genre_count(runtime, library, null, 3, &count));
@@ -8919,7 +8919,7 @@ test "feedback, rating and release love edits refuse bad arguments and leave the
     try std.testing.expectEqual(Status.invalid_argument, orca_library_set_release_love(runtime, library, &ids, 1, 2, &change));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_set_release_love(runtime, library, null, 1, 1, &change));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_set_release_love(runtime, library, &ids, 1, 1, null));
-    const too_many = [_]i64{1} ** (max_page + 1);
+    const too_many: [max_page + 1]i64 = @splat(1);
     try std.testing.expectEqual(Status.invalid_argument, orca_library_set_rating(runtime, library, &too_many, too_many.len, 80, &change));
     var feedback: u8 = 9;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_feedback(runtime, library, 1, null));
@@ -9063,7 +9063,7 @@ test "playlist edits refuse bad arguments, blank or taken names and unknown play
     try std.testing.expectEqual(Status.invalid_argument, orca_library_rename_playlist(runtime, library, id, "", 0));
 
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, null, 1, -1, &change));
-    const too_many = [_]i64{1} ** (max_page + 1);
+    const too_many: [max_page + 1]i64 = @splat(1);
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &too_many, too_many.len, -1, &change));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &ids, 1, -1, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &ids, 1, 1, &change));
@@ -9073,7 +9073,7 @@ test "playlist edits refuse bad arguments, blank or taken names and unknown play
 
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, null, 1, &removed));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, &positions, 1, null));
-    const too_many_positions = [_]u32{0} ** (max_page + 1);
+    const too_many_positions: [max_page + 1]u32 = @splat(0);
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, &too_many_positions, too_many_positions.len, &removed));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, &positions, 1, &removed));
     try std.testing.expectEqual(Status.ok, orca_library_playlist_remove(runtime, library, id, null, 0, &removed));
@@ -9210,9 +9210,9 @@ test "playlist metadata and smart playlists reach the C ABI and refuse bad argum
         .filter = .{ .pointer = null, .length = 0 },
         .limit = 8,
         .offset = 0,
-        .sort = @intFromEnum(PlaylistSortKey.name),
+        .sort = @backingInt(PlaylistSortKey.name),
         .has_kind = 1,
-        .kind = @intFromEnum(database.PlaylistKind.smart),
+        .kind = @backingInt(database.PlaylistKind.smart),
         .pinned_only = 0,
         .has_creator = 0,
         .creator = 0,
@@ -9860,8 +9860,8 @@ test "tag edits and writes refuse bad arguments, unknown Tracks and plans, and a
     var bad_track_number = edit;
     bad_track_number.field = exportMetadataField(.track_number);
     bad_track_number.value = .{ .pointer = zero.ptr, .length = zero.len };
-    const too_many_edits = [_]TrackEditView{edit} ** (max_track_edits + 1);
-    const too_many_ids = [_]i64{1} ** (max_page + 1);
+    const too_many_edits: [max_track_edits + 1]TrackEditView = @splat(edit);
+    const too_many_ids: [max_page + 1]i64 = @splat(1);
     var calls: usize = 0;
 
     try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, null, 1, &.{edit}, 1, &calls, countIds));
@@ -10198,19 +10198,19 @@ test "a missing credential is absent, while an unavailable or oversized one is a
     var keyring: FakeKeyring = .{};
     var slot: CredentialSlot = .{ .callback = FakeKeyring.lookup, .context = &keyring };
 
-    keyring.result = @intFromEnum(CredentialResult.not_found);
+    keyring.result = @backingInt(CredentialResult.not_found);
     try std.testing.expectEqual(@as(?[]u8, null), try hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
     try expectNoSecret(&backing, "host-secret");
 
-    keyring.result = @intFromEnum(CredentialResult.unavailable);
+    keyring.result = @backingInt(CredentialResult.unavailable);
     try std.testing.expectError(error.CredentialUnavailable, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
     try expectNoSecret(&backing, "host-secret");
 
-    keyring.result = @intFromEnum(CredentialResult.too_large);
+    keyring.result = @backingInt(CredentialResult.too_large);
     try std.testing.expectError(error.CredentialTooLarge, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
     try expectNoSecret(&backing, "host-secret");
 
-    keyring.result = @intFromEnum(CredentialResult.found);
+    keyring.result = @backingInt(CredentialResult.found);
     keyring.reported_length = credential_max_bytes + 1;
     try std.testing.expectError(error.CredentialTooLarge, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
     try expectNoSecret(&backing, "host-secret");
@@ -10246,6 +10246,7 @@ test "a provider server is copied out of the caller's buffer, refused unless htt
         "http://example.org",
         "https://user:secret@example.org",
         "ftp://example.org",
+        "http://[::1]:9/acoustid",
     }) |refused| {
         try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 1, refused));
         try std.testing.expectEqualStrings(
@@ -10264,10 +10265,10 @@ test "a provider server is copied out of the caller's buffer, refused unless htt
     );
 
     try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 0, "https://lb.example.org"));
-    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 2, "http://[::1]:9/acoustid"));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 2, "https://acoustid.example.org/v2"));
     try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 3, "http://localhost:9"));
     try std.testing.expectEqualStrings("https://lb.example.org", box.runtime.listenbrainz_server.view());
-    try std.testing.expectEqualStrings("http://[::1]:9/acoustid", box.runtime.acoustid_server.view());
+    try std.testing.expectEqualStrings("https://acoustid.example.org/v2", box.runtime.acoustid_server.view());
     try std.testing.expectEqualStrings("http://localhost:9", box.runtime.coverartarchive_server.view());
 
     try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 4, "http://127.0.0.1:9/lrclib"));
@@ -10700,7 +10701,7 @@ test "a match started through the C ABI stores proposals that review lists, acce
     const accepted_track = try provider_tests.trackOfFile(rig.library_database, acceptance.file_id);
     try std.testing.expectEqual(Status.ok, orca_library_track_details(rig.runtime, rig.library, accepted_track, &recording, captureRecording));
     try std.testing.expectEqualStrings(provider_tests.northern_sky_mbid, recording.recording_mbid.text());
-    try std.testing.expectEqual(@intFromEnum(IdSource.match), recording.source);
+    try std.testing.expectEqual(@backingInt(IdSource.match), recording.source);
 
     proposal = .{};
     try std.testing.expectEqual(Status.ok, orca_library_query_match_proposals(rig.runtime, rig.library, pink_moon, &proposal, captureProposal));
@@ -11011,7 +11012,7 @@ test "an album group of corrections dismissed through the C ABI leaves every mem
     var recording: CapturedRecording = .{};
     try std.testing.expectEqual(Status.ok, orca_library_track_details(rig.runtime, rig.library, sounds_northern, &recording, captureRecording));
     try std.testing.expectEqualStrings(provider_tests.pink_moon_mbid, recording.recording_mbid.text());
-    try std.testing.expectEqual(@intFromEnum(IdSource.tag), recording.source);
+    try std.testing.expectEqual(@backingInt(IdSource.tag), recording.source);
 }
 
 test "a cover fetched through the C ABI is a metadata lookup whose stats say fetched, and the Release's artwork then returns it" {
@@ -11046,7 +11047,7 @@ test "a submission started through the C ABI sends an accepted recording ID once
     defer rig.deinit();
     rig.musicbrainz.answers = &nick_drake_answers;
     rig.acoustid.submit_body = "{\"status\":\"ok\",\"submissions\":[{\"id\":71,\"status\":\"pending\",\"index\":\"0\"}]}";
-    var keyring: FakeKeyring = .{ .result = @intFromEnum(CredentialResult.not_found), .secret = "userkey" };
+    var keyring: FakeKeyring = .{ .result = @backingInt(CredentialResult.not_found), .secret = "userkey" };
     try std.testing.expectEqual(Status.ok, orca_runtime_set_credential_callback(rig.runtime, FakeKeyring.lookup, &keyring));
     const northern_sky = try rig.addUntaggedTone("northern.wav", 440, "Northern Sky");
 
@@ -11122,14 +11123,14 @@ test "a submission started through the C ABI sends an accepted recording ID once
     try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
     try std.testing.expectEqual(@as(u64, 1), count);
 
-    keyring.result = @intFromEnum(CredentialResult.unavailable);
+    keyring.result = @backingInt(CredentialResult.unavailable);
     try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
     try std.testing.expectEqual(job.State.failed, try rig.finish(submitting));
     try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
     try std.testing.expectEqual(exportSubmissionOutcome(.needs_user_key), stats.outcome);
     try std.testing.expectEqual(@as(u32, 0), rig.acoustid.submissions.load(.acquire));
 
-    keyring.result = @intFromEnum(CredentialResult.found);
+    keyring.result = @backingInt(CredentialResult.found);
     try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
     try std.testing.expectEqual(job.State.succeeded, try rig.finish(submitting));
     try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
@@ -11433,7 +11434,7 @@ test "a maintenance unit enabled through the C ABI is a metadata lookup of origi
     try std.testing.expectEqual(@as(u8, 1), waiting.has_next_due_ms);
     try std.testing.expect(waiting.next_due_ms > 0 and waiting.next_due_ms <= 5 * 60 * 1000);
     try std.testing.expectEqual(@as(u8, 1), waiting.has_last);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(job.State.succeeded)), waiting.last_state);
+    try std.testing.expectEqual(@as(u8, @backingInt(job.State.succeeded)), waiting.last_state);
     try std.testing.expectEqual(@as(u8, 1), waiting.has_last_release_id);
     try std.testing.expectEqual(album, waiting.last_release_id);
     try std.testing.expectEqual(@as(u64, 1), waiting.last_stats.verified);

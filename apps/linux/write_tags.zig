@@ -255,7 +255,7 @@ fn card(title: [:0]const u8, subtitle: [:0]const u8) *gtk.Widget {
 }
 
 fn fieldsCard(plan: liborca.TagWritePlan) *gtk.Widget {
-    var seen: std.EnumSet(liborca.MetadataField) = .initEmpty();
+    var seen: std.EnumSet(liborca.MetadataField) = .empty;
     var genres = false;
     for (plan.files) |file| {
         for (file.changes) |change| seen.insert(change.field);

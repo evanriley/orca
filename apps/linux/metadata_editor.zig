@@ -338,7 +338,7 @@ fn entryChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn setEntry(editor: *Editor, row: *Row, value: ?[]const u8, mixed: bool) void {
     const allocator = editor.self.allocator;
     if (row.initial) |text| allocator.free(text);
-    row.initial = if (value) |text| allocator.dupeZ(u8, text) catch null else null;
+    row.initial = if (value) |text| allocator.dupeSentinel(u8, text, 0) catch null else null;
     row.mixed = mixed;
     row.touched = false;
     const entry = row.entry orelse return;

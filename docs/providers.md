@@ -126,9 +126,8 @@ not a tuning choice.
   Wikipedia servers with `Runtime.setWikidataServer`,
   `Runtime.setWikimediaCommonsServer` and `Runtime.setWikipediaServer`, and
   another ListenBrainz Labs server with `Runtime.setListenBrainzLabsServer`.
-  `http` is accepted only for `127.0.0.1`,
-  `[::1]` and `localhost`, so a token or a library's contents never cross a
-  network in clear text.
+  `http` is accepted only for `127.0.0.1` and `localhost`, so a token or a
+  library's contents never cross a network in clear text.
 
 ## Listens
 

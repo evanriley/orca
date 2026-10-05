@@ -468,7 +468,7 @@ fn loadNext(self: *App) void {
 
 fn matches(self: *App, object: *BrowseObject) bool {
     const filter = self.folders.filter.value;
-    return filter.len == 0 or std.ascii.indexOfIgnoreCase(object.name(), filter) != null;
+    return filter.len == 0 or std.ascii.findIgnoreCase(object.name(), filter) != null;
 }
 
 fn refill(self: *App) void {

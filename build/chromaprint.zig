@@ -5,8 +5,8 @@
 //! may only contain permissively licensed code, so that resampler is never
 //! compiled: `config.h` leaves `USE_INTERNAL_AVRESAMPLE` undefined, Chromaprint
 //! then accepts only 11025 Hz input, and Orca resamples with libsamplerate
-//! before feeding it. `LicenceCheck` fails the build if any source compiled
-//! here carries a GPL or LGPL notice.
+//! before feeding it. `build/licence_check.zig` fails the build if any source
+//! compiled here carries a GPL or LGPL notice.
 
 const std = @import("std");
 
@@ -36,17 +36,21 @@ pub fn addTo(b: *std.Build, module: *std.Build.Module) *std.Build.Step {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
 
-    const check = b.allocator.create(LicenceCheck) catch @panic("OOM");
-    check.* = .{
-        .step = .init(.{
-            .id = .custom,
-            .name = "check Chromaprint licences",
-            .owner = b,
-            .makeFn = LicenceCheck.make,
+    const licence_check = b.addRunArtifact(b.addExecutable(.{
+        .name = "licence-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build/licence_check.zig"),
+            .target = b.graph.host,
         }),
-        .root = chromaprint.builder.build_root,
-    };
-    return &check.step;
+    }));
+    licence_check.setName("check Chromaprint licences");
+    for (cpp_sources ++ c_sources) |source| {
+        const sub_path = b.fmt("src/{s}", .{source});
+        licence_check.addArg(sub_path);
+        licence_check.addFileArg(chromaprint.path(sub_path));
+    }
+    licence_check.expectExitCode(0);
+    return &licence_check.step;
 }
 
 const common_flags = [_][]const u8{
@@ -84,30 +88,4 @@ const cpp_sources = [_][]const u8{
 const c_sources = [_][]const u8{
     "3rdparty/kissfft/kiss_fft.c",
     "3rdparty/kissfft/kiss_fftr.c",
-};
-
-/// Text that appears in every GPL and LGPL notice, in either the long form or
-/// an SPDX identifier.
-const copyleft_markers = [_][]const u8{ "General Public", "GPL" };
-
-const LicenceCheck = struct {
-    step: std.Build.Step,
-    root: std.Build.Cache.Directory,
-
-    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
-        const self: *LicenceCheck = @fieldParentPtr("step", step);
-        const io = step.owner.graph.io;
-        for (cpp_sources ++ c_sources) |source| {
-            const sub_path = try std.fs.path.join(options.gpa, &.{ "src", source });
-            defer options.gpa.free(sub_path);
-            const text = try self.root.handle.readFileAlloc(io, sub_path, options.gpa, .limited(1 << 20));
-            defer options.gpa.free(text);
-            for (copyleft_markers) |marker| {
-                if (std.mem.indexOf(u8, text, marker) != null) return step.fail(
-                    "Chromaprint source {s} contains \"{s}\"; liborca may only compile permissively licensed code. Remove it from build/chromaprint.zig.",
-                    .{ sub_path, marker },
-                );
-            }
-        }
-    }
 };

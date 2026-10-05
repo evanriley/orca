@@ -1550,7 +1550,7 @@ fn showProposal(widgets: Proposal, proposal: liborca.MatchProposal) void {
 fn setPath(panel: *Panel, path: ?[]const u8) void {
     const allocator = panel.self.allocator;
     if (panel.path) |old| allocator.free(old);
-    panel.path = if (path) |value| allocator.dupeZ(u8, value) catch null else null;
+    panel.path = if (path) |value| allocator.dupeSentinel(u8, value, 0) catch null else null;
 }
 
 fn optionalEql(a: ?i64, b: ?i64) bool {

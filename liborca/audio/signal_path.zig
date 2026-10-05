@@ -19,7 +19,7 @@ pub const Reason = enum {
     lossy_source,
 };
 
-pub const max_reasons = @typeInfo(Reason).@"enum".fields.len;
+pub const max_reasons = @typeInfo(Reason).@"enum".field_names.len;
 
 pub fn Report(comptime capacity: usize) type {
     return struct {

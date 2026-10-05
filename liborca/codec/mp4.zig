@@ -1003,7 +1003,7 @@ test "the container probe reports exactly what the decoder does" {
 }
 
 test "a movie with no audio track is reported as such" {
-    const movie_header = "\x00\x00\x00\x1cmvhd" ++ "\x00" ** 12 ++ "\x00\x00\x03\xe8" ++ "\x00" ** 4;
+    const movie_header = "\x00\x00\x00\x1cmvhd" ++ &@as([12]u8, @splat(0)) ++ "\x00\x00\x03\xe8" ++ &@as([4]u8, @splat(0));
     var memory = storage.MemorySource{ .bytes = "\x00\x00\x00\x24moov" ++ movie_header };
     try std.testing.expectError(error.Mp4HasNoAudio, readTrack(std.testing.allocator, memory.readable()));
 }
@@ -1026,17 +1026,17 @@ const TestMovie = struct {
     sample_count: u32 = 3,
     sample_size: u32 = 32,
     time_runs: []const [2]u32 = &.{.{ 3, 4096 }},
-    chunk_offsets: []const u8 = testBox("stco", "\x00" ** 4 ++ be32(1) ++ be32(0)),
+    chunk_offsets: []const u8 = testBox("stco", &@as([4]u8, @splat(0)) ++ be32(1) ++ be32(0)),
     edits: []const u8 = "",
 
     fn bytes(comptime self: TestMovie) []const u8 {
         comptime {
-            const full_box = "\x00" ** 4;
+            const full_box = &@as([4]u8, @splat(0));
             const alac_config = be32(4096) ++ [_]u8{ 0, 16, 40, 10, 14, 2 } ++ be32(255 << 16)[0..2].* ++
                 be32(0) ++ be32(0) ++ be32(44_100);
             const sample_entry = testBox(
                 "alac",
-                "\x00" ** 6 ++ "\x00\x01" ++ "\x00" ** 8 ++ "\x00\x02\x00\x10" ++ "\x00" ** 4 ++
+                &@as([6]u8, @splat(0)) ++ "\x00\x01" ++ &@as([8]u8, @splat(0)) ++ "\x00\x02\x00\x10" ++ &@as([4]u8, @splat(0)) ++
                     be32(44_100 << 16) ++ testBox("alac", full_box ++ alac_config),
             );
             var runs: []const u8 = "";
@@ -1046,10 +1046,10 @@ const TestMovie = struct {
                 testBox("stsz", full_box ++ be32(self.sample_size) ++ be32(self.sample_count)) ++
                 testBox("stsc", full_box ++ be32(1) ++ be32(1) ++ be32(self.sample_count) ++ be32(1)) ++
                 self.chunk_offsets;
-            const media = testBox("mdhd", full_box ++ "\x00" ** 8 ++ be32(self.media_timescale) ++ "\x00" ** 8) ++
-                testBox("hdlr", full_box ++ "\x00" ** 4 ++ "soun" ++ "\x00" ** 12) ++
+            const media = testBox("mdhd", full_box ++ &@as([8]u8, @splat(0)) ++ be32(self.media_timescale) ++ &@as([8]u8, @splat(0))) ++
+                testBox("hdlr", full_box ++ &@as([4]u8, @splat(0)) ++ "soun" ++ &@as([12]u8, @splat(0))) ++
                 testBox("minf", testBox("stbl", table));
-            const movie_header = testBox("mvhd", full_box ++ "\x00" ** 8 ++ be32(self.movie_timescale) ++ "\x00" ** 4);
+            const movie_header = testBox("mvhd", full_box ++ &@as([8]u8, @splat(0)) ++ be32(self.movie_timescale) ++ &@as([4]u8, @splat(0)));
             return testBox("moov", movie_header ++ testBox("trak", self.edits ++ testBox("mdia", media)));
         }
     }
@@ -1078,7 +1078,7 @@ test "a chunk offset that runs a packet past 2^64 is invalid" {
     var memory = storage.MemorySource{ .bytes = comptime (TestMovie{
         .sample_count = 1,
         .time_runs = &.{.{ 1, 4096 }},
-        .chunk_offsets = testBox("co64", "\x00" ** 4 ++ be32(1) ++ be64(0xffff_ffff_ffff_fff0)),
+        .chunk_offsets = testBox("co64", &@as([4]u8, @splat(0)) ++ be32(1) ++ be64(0xffff_ffff_ffff_fff0)),
     }).bytes() };
     try std.testing.expectError(error.InvalidMp4, readTrack(std.testing.allocator, memory.readable()));
 }

@@ -4417,10 +4417,10 @@ test "every rule field with every operator it accepts runs against the library" 
     const manual_value = try std.fmt.bufPrint(&manual_value_buffer, ",\"value\":{d}", .{manual});
     const smart_playlist = @import("../library/smart_playlist.zig");
     var checked: usize = 0;
-    inline for (std.meta.fields(smart_playlist.Field)) |field_info| {
-        const field: smart_playlist.Field = @fromBackingInt(@intCast(field_info.value));
-        inline for (std.meta.fields(smart_playlist.Operator)) |operator_info| {
-            const operator: smart_playlist.Operator = @fromBackingInt(@intCast(operator_info.value));
+    inline for (@typeInfo(smart_playlist.Field).@"enum".field_names) |field_name| {
+        const field = @field(smart_playlist.Field, field_name);
+        inline for (@typeInfo(smart_playlist.Operator).@"enum".field_names) |operator_name| {
+            const operator = @field(smart_playlist.Operator, operator_name);
             if (operator.appliesTo(field.fieldType())) {
                 const value: []const u8 = switch (operator) {
                     .is_set, .is_not_set => "",
@@ -4437,7 +4437,7 @@ test "every rule field with every operator it accepts runs against the library" 
                 const rules = try std.fmt.bufPrint(
                     &buffer,
                     "{{\"v\":1,\"rules\":[{{\"field\":\"{s}\",\"op\":\"{s}\"{s}}}],\"sort\":{{\"field\":\"{s}\"}}}}",
-                    .{ field_info.name, operator_info.name, value, if (field == .added_at) "added_at" else "title" },
+                    .{ field_name, operator_name, value, if (field == .added_at) "added_at" else "title" },
                 );
                 _ = library.playlists.smartCount(std.testing.allocator, rules, .{ .now = 1_000_000, .seed = 0 }) catch |err| {
                     std.debug.print("{s}\n", .{rules});

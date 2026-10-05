@@ -161,7 +161,7 @@ fn yearClaim(item: std.json.Value, property: []const u8) ?i32 {
 pub fn itemIdFromUrl(url: []const u8) ?[]const u8 {
     const uri = std.Uri.parse(url) catch return null;
     var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (uri.getHost(&host_buffer) catch return null).bytes;
+    const host = (std.Io.net.HostName.fromUri(uri, &host_buffer) catch return null).bytes;
     if (!std.ascii.eqlIgnoreCase(host, "www.wikidata.org") and !std.ascii.eqlIgnoreCase(host, "wikidata.org")) return null;
     const path = switch (uri.path) {
         .raw, .percent_encoded => |text| text,
