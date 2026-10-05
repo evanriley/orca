@@ -3358,7 +3358,8 @@ orca_status orca_job_artist_info_outcome(
 
 /* Writes to `stores` how many times the artist info job has stored part of
  * what it found, while it runs: the Artist's info first, then its listeners
- * and related artists, then their photos. INVALID_ARGUMENT for a job of
+ * and related artists, then their photos, then the covers of its albums
+ * and EPs. INVALID_ARGUMENT for a job of
  * another kind, STALE_HANDLE for an unknown job. */
 orca_status orca_job_artist_info_stores(
     orca_runtime *runtime,

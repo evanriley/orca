@@ -771,10 +771,15 @@ The window is an `AdwNavigationSplitView`:
   section with more shows `See all N`, which opens Albums scoped to the
   Artist under a `Name • Albums` (or `Appearances`) chip beside the Albums
   search until its × is clicked. Elsewhere, `From MusicBrainz · not in your
-  library`, shows the release groups `libraryArtistElsewhere` lists as
+  library`, shows the albums and EPs `libraryArtistElsewhere` lists, newest first, as
   dimmed tiles marked `No local files`, captioned with the other artists
   credited and the year, such as `with Kaytranada · 2023`, each opening its
-  MusicBrainz page in the browser. A tile shows the release group's kept
+  MusicBrainz page in the browser. One row of the first 6 is shown; with
+  more, the heading carries `See all N`, which shows every one in place and
+  becomes `Show fewer`, and a refresh of the page keeps the choice. Every
+  tile, here and in Albums, Appears On and Related Artists, is as wide as
+  its cover: a long title or caption ends in an ellipsis and never widens
+  it, and the cover sits flush above its title. A tile shows the release group's kept
   Cover Art Archive cover (`ArtworkSubject.release_group`, requested only
   when `ElsewhereRelease.cover` is `kept`) under a `No local files` pill,
   otherwise a dashed frame with the label at its centre. Related

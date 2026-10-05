@@ -1509,6 +1509,13 @@
 
 ### Fixed
 
+- **Elsewhere on the Artist page lists albums and EPs, each with its cover.**
+  It used to list every release group MusicBrainz knows, mostly singles, and
+  asked the Cover Art Archive only about the first 24, so most tiles stayed
+  empty. It now lists only albums and EPs the Library lacks, newest first, one
+  row of six with See all N for the rest, and asks for every listed cover, the
+  visible row first. Album and Elsewhere tiles are as wide as their cover, so
+  a long title ends in an ellipsis instead of pushing its cover off its title.
 - **A folder a scan cannot enter no longer fails the scan.** A directory a
   scan or reconcile lists but cannot open, for example because its permissions
   deny it, adds one to `ScanStats.errors` and keeps every file and folder

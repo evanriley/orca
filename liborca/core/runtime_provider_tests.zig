@@ -6795,7 +6795,7 @@ test "a related artist whose lookup fails leaves the other related artists' phot
     try std.testing.expectEqualStrings(related_thumbnail, photo.bytes);
 }
 
-test "an Artist's fetch stores its origin and release groups in one browse, a second fetch asks nothing, and Elsewhere leaves out the groups the library has" {
+test "an Artist's fetch stores its origin and release groups in one browse, a second fetch asks nothing, and Elsewhere lists the albums and EPs the library does not have" {
     var fake: FakeArtistInfo = .{};
     defer fake.deinit();
     try fake.init();
@@ -6816,7 +6816,7 @@ test "an Artist's fetch stores its origin and release groups in one browse, a se
 
     const all = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
     defer freeElsewhere(all);
-    try std.testing.expectEqual(@as(usize, 6), all.len);
+    try std.testing.expectEqual(@as(usize, 4), all.len);
     try std.testing.expectEqualStrings("KAYTRAMINÉ", all[0].title);
     try std.testing.expectEqualStrings("Kaytranada", all[0].credited_with.?);
 
@@ -6825,7 +6825,7 @@ test "an Artist's fetch stores its origin and release groups in one browse, a se
     );
     const elsewhere = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
     defer freeElsewhere(elsewhere);
-    try std.testing.expectEqual(@as(usize, 5), elsewhere.len);
+    try std.testing.expectEqual(@as(usize, 3), elsewhere.len);
     for (elsewhere) |group| try std.testing.expect(!std.mem.eql(u8, group.title, "Good for You"));
 
     const requests = fake.artistInfoRequests();
@@ -6848,7 +6848,7 @@ fn elsewhereCovers(runtime: *OrcaRuntime, library: LibraryHandle, artist: i64) !
     return counts;
 }
 
-fn releaseGroupBrowse(allocator: std.mem.Allocator, count: usize, first: usize) ![]u8 {
+fn releaseGroupBrowse(allocator: std.mem.Allocator, count: usize, first: usize, single_every: usize) ![]u8 {
     var body: std.Io.Writer.Allocating = .init(allocator);
     errdefer body.deinit();
     try body.writer.writeAll("{\"release-group-count\":");
@@ -6856,10 +6856,10 @@ fn releaseGroupBrowse(allocator: std.mem.Allocator, count: usize, first: usize) 
     for (0..count) |index| {
         if (index != 0) try body.writer.writeAll(",");
         try body.writer.print(
-            \\{{"id":"0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d{d:0>4}","title":"Group {d}","primary-type":"Album",
+            \\{{"id":"0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d{d:0>4}","title":"Group {d}","primary-type":"{s}",
             \\"secondary-types":[],"first-release-date":"{d}-01-01","artist-credit":[{{"name":"Aminé","joinphrase":"",
             \\"artist":{{"id":"{s}","name":"Aminé"}}}}]}}
-        , .{ first + index, first + index, 2050 - first - index, amine_mbid });
+        , .{ first + index, first + index, if (single_every != 0 and index % single_every == single_every - 1) "Single" else "Album", 2050 - first - index, amine_mbid });
     }
     try body.writer.writeAll("]}");
     return body.toOwnedSlice();
@@ -6881,9 +6881,9 @@ test "an Artist's fetch keeps the release group covers the Cover Art Archive has
     try std.testing.expectEqual(@as(u32, 0), fake.group_cover_requests.load(.monotonic));
 
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
-    try std.testing.expectEqual(@as(u32, 6), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 4), fake.group_cover_requests.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 1), fake.area_requests.load(.monotonic));
-    try std.testing.expectEqual(CoverCounts{ .kept = 3, .none = 3 }, try elsewhereCovers(&runtime, library, artist));
+    try std.testing.expectEqual(CoverCounts{ .kept = 2, .none = 2 }, try elsewhereCovers(&runtime, library, artist));
 
     const subject: runtime_module.ArtworkSubject = .{ .release_group = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03".* };
     const request = try runtime.libraryRequestArtwork(library, std.testing.io, subject);
@@ -6898,7 +6898,7 @@ test "an Artist's fetch keeps the release group covers the Cover Art Archive has
 
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
-    try std.testing.expectEqual(@as(u32, 6), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 4), fake.group_cover_requests.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 1), fake.area_requests.load(.monotonic));
     var info = (try runtime.libraryArtistInfo(library, artist)).?;
     defer info.deinit();
@@ -6924,38 +6924,45 @@ test "a release group the Cover Art Archive has no cover for is kept as none and
 
     fake.clock.advance(29 * std.time.ms_per_day);
     _ = try runArtistInfo(&runtime, library, artist, .{ .force = true });
-    try std.testing.expectEqual(@as(u32, 6), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 4), fake.group_cover_requests.load(.monotonic));
 
     fake.clock.advance(2 * std.time.ms_per_day);
     _ = try runArtistInfo(&runtime, library, artist, .{});
-    try std.testing.expectEqual(@as(u32, 6 + 3), fake.group_cover_requests.load(.monotonic));
-    try std.testing.expectEqual(CoverCounts{ .kept = 3, .none = 3 }, try elsewhereCovers(&runtime, library, artist));
+    try std.testing.expectEqual(@as(u32, 4 + 2), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(CoverCounts{ .kept = 2, .none = 2 }, try elsewhereCovers(&runtime, library, artist));
 }
 
-test "an Artist's fetch asks the Cover Art Archive about the first 24 release groups Elsewhere lists, newest first, and no more on the next fetch" {
+test "an Artist's fetch asks the Cover Art Archive about every album and EP Elsewhere lists, newest first, none of the singles, and nothing more on the next fetch" {
     var fake: FakeArtistInfo = .{};
     defer fake.deinit();
     try fake.init();
     std.testing.allocator.free(fake.release_group_browse);
-    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 30, 0);
+    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 40, 0, 5);
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.matching_hooks = fake.hooks();
     try runtime.setClientIdentity(network.testing.test_identity);
-    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group-cover-cap?mode=memory&cache=shared");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group-cover-all?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
     const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
 
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
-    try std.testing.expectEqual(@as(u32, 24), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 32), fake.group_cover_requests.load(.monotonic));
     const groups = try runtime.libraryArtistElsewhere(library, std.testing.allocator, artist);
     defer freeElsewhere(groups);
-    try std.testing.expectEqual(@as(usize, 30), groups.len);
-    for (groups, 0..) |group, index|
-        try std.testing.expectEqual(index >= 24, group.cover == .not_fetched);
+    try std.testing.expectEqual(@as(usize, 32), groups.len);
+    for (groups) |group| {
+        try std.testing.expectEqualStrings("Album", group.primary_type.?);
+        try std.testing.expect(group.cover != .not_fetched);
+    }
+    try std.testing.expectEqual(@as(i64, 32), try database.columns.scalar(library_database.database, "SELECT count(*) FROM release_group_covers;"));
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM release_group_covers WHERE mbid IN (SELECT mbid FROM artist_release_groups WHERE primary_type = 'Single');",
+    ));
 
     _ = try runArtistInfo(&runtime, library, artist, .{});
-    try std.testing.expectEqual(@as(u32, 24), fake.group_cover_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 32), fake.group_cover_requests.load(.monotonic));
 }
 
 test "an Artist's fetch from services that stop answering ends by its deadline with outcome unavailable" {
@@ -7133,7 +7140,7 @@ test "an Artist's fetch stores its info and counts the store while related artis
     fake.hold_extras.store(false, .release);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, handle));
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runtime.jobArtistInfoOutcome(handle));
-    try std.testing.expectEqual(@as(u32, 3), try runtime.jobArtistInfoStores(handle));
+    try std.testing.expectEqual(@as(u32, 4), try runtime.jobArtistInfoStores(handle));
     try std.testing.expect(fake.relatedPhotoRequests() > 0);
     try std.testing.expect(fake.group_cover_requests.load(.monotonic) > 0);
 }
@@ -7151,12 +7158,12 @@ test "release groups an Artist's browse no longer names take their covers with t
     const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
 
     std.testing.allocator.free(fake.release_group_browse);
-    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 4, 0);
+    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 4, 0, 0);
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
     try std.testing.expectEqual(CoverCounts{ .kept = 2, .none = 2 }, try elsewhereCovers(&runtime, library, artist));
 
     std.testing.allocator.free(fake.release_group_browse);
-    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 4, 2);
+    fake.release_group_browse = try releaseGroupBrowse(std.testing.allocator, 4, 2, 0);
     fake.clock.advance(31 * std.time.ms_per_day);
     try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
     for ([_][]const u8{ "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d0000", "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d0001" }) |gone|

@@ -572,10 +572,10 @@ const help_details =
     \\line each), at most weekly. --include-releases then fetches each of the
     \\Artist's Releases as release-info does, and prints one `elsewhere:
     \\mbid<TAB>title<TAB>year<TAB>type<TAB>cover=yes|no|-[<TAB>with NAMES]`
-    \\line per release group none of the Artist's Releases in the Library
+    \\line per album or EP none of the Artist's Releases in the Library
     \\belongs to, newest first; NAMES are the credit's other artists. The
-    \\fetch asks the Cover Art Archive for the front cover of the first 24
-    \\groups it has not asked about yet: `cover=yes` is a kept cover, `no`
+    \\fetch asks the Cover Art Archive for the front cover of each of those
+    \\it has not asked about yet: `cover=yes` is a kept cover, `no`
     \\a group without one (asked again after 30 days), `-` one not asked
     \\about. The origin is the area followed by the subdivision it is in,
     \\such as `Portland, Oregon`. ORCA_MUSICBRAINZ_URL,

@@ -747,14 +747,14 @@ defer page.deinit();
   country, found through at most 3 MusicBrainz area lookups; the name alone
   when the area is a subdivision or country, or none is found.
   `libraryArtistElsewhere(library, allocator, artist_id)` returns the
-  Artist's stored MusicBrainz release groups that the Library does not
-  hold, newest first, as caller-owned `ElsewhereRelease`s (free each with
+  Artist's stored MusicBrainz release groups of primary type Album or EP,
+  compared without case, that the Library does not hold, newest first,
+  leaving out singles, other types and groups with no type, as caller-owned `ElsewhereRelease`s (free each with
   `deinit`, then the slice): `mbid`, `title`, `primary_type`, `year`,
   `credited_with`, the credit's other artists as MusicBrainz joins them, and
   `cover`, a `ReleaseGroupCoverState`: `kept`, `none` (the Cover Art Archive
   has none) or `not_fetched`. An Artist fetch asks the archive for the
-  covers of the first `artist_info.release_group_covers_per_fetch` (24)
-  groups listed, except with `offline`; request a kept one through
+  covers of every group listed, in that order, except with `offline`; request a kept one through
   `libraryRequestArtwork` with `.{ .release_group = mbid }`. A
   group is held when its release-group MBID, without case, is in the
   `release_info`, file tags or Orca values of a Release filed under the

@@ -842,8 +842,8 @@ what was kept.
      Commons page), `photo_licence`, `photo_licence_url` and `photo_credit`
      from the `imageinfo` reply's `extmetadata`, which
      `libraryRelatedArtistPhotoInfo` returns for a host to show with it.
-  10. **Release group covers.** For each of the first 24 groups Elsewhere
-     lists (`libraryArtistElsewhere`, newest first), `GET
+  10. **Release group covers.** For each album and EP Elsewhere lists
+     (`libraryArtistElsewhere`, newest first, at most 200), `GET
      /release-group/{mbid}/front-250` on the Cover Art Archive, as the
      service `coverartarchive`, under its redirect and image rules
      ([Cover Art Archive](#cover-art-archive)). A cover is kept in

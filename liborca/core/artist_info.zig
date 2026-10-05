@@ -73,9 +73,9 @@ pub const refresh_after_s: i64 = 30 * 24 * 60 * 60;
 /// At most this many related artists outside the Library have their photo
 /// looked for in one fetch.
 pub const related_photos_per_fetch = 8;
-/// Only the first this many release groups Elsewhere lists have their cover
-/// asked for.
-pub const release_group_covers_per_fetch = 24;
+/// The release groups at the front of Elsewhere, the visible row, whose
+/// covers are stored before the rest are asked for.
+const release_group_covers_first_batch = 6;
 pub const fetch_deadline_ms: i64 = 60_000;
 /// The most area lookups one fetch makes to name the area an origin lies in.
 pub const max_origin_area_lookups = 3;
@@ -254,10 +254,11 @@ pub const Fetch = struct {
         return true;
     }
 
-    /// Front covers from the Cover Art Archive for the first
-    /// `release_group_covers_per_fetch` groups Elsewhere lists, skipping a
-    /// group whose cover is kept or that was found to have none less than
-    /// `cover_art.retry_missing_after_s` ago. Each group is asked once, so one
+    /// Front covers from the Cover Art Archive for the groups Elsewhere lists,
+    /// in its order, noting a store once after the first
+    /// `release_group_covers_first_batch` are asked and once at the end,
+    /// skipping a group whose cover is kept or that was found to have none
+    /// less than `cover_art.retry_missing_after_s` ago. Each group is asked once, so one
     /// cannot spend the fetch's deadline. A refusal is kept as none; a group
     /// the archive could not answer for keeps nothing and the next is asked.
     /// Neither fails the fetch. False when cancelled.
@@ -269,7 +270,8 @@ pub const Fetch = struct {
             for (groups) |group| group.deinit(self.allocator);
             self.allocator.free(groups);
         }
-        for (groups[0..@min(groups.len, release_group_covers_per_fetch)]) |group| {
+        for (groups, 0..) |group, index| {
+            if (index == release_group_covers_first_batch) self.noteStored();
             if (!metadata.isMusicBrainzId(group.mbid)) continue;
             if (try info.releaseGroupCoverMark(group.mbid)) |mark|
                 if (mark.has_image or now_s - mark.fetched_at < cover_art.retry_missing_after_s) continue;
@@ -288,6 +290,7 @@ pub const Fetch = struct {
                 },
             }
         }
+        self.noteStored();
         return true;
     }
 

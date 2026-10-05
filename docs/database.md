@@ -1349,8 +1349,9 @@ groups from the artist-info browse, each with its `title`, `primary_type`,
 rows by negating their positions, upserts the new groups, and deletes the
 rows still marked, so a group in both the old and new answers keeps its row.
 Every group is
-stored, held or not; `elsewhere` leaves out, when it reads them, each group
-whose MBID matches, without case, a `release_info`, `observed_file_tags` or
+stored, whatever its type and whether held or not; `elsewhere` leaves out,
+when it reads them, each group whose primary type is not Album or EP,
+compared without case, and each group whose MBID matches, without case, a `release_info`, `observed_file_tags` or
 `orca_metadata_values` release-group ID of a Release filed under
 the Artist or holding one of their Tracks, so the result follows the Library
 without a refetch.

@@ -34,6 +34,7 @@ const album_columns = 3;
 const own_release_limit = 9;
 const appearance_limit = 6;
 const elsewhere_pixels: c_int = 150;
+const elsewhere_row_limit = 6;
 const track_cover_pixels: c_int = 40;
 const related_pixels: c_int = 88;
 const related_tile_pixels: c_int = 96;
@@ -85,6 +86,8 @@ pub const ArtistPage = struct {
     biography_pending: bool = false,
     elsewhere_section: ?*gtk.Widget = null,
     elsewhere_flow: ?*gtk.Widget = null,
+    elsewhere_toggle: ?*gtk.Widget = null,
+    elsewhere_expanded: bool = false,
     related_section: ?*gtk.Widget = null,
     related_flow: ?*gtk.Widget = null,
     love_button: ?*gtk.Widget = null,
@@ -476,6 +479,12 @@ fn tileLabel(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
     return label;
 }
 
+fn tileCaption(text: [*:0]const u8, class: [*:0]const u8) *gtk.Widget {
+    const label = tileLabel(text, class);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 1);
+    return label;
+}
+
 fn albumTile(page: *ArtistPage, release: liborca.ReleaseSummary, position: usize) *gtk.Widget {
     const self = page.self;
     const tile = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -505,8 +514,8 @@ fn albumTile(page: *ArtistPage, release: liborca.ReleaseSummary, position: usize
     albums.showPlaying(tile, self.playing().matches(.release, release.id));
 
     var buffer: [512]u8 = undefined;
-    const title = tileLabel(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr, "tile-title");
-    const year = tileLabel(strings.terminated(&buffer, releaseYear(release)).ptr, "tile-year");
+    const title = tileCaption(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr, "tile-title");
+    const year = tileCaption(strings.terminated(&buffer, releaseYear(release)).ptr, "tile-year");
     gtk.gtk_widget_add_css_class(year, "numeric");
 
     for ([_]*gtk.Widget{ frame, title, year }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
@@ -831,8 +840,8 @@ fn elsewhereTile(page: *ArtistPage, group: liborca.ElsewhereRelease, position: u
     }
 
     var buffer: [512]u8 = undefined;
-    const title = tileLabel(strings.terminated(&buffer, if (group.title.len != 0) group.title else "Untitled").ptr, "tile-title");
-    const detail = tileLabel(elsewhereCaption(&buffer, group).ptr, "tile-year");
+    const title = tileCaption(strings.terminated(&buffer, if (group.title.len != 0) group.title else "Untitled").ptr, "tile-title");
+    const detail = tileCaption(elsewhereCaption(&buffer, group).ptr, "tile-year");
     gtk.gtk_widget_add_css_class(detail, "numeric");
     for ([_]*gtk.Widget{ frame, title, detail }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
     gtk.gtk_widget_set_tooltip_text(tile, "Open on MusicBrainz");
@@ -844,19 +853,37 @@ fn showElsewhere(page: *ArtistPage) void {
     const section_box = page.elsewhere_section orelse return;
     const flow = page.elsewhere_flow orelse return;
     const library = self.library orelse return;
-    gtk.gtk_flow_box_remove_all(gtk.cast(gtk.FlowBox, flow));
     freeElsewhere(page);
     page.elsewhere = self.runtime.libraryArtistElsewhere(library, self.allocator, page.artist_id) catch &.{};
-    for (page.elsewhere, 0..) |group, position| gtk.gtk_flow_box_append(gtk.cast(gtk.FlowBox, flow), elsewhereTile(page, group, position));
+    gtk.gtk_flow_box_remove_all(gtk.cast(gtk.FlowBox, flow));
+    const shown = if (page.elsewhere_expanded) page.elsewhere.len else @min(page.elsewhere.len, elsewhere_row_limit);
+    for (page.elsewhere[0..shown], 0..) |group, position| gtk.gtk_flow_box_append(gtk.cast(gtk.FlowBox, flow), elsewhereTile(page, group, position));
+    if (page.elsewhere_toggle) |toggle| {
+        var buffer: [48]u8 = undefined;
+        const label = if (page.elsewhere_expanded) "Show fewer" else strings.format(&buffer, "See all {d}", .{page.elsewhere.len});
+        gtk.gtk_button_set_label(gtk.cast(gtk.Button, toggle), label.ptr);
+        gtk.gtk_widget_set_visible(toggle, @intFromBool(page.elsewhere.len > elsewhere_row_limit));
+    }
     gtk.gtk_widget_set_visible(section_box, @intFromBool(page.elsewhere.len != 0));
+}
+
+fn elsewhereToggled(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    page.elsewhere_expanded = !page.elsewhere_expanded;
+    showElsewhere(page);
 }
 
 fn elsewhereSection(page: *ArtistPage) *gtk.Widget {
     const box = section(12);
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(heading, "artist-section-heading");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), sectionTitle("Elsewhere"));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), caption("From MusicBrainz · not in your library"));
+    const heading = spreadHeading("Elsewhere", "From MusicBrainz · not in your library");
+    const toggle = gtk.gtk_button_new_with_label("See all");
+    gtk.gtk_widget_add_css_class(toggle, "flat");
+    gtk.gtk_widget_add_css_class(toggle, "see-all");
+    gtk.gtk_widget_set_valign(toggle, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_visible(toggle, gtk.false_);
+    _ = gtk.signalConnect(toggle, "clicked", gtk.callback(elsewhereToggled), page);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), toggle);
+    page.elsewhere_toggle = toggle;
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), heading);
     const flow = gtk.gtk_flow_box_new();
     const flow_box = gtk.cast(gtk.FlowBox, flow);
@@ -912,7 +939,7 @@ fn relatedTile(page: *ArtistPage, related: liborca.RelatedArtist, position: usiz
     gtk.gtk_label_set_lines(gtk.cast(gtk.Label, name), 2);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, name), gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_justify(gtk.cast(gtk.Label, name), gtk.JUSTIFY_CENTER);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, name), 10);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, name), 1);
     gtk.gtk_widget_set_size_request(button, related_tile_pixels, -1);
     gtk.gtk_widget_add_css_class(name, "related-artist-name");
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), cover);

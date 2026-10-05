@@ -474,10 +474,11 @@ pub const ArtistInfoRepository = struct {
         try self.db.exec("COMMIT;");
     }
 
-    /// An Artist's kept release groups that none of its Releases or
-    /// appearances in the Library belongs to, newest first. A Release
-    /// belongs to a group its release info, a file's tags or an accepted
-    /// value names, compared without case.
+    /// An Artist's kept Album and EP release groups, compared without case,
+    /// that none of its Releases or appearances in the Library belongs to,
+    /// newest first. A Release belongs to a group its release info, a file's
+    /// tags or an accepted value names, compared without case. Singles,
+    /// other types and groups with no type are stored but not listed.
     pub fn elsewhere(self: *const ArtistInfoRepository, allocator: std.mem.Allocator, artist_id: i64) ![]ElsewhereRelease {
         var statement = try self.db.prepare(
             \\WITH artist_releases(id) AS (
@@ -505,7 +506,7 @@ pub const ArtistInfoRepository = struct {
             \\SELECT groups.mbid, title, primary_type, first_release_year, credited_with,
             \\    CASE WHEN covers.mbid IS NULL THEN 0 WHEN covers.image IS NULL THEN 1 ELSE 2 END
             \\FROM artist_release_groups AS groups LEFT JOIN release_group_covers AS covers ON covers.mbid = groups.mbid
-            \\WHERE artist_id = ?1 AND NOT EXISTS (
+            \\WHERE artist_id = ?1 AND groups.primary_type COLLATE NOCASE IN ('Album', 'EP') AND NOT EXISTS (
             \\    SELECT 1 FROM library_groups WHERE library_groups.mbid = groups.mbid COLLATE NOCASE)
             \\ORDER BY first_release_year IS NULL, first_release_year DESC, position
             \\LIMIT ?2;
@@ -1058,11 +1059,11 @@ test "elsewhere leaves out release groups a Release or appearance of the artist 
         .{release_group_mbid_field},
     ));
     try library.artist_info.storeReleaseGroups(1, &.{
-        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01", .title = "Own", .first_release_year = 2017 },
-        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02", .title = "Feature", .first_release_year = 2018 },
-        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03", .title = "Accepted", .first_release_year = 2019 },
-        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04", .title = "Someone else's copy", .first_release_year = 2020 },
-        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e05", .title = "Undated" },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01", .title = "Own", .primary_type = "Album", .first_release_year = 2017 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02", .title = "Feature", .primary_type = "Album", .first_release_year = 2018 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03", .title = "Accepted", .primary_type = "Album", .first_release_year = 2019 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04", .title = "Someone else's copy", .primary_type = "Album", .first_release_year = 2020 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e05", .title = "Undated", .primary_type = "EP" },
         .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e06", .title = "Collab", .primary_type = "Album", .first_release_year = 2023, .credited_with = "Kaytranada" },
     });
 
@@ -1086,6 +1087,29 @@ test "elsewhere leaves out release groups a Release or appearance of the artist 
     try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
+test "elsewhere lists only Album and EP release groups, without case, and still stores the rest" {
+    var library = try openTestLibrary("elsewhere-types");
+    defer library.close();
+    const host = (try library.artists.ensure(.{ .key = "host", .name = "Host" })).?;
+    try library.artist_info.storeReleaseGroups(host, &.{
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e01", .title = "Single", .primary_type = "Single", .first_release_year = 2024 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e02", .title = "Album", .primary_type = "Album", .first_release_year = 2020 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e03", .title = "Other", .primary_type = "Other", .first_release_year = 2023 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04", .title = "Untyped", .first_release_year = 2022 },
+        .{ .mbid = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e05", .title = "Extended", .primary_type = "ep", .first_release_year = 2021 },
+    });
+    try std.testing.expectEqual(@as(i64, 5), try columns.scalar(library.database, "SELECT count(*) FROM artist_release_groups;"));
+
+    const found = try library.artist_info.elsewhere(std.testing.allocator, host);
+    defer {
+        for (found) |group| group.deinit(std.testing.allocator);
+        std.testing.allocator.free(found);
+    }
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+    try std.testing.expectEqualStrings("Extended", found[0].title);
+    try std.testing.expectEqualStrings("Album", found[1].title);
+}
+
 test "replacing an Artist's release groups removes the covers of the groups it drops unless another Artist keeps them, and keeps the rest" {
     var library = try openTestLibrary("release-group-covers");
     defer library.close();
@@ -1097,12 +1121,12 @@ test "replacing an Artist's release groups removes the covers of the groups it d
     const missing = "0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5e04";
     const jpeg: ArtistInfoPhoto = .{ .bytes = "\xff\xd8\xff\xe0JFIF", .mime_type = "image/jpeg" };
     try library.artist_info.storeReleaseGroups(host, &.{
-        .{ .mbid = kept, .title = "Kept" },
-        .{ .mbid = dropped, .title = "Dropped" },
-        .{ .mbid = shared, .title = "Shared" },
-        .{ .mbid = missing, .title = "Missing" },
+        .{ .mbid = kept, .title = "Kept", .primary_type = "Album" },
+        .{ .mbid = dropped, .title = "Dropped", .primary_type = "Album" },
+        .{ .mbid = shared, .title = "Shared", .primary_type = "Album" },
+        .{ .mbid = missing, .title = "Missing", .primary_type = "Album" },
     });
-    try library.artist_info.storeReleaseGroups(guest, &.{.{ .mbid = shared, .title = "Shared" }});
+    try library.artist_info.storeReleaseGroups(guest, &.{.{ .mbid = shared, .title = "Shared", .primary_type = "Album" }});
     for ([_][]const u8{ kept, dropped, shared }) |mbid| try library.artist_info.storeReleaseGroupCover(mbid, jpeg, 10);
     try library.artist_info.storeReleaseGroupCover(missing, null, 10);
     try library.artist_info.storeReleaseGroupCover("0c1f6a8e-3d5b-4c2a-9e7f-1a2b3c4d5eff", jpeg, 10);
@@ -1139,7 +1163,7 @@ test "storing release groups replaces the artist's, keeps at most the bound, and
     var groups: [max_release_groups + 1]ReleaseGroupRecord = undefined;
     for (&mbids, &groups, 0..) |*mbid, *group, index| {
         _ = std.fmt.bufPrint(mbid, "00000000-0000-4000-8000-{x:0>12}", .{index}) catch unreachable;
-        group.* = .{ .mbid = mbid, .title = "Group" };
+        group.* = .{ .mbid = mbid, .title = "Group", .primary_type = "Album" };
     }
     try library.artist_info.storeReleaseGroups(host, &groups);
     try library.artist_info.storeReleaseGroups(other, groups[0..2]);

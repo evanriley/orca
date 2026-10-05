@@ -170,7 +170,7 @@ zig build run -- lyrics DATABASE TRACK_ID --fetch   # local synced, LRCLIB synce
 # ORCA_MUSICBRAINZ_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL,
 # ORCA_LISTENBRAINZ_URL, ORCA_LISTENBRAINZ_LABS_URL and ORCA_COVERARTARCHIVE_URL
 # (https, or http to localhost); kept in the library, never in a file
-zig build run -- artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx] [--include-releases]   # totals (own releases, appearances apart), origin=, photo=, biography=, years=, links:, listeners=, related:, elsewhere: (release groups the library lacks, cover=yes|no|-, with --include-releases), outcome=
+zig build run -- artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx] [--include-releases]   # totals (own releases, appearances apart), origin=, photo=, biography=, years=, links:, listeners=, related:, elsewhere: (albums and EPs the library lacks, cover=yes|no|-, with --include-releases), outcome=
 zig build run -- artist-photo DATABASE ARTIST_ID --out=PATH
 zig build run -- related DATABASE ARTIST_ID   # score, name, mbid, library=ID, photo=yes|no
 zig build run -- related-photo DATABASE MBID --out=PATH   # a related artist's photo, kept by the artist-info fetch; prints source=, licence=, credit=
