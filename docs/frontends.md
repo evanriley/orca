@@ -757,8 +757,10 @@ The window is an `AdwNavigationSplitView`:
   with Pango at the label's width and measured again when the width
   changes; the inline Read more link expands it in place to the full text
   and a `From Wikipedia · licence` credit, and a Show less link at its end
-  folds it again. Then come Play, a dark Shuffle, a heart that loves the
-  Artist (`librarySetArtistLove`) and a more button. Below, Top
+  folds it again. While an artist-info fetch for the Artist is running, a
+  muted spinner and `Looking up artist info…` sit beside the genres in a
+  fixed-height line, so they never move the Play row. Then come Play, a dark
+  Shuffle, a heart that loves the Artist (`librarySetArtistLove`) and a more button. Below, Top
   Tracks, `By your plays`, lists up to five of their tracks with plays,
   most played first (`libraryTrackQuery` sorted by `play_count`
   descending), each with its cover, an E badge when explicit, its album and

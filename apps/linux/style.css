@@ -3115,6 +3115,15 @@ button.now-full-album image {
   color: @orca_text_2;
 }
 
+.artist-meta {
+  min-height: 18px;
+}
+
+.artist-lookup {
+  font-size: 13.5px;
+  color: @orca_text_2;
+}
+
 .artist-genre-separator {
   color: @orca_text_dim;
 }

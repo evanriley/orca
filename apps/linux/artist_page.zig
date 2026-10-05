@@ -77,6 +77,7 @@ pub const ArtistPage = struct {
     scroller: ?*gtk.Widget = null,
     photo: ?*gtk.Widget = null,
     genres: ?*gtk.Widget = null,
+    lookup: ?*gtk.Widget = null,
     biography: ?*gtk.Widget = null,
     biography_label: ?*gtk.Widget = null,
     biography_credit: ?*gtk.Widget = null,
@@ -1069,8 +1070,27 @@ fn biographyCredit(buffer: []u8, record: liborca.ArtistInfoRecord) [:0]const u8 
     return strings.format(buffer, "From Wikipedia · {s}", .{licence});
 }
 
+fn showLookup(page: *ArtistPage) void {
+    const lookup = page.lookup orelse return;
+    gtk.gtk_widget_set_visible(lookup, @intFromBool(infoPending(page.self, page.artist_id)));
+}
+
+fn newLookup() *gtk.Widget {
+    const lookup = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_add_css_class(lookup, "artist-lookup");
+    gtk.gtk_widget_set_visible(lookup, gtk.false_);
+    const spinner = adw.adw_spinner_new();
+    gtk.gtk_widget_set_size_request(spinner, 16, 16);
+    gtk.gtk_widget_set_valign(spinner, gtk.ALIGN_CENTER);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, spinner), gtk.ACCESSIBLE_PROPERTY_LABEL, "Looking up artist info", @as(c_int, -1));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lookup), spinner);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, lookup), gtk.gtk_label_new("Looking up artist info…"));
+    return lookup;
+}
+
 fn showInfo(page: *ArtistPage) bool {
     const self = page.self;
+    showLookup(page);
     showPhoto(page);
     showGenres(page);
     showRelated(page);
@@ -1179,7 +1199,13 @@ fn newHero(page: *ArtistPage) *gtk.Widget {
     const genres = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_add_css_class(genres, "artist-genres");
     page.genres = genres;
-    gtk.gtk_box_append(gtk.cast(gtk.Box, facts), genres);
+    const lookup = newLookup();
+    page.lookup = lookup;
+    const meta = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    gtk.gtk_widget_add_css_class(meta, "artist-meta");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, meta), genres);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, meta), lookup);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, facts), meta);
     gtk.gtk_box_append(gtk.cast(gtk.Box, facts), newBiography(page));
 
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
@@ -1305,6 +1331,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     layOut(page);
     _ = showInfo(page);
     if (self.fetch_artist_info) requestInfo(self, artist_id, false);
+    showLookup(page);
 
     const layers = gtk.gtk_overlay_new();
     const backdrop = art.newBackdrop(self, .header);
@@ -1361,6 +1388,9 @@ pub fn requestInfo(self: *App, artist_id: i64, force: bool) void {
     info.requested.put(self.allocator, artist_id, {}) catch {};
     info.pending[info.pending_count] = .{ .artist_id = artist_id, .job = job };
     info.pending_count += 1;
+    for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
+        if (page.artist_id == artist_id) showLookup(page);
+    }
 }
 
 pub fn tick(self: *App) void {

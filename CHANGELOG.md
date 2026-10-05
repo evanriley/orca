@@ -1137,6 +1137,9 @@
 
 ### Changed
 
+- The Artist page shows a spinner and `Looking up artist info…` beside the
+  genres while an artist-info fetch for that Artist runs, forced refreshes
+  included, and hides it when the fetch ends.
 - **Providers are paced at their published rates.** Requests were spaced 1 s
   apart for every service. Each service now has its own interval: AcoustID 334
   ms, the Cover Art Archive 250 ms, Wikidata, Wikimedia Commons and Wikipedia
