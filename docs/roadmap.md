@@ -348,6 +348,34 @@ removed.
   location's identity without reading its tags, so the next scan skips the
   path and its tags are never observed; the tags must show. Checked by tests
   of each case through `orca-cli` and the C ABI.
+- Match Review can finish every release. Applying a release (`apply-release`,
+  Match Review's Apply, the Matches page's Accept) writes nothing unless every
+  Track holds an accepted or pending proposal enriched on that release, or a
+  tag naming it, and `orca-gtk` then says only "Every track must be on the
+  release first", without naming the Tracks or offering a way on. Users with
+  every file of an album hit it in three ways. A proposal that lists no
+  release, as an AcoustID-only match does, is never enriched by Match Album's
+  release vote even when the winning release lists its recording ID, so the
+  Track stays unaligned however often the album is matched (Kavinsky,
+  Nightcall EP: the release lists the file's own recording as track 1).
+  MusicBrainz often lists the same song on an EP or single as a separate
+  recording, and Tracks are placed only by recording ID. A Release whose tags
+  already name its MusicBrainz release is listed with that release as a 100%
+  candidate that is never looked up, so Match Review shows no values, Apply
+  writes nothing and the only way off the list is Not This Release. No action
+  sets a Track's release, and the metadata editor sets only a recording ID,
+  which matching then treats as confirmed and stores no proposal for. The
+  result: Match Review compares the files with the release's own tracklist,
+  places every Track whose recording ID the release lists from any source,
+  suggests the rest with their evidence for a person to confirm or pair by
+  hand, applies release values to every Track and track values only to placed
+  ones, names what it left alone, offers Mark as Reviewed when nothing
+  differs, and never offers a button that would refuse. Aligning by position,
+  title or duration without a person's confirmation is rejected: a wrong
+  pairing would lock a wrong recording ID and reach AcoustID submissions and
+  ListenBrainz. Checked through `orca-cli` and `orca-gtk` with a release whose
+  proposals list no release, one with an EP recording that differs from the
+  file's, one with a missing and an extra Track, and an already-tagged release.
 - The Library schema starts over. The migrations to schema 55 served one
   Library; once the gates above that change stored data are closed, they are
   replaced by one baseline schema, and a Library from an earlier release is
@@ -393,30 +421,6 @@ removed.
   checks the Zone instead. A device-0 output lost after it opened resets its
   recovery count on each reopen and retries without end. Each must have a
   defined result, checked by a test of each.
-- Match Review can finish every release. Release review without guessing: once
-  a release is chosen, apply its release-level values (album, album artist,
-  date, type, release ID) to every Track, and track titles and recording IDs
-  only to Tracks aligned by recording ID; let the user pair each remaining
-  Track with one of the release's tracks by hand; offer Mark as Reviewed when
-  nothing differs; name the unaligned Tracks when Apply refuses. Aligning by
-  position, title or duration automatically is rejected: a wrong pairing
-  would lock a wrong recording ID and reach AcoustID submissions and
-  ListenBrainz. This covers two defects. Applying a reviewed release
-  (`apply-release`, Match Review's Apply) writes nothing unless every Track
-  holds an accepted or pending proposal enriched on that release, or a tag
-  naming it. Tracks are placed on a release only by recording ID, and
-  MusicBrainz often lists the same song on an EP or single as a separate
-  recording, so an album whose files are all on the release can stay partly
-  aligned through any number of re-identifications; orca-gtk then reports
-  only "Every track must be on the release first", without naming the Tracks.
-  No action sets a Track's release, and the metadata editor sets only a
-  recording ID, which matching then treats as confirmed and stores no
-  proposal for. A Release whose tags already name its MusicBrainz release is
-  listed for review with that release as a 100% candidate, but the release is
-  never looked up, so Match Review shows no MusicBrainz values and Apply
-  writes nothing; the only way off the list is Not This Release, which says
-  the opposite. Checked by a review of a release with unaligned Tracks, and
-  of an already-tagged release, through `orca-cli` and `orca-gtk`.
 - `orca-gtk` shows a Library that fails to open. It ignores one that fails to
   open, including one with a newer schema, and shows the welcome page.
   Checked by launching against such a Library.
