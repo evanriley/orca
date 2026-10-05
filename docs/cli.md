@@ -261,7 +261,10 @@ zone_a=$(scripts/silent-sink.sh 1)
 zone_b=$(scripts/silent-sink.sh 2)
 ```
 
-Omitting a device selects the system default output.
+Omitting a device selects the system default output. A chosen device that is
+missing or removed is never replaced by another: `play`, `play-tracks`,
+`play-folder` and `resume --play` exit with an error once its output has
+failed.
 
 ## Running tests
 

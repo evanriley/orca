@@ -29,6 +29,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidFolderPath => "PATH must be relative to the root, with no '.', '..', empty or trailing component",
         error.FolderEmpty => "no track below that folder",
         error.MissingDevice => "play-folder needs --device=ID; scripts/silent-sink.sh prints a silent one",
+        error.OutputFailed => "the output device could not be opened or was lost, and reopening it failed; a chosen device is never replaced by another",
         error.WatchingUnsupported => "watching folders needs Linux",
         error.InvalidWatchOptions => "--quiet must be at least 1 and --max-delay at least --quiet",
         error.InvalidMaintenanceOptions => "--maintenance must be at least 1",
@@ -2205,6 +2206,7 @@ fn playFolder(context: Context) !void {
             });
             try stdout.flush();
         }
+        try requireOutput(&runtime, zone);
         if (try runtime.playerDrained(player)) break;
         sleepMilliseconds(10);
         elapsed_ms += 10;
@@ -2388,6 +2390,7 @@ fn playFile(context: Context) !void {
 
     var elapsed_ms: u64 = 0;
     while (!try runtime.playerDrained(player)) {
+        try requireOutput(&runtime, zone);
         if (elapsed_ms >= 30 * std.time.ms_per_s) return error.PlaybackStalled;
         sleepMilliseconds(10);
         elapsed_ms += 10;
@@ -2410,6 +2413,13 @@ fn playFile(context: Context) !void {
             stats.backend_quantum_frames,
         },
     );
+}
+
+fn requireOutput(runtime: *liborca.Runtime, zone: liborca.ZoneHandle) !void {
+    const stats = try runtime.zoneStats(zone);
+    if (stats.output_state == .failed and
+        stats.recovery_attempts >= liborca.max_output_recovery_attempts)
+        return error.OutputFailed;
 }
 
 fn acceptMatch(context: Context) !void {
@@ -2930,6 +2940,7 @@ fn playTracks(context: Context) !void {
                 try stdout.flush();
             }
         }
+        try requireOutput(&runtime, zone);
         if (try runtime.playerDrained(player)) break;
         sleepMilliseconds(10);
         elapsed_ms += 10;
@@ -3033,6 +3044,7 @@ fn resumePlayback(context: Context) !void {
     var elapsed_ms: u64 = 0;
     while (elapsed_ms < limit_ms) {
         _ = runtime.processNextCommand();
+        try requireOutput(&runtime, zone);
         if (try runtime.playerDrained(player)) break;
         sleepMilliseconds(10);
         elapsed_ms += 10;

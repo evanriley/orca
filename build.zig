@@ -279,6 +279,15 @@ pub fn build(b: *std.Build) void {
     check_cli_stdio.addArtifactArg(cli);
     _ = check_cli_stdio.addOutputDirectoryArg("cli-stdio");
     test_step.dependOn(&check_cli_stdio.step);
+    if (target.result.os.tag == .linux) {
+        const check_output_fail_closed = b.addSystemCommand(&.{"bash"});
+        check_output_fail_closed.addFileArg(b.path("scripts/check-output-fail-closed.sh"));
+        check_output_fail_closed.addArtifactArg(cli);
+        _ = check_output_fail_closed.addOutputDirectoryArg("output-fail-closed");
+        check_output_fail_closed.has_side_effects = true;
+        test_step.dependOn(&check_output_fail_closed.step);
+    }
+
     const manifest = @import("build.zig.zon");
     const check_package = b.addSystemCommand(&.{"bash"});
     check_package.addFileArg(b.path("scripts/check-package.sh"));

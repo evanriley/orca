@@ -256,6 +256,7 @@ pub const DiscoveryDetail = audio.backend.DiscoveryDetail;
 pub const OutputFactory = audio.output.Factory;
 pub const ZoneStats = runtime.ZoneStats;
 pub const OutputState = audio.zone.OutputState;
+pub const max_output_recovery_attempts = audio.zone_runtime.max_recovery_attempts;
 pub const RenderPolicy = audio.zone.RenderPolicy;
 pub const RenderStrategy = audio.zone.RenderStrategy;
 

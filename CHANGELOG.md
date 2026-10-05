@@ -1494,6 +1494,16 @@
 
 ### Fixed
 
+- **A chosen output device fails closed.** An output opened for a device
+  other than 0 sets `node.dont-fallback` and `node.dont-reconnect`, and its
+  open waits up to 2 s for a link. A device that is missing at open, or
+  removed during playback, now leaves the Zone `failed` instead of
+  WirePlumber moving the stream to the default sink, so audio never reaches a
+  device the user did not choose. Device 0 still follows the default.
+  `orca-cli play`, `play-tracks`, `play-folder` and `resume --play` exit with
+  an error once the output has failed, and `liborca.max_output_recovery_attempts`
+  is exported. `scripts/check-output-fail-closed.sh` checks this in
+  `zig build test` under `scripts/headless-audio.sh` and skips elsewhere.
 - **The Zig package ships what it builds from.** `build.zig.zon` `.paths`
   now includes `LICENSE`, `scripts/` and `examples/`; a package fetched as
   a dependency failed to install without `LICENSE`. `zig fmt --check` also

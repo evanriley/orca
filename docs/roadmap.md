@@ -510,10 +510,6 @@ Small defects that are not yet scheduled:
   backup directory already exists, records no `TagWriteFailure`, so
   `orca-cli` and `orca-gtk` fall back to a message without a reason.
 
-- An output opened for a device id PipeWire does not know, such as a stale
-  one, falls back to the default sink instead of failing, so it can play on
-  real hardware. The stream sets `target.object` without
-  `node.dont-fallback`.
 - `orca-cli` runs every command but `duplicates` and `analyze-library` on an
   arena, so a cold scan holds memory for every file until it exits.
 - The scanner skips symbolic links to files without counting them.
@@ -562,11 +558,6 @@ Small defects that are not yet scheduled:
   file left when its page is reached, though the job's total counted it.
 - `zig build pipewire-live-smoke` opens the first device on the user's
   PipeWire server rather than a silent sink.
-- `scripts/headless-audio.sh` fails on the development desktop with
-  "wireplumber did not connect to pipewire within 5 s", before running its
-  command; `scripts/headless-audio.sh true` fails the same way.
-  WirePlumber's log shows only skipped optional components. Not yet
-  examined; whether CI is affected is unknown.
 - A credential store that is unavailable, or a credential too large for the
   C ABI's buffer, stops the listen worker with an error, while AcoustID
   lookups take it as no key (they fall back to the application key) and a

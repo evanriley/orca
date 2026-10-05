@@ -311,7 +311,17 @@ attempts; a Zone whose recovery is exhausted does not, so it cannot stall the
 Zones that still play.
 
 Device discovery returns bounded Orca-owned snapshots and uses PipeWire object
-serials for stream targeting; device ID zero delegates selection to the server.
+serials for stream targeting; device ID zero delegates selection to the server,
+which follows the default sink. Any other device ID fails closed: the stream
+sets `target.object` with `node.dont-fallback` and `node.dont-reconnect`, so
+WirePlumber errors the stream instead of linking it to the default sink when
+the device is missing, and destroys it instead of moving it when the device is
+removed during playback. Opening such a stream waits up to 2 s for a link out
+of its node; an error or no link within that time fails the open. A missing or
+removed device therefore exhausts the Zone's recovery attempts and reports
+`failed`, and no audio reaches a device the user did not choose.
+`scripts/check-output-fail-closed.sh` checks this in `zig build test` under
+`scripts/headless-audio.sh`, and skips outside that private server.
 Each snapshot carries a `DeviceKind`: `usb`, `pci`, `bluetooth`, `hdmi`,
 `virtual` or `unknown`. Registry globals carry only filtered properties, so
 discovery binds each sink node and each `Audio/Device` and reads their info in
@@ -356,7 +366,8 @@ The callback advances Player position only for frames actually rendered.
 `orca-cli play AUDIO [DEVICE_ID]` plays one file through this path and reports
 played frames, underruns and backend quantum. Without a device ID it uses
 device 0, the system default output, which is real hardware; tests pass a
-device from `scripts/silent-sink.sh`.
+device from `scripts/silent-sink.sh`. It exits with an error once the Zone's
+output reports `failed` with its recovery attempts exhausted.
 
 Codec selection is owned by a bounded `CodecRegistry`. Playback sees only an
 Orca `Decoder` interface (source and canonical formats, optional frame count,

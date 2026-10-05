@@ -8,6 +8,7 @@
 #include <string.h>
 
 #define OUTPUT_LINK_BOUND 32
+#define OUTPUT_TARGET_LINK_TIMEOUT_NS (2 * SPA_NSEC_PER_SEC)
 
 struct output_link {
     uint32_t id;
@@ -673,6 +674,7 @@ static void output_global(void *userdata, uint32_t id, uint32_t permissions,
         .input_node = (uint32_t)strtoul(to, NULL, 10),
     };
     sink_follow_links(output);
+    pw_thread_loop_signal(output->loop, false);
 }
 
 static void output_global_remove(void *userdata, uint32_t id) {
@@ -729,8 +731,25 @@ static void output_state_changed(void *userdata, enum pw_stream_state old,
     default:
         return;
     }
+    pw_thread_loop_signal(output->loop, false);
     if (output->wake != NULL)
         output->wake(output->wake_context);
+}
+
+static int output_await_target_link(struct orca_pw_output *output) {
+    struct timespec deadline;
+    pw_thread_loop_lock(output->loop);
+    pw_thread_loop_get_time(output->loop, &deadline,
+                            OUTPUT_TARGET_LINK_TIMEOUT_NS);
+    while (output->link_count == 0 &&
+           atomic_load_explicit(&output->state, memory_order_acquire) !=
+               ORCA_PW_OUTPUT_LOST) {
+        if (pw_thread_loop_timed_wait_full(output->loop, &deadline) < 0)
+            break;
+    }
+    const int result = output->link_count > 0 ? 0 : -ENOLINK;
+    pw_thread_loop_unlock(output->loop);
+    return result;
 }
 
 static const struct pw_stream_events output_events = {
@@ -861,9 +880,15 @@ struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
         PW_KEY_MEDIA_CATEGORY, "Playback",
         PW_KEY_MEDIA_ROLE, "Music",
         NULL);
-    if (device_id != 0)
+    if (device_id != 0) {
         pw_properties_setf(properties, PW_KEY_TARGET_OBJECT, "%llu",
                            (unsigned long long)device_id);
+        // An explicitly chosen device fails closed: without these the session
+        // manager plays to the default sink when the target is missing or
+        // removed, which can be speakers the user did not choose.
+        pw_properties_set(properties, PW_KEY_NODE_DONT_RECONNECT, "true");
+        pw_properties_set(properties, "node.dont-fallback", "true");
+    }
     pw_properties_setf(properties, PW_KEY_NODE_RATE, "1/%u", sample_rate);
     if (requested_latency_frames != 0)
         pw_properties_setf(properties, PW_KEY_NODE_LATENCY, "%u/%u",
@@ -892,6 +917,10 @@ struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
         params, 1);
     if (result < 0 || pw_thread_loop_start(output->loop) < 0)
         goto fail;
+    if (device_id != 0 && output_await_target_link(output) < 0) {
+        orca_pw_output_destroy(output);
+        return NULL;
+    }
     return output;
 
 fail:

@@ -41,6 +41,7 @@ trap cleanup EXIT
 export XDG_RUNTIME_DIR="$runtime"
 export XDG_CONFIG_HOME="$runtime/config"
 export XDG_STATE_HOME="$runtime/state"
+export ORCA_PRIVATE_AUDIO="$runtime"
 unset PIPEWIRE_REMOTE DBUS_SESSION_BUS_ADDRESS
 
 mkdir -p "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d"
