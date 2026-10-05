@@ -1,8 +1,9 @@
 # Roadmap
 
-What Orca does today, what comes next, and what is deferred. "Works" means
-reachable from `orca-cli` or `orca-gtk` through the public runtime path, per
-the rule in [architecture.md](architecture.md).
+What Orca does today, what must hold before the public preview and 1.0, and
+what is deferred. "Works" means reachable from `orca-cli` or `orca-gtk`
+through the public runtime path, per the rule in
+[architecture.md](architecture.md).
 
 ## Status
 
@@ -16,17 +17,18 @@ folder, artist and release info, ListenBrainz scrobbling, MusicBrainz and Acoust
 review, AcoustID submission and verification, actionable Health, idle
 maintenance, and watching of the music folders, so new, changed and
 removed files show up without a rescan. `liborca` builds for aarch64
-macOS, but macOS has no audio output or filesystem watcher yet.
+macOS; there is no macOS app, audio output or filesystem watcher.
+
+Features are frozen until 1.0. The work is the [release gates](#release-gates)
+below: a public preview released as 0.9.0, then 1.0.
 
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`
 versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The C ABI reaches everything
-`orca-gtk` uses, and `scripts/check-abi-coverage.sh` names, for each
-`Runtime` method it does not reach, the reason. The next milestone is
-more identification sources.
+`orca-gtk` sleeps on instead of polling. `scripts/check-abi-coverage.sh`
+names each `Runtime` method the C ABI does not reach and why.
 
 ## Works today
 
@@ -321,29 +323,163 @@ entry point and a client before it counts as working.
 - File moves through the journaled `MutationPlan` executor. Tag writes are
   reachable; moves are not.
 
-## Next
+## Release gates
 
-In priority order. Each step leaves `orca-gtk` usable every day.
+Each gate states the defect or requirement, the result that must be observable
+and how it is checked. A gate closes when its check passes and the entry is
+removed.
 
-1. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
-   would match what MusicBrainz and AcoustID miss, 50 songs per request, but
-   needs the user's token and must share the listen worker's gateway.
-2. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
-   written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
-   as not writable.
-3. **An optional fixed output rate with a band-limited resampler**, for
-   devices held at another rate and for gapless playback across sample-rate
-   changes. Output at the source rate stays the default, since it is the
-   only path that can be bit-perfect. A Resampler quality setting (Highest
-   or Fast, used only when the device cannot match the source) arrives with
-   it.
+### Before the public preview
+
+- Track ids follow their song. A file keeps its Track id only when it moves to
+  a position no row holds. When two files of a Release swap positions, their
+  Track ids trade files, so a queued id plays the other song. When numbers
+  shift, such as 1 to 2 and 2 to 3, the file landing on the occupied position
+  takes that Track's id and the other file gets a new one. Match Album
+  correcting track numbers does this. Ids must follow their song through
+  corrections, swaps and longer cycles. Checked by projection tests of each
+  case.
+- Quick hashes only nominate candidates. Two files of the same length whose
+  first and last 64 KiB are equal merge into one File in the scanner
+  (`liborca/database/repository/files.zig`) and `duplicate_pass.zig` calls
+  them exact copies. A change confined to the middle of a file, with its size
+  and first and last 64 KiB unchanged, keeps its quick hash, so analysis and
+  the identity cascade still treat it as the old bytes. A merge or an exact
+  verdict requires a full-content comparison. Checked by tests with files that
+  differ only in the middle.
+- Decoded-audio hashes include sample rate and channel layout and keep source
+  precision. Today only float32 sample bits are hashed, so the same samples at
+  44.1 and 48 kHz, or as mono and stereo, hash equal, and 32-bit PCM values
+  below float32 precision collapse. Checked by hashing such pairs and
+  requiring different results.
+- Concurrent scans of one Library from two runtimes or processes cannot mark a
+  present file missing. Stamps no longer go backwards, but the one-walk guard
+  is per runtime, so two walks still interleave. Checked by a test running
+  two scans at once.
+- A file the scan fails to open, for a permission, descriptor or I/O error,
+  keeps its availability instead of being swept missing. Checked by a scan
+  over an unreadable file.
+- Root paths are sound. A root path is stored as given: neither `orca-cli
+  add-root` nor `orca_library_add_root` makes it absolute or refuses a
+  relative one, and an absolute playlist export from a relative root writes
+  lines that do not resolve; relative roots are made absolute or refused.
+  Removing a root leaves its recordings, and their love and hate, ratings and
+  playlist entries, in the Library; rescanning the folder creates new
+  recordings, so those entries show as unavailable; removing a root must
+  distinguish forgetting from relocating. `orca-cli analyze PATH` records the
+  location's identity without reading its tags, so the next scan skips the
+  path and its tags are never observed; the tags must show. Checked by tests
+  of each case through `orca-cli` and the C ABI.
+- The Library schema starts over. The migrations to schema 55 served one
+  Library; once the gates above that change stored data are closed, they are
+  replaced by one baseline schema, and a Library from an earlier release is
+  refused with a message to create it again. Checked by opening a fresh
+  Library and a 0.8.1 one.
+- Publication. Fixture and asset licence records; SECURITY, CONTRIBUTING and a
+  privacy note on provider traffic; a README preview warning with a platform
+  matrix; and the GitHub items: the `required` CI job passing on GitHub and
+  made required by branch protection, Dependabot and pinact for pinned
+  actions, the provider User-Agent contact switched to the repository URL, and
+  the README's flake snippets checked from outside the repository.
+
+### Before 1.0
+
+- Provider pacing matches published limits. Every service is spaced 1 s
+  apart, although AcoustID allows 3 requests a second, the Wikimedia APIs
+  200 a minute, and the Cover Art Archive and LRCLIB publish no limit. A
+  timeout or a 503 without `Retry-After` makes matching wait 60 s, and cover
+  art, lyrics and artist information never retry; cover candidates store a
+  failed download as missing. A second job or process that wants a service
+  in use fails with `error.ProviderBusy` instead of waiting its turn, so
+  artist information fails while matching runs. Every request opens a new
+  connection. Back-off a provider asks for stays as it is. Checked by tests
+  with an injected clock for each.
+- Signal path truth. Unknown device details must not produce an unqualified
+  bit-perfect verdict: zero known reasons currently means eligible, and a
+  channel mismatch is not checked. A float32-to-integer device path is not by
+  itself sample loss. The report must describe the audio actually playing,
+  not settings applied to future blocks: `playerSignalPath` describes the
+  current DSP settings while audio processed under earlier settings is still
+  queued, so it can report bit-perfect output for up to a pipe's worth of
+  processed audio. Checked by signal path tests with unknown device details,
+  and by a settings change under playback.
+- Gapless transitions inside one 256-frame block apply the successor's
+  identity and position anchor at its first frame, not the block's. Checked
+  by an engine test with a boundary mid-block.
+- More than two channels are refused for playback and loudness analysis with
+  a clear error until [full multichannel support](#later) lands. Checked by
+  playing and analysing a six-channel file.
+- Malformed input is reported. An AIFF whose COMM frame count exceeds its SSND
+  data, or with no SSND, is reported damaged; an 8-bit AIFF reports its sample
+  format correctly; a WAV with a data chunk that is not a whole number of
+  frames is reported; tolerant FLAC playback (errors discarded, MD5 off, short
+  final block accepted) does not clear `corrupt_audio` in analysis. Checked
+  by fixtures for each.
+- Player lifecycle. `playerNext` and `playerPrevious` move the queue before
+  opening the target, so a target that fails to open leaves now-playing on it
+  while the previous entry keeps playing. A Zone whose stream stays active but
+  stops calling back after decoding finished blocks draining for ever. A Zone
+  attached, detached or moved while its Player's engine thread is starting can
+  return before that engine adopts the change. Once every Zone has failed
+  with its recovery attempts used, the engine stops pumping and the Player
+  never drains, so a host that waits for the drain waits for ever; `orca-cli`
+  checks the Zone instead. A device-0 output lost after it opened resets its
+  recovery count on each reopen and retries without end. Each must have a
+  defined result, checked by a test of each.
+- Match Review can finish every release. Release review without guessing: once
+  a release is chosen, apply its release-level values (album, album artist,
+  date, type, release ID) to every Track, and track titles and recording IDs
+  only to Tracks aligned by recording ID; let the user pair each remaining
+  Track with one of the release's tracks by hand; offer Mark as Reviewed when
+  nothing differs; name the unaligned Tracks when Apply refuses. Aligning by
+  position, title or duration automatically is rejected: a wrong pairing
+  would lock a wrong recording ID and reach AcoustID submissions and
+  ListenBrainz. This covers two defects. Applying a reviewed release
+  (`apply-release`, Match Review's Apply) writes nothing unless every Track
+  holds an accepted or pending proposal enriched on that release, or a tag
+  naming it. Tracks are placed on a release only by recording ID, and
+  MusicBrainz often lists the same song on an EP or single as a separate
+  recording, so an album whose files are all on the release can stay partly
+  aligned through any number of re-identifications; orca-gtk then reports
+  only "Every track must be on the release first", without naming the Tracks.
+  No action sets a Track's release, and the metadata editor sets only a
+  recording ID, which matching then treats as confirmed and stores no
+  proposal for. A Release whose tags already name its MusicBrainz release is
+  listed for review with that release as a 100% candidate, but the release is
+  never looked up, so Match Review shows no MusicBrainz values and Apply
+  writes nothing; the only way off the list is Not This Release, which says
+  the opposite. Checked by a review of a release with unaligned Tracks, and
+  of an already-tagged release, through `orca-cli` and `orca-gtk`.
+- `orca-gtk` shows a Library that fails to open. It ignores one that fails to
+  open, including one with a newer schema, and shows the welcome page.
+  Checked by launching against such a Library.
+- `write-tags` on a read-only file follows a stated policy. It rewrites a file
+  whose permissions make it read-only. Checked by a test of the stated
+  policy.
+- Queue pages keep queue positions. `playerQueueTracks` and
+  `orca_player_query_queue_tracks` skip a queue entry whose Track was removed
+  from the Library, contrary to the comment in `core/runtime_status.zig` that
+  it keeps its place, so a page's row `n` is then not queue position
+  `offset + n`. Checked by a page over a queue with a removed Track.
+- Embedding is specified. The SQLite unix-VFS lock replacement on Linux
+  (`liborca/database/sqlite_locks.zig`) is process-wide; its initialization
+  contract is documented and enforced. `orca_runtime_destroy` skips the Debug
+  wrong-thread check; document or fix. Whether the AcoustID application key
+  is snapshotted per job or per request is specified. Checked by tests and
+  by [frontends.md](frontends.md) stating each.
+- Compatibility promises for 1.0 are written separately for the Zig API, the
+  C ABI and the Library schema. Schema upgrades from the public preview are
+  tested. A GTK launch, open, play and close smoke test runs on a private
+  display in CI. A release candidate passes an acceptance period with no open
+  data-loss, memory-corruption, wrong-song or unintended-output defect.
 
 ## Releases
 
 Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
 release bumps the minor version when it contains a breaking change to the
 Zig API, the C ABI or the Library schema, and the patch version otherwise.
-Each milestone in [Next](#next) ends with a release.
+The public preview is released as 0.9.0; 1.0 follows the
+[Before 1.0](#before-10) gates.
 
 Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
 the same commit: features, fixes, refactors, removals and breaking changes
@@ -375,19 +511,11 @@ Small defects that are not yet scheduled:
   one, falls back to the default sink instead of failing, so it can play on
   real hardware. The stream sets `target.object` without
   `node.dont-fallback`.
-- `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
-  it on change, never on a tick.
-- `Telemetry.job_progress` is never published, so `ORCA_EVENT_JOB_PROGRESS`
-  never fires; `Runtime.publishTelemetry` has no callers.
 - `orca-cli` runs every command but `duplicates` and `analyze-library` on an
   arena, so a cold scan holds memory for every file until it exits.
-- `write-tags` rewrites a file whose permissions make it read-only.
 - The scanner skips symbolic links to files without counting them.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
-- Removing a root leaves its recordings, and their love and hate, ratings
-  and playlist entries, in the Library; rescanning the folder creates new
-  recordings, so those entries show as unavailable.
 - On macOS, which has no OFD locks, opening and closing a Library's
   database, `-wal` or `-shm` file from another part of the same process
   drops SQLite's POSIX locks on it. A second Orca process can then
@@ -395,8 +523,6 @@ Small defects that are not yet scheduled:
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
 - Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
-- `orca-gtk` ignores a Library that fails to open, including one with a newer
-  schema, and shows the welcome page.
 - When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
   sometimes not drawn, and is still missing seconds later; it was missing
   in 10 of 20 headless starts. The race is likely in `updateBackdrop`
@@ -425,52 +551,9 @@ Small defects that are not yet scheduled:
   renders in software. To examine: build the default from the consumer's
   `pkgs` when its `zig` is 0.16, and document `inputs.nixpkgs.follows` and
   nixGL for `nix run` outside NixOS.
-- Files in different folders at the same release position share one Track,
-  and the folder projected last decides which File it prefers; the other
-  File is on no Track. An undo can switch the Track between them.
-- A file keeps its Track id only when it moves to a position no row holds.
-  When two files of a Release swap positions, their Track ids trade files,
-  so a queued id plays the other song. When numbers shift, such as 1 to 2
-  and 2 to 3, the file landing on the occupied position takes that Track's
-  id and the other file gets a new one. Match Album correcting track
-  numbers does this. To fix: repeat the move pass until no row moves, and
-  let a row leave a position another file of the Release now claims.
-- `playerNext` and `playerPrevious` move the queue before opening the
-  target, so a target that fails to open leaves now-playing on it while the
-  previous entry keeps playing.
-- `orca-cli analyze PATH` records the location's identity without reading
-  its tags, so the next scan skips the path and its tags are never observed.
-- A change confined to the middle of a file, with its size and first and
-  last 64 KiB unchanged, keeps its quick hash, so analysis and the identity
-  cascade still treat it as the old bytes.
-- `playerSignalPath` describes the current DSP settings while audio
-  processed under earlier settings is still queued, so it can report
-  bit-perfect output for up to a pipe's worth of processed audio.
-- Canonical PCM carries a channel count but no layout: Vorbis and FLAC
-  order multichannel audio differently, the PipeWire stream gets no channel
-  positions, and loudness weights every channel 1.0.
-- A Zone whose stream stays active but stops calling back after decoding
-  finished blocks draining for ever.
-- A Zone attached, detached or moved while its Player's engine thread is
-  starting can return before that engine adopts the change.
 - Re-identifying a Release turns its pending album correction into
   single-file corrections, which can then be accepted one at a time and
   leave the album's positions half-moved until the rest are accepted.
-- Applying a reviewed release (`apply-release`, Match Review's Apply)
-  writes nothing unless every Track holds an accepted or pending proposal
-  enriched on that release, or a tag naming it. Tracks are placed on a
-  release only by recording ID, and MusicBrainz often lists the same song
-  on an EP or single as a separate recording, so an album whose files are
-  all on the release can stay partly aligned through any number of
-  re-identifications; orca-gtk then reports only "Every track must be on
-  the release first", without naming the Tracks. No action sets a Track's
-  release, and the metadata editor sets only a recording ID, which matching
-  then treats as confirmed and stores no proposal for.
-- A Release whose tags already name its MusicBrainz release is listed for
-  review with that release as a 100% candidate, but the release is never
-  looked up, so Match Review shows no MusicBrainz values and Apply writes
-  nothing. The only way off the list is Not This Release, which says the
-  opposite.
 - In a Release of more than 512 Tracks, verified a page at a time, a file
   that still disagrees is checked again only while the Release has a stale
   file left when its page is reached, though the job's total counted it.
@@ -481,14 +564,6 @@ Small defects that are not yet scheduled:
   command; `scripts/headless-audio.sh true` fails the same way.
   WirePlumber's log shows only skipped optional components. Not yet
   examined; whether CI is affected is unknown.
-- `playerQueueTracks` and `orca_player_query_queue_tracks` skip a queue
-  entry whose Track was removed from the Library, contrary to the comment in
-  `core/runtime_status.zig` that it keeps its place, so a page's row `n` is
-  then not queue position `offset + n`.
-- A root path is stored as given: neither `orca-cli add-root` nor
-  `orca_library_add_root` makes it absolute or refuses a relative one, and
-  an absolute playlist export from a relative root writes lines that do not
-  resolve.
 - A credential store that is unavailable, or a credential too large for the
   C ABI's buffer, stops the listen worker with an error, while AcoustID
   lookups take it as no key (they fall back to the application key) and a
@@ -510,20 +585,35 @@ are sniffed or not recognized until then:
 
 ## Later
 
-- Release review without guessing: once a release is chosen, apply its
-  release-level values (album, album artist, date, type, release ID) to
-  every Track, and track titles and recording IDs only to Tracks aligned
-  by recording ID; let the user pair each remaining Track with one of the
-  release's tracks by hand; offer Mark as Reviewed when nothing differs;
-  name the unaligned Tracks when Apply refuses. Aligning by position,
-  title or duration automatically is rejected: a wrong pairing would lock
-  a wrong recording ID and reach AcoustID submissions and ListenBrainz.
+- More identification sources. ListenBrainz's `/1/metadata/lookup` would
+  match what MusicBrainz and AcoustID miss, 50 songs per request, but needs
+  the user's token and must share the listen worker's gateway.
+- Fewer provider requests. Cover candidates learn an image's dimensions
+  without downloading it in full; matching combines MusicBrainz recording
+  searches instead of one per track; artist information overlaps its
+  requests to different services.
+- Tag writers for the remaining formats. FLAC, MP3 and ADTS are written; M4A,
+  Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported as not
+  writable.
+- An optional fixed output rate with a band-limited resampler, for devices
+  held at another rate and for gapless playback across sample-rate changes.
+  Output at the source rate stays the default, since it is the only path that
+  can be bit-perfect. A Resampler quality setting (Highest or Fast, used only
+  when the device cannot match the source) arrives with it.
+- Full multichannel support, required eventually. Canonical PCM carries a
+  channel count but no layout: Vorbis and FLAC order multichannel audio
+  differently, the PipeWire stream gets no channel positions, and loudness
+  weights every channel 1.0. The channel layout is carried through decode;
+  analysis applies BS.1770 channel weights and excludes the LFE channel; DSP
+  and PipeWire channel positions follow the layout. Until then more than two
+  channels are refused (see [Before 1.0](#before-10)).
 - Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files; a
   figure comes only from Orca's own analysis.
 - Exact album loudness: the album figure is a duration-weighted energy mean
   of the Tracks' gated loudness, which differs from BS.1770 gating over the
-  album's merged blocks. Storing each file's gated-block count would make it
-  exact ([analysis.md](analysis.md#album-replaygain)).
+  album's merged blocks. Per-file gated-block counts cannot reproduce album-wide gating, which
+  depends on the album's loudness distribution; exactness needs each file's
+  block-energy distribution ([analysis.md](analysis.md#album-replaygain)).
 - Batched Track inserts for the first scan.
 - `orca-cli tracks --filter` and a text `TrackQuery` rank every match by
   bm25 before the page is cut, about 83 ms at 500,000 Tracks.
@@ -537,12 +627,11 @@ are sniffed or not recognized until then:
   only in folders that hold audio, so such a folder has no entry to list.
 - `orca-gtk`'s Settings equalizer band captions are written in
   `preferences.zig` rather than taken from `equalizer_band_frequencies_hz`.
-- macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
-  client rebuilt against the current C ABI. `liborca` compiles for macOS;
-  without this output it cannot play there.
-- A macOS filesystem watcher (FSEvents) behind the same `library/watch.zig`
-  contract; until then `libraryWatch` returns `error.WatchingUnsupported`
-  there.
+- macOS: a macOS app with a CoreAudio output behind the same backend contract
+  and a filesystem watcher (FSEvents) behind the same `library/watch.zig`
+  contract. There is none today: `liborca` compiles for macOS but cannot play
+  there, and `libraryWatch` returns `error.WatchingUnsupported`. The macOS
+  POSIX-lock write-loss Known issue must be fixed first.
 - Opt-in per write: embedding a Release's fetched cover only in files with no
   embedded picture, as one front cover, stored once per plan and referenced
   by digest from each action rather than copied into every action. In

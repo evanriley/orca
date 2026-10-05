@@ -442,10 +442,15 @@ delete.
 ### The exact test and decoding
 
 The exact test holds because `files.audio_hash` is a function of the audio: the
-lossless decoders return exactly the samples the file encodes, and FLAC decodes
+lossless decoders return the samples the file encodes, and FLAC decodes
 bit-exactly through libFLAC (see [codecs.md](codecs.md#flac)). Two lossless
 files holding identical PCM hash identically whatever their container or encoder
 settings, and are reported as `exact_duplicate`.
+
+Exact-duplicate certainty is currently limited. Decoded samples are narrowed to
+float32 before hashing, so 32-bit integer and float64 sources lose precision,
+and the hash covers neither sample rate nor channel layout. A release gate in
+[roadmap.md](roadmap.md#before-the-public-preview) fixes this.
 
 ### Groups
 

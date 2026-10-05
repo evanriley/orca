@@ -117,9 +117,10 @@ without opening anything, so the control lane calls
 `PlayerEngine.refreshSharedRelease` under its quiesce to re-decide every
 opened session; audio already decoded keeps the gain it was decoded with.
 
-**Playback never resamples.** Each stream opens at the entry's source rate, and
-a format change between entries reopens the output (see below). The only
-resampler is `resampler.SampleRate`, libsamplerate behind
+**Orca runs no resampler on the playback path.** Each stream opens at the
+entry's source rate, and a format change between entries reopens the output
+(see below). PipeWire may resample when the device runs at another rate. The
+only Orca resampler is `resampler.SampleRate`, libsamplerate behind
 `audio/samplerate_shim.c`, which brings audio to 11,025 Hz for AcoustID
 fingerprints; see [analysis.md](analysis.md#acoustid-fingerprints). Gain and
 metering have scalar references and tested Zig vector kernels
