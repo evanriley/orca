@@ -1198,6 +1198,7 @@ fn topTracks(self: *App, library: liborca.LibraryHandle, artist_id: i64) ?TopTra
 }
 
 pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) void {
+    if (self.open_artist_page_count == self.open_artist_pages.len) return self.toast("Too many artist pages are open; go back to close one");
     const library = self.library orelse return;
     const artist = (self.runtime.libraryArtist(library, artist_id) catch null) orelse return;
     defer artist.deinit(self.allocator);
@@ -1267,7 +1268,8 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), elsewhereSection(page));
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), relatedSection(page));
     layOut(page);
-    if (!showInfo(page) and self.fetch_artist_info) requestInfo(self, artist_id, false);
+    _ = showInfo(page);
+    if (self.fetch_artist_info) requestInfo(self, artist_id, false);
 
     const clamp = adw.adw_clamp_new();
     adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), content_max_pixels);
@@ -1305,15 +1307,28 @@ pub fn infoPending(self: *const App, artist_id: i64) bool {
     return false;
 }
 
+pub fn infoMissing(record: ?liborca.ArtistInfoRecord) bool {
+    const found = record orelse return true;
+    const outcome = std.enums.fromInt(liborca.ArtistInfoOutcome, found.outcome) orelse return true;
+    return !infoSettled(outcome);
+}
+
+pub fn infoSettled(outcome: liborca.ArtistInfoOutcome) bool {
+    return switch (outcome) {
+        .fetched, .cached, .no_musicbrainz_id, .not_found => true,
+        else => false,
+    };
+}
+
 pub fn requestInfo(self: *App, artist_id: i64, force: bool) void {
     const info = &self.artist_info;
     if (info.closed or infoPending(self, artist_id)) return;
     if (!force and info.requested.contains(artist_id)) return;
-    if (info.pending_count == info.pending.len) return;
     const library = self.library orelse return;
-    info.requested.put(self.allocator, artist_id, {}) catch return;
+    if (info.pending_count == info.pending.len) return self.toast("Too many artist lookups are running; try again shortly");
     const job = self.runtime.startArtistInfoFetch(library, artist_id, .{ .force = force }) catch
         return self.toast("Could not look this artist up");
+    info.requested.put(self.allocator, artist_id, {}) catch {};
     info.pending[info.pending_count] = .{ .artist_id = artist_id, .job = job };
     info.pending_count += 1;
 }
@@ -1322,22 +1337,34 @@ pub fn tick(self: *App) void {
     const info = &self.artist_info;
     var index: usize = 0;
     while (index < info.pending_count) {
-        const pending = info.pending[index];
+        const pending = &info.pending[index];
         if (self.runtime.jobSnapshotSynced(pending.job)) |snapshot| switch (snapshot.state) {
             .succeeded, .failed, .cancelled => {},
             else => {
+                const stores = self.runtime.jobArtistInfoStores(pending.job) catch pending.stores;
+                if (stores != pending.stores) {
+                    pending.stores = stores;
+                    refreshInfo(self, pending.artist_id);
+                }
                 index += 1;
                 continue;
             },
         } else |_| {}
+        const finished = pending.*;
         info.pending_count -= 1;
         info.pending[index] = info.pending[info.pending_count];
-        art.refreshArtist(self, pending.artist_id);
-        for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
-            if (page.artist_id == pending.artist_id) _ = showInfo(page);
-        }
-        details.artistInfoChanged(self, pending.artist_id);
+        const outcome = self.runtime.jobArtistInfoOutcome(finished.job) catch .not_requested;
+        if (!infoSettled(outcome)) _ = info.requested.remove(finished.artist_id);
+        refreshInfo(self, finished.artist_id);
     }
+}
+
+fn refreshInfo(self: *App, artist_id: i64) void {
+    art.refreshArtist(self, artist_id);
+    for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
+        if (page.artist_id == artist_id) _ = showInfo(page);
+    }
+    details.artistInfoChanged(self, artist_id);
 }
 
 pub fn shutdown(self: *App) void {

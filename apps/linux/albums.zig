@@ -3134,10 +3134,11 @@ fn newAbout(page: *AlbumPage) *gtk.Widget {
 fn requestInfo(self: *App, release_id: i64) void {
     const info = &self.album_info;
     if (info.closed or info.requested.contains(release_id)) return;
-    if (info.pending_count == info.pending.len) return;
     const library = self.library orelse return;
-    info.requested.put(self.allocator, release_id, {}) catch return;
-    const job = self.runtime.startReleaseInfoFetch(library, release_id, .{}) catch return;
+    if (info.pending_count == info.pending.len) return self.toast("Too many album lookups are running; reopen this album shortly");
+    const job = self.runtime.startReleaseInfoFetch(library, release_id, .{}) catch
+        return self.toast("Could not look this album up");
+    info.requested.put(self.allocator, release_id, {}) catch {};
     info.pending[info.pending_count] = .{ .release_id = release_id, .job = job };
     info.pending_count += 1;
 }
@@ -3156,6 +3157,8 @@ pub fn tick(self: *App) void {
         } else |_| {}
         info.pending_count -= 1;
         info.pending[index] = info.pending[info.pending_count];
+        const outcome = self.runtime.jobReleaseInfoOutcome(pending.job) catch .not_requested;
+        if (!artist_page.infoSettled(outcome)) _ = info.requested.remove(pending.release_id);
         for (self.open_album_pages[0..self.open_album_page_count]) |page| {
             if (page.release_id != pending.release_id) continue;
             _ = showInfo(page);
@@ -3306,7 +3309,8 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, meta), 0.0);
     for ([_]*gtk.Widget{ kind, title, artist, meta, newAbout(page) }) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, facts), widget);
-    if (!showInfo(page)) requestInfo(self, release_id);
+    _ = showInfo(page);
+    requestInfo(self, release_id);
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(actions, "album-actions");
     gtk.gtk_widget_add_css_class(actions, "artist-actions");

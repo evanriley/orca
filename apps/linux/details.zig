@@ -817,7 +817,7 @@ fn populateArtist(panel: *Panel, artist_id: i64) bool {
         };
     }
     gtk.gtk_widget_set_visible(view.links_section, boolean(shown_links != 0));
-    gtk.gtk_widget_set_visible(view.fetch, boolean(record == null));
+    gtk.gtk_widget_set_visible(view.fetch, boolean(artist_page.infoMissing(record)));
     gtk.gtk_widget_set_sensitive(view.fetch, boolean(!artist_page.infoPending(self, artist_id)));
     return true;
 }

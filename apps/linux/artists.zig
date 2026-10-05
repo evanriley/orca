@@ -51,6 +51,7 @@ pub const Info = struct {
     const Pending = struct {
         artist_id: i64,
         job: liborca.JobHandle,
+        stores: u32 = 0,
     };
 
     pub fn deinit(self: *Info, allocator: std.mem.Allocator) void {

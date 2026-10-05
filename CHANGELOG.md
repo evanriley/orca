@@ -1482,9 +1482,34 @@
   ending at once as busy, which is what happened to an artist opened from
   one of their albums while the album's info was still being fetched.
   `--include-releases` and the genre fill keep no time limit.
+- **Every route to an artist page fetches its info.** In orca-gtk, an
+  artist page asks for the artist's info each session whenever fetching is
+  on, not only when nothing is stored, and the inspector offers Fetch
+  artist info while the stored info is a failed fetch. Before, a busy or
+  failed fetch stored an empty record, and the page then neither fetched
+  again nor showed the button. A failed fetch is tried again the next time
+  the page opens, and a lookup that cannot start says so instead of being
+  dropped.
+- **Artist info shows as soon as it is stored.** An artist info Job now
+  reports each part it stores (`jobArtistInfoStores`,
+  `orca_job_artist_info_stores`, and `stored n= at_ms=` lines from
+  `orca-cli artist-info --fetch`), and orca-gtk's artist page and
+  inspector show the biography, photo, origin and links as soon as they
+  arrive, within a few seconds. Before, nothing appeared until related
+  artists' photos and release group covers had also been fetched, up to a
+  minute later.
+- **Album info is fetched again after a failed fetch.** In orca-gtk, an
+  album page asks for its info each session, not only when nothing is
+  stored, and asks again on the next visit after a fetch that failed.
+  Before, a busy or failed fetch was never retried that session, and a
+  lookup dropped because too many were running was never made. A lookup
+  that cannot start now says so.
 - **Lyrics fetches wait for LRCLIB.** A lyrics fetch that finds LRCLIB in
   use by another fetch waits for it for up to a minute instead of ending
   at once as busy.
+- **Opening too many artist pages says so.** In orca-gtk, opening a ninth
+  artist page while eight are open now says to go back and close one.
+  Before, the page opened but never updated its info or playing state.
 - **Shortcuts no longer highlight the sidebar.** In orca-gtk, a shortcut
   such as Ctrl+K, Ctrl+, or Escape no longer draws focus rings. Before, it
   outlined the focused sidebar item, the sidebar and the whole window. Every
