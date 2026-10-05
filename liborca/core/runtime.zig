@@ -222,6 +222,7 @@ pub const TrackEditPage = database.repository.FieldValuePage;
 pub const RemovedRoot = struct {
     files_forgotten: u64,
     tracks_removed: u64,
+    recordings_forgotten: u64,
 };
 
 /// The Library's roots that are offline now, and what they leave unable to

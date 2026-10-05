@@ -60,7 +60,7 @@ const WatchFixture = struct {
         self.library_changed = 0;
         try self.temporary.dir.createDirPath(io, "A");
         try copyFixtureInto(self.temporary.dir, "fixtures/audio/tagged-reference.flac", "A/one.flac");
-        self.root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
+        self.root = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{self.temporary.sub_path});
         errdefer std.testing.allocator.free(self.root);
         const database_path = switch (location) {
             .memory => |name| try std.testing.allocator.dupeSentinel(u8, name, 0),

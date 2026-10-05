@@ -151,11 +151,19 @@ uncancelled scan run marks locations it did not reach as `missing`; nothing
 deletes a location implicitly, because an unmounted drive must not empty a
 library.
 
+A root's path is absolute: `ensureRoot` and `relocate` refuse a relative one
+with `error.InvalidLibraryRoot`, and `orca-cli` resolves a relative argument
+against its working directory before it calls them.
+
 Removing a root is the one explicit path that forgets. In one transaction it
 deletes the root's locations, the files that were located only under it (with
 their tags, Orca values, analysis and health rows), the Tracks those files
-backed, and the Releases and Artists nothing else references. Nothing on disk
-is touched. A file also located under another root or volume survives, and
+backed, and the Releases and Artists nothing else references. It also deletes
+each Recording those Tracks or files held that no remaining Track or file
+holds, and with it, by `ON DELETE CASCADE`, its feedback, rating, playlist
+entries and play stats; listens keep their rows with `recording_id` NULL. A
+Recording already held by nothing before the removal is left alone. Nothing
+on disk is touched. A file also located under another root or volume survives, and
 the projection is rerun over it. Undo journal rows keep their paths and lose
 only their `file_id`, so a tag write can still be undone. Every Library job
 writes rows keyed by `files.id`, so the removal fails with `LibraryJobRunning`
@@ -755,11 +763,12 @@ file, for the callers that ask about a file rather than a song.
 
 A listen stores a snapshot of the title, artist, album, duration and
 recording MBID that were heard, so history stays readable after the file is
-gone. `remove-root` deletes the root's files, and `ON DELETE SET NULL` on
-`file_id` (and `recording_id`) leaves the listen in place with a null file
-rather than deleting it or failing the delete. Rows with a null `file_id` no
-longer count towards a file in `filePlayStats`, and still count towards their
-Recording.
+gone. `remove-root` deletes the root's files and the Recordings only they
+held, and `ON DELETE SET NULL` on `file_id` and `recording_id` leaves the
+listen in place with a null file and, when its Recording went too, a null
+Recording, rather than deleting it or failing the delete. Rows with a null
+`file_id` no longer count towards a file in `filePlayStats`, and still count
+towards their Recording while it exists.
 
 `ListenRepository.recordAndQueue` inserts the listen and its `scrobble_queue`
 row in one transaction with `event_key = "listen:<listens.id>"`, so a listen is
@@ -796,7 +805,8 @@ lease expiry for a worker to sleep until.
 `recordings.id`, so every file and Track of one song shares a row and a
 reprojection that gives a Track a new id keeps it. Star ratings are a
 separate thing (below). Rows are removed with their recording
-(`ON DELETE CASCADE`), which nothing does today.
+(`ON DELETE CASCADE`), which `remove-root` does for a Recording only the
+removed root held.
 
 `score` is what the user wants (`-1`, `0`, `1`) and `synced_score` what
 ListenBrainz was last told, so `score IS NOT synced_score` is exactly the work
@@ -812,10 +822,9 @@ The MusicBrainz recording id is the one in effect for any file of the
 Recording, preferring a file some Track plays: a locked Orca value, else the
 file's tag, else an accepted match (see
 [metadata.md](metadata.md#musicbrainz-recording-ids)). It is found after the
-files are rescanned or retagged. Removing a root forgets its files but not
-its recordings' feedback rows; rescanning the same folder creates new
-recordings, so feedback given before the removal no longer shows on the
-rescanned Tracks.
+files are rescanned or retagged. Removing a root forgets the Recordings only
+its files held, with their feedback; adding and rescanning the same folder
+creates new Recordings without it.
 
 Version 16 also adds the index `files_by_recording ON files(recording_id)`,
 which finds a Recording's files when looking for its MusicBrainz recording id.

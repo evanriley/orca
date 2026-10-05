@@ -99,7 +99,7 @@ test "a scan runs on a registered worker and honors cancellation" {
         std.testing.io,
         "file:orca-scan-job-cancel?mode=memory&cache=shared",
     );
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     try runtime.cancelJob(job_handle);
 
@@ -129,7 +129,7 @@ test "shutdown joins a scan worker that is still walking" {
         std.testing.io,
         "file:orca-scan-job-shutdown?mode=memory&cache=shared",
     );
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     // No wait: shutdown must cancel the worker's token, join its thread, and
     // only then close the database the worker is writing to.
@@ -145,7 +145,7 @@ test "a completed scan projects what it observed" {
         std.testing.io,
         "file:orca-scan-job-project?mode=memory&cache=shared",
     );
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     while (true) {
         runtime.reapFinishedJobs();
@@ -258,7 +258,7 @@ test "a scan Job reports the files its walk will reach as its total" {
         std.testing.io,
         "file:orca-scan-job-total?mode=memory&cache=shared",
     );
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     while (true) {
         runtime.reapFinishedJobs();
@@ -308,7 +308,7 @@ fn scannedFixtureDetails(
 
 fn scanFixtureLibrary(runtime: *OrcaRuntime, uri: [:0]const u8) !LibraryHandle {
     const library = try runtime.openLibrary(std.testing.io, uri);
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(runtime, library);
     const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     while (true) {
         runtime.reapFinishedJobs();
@@ -403,7 +403,7 @@ test "backfill pending leaves out a file the backfill already found unreadable, 
         defer music.close(std.testing.io);
         try music.writeFile(std.testing.io, .{ .sub_path = "truncated.flac", .data = reference[0..30] });
     }
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/music", .{temporary.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}/music", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
 
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -796,7 +796,7 @@ test "a finished job wakes the host" {
         std.testing.io,
         "file:orca-scan-job-wake?mode=memory&cache=shared",
     );
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     try runtime.cancelJob(job_handle);
 
@@ -1843,9 +1843,9 @@ test "playing a stopped queue whose cursor file has gone steps over it to the ne
     defer temporary.cleanup();
     try copyFixtureInto(temporary.dir, "fixtures/audio/generated-reference.flac", "a.flac");
     try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
-    const first_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/a.flac", .{temporary.sub_path});
+    const first_path = try absoluteTestPath(".zig-cache/tmp/{s}/a.flac", .{temporary.sub_path});
     defer std.testing.allocator.free(first_path);
-    const second_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/b.flac", .{temporary.sub_path});
+    const second_path = try absoluteTestPath(".zig-cache/tmp/{s}/b.flac", .{temporary.sub_path});
     defer std.testing.allocator.free(second_path);
 
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -1934,9 +1934,9 @@ test "a Track under a root that has moved is reported as folder unavailable unti
         defer music.close(std.testing.io);
         try copyFixtureInto(music, "fixtures/audio/generated-reference.flac", "a.flac");
     }
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/music", .{temporary.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}/music", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
-    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/moved", .{temporary.sub_path});
+    const moved = try absoluteTestPath(".zig-cache/tmp/{s}/moved", .{temporary.sub_path});
     defer std.testing.allocator.free(moved);
 
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -2003,9 +2003,9 @@ test "an offline root leaves only its own Releases unavailable until its folder 
         defer directory.close(std.testing.io);
         try copyFixtureInto(directory, fixture, "a.flac");
     }
-    const away = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/away", .{temporary.sub_path});
+    const away = try absoluteTestPath(".zig-cache/tmp/{s}/away", .{temporary.sub_path});
     defer std.testing.allocator.free(away);
-    const home = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/home", .{temporary.sub_path});
+    const home = try absoluteTestPath(".zig-cache/tmp/{s}/home", .{temporary.sub_path});
     defer std.testing.allocator.free(home);
 
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -2079,9 +2079,9 @@ test "a tag write undone after its root was relocated restores the original byte
         defer music.close(std.testing.io);
         for (fixtures) |fixture| try copyFixtureInto(music, fixture.source, fixture.name);
     }
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/music", .{temporary.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}/music", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
-    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/moved", .{temporary.sub_path});
+    const moved = try absoluteTestPath(".zig-cache/tmp/{s}/moved", .{temporary.sub_path});
     defer std.testing.allocator.free(moved);
 
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -2561,7 +2561,7 @@ fn listenToEveryTrack(runtime: *OrcaRuntime, library: LibraryHandle, started_at:
     }
 }
 
-test "plays follow files into a merged recording and equal each recording's listens after a rescan and removing the root" {
+test "plays follow files into a merged recording, equal each recording's listens after a rescan, and leave with it when its root is removed" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -2622,10 +2622,16 @@ test "plays follow files into a merged recording and equal each recording's list
     roots.deinit();
     const removed = try runtime.libraryRemoveRoot(library, root_id);
     try std.testing.expectEqual(@as(u64, 3), removed.files_forgotten);
+    try std.testing.expectEqual(@as(u64, 1), removed.recordings_forgotten);
     try expectPlayStatsMatchListens(library_database);
+    try std.testing.expectEqual(@as(u64, 2), try library_database.recordings.count());
+    try std.testing.expectEqual(@as(i64, 0), try @import("../database/columns.zig").scalar(
+        library_database.database,
+        "SELECT count(*) FROM recording_play_stats;",
+    ));
     try std.testing.expectEqual(@as(i64, 4), try @import("../database/columns.zig").scalar(
         library_database.database,
-        "SELECT sum(play_count) FROM recording_play_stats;",
+        "SELECT count(*) FROM listens WHERE recording_id IS NULL AND title <> '';",
     ));
 }
 
@@ -2871,7 +2877,7 @@ pub fn scannedTempLibrary(runtime: *OrcaRuntime, temporary: *std.testing.TmpDir,
 }
 
 pub fn scannedTempFolder(runtime: *OrcaRuntime, temporary: *std.testing.TmpDir, name: [:0]const u8) !LibraryHandle {
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
     const library = try runtime.openLibrary(std.testing.io, name);
     const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
@@ -3781,7 +3787,7 @@ test "writing tags to one copy of a shared file splits that copy off and marks t
     for ([_][]const u8{ "one", "two" }) |folder| try temporary.dir.createDir(std.testing.io, folder, .default_dir);
     try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "one/song.flac");
     try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "two/song.flac");
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -3848,7 +3854,7 @@ test "requested covers arrive off the caller's thread and match the synchronous 
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-artwork-async?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
 
     var releases = try runtime.libraryReleasePage(library, .{ .limit = 32 });
@@ -3881,7 +3887,7 @@ test "closing a library frees covers nobody took" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-artwork-shutdown?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
     var releases = try runtime.libraryReleasePage(library, .{ .limit = 8 });
     defer releases.deinit();
@@ -3932,7 +3938,7 @@ test "browse requests answer exactly as the synchronous page, totals and count q
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-browse-round-trip?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
 
     var every_track = try runtime.libraryTrackQuery(library, "", .{});
@@ -3990,7 +3996,7 @@ test "a browse request copies its text, so changing the caller's buffers afterwa
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-browse-copies?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
     const library_database = try libraryDatabase(&runtime, library);
     var registration: work.Registration = .{};
@@ -4048,7 +4054,7 @@ test "closing a library or the runtime with browse requests in flight joins the 
     const closed = try runtime.openLibrary(std.testing.io, "file:orca-browse-close-a?mode=memory&cache=shared");
     const left_open = try runtime.openLibrary(std.testing.io, "file:orca-browse-close-b?mode=memory&cache=shared");
     for ([_]LibraryHandle{ closed, left_open }) |library| {
-        const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+        const binding = try addFixturesRoot(&runtime, library);
         try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
     }
     for ([_]LibraryHandle{ closed, left_open }) |library| {
@@ -4101,7 +4107,7 @@ test "every release order lists the same releases, each in its own order" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-release-sorts?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
 
     var by_title = try runtime.libraryReleasePage(library, .{ .sort = .title });
@@ -4134,7 +4140,7 @@ test "queue edits from the host jump, insert after the playing entry and refuse 
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
     const library = try runtime.openLibrary(std.testing.io, "file:orca-queue-edits?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
     var page = try runtime.libraryTrackQuery(library, "", .{ .limit = 6, .sort = .id });
     defer page.deinit();
@@ -4178,7 +4184,7 @@ test "queue history lists skipped and replaced entries newest first, and saving 
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
     const library = try runtime.openLibrary(std.testing.io, "file:orca-queue-history?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
     var page = try runtime.libraryTrackQuery(library, "", .{ .limit = 6, .sort = .id });
     defer page.deinit();
@@ -4240,7 +4246,7 @@ test "a root cannot be removed while a job runs on its library, and afterwards i
     defer runtime.deinit();
     try copyFixtureInto(temporary.dir, "fixtures/audio/covered-reference.mp3", "a.mp3");
     try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
     const library = try runtime.openLibrary(std.testing.io, "file:orca-runtime-remove-root?mode=memory&cache=shared");
     const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
@@ -4301,7 +4307,7 @@ const ReconcileFixture = struct {
         try self.temporary.dir.createDirPath(std.testing.io, "B");
         try copyFixtureInto(self.temporary.dir, "fixtures/audio/tagged-reference.flac", "A/one.flac");
         try copyFixtureInto(self.temporary.dir, "fixtures/audio/covered-reference.mp3", "B/two.mp3");
-        self.root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
+        self.root = try absoluteTestPath(".zig-cache/tmp/{s}", .{self.temporary.sub_path});
         errdefer std.testing.allocator.free(self.root);
         self.runtime = OrcaRuntime.init(std.testing.allocator);
         errdefer self.runtime.deinit();
@@ -4753,7 +4759,7 @@ test "a root relocated while another process walks the library is refused and co
     defer fixture.deinit();
     var elsewhere = std.testing.tmpDir(.{});
     defer elsewhere.cleanup();
-    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{elsewhere.sub_path});
+    const moved = try absoluteTestPath(".zig-cache/tmp/{s}", .{elsewhere.sub_path});
     defer std.testing.allocator.free(moved);
     const jobs_before = fixture.runtime.jobs.jobs.count();
 
@@ -4789,7 +4795,7 @@ test "a root relocated while the library's jobs are paused frees the walk lock u
     defer fixture.deinit();
     var elsewhere = std.testing.tmpDir(.{});
     defer elsewhere.cleanup();
-    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{elsewhere.sub_path});
+    const moved = try absoluteTestPath(".zig-cache/tmp/{s}", .{elsewhere.sub_path});
     defer std.testing.allocator.free(moved);
 
     try fixture.runtime.pauseAll(fixture.library);
@@ -5389,7 +5395,7 @@ test "Jobs pauseAll holds wait for resumeAll, and a Library's history keeps ever
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-job-history?mode=memory&cache=shared");
-    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try addFixturesRoot(&runtime, library);
     const scan = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, scan));
 
@@ -5435,4 +5441,18 @@ test "Jobs pauseAll holds wait for resumeAll, and a Library's history keeps ever
     try std.testing.expect(history[3].summary.slice().len != 0);
     try std.testing.expectError(error.JobNotRetryable, runtime.jobRetry(library, history[3].id));
     try std.testing.expectError(error.UnknownJobHistory, runtime.jobRetry(library, history[0].id + 1));
+}
+
+pub fn absoluteTestPath(comptime format: []const u8, args: anytype) ![]u8 {
+    const relative = try std.fmt.allocPrint(std.testing.allocator, format, args);
+    defer std.testing.allocator.free(relative);
+    const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(current);
+    return std.fs.path.resolve(std.testing.allocator, &.{ current, relative });
+}
+
+pub fn addFixturesRoot(runtime: *OrcaRuntime, library: LibraryHandle) !database.RootBinding {
+    const root = try absoluteTestPath("fixtures/audio", .{});
+    defer std.testing.allocator.free(root);
+    return runtime.libraryAddRoot(library, std.testing.io, root);
 }

@@ -28,13 +28,17 @@ first database open; see [database.md](database.md#concurrency).
 The boundary covers the whole engine, not a fragment of it:
 
 - **Library and roots.** Open/close, bounded track and health pages, root
-  add/remove/query. `orca_library_query_roots_v2` calls back with an
-  `orca_root_view_v2`, which adds whether the root is `available`, its
-  `track_count` and its `unavailable_tracks`.
+  add/remove/query. `orca_library_add_root` takes an absolute path; a frontend
+  resolves a relative one itself. `orca_library_remove_root` also forgets the
+  Recordings only the root's files held, with their loves, ratings, play
+  counts and playlist entries; listens stay. `orca_library_query_roots_v2`
+  calls back with an `orca_root_view_v2`, which adds whether the root is
+  `available`, its `track_count` and its `unavailable_tracks`.
   `orca_library_relocate_root` moves a root to a new path, keeping its ids
   and the undo of its tag writes, and returns the reconcile job it starts; a
-  path that is not a readable directory, or is nested with another root, its
-  files or the root's old directory while that still exists, is
+  path that is not absolute or not a readable directory, or is nested with
+  another root, its files or the root's old directory while that still
+  exists, is
   `ORCA_STATUS_INVALID_ARGUMENT`, an unknown root `ORCA_STATUS_NOT_FOUND`, a
   held journal, a walk of the Library in another runtime or process, or an
   unfinished tag write under the root `ORCA_STATUS_BUSY`,

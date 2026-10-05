@@ -415,9 +415,13 @@ const help_details =
     \\missing AcoustID key, or a provider that is backing off or in use by
     \\another Orca process; `blocked=none` follows once that clears.
     \\
-    \\roots lists the registered folders. remove-root forgets one and every
-    \\file, Track, Release and Artist that exists only under it; a file also
-    \\located under another root stays. Files on disk are not touched.
+    \\roots lists the registered folders. add-root and relocate-root make a
+    \\relative path absolute against the working directory. remove-root
+    \\forgets one and every file, Track, Release and Artist that exists only
+    \\under it, and every Recording no file elsewhere holds, with its loves,
+    \\ratings, play counts and playlist entries; listens stay in the
+    \\history. A file also located under another root stays. Files on disk
+    \\are not touched.
     \\
     \\folders lists each root with its file and Track counts and duration.
     \\With ROOT_ID it lists the root's subfolders, each with the same totals
@@ -943,8 +947,9 @@ fn scanRoot(context: Context) !void {
     // Re-adding a registered root would rebind it to whatever volume its path
     // is on now, so an unmounted drive's empty mount point would pass the
     // volume check and the scan would mark every file under it missing.
-    const root_id = try registeredRootId(&runtime, library_handle, context.arguments[1]) orelse
-        (try bindRoot(&runtime, library_handle, context)).root_id;
+    const root_path = try absolutePath(context, context.arguments[1]);
+    const root_id = try registeredRootId(&runtime, library_handle, root_path) orelse
+        (try bindRoot(&runtime, library_handle, context, root_path)).root_id;
     const job_handle = try runtime.startLibraryScan(library_handle, .{ .root_id = root_id, .reprobe_all = reprobe_all });
     awaitScan(&runtime, stdout, job_handle) catch |err| {
         if (err == error.JobFailed and (try runtime.jobScanStats(job_handle)).volume_changed)
@@ -1010,8 +1015,14 @@ fn addRoot(context: Context) !void {
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    const binding = try bindRoot(&runtime, library_handle, context);
+    const binding = try bindRoot(&runtime, library_handle, context, try absolutePath(context, context.arguments[1]));
     try context.stdout.print("root {d} on volume {d}\n", .{ binding.root_id, binding.volume_id });
+}
+
+fn absolutePath(context: Context, path: []const u8) ![]const u8 {
+    if (path.len == 0 or std.fs.path.isAbsolute(path)) return path;
+    const working_directory = try std.process.currentPathAlloc(context.io, context.allocator);
+    return std.fs.path.resolve(context.allocator, &.{ working_directory, path });
 }
 
 /// Adding a root is an explicit user action, so this is the one path allowed
@@ -1021,8 +1032,9 @@ fn bindRoot(
     runtime: *liborca.Runtime,
     library: liborca.LibraryHandle,
     context: Context,
+    path: []const u8,
 ) !liborca.RootBinding {
-    const binding = try runtime.libraryAddRoot(library, context.io, context.arguments[1]);
+    const binding = try runtime.libraryAddRoot(library, context.io, path);
     if (binding.claimed_locations != 0) try context.stdout.print(
         "claimed {d} migrated locations for volume {d}\n",
         .{ binding.claimed_locations, binding.volume_id },
@@ -1813,7 +1825,7 @@ fn analyzeFile(context: Context) !void {
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    const result = try runtime.libraryAnalyzeFile(library_handle, context.io, context.arguments[1]);
+    const result = try runtime.libraryAnalyzeFile(library_handle, context.io, try absolutePath(context, context.arguments[1]));
     defer result.deinit();
     try context.stdout.print(
         "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d} chromaprint={s}\n",
@@ -2228,8 +2240,8 @@ fn removeRoot(context: Context) !void {
     const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const removed = try runtime.libraryRemoveRoot(library_handle, root_id);
     try context.stdout.print(
-        "removed root {d}: {d} files, {d} tracks\n",
-        .{ root_id, removed.files_forgotten, removed.tracks_removed },
+        "removed root {d}: {d} files, {d} tracks, {d} recordings\n",
+        .{ root_id, removed.files_forgotten, removed.tracks_removed, removed.recordings_forgotten },
     );
 }
 
@@ -2238,8 +2250,9 @@ fn relocateRoot(context: Context) !void {
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    const job_handle = try runtime.libraryRelocateRoot(library_handle, context.io, root_id, context.arguments[2]);
-    try context.stdout.print("relocated root {d} to {s}\n", .{ root_id, context.arguments[2] });
+    const path = try absolutePath(context, context.arguments[2]);
+    const job_handle = try runtime.libraryRelocateRoot(library_handle, context.io, root_id, path);
+    try context.stdout.print("relocated root {d} to {s}\n", .{ root_id, path });
     try awaitJob(&runtime, context.stdout, job_handle, null);
     try printScanStats(context.stdout, try runtime.jobScanStats(job_handle));
 }

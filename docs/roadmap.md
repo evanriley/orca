@@ -337,17 +337,6 @@ removed.
 
 ### Before the public preview
 
-- Root paths are sound. A root path is stored as given: neither `orca-cli
-  add-root` nor `orca_library_add_root` makes it absolute or refuses a
-  relative one, and an absolute playlist export from a relative root writes
-  lines that do not resolve; relative roots are made absolute or refused.
-  Removing a root leaves its recordings, and their love and hate, ratings and
-  playlist entries, in the Library; rescanning the folder creates new
-  recordings, so those entries show as unavailable; removing a root must
-  distinguish forgetting from relocating. `orca-cli analyze PATH` records the
-  location's identity without reading its tags, so the next scan skips the
-  path and its tags are never observed; the tags must show. Checked by tests
-  of each case through `orca-cli` and the C ABI.
 - Match Review can finish every release. Applying a release (`apply-release`,
   Match Review's Apply, the Matches page's Accept) writes nothing unless every
   Track holds an accepted or pending proposal enriched on that release, or a

@@ -36,9 +36,9 @@ zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file a
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
 zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N volume= last_seen_at=
 zig build run -- availability DATABASE [RELEASE_ID...]   # offline_roots= unavailable_tracks= unavailable_releases=, an `offline` line per root, then release= available=yes|no
-zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now
-zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks; nothing on disk
-zig build run -- relocate-root DATABASE ID PATH   # moves a root that moved on disk, keeping its ids; binds the volume PATH is on now, then reconciles
+zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now; a relative ROOT is made absolute against the working directory
+zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks, and the recordings no other file holds with their loves, ratings, play counts and playlist entries; listens stay; nothing on disk
+zig build run -- relocate-root DATABASE ID PATH   # moves a root that moved on disk, keeping its ids; a relative PATH is made absolute; binds the volume PATH is on now, then reconciles
 zig build run -- folders DATABASE [ROOT_ID [PATH]]   # roots with totals; or a `folder: release= tracks= images= last_scanned_at=` line, subfolders with recursive counts, files with track ids, then images; entries end kind= status=imported|unreadable, images role=
 zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]] [--pause-after=MS] [--resume-after=MS]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle; --pause-after/--resume-after pause and resume the Library's Jobs, printing `jobs: state=paused|running`
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them

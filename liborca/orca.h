@@ -4088,7 +4088,8 @@ orca_status orca_library_export_tag_write_history(
 );
 
 /* Registering a root is an explicit user action: it is the one path allowed to
- * persist a volume identifier at a mount root. */
+ * persist a volume identifier at a mount root. INVALID_ARGUMENT when `path` is
+ * empty or not absolute; a frontend resolves a relative path itself. */
 orca_status orca_library_add_root(
     orca_runtime *runtime,
     orca_handle library,
@@ -4096,7 +4097,9 @@ orca_status orca_library_add_root(
     int64_t *root_id
 );
 /* Forgets a root and every file, Track, Release and Artist that exists only
- * under it; files on disk are untouched. NOT_FOUND for an unknown root, BUSY
+ * under it, and every Recording no file elsewhere holds, with its loves,
+ * ratings, play counts and playlist entries; listen history stays without its
+ * Recording. Files on disk are untouched. NOT_FOUND for an unknown root, BUSY
  * while a job is running on the library. */
 orca_status orca_library_remove_root(
     orca_runtime *runtime,
@@ -4106,9 +4109,9 @@ orca_status orca_library_remove_root(
 /* Moves root `root_id` to `path`, bound to the volume `path` is on now, and
  * keeps the root's id, every File, Track and location under it, and the undo
  * of every tag write there; then starts a whole-root reconcile Job and returns
- * it in `job`. INVALID_ARGUMENT when `path` is not a readable directory, is
- * inside or holds another root or files of another root, or is inside or
- * holds the root's old folder while that still exists; NOT_FOUND for an
+ * it in `job`. INVALID_ARGUMENT when `path` is not absolute or not a readable
+ * directory, is inside or holds another root or files of another root, or is
+ * inside or holds the root's old folder while that still exists; NOT_FOUND for an
  * unknown root; BUSY while a job is running on the library, another runtime
  * or process is walking it, a tag write holds the library's journal, or one
  * under the root is unfinished;

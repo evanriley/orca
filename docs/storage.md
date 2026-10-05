@@ -64,9 +64,12 @@ play nor probe.
 
 The scanner recursively walks a configured root, opens candidate files through
 `LocalFileSource`, and compares path plus storage identity (inode, size and
-modification time) against the path's `present` row in `locations`
-(`LocationRepository.unchangedLocationId`). Unchanged files avoid format or
-metadata work. Changed audio files commit in bounded transactions through the
+modification time) against the path's `present` row in `locations` under the
+root being scanned (`LocationRepository.unchangedLocationId`). Unchanged files
+avoid format or metadata work. `orca-cli analyze PATH` records a location
+without reading tags: a new one belongs to no root and an existing one keeps
+the identity its scan recorded, so the next scan of the root re-reads the
+path. Changed audio files commit in bounded transactions through the
 Library's shared write lane; unsupported and transiently unreadable files are
 counted without invalidating successful batches.
 
@@ -302,8 +305,8 @@ unmounted drive or a renamed music folder does not mark a whole library
 and fails with `TrackFileMissing`.
 
 `libraryRelocateRoot` (`orca-cli relocate-root DATABASE ID PATH`) is the
-repair for a root that moved. It refuses a path that is not a readable
-directory, then binds the path to the volume it is on now, as `libraryAddRoot`
+repair for a root that moved. It refuses a path that is not absolute or not
+a readable directory, then binds the path to the volume it is on now, as `libraryAddRoot`
 does, and rewrites the root, its locations and its folder images in one
 `BEGIN IMMEDIATE` transaction, with the tag write journal's paths under it
 (see [metadata.md](metadata.md#relocated-roots)). A crash leaves the root

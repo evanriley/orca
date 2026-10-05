@@ -2613,7 +2613,7 @@ fn addAudioTrack(
     title: []const u8,
     artist: []const u8,
 ) !i64 {
-    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+    const path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
     defer std.testing.allocator.free(path);
     const binding = try library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:acoustid" });
     try library_database.tracks.upsertTracks(&.{.{
@@ -3997,7 +3997,7 @@ test "after an accept, a tag-write preview of a 2.3 MP3 and a FLAC adds only the
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, database_path);
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
     const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
@@ -4103,7 +4103,7 @@ const VerifyRig = struct {
     }
 
     fn addFile(self: *VerifyRig, name: []const u8, title: []const u8, recording_mbid: ?[]const u8, release_id: ?i64) !i64 {
-        const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, name });
+        const path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, name });
         defer std.testing.allocator.free(path);
         const binding = try self.library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:verify" });
         try self.library_database.observed_tags.upsert(.{ .file_id = binding.file_id, .values = .{
@@ -4464,7 +4464,7 @@ test "a Release whose files carry each other's tags is proposed one album correc
     defer data.cleanup();
     try writeTitledMp3(rig.temporary.dir, "a.mp3", "First");
     try writeTitledMp3(rig.temporary.dir, "b.mp3", "Second");
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{rig.temporary.sub_path});
+    const root = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{rig.temporary.sub_path});
     defer std.testing.allocator.free(root);
     const binding = try rig.runtime.libraryAddRoot(rig.library, std.testing.io, root);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, try rig.runtime.startLibraryScan(rig.library, .{ .root_id = binding.root_id })));
@@ -4718,7 +4718,7 @@ fn addTaggedFile(
     recording_mbid: []const u8,
     release_id: ?i64,
 ) !i64 {
-    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+    const path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
     defer std.testing.allocator.free(path);
     const binding = try library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:maintenance" });
     try library_database.observed_tags.upsert(.{ .file_id = binding.file_id, .values = .{
@@ -5282,7 +5282,7 @@ test "removing a root cancels a running unit instead of refusing" {
     defer rig.deinit();
     const library = rig.verify.library;
     _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(rig.verify.library_database, "A", null));
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{rig.verify.temporary.sub_path});
+    const root_path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{rig.verify.temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     const root = try rig.runtime().libraryAddRoot(library, std.testing.io, root_path);
     rig.verify.acoustid.hang_lookups_from = 0;
@@ -5303,7 +5303,7 @@ test "removing a root refuses while a host job waits behind a unit" {
     const library = rig.verify.library;
     const release = try addRelease(rig.verify.library_database, "A", null);
     _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, release);
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{rig.verify.temporary.sub_path});
+    const root_path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{rig.verify.temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     const root = try rig.runtime().libraryAddRoot(library, std.testing.io, root_path);
     rig.verify.acoustid.held.store(true, .release);
@@ -6258,7 +6258,7 @@ test "an image in the Artist's folder is the photo and Commons is not asked, and
     try music.dir.createDirPath(std.testing.io, "Aminé/Good for You");
     try music.dir.writeFile(std.testing.io, .{ .sub_path = "Aminé/artist.jpg", .data = "\xff\xd8\xff\xe0local" });
     try music.dir.writeFile(std.testing.io, .{ .sub_path = "Aminé/Good for You/folder.jpg", .data = "\xff\xd8\xff\xe0cover" });
-    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{music.sub_path});
+    const root = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{music.sub_path});
     defer std.testing.allocator.free(root);
 
     var runtime = OrcaRuntime.init(std.testing.allocator);

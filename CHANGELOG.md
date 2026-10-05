@@ -1547,6 +1547,16 @@
 
 ### Fixed
 
+- **Library roots are always absolute.** `orca_library_add_root` and
+  `orca_library_relocate_root` refuse a relative path with
+  `ORCA_STATUS_INVALID_ARGUMENT`; `orca-cli add-root`, `relocate-root`,
+  `scan` and `analyze` resolve one against the working directory.
+- **Removing a root forgets its recordings.** Recordings only its files held
+  go with their loves, ratings, play counts and playlist entries; listen
+  history stays. `orca-cli remove-root` reports the number of recordings.
+- **An analyzed file's tags show after the next scan.** A file analyzed with
+  `orca-cli analyze` is read by the next scan of its root, and analyzing a
+  file no longer clears its codec, duration and other audio properties.
 - **`orca-gtk` no longer calls a 100% fingerprint match "Identical
   audio".** The Duplicates page states the group's verdict: Same file,
   Identical audio, or Fingerprints match with the percentage rounded down.

@@ -536,8 +536,7 @@ const Fixture = struct {
     fn init(name: [:0]const u8) !Fixture {
         var directory = std.testing.tmpDir(.{});
         errdefer directory.cleanup();
-        const root = try std.fmt.allocPrint(
-            testing.allocator,
+        const root = try absoluteTestPath(
             ".zig-cache/tmp/{s}",
             .{directory.sub_path},
         );
@@ -1098,7 +1097,7 @@ test "a file whose middle changed under an unchanged quick hash is measured agai
 test "a 0.8.1 library's loudness keyed by quick hash opens as stale and is measured again" {
     var directory = std.testing.tmpDir(.{});
     defer directory.cleanup();
-    const root = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{directory.sub_path});
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}", .{directory.sub_path});
     defer testing.allocator.free(root);
     var fixture: Fixture = .{ .directory = directory, .root = root, .library = undefined };
     const tone = try toneWav(2, 0.5, 0.5);
@@ -1491,4 +1490,12 @@ test "analysing one file measures it again even when it owes nothing and settles
     var missing = fixture.pass();
     missing.only_file_id = loud + 100;
     try testing.expectEqual(@as(u64, 0), (try missing.run()).files_seen);
+}
+
+fn absoluteTestPath(comptime format: []const u8, args: anytype) ![]u8 {
+    const relative = try std.fmt.allocPrint(std.testing.allocator, format, args);
+    defer std.testing.allocator.free(relative);
+    const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(current);
+    return std.fs.path.resolve(std.testing.allocator, &.{ current, relative });
 }

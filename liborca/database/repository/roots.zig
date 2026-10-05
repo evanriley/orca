@@ -58,7 +58,9 @@ pub const RootRemoval = struct {
     allocator: std.mem.Allocator,
     files_forgotten: u64,
     tracks_removed: u64,
-    /// Files that were also located outside the removed root and so remain.
+    recordings_forgotten: u64,
+    /// Files that were also located outside the removed root, and files
+    /// elsewhere holding a Recording a removed Track played, so remain.
     surviving_file_ids: []i64,
 
     pub fn deinit(self: RootRemoval) void {
@@ -164,11 +166,15 @@ pub const LibraryRootRepository = struct {
     }
 
     /// Forgets the root and everything that exists only under it, in one
-    /// transaction. Only rows are deleted; no file on disk is touched.
+    /// transaction: its files, their Tracks, and the Recordings nothing else
+    /// holds, whose feedback, ratings, playlist entries and play counts go
+    /// with them while their listens stay. Only rows are deleted; no file on
+    /// disk is touched.
     ///
     /// A file with a location under another root, or under no root, survives
     /// and is returned so the caller can reproject it: its tracks may have
-    /// been backed by a sibling that is now gone.
+    /// been backed by a sibling that is now gone. So is a file elsewhere that
+    /// holds the Recording of a removed Track.
     pub fn remove(
         self: *LibraryRootRepository,
         allocator: std.mem.Allocator,
@@ -224,21 +230,51 @@ pub const LibraryRootRepository = struct {
             }
         }
 
+        try self.db.exec(
+            \\CREATE TEMP TABLE forgotten_recordings(id INTEGER PRIMARY KEY);
+            \\INSERT INTO temp.forgotten_recordings(id)
+            \\SELECT recording_id FROM tracks
+            \\WHERE preferred_file_id IN (SELECT id FROM temp.forgotten_files) AND recording_id IS NOT NULL
+            \\UNION
+            \\SELECT recording_id FROM files
+            \\WHERE id IN (SELECT id FROM temp.forgotten_files) AND recording_id IS NOT NULL;
+        );
         try self.db.exec("DELETE FROM tracks WHERE preferred_file_id IN (SELECT id FROM temp.forgotten_files);");
         const tracks_removed = self.db.changes();
         _ = try pruneOrphanedReleasesAndArtists(self.db, allocator, releases.items, artists.items, null);
 
+        {
+            var statement = try self.db.prepare(
+                \\SELECT id FROM files
+                \\WHERE recording_id IN (SELECT id FROM temp.forgotten_recordings)
+                \\  AND id NOT IN (SELECT id FROM temp.forgotten_files)
+                \\  AND id NOT IN (SELECT file_id FROM locations WHERE root_id = ?1);
+            );
+            defer statement.deinit();
+            try statement.bindInt64(1, root_id);
+            while (try statement.step() == .row) try surviving.append(allocator, statement.columnInt64(0));
+        }
         try self.db.exec("UPDATE mutation_operations SET file_id = NULL WHERE file_id IN (SELECT id FROM temp.forgotten_files);");
         _ = try self.execWithRoot("DELETE FROM locations WHERE root_id = ?1;", root_id);
         try self.db.exec("DELETE FROM files WHERE id IN (SELECT id FROM temp.forgotten_files);");
+        try self.db.exec(
+            \\DELETE FROM temp.forgotten_recordings
+            \\WHERE EXISTS (SELECT 1 FROM tracks WHERE recording_id = forgotten_recordings.id)
+            \\   OR EXISTS (SELECT 1 FROM files WHERE recording_id = forgotten_recordings.id);
+            \\UPDATE identification_proposals SET recording_id = NULL
+            \\WHERE recording_id IN (SELECT id FROM temp.forgotten_recordings);
+        );
+        try self.db.exec("DELETE FROM recordings WHERE id IN (SELECT id FROM temp.forgotten_recordings);");
+        const recordings_forgotten = self.db.changes();
         _ = try self.execWithRoot("DELETE FROM library_roots WHERE id = ?1;", root_id);
         for (releases.items) |release_id| _ = try refreshFolderCoverLocked(self.db, release_id);
-        try self.db.exec("DROP TABLE temp.forgotten_files;");
+        try self.db.exec("DROP TABLE temp.forgotten_files; DROP TABLE temp.forgotten_recordings;");
         try self.db.exec("COMMIT;");
         return .{
             .allocator = allocator,
             .files_forgotten = files_forgotten,
             .tracks_removed = tracks_removed,
+            .recordings_forgotten = recordings_forgotten,
             .surviving_file_ids = try surviving.toOwnedSlice(allocator),
         };
     }
@@ -253,7 +289,7 @@ pub const LibraryRootRepository = struct {
         volume: VolumeInput,
         path: []const u8,
     ) !i64 {
-        if (path.len == 0) return error.InvalidLibraryRoot;
+        if (!std.fs.path.isAbsolute(path)) return error.InvalidLibraryRoot;
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");

@@ -289,6 +289,7 @@ pub const LibraryDatabase = struct {
         path: []const u8,
         options: VolumeOptions,
     ) !RootBinding {
+        if (!std.fs.path.isAbsolute(path)) return error.InvalidLibraryRoot;
         if (try self.resolveVolume(io, path, options)) |volume_id| {
             const root_id = try self.library_roots.add(volume_id, path);
             return .{
@@ -358,6 +359,7 @@ pub const LibraryDatabase = struct {
         path: []const u8,
         options: VolumeOptions,
     ) !RootBinding {
+        if (!std.fs.path.isAbsolute(path)) return error.InvalidLibraryRoot;
         const existing = (try self.library_roots.find(self.allocator, root_id)) orelse return error.UnknownRoot;
         defer existing.deinit(self.allocator);
         if (!std.mem.eql(u8, existing.path, path) and
@@ -399,6 +401,10 @@ pub const LibraryDatabase = struct {
     /// rather than a path. A path whose bytes are not proven to equal those of
     /// a file still present elsewhere becomes a file of its own, as a scan
     /// would make it.
+    ///
+    /// No tags are read here, so an existing location keeps the identity its
+    /// scan recorded and a new one is under no root: either way the next scan
+    /// of its root re-observes the path instead of passing it as unchanged.
     pub fn resolveOrCreateFile(
         self: *LibraryDatabase,
         io: std.Io,
@@ -438,21 +444,22 @@ pub const LibraryDatabase = struct {
         const file_id = switch (try self.files.resolveForBytes(path, identity, &digest, measurements.evidence(own_digest))) {
             .new => try self.files.createLocked(upsert),
             .same => |id| same: {
-                try self.files.updateLocked(id, upsert);
+                try self.files.updateBytesLocked(id, upsert);
                 if (own_digest == null) try self.files.forgetUnheldContentHashLocked(id, identity);
                 break :same id;
             },
             .diverged => |shared| try self.files.forkLocked(shared, path, upsert),
         };
-        const location_id = try self.locations.upsertLocked(.{
-            .file_id = file_id,
-            .volume_id = volume_id,
-            .uri = path,
-            .native_inode = identity.native_inode,
-            .size_bytes = identity.size_bytes,
-            .modified_ns = identity.modified_ns,
-            .state = .present,
-        });
+        const location_id = try self.locations.repointLocked(volume_id, path, file_id) orelse
+            try self.locations.upsertLocked(.{
+                .file_id = file_id,
+                .volume_id = volume_id,
+                .uri = path,
+                .native_inode = identity.native_inode,
+                .size_bytes = identity.size_bytes,
+                .modified_ns = identity.modified_ns,
+                .state = .present,
+            });
         try self.database.exec("COMMIT;");
         return .{
             .file_id = file_id,
@@ -2097,7 +2104,7 @@ test "a root is not relocated into or around its old folder while it exists, nor
     );
     defer library.close();
     try temporary.dir.createDirPath(std.testing.io, "lib/music/inner");
-    const old_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/lib/music", .{temporary.sub_path});
+    const old_path = try absoluteTestPath(".zig-cache/tmp/{s}/lib/music", .{temporary.sub_path});
     defer std.testing.allocator.free(old_path);
     const inner = try std.fmt.allocPrint(std.testing.allocator, "{s}/inner", .{old_path});
     defer std.testing.allocator.free(inner);
@@ -4574,4 +4581,12 @@ test "a Track's lyrics row is replaced whole, is not stored for a gone Track, an
     var sql: [64]u8 = undefined;
     try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "DELETE FROM tracks WHERE id = {d};", .{track}, 0));
     try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM track_lyrics;"));
+}
+
+fn absoluteTestPath(comptime format: []const u8, args: anytype) ![]u8 {
+    const relative = try std.fmt.allocPrint(std.testing.allocator, format, args);
+    defer std.testing.allocator.free(relative);
+    const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(current);
+    return std.fs.path.resolve(std.testing.allocator, &.{ current, relative });
 }

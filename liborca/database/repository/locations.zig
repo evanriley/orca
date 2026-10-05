@@ -441,7 +441,9 @@ pub const LocationRepository = struct {
     /// carries whatever tags the old schema had room for, so it is re-observed
     /// once and promoted rather than trusted on sight.
     /// The id of the present Location this identity already describes, or null
-    /// when the entry is new or its bytes changed.
+    /// when the entry is new or its bytes changed. With `root_id`, a location
+    /// a scan of that root did not record, such as one `orca-cli analyze`
+    /// made, is not unchanged either, so its tags are observed.
     ///
     /// The caller must stamp what this returns through `markSeenLocked`. A scan
     /// that skips an unchanged file without recording that it *saw* it leaves
@@ -452,11 +454,13 @@ pub const LocationRepository = struct {
         volume_id: i64,
         path: []const u8,
         key: StorageIdentityKey,
+        root_id: ?i64,
     ) !?i64 {
         var statement = try self.db.prepare(
             \\SELECT id FROM locations
             \\WHERE volume_id=?1 AND uri=?2 AND native_inode=?3
-            \\  AND size_bytes=?4 AND modified_ns=?5 AND state='present';
+            \\  AND size_bytes=?4 AND modified_ns=?5 AND state='present'
+            \\  AND (?6 IS NULL OR root_id=?6);
         );
         defer statement.deinit();
         try statement.bindInt64(1, volume_id);
@@ -464,6 +468,25 @@ pub const LocationRepository = struct {
         try statement.bindInt64(3, key.native_inode);
         try statement.bindInt64(4, key.size_bytes);
         try statement.bindInt64(5, key.modified_ns);
+        try statement.bindOptionalInt64(6, root_id);
+        return switch (try statement.step()) {
+            .row => statement.columnInt64(0),
+            .done => null,
+        };
+    }
+
+    /// Points the location at `path` on `volume_id` at `file_id` as present,
+    /// keeping the identity a scan recorded for it. Null when there is none.
+    pub fn repointLocked(self: *LocationRepository, volume_id: i64, path: []const u8, file_id: i64) !?i64 {
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET file_id=?3, state='present', missing_since=NULL
+            \\WHERE volume_id=?1 AND uri=?2
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, path);
+        try statement.bindInt64(3, file_id);
         return switch (try statement.step()) {
             .row => statement.columnInt64(0),
             .done => null,

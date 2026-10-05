@@ -2260,6 +2260,10 @@ static int roots_v2_smoke(orca_runtime *runtime, orca_handle library, int64_t ro
     SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id,
                                            "/nonexistent/orca-relocated-root", &job) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, "fixtures/audio", &job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, "", &job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id + 1000, root_path, &job) ==
                 ORCA_STATUS_NOT_FOUND);
     SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, root_path, &job) ==
@@ -3016,10 +3020,17 @@ static int artist_smoke(orca_runtime *runtime, orca_handle library) {
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
     char root[] = ".zig-cache/tmp/orca-c-smoke-watch-XXXXXX";
+    char absolute[1024];
     char album[sizeof root + 16];
     char track[sizeof album + 16];
     if (mkdir(".zig-cache/tmp", 0700) != 0 && errno != EEXIST) return 210;
     if (mkdtemp(root) == 0) return 211;
+    if (getcwd(absolute, sizeof absolute - sizeof root - 1) == 0) {
+        rmdir(root);
+        return 211;
+    }
+    strcat(absolute, "/");
+    strcat(absolute, root);
     snprintf(album, sizeof album, "%s/Album", root);
     snprintf(track, sizeof track, "%s/one.flac", album);
     int result = 0;
@@ -3036,7 +3047,7 @@ static int watch_smoke(orca_runtime *runtime) {
     options.quiet_ms = 50;
     orca_watch_status watch_status;
     orca_status watched = ORCA_STATUS_INTERNAL;
-    if (orca_library_add_root(runtime, library, root, &root_id) != ORCA_STATUS_OK) {
+    if (orca_library_add_root(runtime, library, absolute, &root_id) != ORCA_STATUS_OK) {
         result = 213;
         goto close;
     }
@@ -4452,6 +4463,12 @@ int main(int argc, char **argv) {
         return 16;
 
     int64_t root_id = 0;
+    if (orca_library_add_root(runtime, library, "fixtures/audio", &root_id) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 17;
+    if (orca_library_add_root(runtime, library, "", &root_id) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 17;
+    if (root_id != 0) return 17;
     char fixtures[4096];
     if (getcwd(fixtures, sizeof fixtures - 16) == 0) return 17;
     strcat(fixtures, "/fixtures/audio");

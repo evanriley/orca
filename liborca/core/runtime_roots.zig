@@ -106,7 +106,7 @@ fn tagWriteRefusal(
         .size_bytes = std.math.cast(i64, observed.size) orelse return .changed_since_scan,
         .modified_ns = std.math.cast(i64, observed.modified_ns) orelse return .changed_since_scan,
     };
-    if (try library_database.locations.unchangedLocationId(location.volume_id, location.uri, key) == null)
+    if (try library_database.locations.unchangedLocationId(location.volume_id, location.uri, key, null) == null)
         return .changed_since_scan;
     return null;
 }
@@ -145,6 +145,7 @@ pub fn libraryRemoveRoot(
     return .{
         .files_forgotten = removal.files_forgotten,
         .tracks_removed = removal.tracks_removed,
+        .recordings_forgotten = removal.recordings_forgotten,
     };
 }
 
@@ -157,6 +158,7 @@ pub fn libraryRelocateRoot(
 ) !JobHandle {
     try runtime.requireRunning(self);
     const library_database = try runtime.libraryDatabase(self, library);
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidLibraryRoot;
     {
         const directory = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch
             return error.InvalidLibraryRoot;

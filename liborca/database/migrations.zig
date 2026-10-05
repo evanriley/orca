@@ -3010,7 +3010,7 @@ test "a version-21 library re-observes present files whose tags held only a cove
             .native_inode = case.inode,
             .size_bytes = 10,
             .modified_ns = 500,
-        });
+        }, null);
         try std.testing.expectEqual(case.unchanged, found != null);
     }
     try std.testing.expectEqual(@as(i64, 500), try scalar(db, "SELECT modified_ns FROM locations WHERE file_id = 3;"));

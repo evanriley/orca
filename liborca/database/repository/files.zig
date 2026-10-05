@@ -363,6 +363,25 @@ pub const FileRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
+    /// Records the size and hashes of a file's bytes and leaves its audio
+    /// properties alone, for a caller that read the bytes but not the headers.
+    pub fn updateBytesLocked(self: *FileRepository, file_id: i64, input: FileUpsert) !void {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET size_bytes=?3, quick_hash=?8,
+            \\    audio_hash=CASE WHEN quick_hash IS ?8 THEN audio_hash ELSE NULL END,
+            \\    audio_hash_tier=CASE WHEN quick_hash IS ?8 THEN audio_hash_tier ELSE NULL END,
+            \\    content_hash=CASE WHEN ?10 IS NOT NULL THEN ?10
+            \\        WHEN quick_hash IS ?8 THEN content_hash ELSE NULL END,
+            \\    content_hash_algorithm=CASE WHEN ?10 IS NOT NULL THEN 1
+            \\        WHEN quick_hash IS ?8 THEN content_hash_algorithm ELSE NULL END
+            \\WHERE id=?12;
+        );
+        defer statement.deinit();
+        try bindFile(statement, input);
+        try statement.bindInt64(12, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
     /// Records what a probe read from a file's headers, and nothing else.
     ///
     /// `update` would also rewrite `audio_format`, `size_bytes` and

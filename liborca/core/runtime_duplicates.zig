@@ -331,7 +331,7 @@ pub fn libraryMergeDuplicateMetadata(
 
 fn scanFixtures(owner: *OrcaRuntime, uri: [:0]const u8) !LibraryHandle {
     const library = try owner.openLibrary(std.testing.io, uri);
-    const binding = try owner.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const binding = try @import("runtime_tests.zig").addFixturesRoot(owner, library);
     const job_handle = try owner.startLibraryScan(library, .{ .root_id = binding.root_id });
     while (true) {
         owner.reapFinishedJobs();

@@ -433,7 +433,7 @@ pub const Scanner = struct {
             .modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse return self.keepUnobserved(path, result),
         };
         const unchanged = if (unchanged_policy == .skip_unchanged)
-            try self.locations.unchangedLocationId(self.volume_id, path, identity)
+            try self.locations.unchangedLocationId(self.volume_id, path, identity, self.root_id)
         else
             null;
         if (unchanged) |location_id| {
@@ -806,8 +806,7 @@ test "scanner batches audio and skips unchanged files on restart" {
         .sub_path = "tagged.mp3",
         .data = &mp3,
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -863,7 +862,7 @@ test "a reprobe scan reads every unchanged file again and keeps its file id" {
     @memcpy(mp3[131..145], "Observed title");
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "tagged.mp3", .data = &mp3 });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "second.flac", .data = "fLaCgenerated" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
 
     var library = try database.LibraryDatabase.open(
@@ -910,8 +909,7 @@ test "a scan records why a changed file would not open and clears it once the fi
         .sub_path = "short.flac",
         .data = "fLaC cut short",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -966,8 +964,7 @@ test "a scan projects only the batches it changed and reprojects nothing on a re
         .sub_path = "two.flac",
         .data = "fLaCgenerated two",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1031,8 +1028,7 @@ test "a scan never ingests the temporaries and backups a tag write leaves beside
         .sub_path = ".hidden.flac",
         .data = "fLaCgenerated hidden",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1071,8 +1067,7 @@ test "a scan of a root holding the Library never examines its database, WAL file
         .sub_path = "library.db.orca-backups/1/0-song.flac",
         .data = "fLaCgenerated backup",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1113,8 +1108,7 @@ test "cancelled scans stop before filesystem work" {
     token.cancel();
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1203,8 +1197,7 @@ fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
         .sub_path = "third.wav",
         .data = "RIFFxxxxWAVEfmt ",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1367,8 +1360,7 @@ test "a scan records the audio properties of every file whose bytes changed" {
         .sub_path = "broken.flac",
         .data = "fLaC but not a stream",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1506,8 +1498,7 @@ test "rescanning an untouched library leaves every file present" {
         .sub_path = "removed.flac",
         .data = "fLaCgenerated removed",
     });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1611,8 +1602,7 @@ test "an ID3 tag in front of a FLAC stream does not hide the tags behind it" {
         .data = tagged,
     });
 
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1658,8 +1648,7 @@ test "a rescan of a file whose tags were removed forgets the old tags" {
     @memcpy(tagged[191..200], "Old album");
     tagged[255] = 17;
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "song.mp3", .data = &tagged });
-    const root_path = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const root_path = try absoluteTestPath(
         ".zig-cache/tmp/{s}",
         .{temporary.sub_path},
     );
@@ -1744,7 +1733,7 @@ const SharedCopies = struct {
         for ([_][]const u8{ "a", "b" }) |folder| try self.temporary.dir.createDir(std.testing.io, folder, .default_dir);
         try copyFixtureTo(self.temporary.dir, "tagged-reference.flac", "a/song.flac");
         try copyFixtureTo(self.temporary.dir, "tagged-reference.flac", "b/song.flac");
-        self.root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
+        self.root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{self.temporary.sub_path});
         self.first_path = try pathUnder(std.testing.allocator, self.root_path, "a/song.flac");
         self.second_path = try pathUnder(std.testing.allocator, self.root_path, "b/song.flac");
         self.library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, name);
@@ -2007,7 +1996,7 @@ test "a file with one location follows its bytes when they change" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try copyFixtureTo(temporary.dir, "tagged-reference.flac", "song.flac");
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     const song_path = try pathUnder(std.testing.allocator, root_path, "song.flac");
     defer std.testing.allocator.free(song_path);
@@ -2148,7 +2137,7 @@ const TwinRoots = struct {
         self.library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, name);
         for (&self.paths, &self.bindings, folders, volumes) |*path, *binding, folder, volume| {
             try self.temporary.dir.createDir(std.testing.io, folder, .default_dir);
-            path.* = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, folder });
+            path.* = try absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, folder });
             binding.* = try self.library.ensureRoot(std.testing.io, path.*, .{ .stable_key = volume });
         }
     }
@@ -2567,7 +2556,7 @@ test "an image in a scanned folder is listed as a front cover beside the music, 
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/notes.jpg", .data = "not a picture" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/Scans/Back.PNG", .data = "\x89PNG\r\n\x1a\n a png" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2652,7 +2641,7 @@ test "an unchanged rescan and a projection read no cover bytes" {
     const png = flac[std.mem.indexOf(u8, flac, "\x89PNG").? .. std.mem.indexOf(u8, flac, "IEND").? + 8];
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/song.flac", .data = flac });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/cover.png", .data = png });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2734,7 +2723,7 @@ test "a cancelled walk records no scan time for the folders it did not finish" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "cover.jpg", .data = "\xff\xd8\xff\xe0" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2771,7 +2760,7 @@ test "a file count names every file a walk reaches and none it skips" {
     for ([_][]const u8{ "Album/01.flac", "Album/cover.jpg", "Album/Disc 2/01.flac", "notes.txt", "Album/01.flac.orca-stage-1" }) |path| {
         try temporary.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "x" });
     }
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
 
     try std.testing.expectEqual(@as(?u64, 4), try countFiles(std.testing.io, std.testing.allocator, root_path, null, .{}, null));
@@ -2850,7 +2839,7 @@ test "a file the walk lists but cannot open keeps its location at the run's gene
     inline for (.{ "locked.flac", "removed.flac", "kept.flac" }) |name| {
         try temporary.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "fLaC" ++ name });
     }
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2881,7 +2870,7 @@ test "a file whose identity does not fit the database keeps its location at the 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "future.flac", .data = "fLaC future" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2911,7 +2900,7 @@ test "a folder image the walk lists but cannot open keeps its row at the run's g
     defer temporary.cleanup();
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "back.png", .data = "\x89PNG\r\n\x1a\n a png" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2946,7 +2935,7 @@ test "a file or image the walk cannot open and never recorded is counted as an e
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = names[1], .data = "\xff\xd8\xff\xe0 a jpeg" });
     for (names) |name| try temporary.dir.setFilePermissions(std.testing.io, name, .fromMode(0), .{});
     defer for (names) |name| temporary.dir.setFilePermissions(std.testing.io, name, .default_file, .{}) catch {};
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -2973,7 +2962,7 @@ test "a directory the walk lists but cannot enter keeps everything recorded unde
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "locked/inner/two.flac", .data = "fLaC two" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "locked/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "other/gone.flac", .data = "fLaC gone" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -3008,7 +2997,7 @@ test "a directory the walk cannot enter keeps nothing of a sibling whose name st
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "ab/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "abc/gone.flac", .data = "fLaC gone" });
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "abc/gone.png", .data = "\x89PNG\r\n\x1a\n a png" });
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
@@ -3045,8 +3034,16 @@ test "a file count skips a directory it cannot enter and counts the rest" {
     }
     try temporary.dir.setFilePermissions(std.testing.io, "locked", .fromMode(0), .{});
     defer temporary.dir.setFilePermissions(std.testing.io, "locked", .default_dir, .{}) catch {};
-    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root_path);
 
     try std.testing.expectEqual(@as(?u64, 2), try countFiles(std.testing.io, std.testing.allocator, root_path, null, .{}, null));
+}
+
+fn absoluteTestPath(comptime format: []const u8, args: anytype) ![]u8 {
+    const relative = try std.fmt.allocPrint(std.testing.allocator, format, args);
+    defer std.testing.allocator.free(relative);
+    const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(current);
+    return std.fs.path.resolve(std.testing.allocator, &.{ current, relative });
 }

@@ -161,7 +161,7 @@ pub fn confirmRemoveFolder(self: *App, root_id: i64) void {
     const folder = if (slash) |index| trimmed[index + 1 ..] else trimmed;
     var buffer: [1024]u8 = undefined;
     const heading = strings.printZ(&buffer, "Remove “{s}”?", .{if (folder.len == 0) path else folder}) catch "Remove this folder?";
-    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its tracks leave the library. The files on disk are not touched.");
+    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its tracks leave the library with their loves, ratings, play counts and playlist entries. The files on disk are not touched.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
     adw.adw_alert_dialog_add_response(alert, "remove", "Remove");
