@@ -858,8 +858,15 @@ what was kept.
   that step, and the rest still run. The outcome is then the first failure:
   `refused` (a `4xx`, a redirect off the service or a body Orca does not
   accept), `unavailable` (`408`, `5xx`, a network failure or a block) or
-  `busy` (another process holds a service's lease). A cancelled job keeps
-  nothing and reports `cancelled`. None of these fail the job.
+  `busy` (another Gateway still holds a service's lease when the deadline
+  passes). A cancelled job keeps nothing and reports `cancelled`. None of
+  these fail the job.
+- **Deadline.** A fetch without `include_releases`, a Release's own info
+  fetch and a lyrics fetch end within `fetch_deadline_ms` (60 s): each
+  request's timeout is cut to the time left, and a service another Gateway
+  holds is waited for until then. The Artist's info is stored first, then
+  its listeners and related artists, then their photos, then release group
+  covers; `jobArtistInfoStores(job)` counts each store as it happens.
 
 `jobArtistInfoOutcome(job)` reports the `ArtistInfoOutcome`: `fetched`,
 `cached`, `no_musicbrainz_id`, `offline`, `not_found`, `refused`,
@@ -877,8 +884,9 @@ orca-cli release-group-cover DATABASE MBID --out=PATH
 `ORCA_WIKIMEDIA_URL`, `ORCA_WIKIPEDIA_URL`, `ORCA_LISTENBRAINZ_URL` and
 `ORCA_LISTENBRAINZ_LABS_URL` point `artist-info --fetch`, `release-info
 --fetch` and `genres --fill-from-musicbrainz` at other servers. With `ORCA_WIKIPEDIA_URL`
-set, every language is asked of that one server. `artist-info` prints
-`listeners=N (ListenBrainz)` and `related: N` with one line per related
+set, every language is asked of that one server. `artist-info --fetch`
+prints `stored n=N at_ms=MS` each time the job stores part of what it
+found, then the info; `artist-info` prints `listeners=N (ListenBrainz)` and `related: N` with one line per related
 artist, each ending in `photo=yes` or `photo=no`; `orca-cli related
 DATABASE ARTIST_ID` prints those lines alone, and `related-photo` writes a
 related artist's kept photo, then prints `source=`, `licence=`, `credit=`,

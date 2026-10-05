@@ -713,7 +713,10 @@ defer page.deinit();
   release info. It returns
   `error.ClientIdentityRequired`, `error.UnknownArtist` or
   `error.InvalidLanguage`. `jobArtistInfoOutcome` returns its
-  `ArtistInfoOutcome` (`error.NotAnArtistInfoJob` for another kind).
+  `ArtistInfoOutcome` (`error.NotAnArtistInfoJob` for another kind), and
+  `jobArtistInfoStores` how many times the running job has stored part of
+  what it found, so a host shows the Artist's info before related artists'
+  photos and covers arrive.
   `libraryArtistInfo` returns the stored `ArtistInfo`, whose
   `ArtistInfoRecord` holds the years active, type, IDs, biography with its
   `ArtistBiographySource`, URL, licence and language, the

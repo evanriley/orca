@@ -3350,6 +3350,16 @@ orca_status orca_job_artist_info_outcome(
     uint8_t *outcome
 );
 
+/* Writes to `stores` how many times the artist info job has stored part of
+ * what it found, while it runs: the Artist's info first, then its listeners
+ * and related artists, then their photos. INVALID_ARGUMENT for a job of
+ * another kind, STALE_HANDLE for an unknown job. */
+orca_status orca_job_artist_info_stores(
+    orca_runtime *runtime,
+    orca_handle job,
+    uint32_t *stores
+);
+
 /* Invokes the callback once with what the Library keeps for the Artist.
  * NOT_FOUND, without a callback, when nothing was ever fetched for it. */
 orca_status orca_library_artist_info(

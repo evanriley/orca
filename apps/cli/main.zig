@@ -4514,7 +4514,7 @@ fn showArtistInfo(context: Context) !void {
     var outcome: ?liborca.ArtistInfoOutcome = null;
     if (fetch) {
         const job_handle = try runtime.startArtistInfoFetch(library, artist_id, options);
-        try awaitJob(&runtime, stdout, job_handle, null);
+        try awaitArtistInfo(&runtime, io, stdout, job_handle);
         outcome = try runtime.jobArtistInfoOutcome(job_handle);
     }
     if (try runtime.libraryArtistTotals(library, artist_id)) |totals| try stdout.print(
@@ -5907,6 +5907,29 @@ fn awaitJob(
         }
         sleepMilliseconds(20);
         elapsed_ms += 20;
+    }
+}
+
+fn awaitArtistInfo(runtime: *liborca.Runtime, io: std.Io, stdout: *std.Io.Writer, job_handle: liborca.JobHandle) !void {
+    const started_ms = monotonicMs(io);
+    var shown: u32 = 0;
+    while (true) {
+        runtime.pump();
+        while (runtime.pollEvent()) |_| {}
+        while (runtime.pollTelemetry()) |_| {}
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        const stores = try runtime.jobArtistInfoStores(job_handle);
+        if (stores != shown) {
+            shown = stores;
+            try stdout.print("stored n={d} at_ms={d}\n", .{ stores, monotonicMs(io) - started_ms });
+            try stdout.flush();
+        }
+        switch (snapshot.state) {
+            .succeeded, .cancelled => return,
+            .failed => return error.JobFailed,
+            else => {},
+        }
+        sleepMilliseconds(20);
     }
 }
 

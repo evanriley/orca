@@ -75,6 +75,7 @@ pub const related_photos_per_fetch = 8;
 /// Only the first this many release groups Elsewhere lists have their cover
 /// asked for.
 pub const release_group_covers_per_fetch = 24;
+pub const fetch_deadline_ms: i64 = 60_000;
 /// The most area lookups one fetch makes to name the area an origin lies in.
 pub const max_origin_area_lookups = 3;
 /// The largest local image read from an Artist's folder.
@@ -110,6 +111,7 @@ pub const Fetch = struct {
     /// Ask no release group cover; the gateways answer only from caches.
     offline: bool = false,
     include_releases: bool = false,
+    stores: ?*std.atomic.Value(u32) = null,
 
     pub fn run(self: *Fetch, artist_id: i64) !Outcome {
         const info = &self.library.artist_info;
@@ -132,14 +134,17 @@ pub const Fetch = struct {
             var buffer: [providers.musicbrainz.fill_genres_max][]const u8 = undefined;
             _ = try self.library.genres.fillFromProvider(self.allocator, .{ .artist = artist_id }, providers.musicbrainz.topGenres(found, &buffer));
         };
+        self.noteStored();
         if (mbid) |artist_mbid| {
             const listened_at = if (stored) |row| row.record.listeners_fetched_at else null;
             if (try self.refreshListenBrainz(artist_id, artist_mbid, listened_at, now_s)) |lb_failure| {
                 if (lb_failure == .cancelled) return .cancelled;
                 failure = failure orelse lb_failure;
             }
+            self.noteStored();
         }
         if (!try self.fetchRelatedPhotos(artist_id, now_s)) return .cancelled;
+        self.noteStored();
         if (!try self.fetchReleaseGroupCovers(artist_id, now_s)) return .cancelled;
         if (self.include_releases) {
             const releases = try self.library.release_info.artistReleases(self.allocator, artist_id);
@@ -162,6 +167,10 @@ pub const Fetch = struct {
             }
         }
         return failure orelse outcome;
+    }
+
+    fn noteStored(self: *Fetch) void {
+        if (self.stores) |stores| _ = stores.fetchAdd(1, .release);
     }
 
     /// Listeners from ListenBrainz and related artists from Labs, unless

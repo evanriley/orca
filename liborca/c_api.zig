@@ -3807,6 +3807,13 @@ pub export fn orca_job_artist_info_outcome(runtime: ?*Runtime, job_handle: Handl
     return .ok;
 }
 
+pub export fn orca_job_artist_info_stores(runtime: ?*Runtime, job_handle: Handle, output: ?*u32) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.jobArtistInfoStores(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
 pub export fn orca_library_artist_info(
     runtime: ?*Runtime,
     library: Handle,
@@ -9604,6 +9611,10 @@ test "artist info and love calls refuse null outputs, out-of-range flags, bad la
     try std.testing.expectEqual(Status.invalid_argument, orca_job_artist_info_outcome(runtime, projection, &outcome));
     try std.testing.expectEqualStrings("orca_job_artist_info_outcome: NotAnArtistInfoJob", std.mem.span(orca_runtime_last_error(runtime)));
     try std.testing.expectEqual(@as(u8, 255), outcome);
+    var stores: u32 = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_artist_info_stores(runtime, projection, &stores));
+    try std.testing.expectEqualStrings("orca_job_artist_info_stores: NotAnArtistInfoJob", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.stale_handle, orca_job_artist_info_stores(runtime, stale, &stores));
 
     try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_info(runtime, library, 1, &calls, null));
     try std.testing.expectEqual(Status.not_found, orca_library_artist_info(runtime, library, 1, &calls, countArtistInfo));

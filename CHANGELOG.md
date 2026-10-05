@@ -1470,6 +1470,21 @@
 
 ### Fixed
 
+- **Artist and album info fetches end within a minute.** An artist or
+  album info Job now stops asking once a minute has passed, and each
+  request's timeout ends there, so a slow or silent service can no longer
+  hold the Job for many minutes. Before, a fresh artist fetch asked for
+  related artists' photos and up to 24 release-group covers one after
+  another with a 30-second timeout each, and orca-gtk kept the Fetch
+  artist info button greyed out until all of it ended. Photos and covers
+  left over are fetched the next time. A fetch that finds a service in use
+  by another fetch now waits for it until that minute is up instead of
+  ending at once as busy, which is what happened to an artist opened from
+  one of their albums while the album's info was still being fetched.
+  `--include-releases` and the genre fill keep no time limit.
+- **Lyrics fetches wait for LRCLIB.** A lyrics fetch that finds LRCLIB in
+  use by another fetch waits for it for up to a minute instead of ending
+  at once as busy.
 - **Shortcuts no longer highlight the sidebar.** In orca-gtk, a shortcut
   such as Ctrl+K, Ctrl+, or Escape no longer draws focus rings. Before, it
   outlined the focused sidebar item, the sidebar and the whole window. Every

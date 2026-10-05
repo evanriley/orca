@@ -738,6 +738,7 @@ const LiveLyricsStats = struct {
 
 const LiveArtistInfoStats = struct {
     outcome: std.atomic.Value(ArtistInfoOutcome) = .init(.not_requested),
+    stores: std.atomic.Value(u32) = .init(0),
 };
 
 pub const Stats = union(enum) {
@@ -783,7 +784,7 @@ const InfoServices = struct {
         providers.coverartarchive.service,
     };
 
-    fn init(self: *InfoServices, worker: *JobWorker, setup: *const ArtistInfoSetup, offline: bool) void {
+    fn init(self: *InfoServices, worker: *JobWorker, setup: *const ArtistInfoSetup, offline: bool, bounded: bool) void {
         self.setup = setup;
         self.standard = .init(worker.allocator, setup.io);
         self.system_clock = .{ .io = setup.io };
@@ -799,6 +800,10 @@ const InfoServices = struct {
             .cancel = &worker.registration.cancel,
             .sharing = .{ .store = shared_state, .service = service },
         };
+        if (bounded) {
+            const deadline = self.gateways[0].clock.nowMs() +| artist_info.fetch_deadline_ms;
+            for (&self.gateways) |*gateway| gateway.deadline_ms = deadline;
+        }
         self.gateways[2].config.max_response_bytes = providers.wikimedia_commons.max_image_bytes;
         if (setup.hooks.cover_art_transport) |transport| self.gateways[6].transport = transport;
         self.gateways[6].config.max_response_bytes = providers.coverartarchive.max_image_bytes;
@@ -978,6 +983,7 @@ pub const JobWorker = struct {
                 .service = providers.lrclib.service,
             },
         };
+        gateway.deadline_ms = gateway.clock.nowMs() +| lyrics_fetch.fetch_deadline_ms;
         defer gateway.releaseLease();
         var archive: providers.lrclib.Lrclib = .{ .gateway = &gateway, .server = setup.server.view() };
         fetch.lrclib = &archive;
@@ -989,7 +995,7 @@ pub const JobWorker = struct {
         const stats = &self.stats.artist_info;
         if (self.cancelled()) return stats.outcome.store(.cancelled, .release);
         var services: InfoServices = undefined;
-        services.init(self, &request.setup, request.offline);
+        services.init(self, &request.setup, request.offline, !request.include_releases);
         defer services.deinit();
         var fetch: artist_info.Fetch = .{
             .allocator = self.allocator,
@@ -1001,6 +1007,7 @@ pub const JobWorker = struct {
             .force = request.force,
             .offline = request.offline,
             .include_releases = request.include_releases,
+            .stores = &stats.stores,
         };
         const outcome = fetch.run(request.artist_id) catch {
             self.failed.store(true, .release);
@@ -1013,7 +1020,7 @@ pub const JobWorker = struct {
         const stats = &self.stats.artist_info;
         if (self.cancelled()) return stats.outcome.store(.cancelled, .release);
         var services: InfoServices = undefined;
-        services.init(self, &request.setup, request.offline);
+        services.init(self, &request.setup, request.offline, request.target == .release);
         defer services.deinit();
         var fetch: release_info.Fetch = .{
             .allocator = self.allocator,
@@ -1986,6 +1993,15 @@ pub const JobWorker = struct {
         return switch (self.stats) {
             .artist_info => |*stats| stats.outcome.load(.acquire),
             .scan, .duplicates, .matching, .submission, .lyrics => .not_requested,
+        };
+    }
+
+    /// How many times an artist info job has stored part of what it found,
+    /// as it goes; 0 for a job of another kind.
+    pub fn artistInfoStores(self: *const JobWorker) u32 {
+        return switch (self.stats) {
+            .artist_info => |*stats| stats.stores.load(.acquire),
+            .scan, .duplicates, .matching, .submission, .lyrics => 0,
         };
     }
 

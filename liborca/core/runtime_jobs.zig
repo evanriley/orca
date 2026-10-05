@@ -345,6 +345,16 @@ pub fn jobArtistInfoOutcome(self: *OrcaRuntime, job_handle: JobHandle) !ArtistIn
     return error.StaleHandle;
 }
 
+pub fn jobArtistInfoStores(self: *OrcaRuntime, job_handle: JobHandle) !u32 {
+    if (queuedHostJob(self, job_handle)) return error.NotAnArtistInfoJob;
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        if (worker.kind() != .artist_info) return error.NotAnArtistInfoJob;
+        return worker.artistInfoStores();
+    }
+    return error.StaleHandle;
+}
+
 fn requireRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !void {
     const release = try (try runtime.libraryDatabase(self, library)).releases.byId(self.allocator, release_id) orelse
         return error.UnknownRelease;

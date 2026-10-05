@@ -1,4 +1,5 @@
 const std = @import("std");
+const artist_info = @import("artist_info.zig");
 const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
@@ -6,6 +7,7 @@ const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const library_pass = @import("../library/root.zig");
 const listen_worker = @import("listen_worker.zig");
+const lyrics_fetch = @import("lyrics_fetch.zig");
 const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
@@ -5444,6 +5446,38 @@ test "a lyrics fetch told to wait by LRCLIB is unavailable, and one inside the w
     try std.testing.expect(try library_database.track_lyrics.get(std.testing.allocator, track) == null);
 }
 
+test "a lyrics fetch waits for LRCLIB while another Gateway holds it, and is busy only once its deadline passes" {
+    var lrclib: FakeLrclib = .{};
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-lease-wait?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    const other = try addMatchTrack(library_database, "Hazey Jane I", "Nick Drake", null);
+
+    const holder: i64 = 99;
+    const now = lrclib.clock.wallNow();
+    try std.testing.expect(try library_database.provider_state.claimLease(providers.lrclib.service, holder, now, now + 10_000));
+    const fetched = try runLyrics(&runtime, library, track, true);
+    defer fetched.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, fetched.outcome);
+    try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+    try std.testing.expect(lrclib.clock.wallNow() - now >= 10_000);
+
+    const later = lrclib.clock.wallNow();
+    try std.testing.expect(try library_database.provider_state.claimLease(providers.lrclib.service, holder, later, later + 10 * 60_000));
+    const started_ms = lrclib.clock.now();
+    const busy = try runLyrics(&runtime, library, other, true);
+    defer busy.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.busy, busy.outcome);
+    try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+    try std.testing.expect(lrclib.clock.now() - started_ms >= lyrics_fetch.fetch_deadline_ms);
+    try std.testing.expect(lrclib.clock.now() - started_ms <= lyrics_fetch.fetch_deadline_ms + 1_000);
+}
+
 test "an edit to a Track's title asks LRCLIB again, and its old answer is not used meanwhile" {
     var lrclib: FakeLrclib = .{};
     defer lrclib.deinit();
@@ -5606,6 +5640,9 @@ const FakeArtistInfo = struct {
     /// A related artist MusicBrainz names no image or Wikidata item for.
     related_without_photo: ?[]const u8 = null,
     related_body: [512]u8 = undefined,
+    stalled: bool = false,
+    /// Related artists' lookups and release group covers wait while set.
+    hold_extras: std.atomic.Value(bool) = .init(false),
 
     fn init(self: *FakeArtistInfo) !void {
         const dir = std.Io.Dir.cwd();
@@ -5632,7 +5669,13 @@ const FakeArtistInfo = struct {
             self.related_commons_requests.load(.monotonic) + self.related_image_requests.load(.monotonic);
     }
 
+    fn waitWhileHeld(self: *FakeArtistInfo) void {
+        var deadline: runtime_tests.TestDeadline = .init(10_000);
+        while (self.hold_extras.load(.acquire) and deadline.tick()) {}
+    }
+
     fn respondRelatedArtist(self: *FakeArtistInfo, mbid: []const u8) !network.testing.Reply {
+        self.waitWhileHeld();
         _ = self.related_musicbrainz_requests.fetchAdd(1, .monotonic);
         if (self.related_unavailable) |unavailable| if (std.mem.eql(u8, mbid, unavailable))
             return .{ .respond = .{ .status = 503, .body = "{}" } };
@@ -5674,9 +5717,14 @@ const FakeArtistInfo = struct {
 
     fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
         const self: *FakeArtistInfo = @ptrCast(@alignCast(context));
+        if (self.stalled) {
+            self.clock.advance(@intCast(exchange.request.timeout_ms));
+            return .{ .fail = error.Timeout };
+        }
         const url = exchange.request.url;
         const group_cover_prefix = "https://coverartarchive.org/release-group/";
         if (std.mem.startsWith(u8, url, group_cover_prefix) and url.len >= group_cover_prefix.len + 36) {
+            self.waitWhileHeld();
             _ = self.group_cover_requests.fetchAdd(1, .monotonic);
             const last = url[group_cover_prefix.len + 35];
             return if (last == '1' or last == '3' or last == '5')
@@ -6617,6 +6665,90 @@ test "an Artist's fetch asks the Cover Art Archive about the first 24 release gr
 
     _ = try runArtistInfo(&runtime, library, artist, .{});
     try std.testing.expectEqual(@as(u32, 24), fake.group_cover_requests.load(.monotonic));
+}
+
+test "an Artist's fetch from services that stop answering ends by its deadline with outcome unavailable" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-stalled?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+
+    fake.stalled = true;
+    const started_ms = fake.clock.now();
+    const requests_before = fake.requestCount();
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.unavailable, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
+    try std.testing.expect(fake.clock.now() - started_ms <= artist_info.fetch_deadline_ms);
+    try std.testing.expect(fake.requestCount() - requests_before <= 2);
+}
+
+test "an Artist's fetch waits for a service another Gateway holds, and is busy only once its deadline passes" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-lease-wait?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    const holder: i64 = 99;
+    const now = fake.clock.wallNow();
+    try std.testing.expect(try library_database.provider_state.claimLease(providers.musicbrainz.service, holder, now, now + 10_000));
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 1), fake.musicbrainz_requests.load(.monotonic));
+    try std.testing.expect(fake.clock.wallNow() - now >= 10_000);
+
+    const later = fake.clock.wallNow();
+    try std.testing.expect(try library_database.provider_state.claimLease(providers.listenbrainz.service, holder, later, later + 10 * 60_000));
+    const started_ms = fake.clock.now();
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.busy, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
+    try std.testing.expectEqual(@as(u32, 1), fake.popularity_requests.load(.monotonic));
+    try std.testing.expect(fake.clock.now() - started_ms <= artist_info.fetch_deadline_ms + 1_000);
+}
+
+test "an Artist's fetch stores its info and counts the store while related artists' photos and covers are still pending" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-progressive?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    fake.hold_extras.store(true, .release);
+    defer fake.hold_extras.store(false, .release);
+    const handle = try runtime.startArtistInfoFetch(library, artist, .{});
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (try runtime.jobArtistInfoStores(handle) < 2 and deadline.tick()) {}
+    try std.testing.expectEqual(@as(u32, 2), try runtime.jobArtistInfoStores(handle));
+    try std.testing.expectEqual(job.State.running, (try runtime.jobSnapshotSynced(handle)).state);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.not_requested, try runtime.jobArtistInfoOutcome(handle));
+    {
+        var stored = (try runtime.libraryArtistInfo(library, artist)).?;
+        defer stored.deinit();
+        try std.testing.expect(stored.record.biography != null);
+        try std.testing.expect(stored.record.photo_source != null);
+    }
+    try std.testing.expect(fake.relatedPhotoRequests() == 0);
+
+    fake.hold_extras.store(false, .release);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, handle));
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runtime.jobArtistInfoOutcome(handle));
+    try std.testing.expectEqual(@as(u32, 3), try runtime.jobArtistInfoStores(handle));
+    try std.testing.expect(fake.relatedPhotoRequests() > 0);
+    try std.testing.expect(fake.group_cover_requests.load(.monotonic) > 0);
 }
 
 test "release groups an Artist's browse no longer names take their covers with them" {

@@ -41,6 +41,7 @@ pub const Result = struct {
 };
 
 pub const retry_missing_after_s: i64 = 7 * 24 * 60 * 60;
+pub const fetch_deadline_ms: i64 = 60_000;
 
 pub const Fetch = struct {
     allocator: std.mem.Allocator,

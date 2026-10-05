@@ -186,8 +186,10 @@ The boundary covers the whole engine, not a fragment of it:
 - **Artist info.** `orca_library_start_artist_info` starts an
   `ORCA_JOB_KIND_ARTIST_INFO` Job for one Artist from an
   `orca_artist_info_options` (biography language, `force`, `offline`); it
-  needs a client identity. Once it finishes, `orca_job_artist_info_outcome`
-  reports an `orca_artist_info_outcome`. `orca_library_artist_info` calls back
+  needs a client identity. While it runs, `orca_job_artist_info_stores`
+  counts the times it has stored part of what it found; a host shows the
+  info again when the count grows. Once it finishes,
+  `orca_job_artist_info_outcome` reports an `orca_artist_info_outcome`. `orca_library_artist_info` calls back
   with an `orca_artist_info_view` of what the Library keeps: years active,
   type, IDs, the biography with its URL, licence and language, and the
   photo's source, Commons page, licence and credit, which a host shows with

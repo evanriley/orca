@@ -170,6 +170,34 @@ test "a second claimant of a service gets ProviderBusy and makes no request unti
     try testing.expectEqual(@as(u32, 3), service.requestCount());
 }
 
+test "a claimant with a deadline waits for a held service, makes its request once free, and is busy only at the deadline" {
+    const uri = "file:orca-shared-state-deadline?mode=memory&cache=shared";
+    var service: Service = .{};
+    defer service.deinit();
+    var first: Process = undefined;
+    try first.start(uri, &service, 1);
+    defer first.stop();
+    var second: Process = undefined;
+    try second.start(uri, &service, 2);
+    defer second.stop();
+
+    try testing.expectEqual(@as(u16, 200), try first.fetch());
+    const waited_from = service.clock.now();
+    second.gateway.deadline_ms = second.monotonic.clock().nowMs() + network.client.lease_duration_ms + 10_000;
+    try testing.expectEqual(@as(u16, 200), try second.fetch());
+    try testing.expectEqual(@as(u32, 2), service.requestCount());
+    try testing.expect(service.clock.now() - waited_from >= network.client.lease_duration_ms);
+    try testing.expect(service.clock.now() - waited_from < network.client.lease_duration_ms + 10_000);
+    try testing.expect(service.transport.timeout_ms <= 10_000);
+
+    const deadline = first.monotonic.clock().nowMs() + 5_000;
+    first.gateway.deadline_ms = deadline;
+    try testing.expectError(error.ProviderBusy, first.fetch());
+    try testing.expectEqual(deadline, first.monotonic.clock().nowMs());
+    try testing.expectError(error.Timeout, first.fetch());
+    try testing.expectEqual(@as(u32, 2), service.requestCount());
+}
+
 test "a lease its holder never released can be claimed once it expires" {
     const uri = "file:orca-shared-state-expired?mode=memory&cache=shared";
     var service: Service = .{};

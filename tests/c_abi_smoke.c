@@ -2907,6 +2907,9 @@ static int artist_smoke(orca_runtime *runtime, orca_handle library) {
     uint8_t outcome = ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED;
     SMOKE_CHECK(orca_job_artist_info_outcome(runtime, job, &outcome) == ORCA_STATUS_OK);
     SMOKE_CHECK(outcome == ORCA_ARTIST_INFO_OUTCOME_NO_MUSICBRAINZ_ID);
+    uint32_t stores = 0;
+    SMOKE_CHECK(orca_job_artist_info_stores(runtime, job, &stores) == ORCA_STATUS_OK && stores >= 1);
+    SMOKE_CHECK(orca_job_artist_info_stores(runtime, job, NULL) == ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_job_lyrics_outcome(runtime, job, &outcome) == ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_library_artist_info(runtime, library, artist, &info, capture_smoke_artist_info) ==
                 ORCA_STATUS_OK);

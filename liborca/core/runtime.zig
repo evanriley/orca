@@ -3090,6 +3090,15 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.jobArtistInfoOutcome(self, job_handle);
     }
 
+    /// How many times a running artist info job has stored part of what it
+    /// found: the Artist's info first, then its listeners and related
+    /// artists, then their photos. A host shows the stored info again when
+    /// this grows, without waiting for the job to finish. Fails with
+    /// `error.NotAnArtistInfoJob` for another kind of job.
+    pub fn jobArtistInfoStores(self: *OrcaRuntime, job_handle: JobHandle) !u32 {
+        return runtime_jobs.jobArtistInfoStores(self, job_handle);
+    }
+
     /// Fetches a Release's description on a job worker and keeps it in the
     /// Library: MusicBrainz names the release group, whose Wikidata item, or
     /// failing that its Wikipedia link, names the article whose lead in

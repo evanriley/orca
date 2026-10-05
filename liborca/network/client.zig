@@ -306,6 +306,7 @@ pub const Config = struct {
 };
 
 const cancel_poll_ms = 100;
+const lease_poll_ms = 250;
 const maximum_inline_hold_ms = 5_000;
 
 /// How long a service stays claimed after a Gateway's last request.
@@ -390,9 +391,11 @@ pub const Gateway = struct {
     blocked_until_ms: ?i64 = null,
     rate_limit_backoff_ms: u64 = 0,
     lease_owner: ?i64 = null,
+    deadline_ms: ?i64 = null,
 
     /// With `sharing`, claims the service before each request and fails with
-    /// `error.ProviderBusy` while another Gateway over the store holds it.
+    /// `error.ProviderBusy` while another Gateway over the store holds it,
+    /// at once or, with `deadline_ms`, once the deadline passes.
     pub fn execute(
         self: *Gateway,
         allocator: std.mem.Allocator,
@@ -404,6 +407,7 @@ pub const Gateway = struct {
         if (self.config.offline) return error.Offline;
         try self.config.validate();
         try self.checkCanceled();
+        _ = try self.requestTimeoutMs();
         try self.loadSharedState();
         if (self.blockedUntilMs() != null) return error.RateLimited;
         const user_agent = try self.config.identity.userAgent(allocator);
@@ -413,6 +417,7 @@ pub const Gateway = struct {
         while (attempt < self.config.maximum_attempts) : (attempt += 1) {
             try self.claimLease();
             try self.awaitTurn();
+            const timeout_ms = try self.requestTimeoutMs();
             const response = self.transport.perform(allocator, .{
                 .method = method,
                 .url = url,
@@ -420,7 +425,7 @@ pub const Gateway = struct {
                 .headers = headers,
                 .user_agent = user_agent,
                 .max_response_bytes = self.config.max_response_bytes,
-                .timeout_ms = self.config.request_timeout_ms,
+                .timeout_ms = timeout_ms,
                 .cancel = self.cancel,
             }) catch |err| switch (err) {
                 error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout => return err,
@@ -480,6 +485,7 @@ pub const Gateway = struct {
 
     fn follow(self: *Gateway, allocator: std.mem.Allocator, target: []const u8) !Response {
         try self.checkCanceled();
+        const timeout_ms = try self.requestTimeoutMs();
         const user_agent = try self.config.identity.userAgent(allocator);
         defer allocator.free(user_agent);
         const followed = self.transport.perform(allocator, .{
@@ -487,7 +493,7 @@ pub const Gateway = struct {
             .url = target,
             .user_agent = user_agent,
             .max_response_bytes = self.config.max_response_bytes,
-            .timeout_ms = self.config.request_timeout_ms,
+            .timeout_ms = timeout_ms,
             .cancel = self.cancel,
         }) catch |err| switch (err) {
             error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout => return err,
@@ -551,11 +557,23 @@ pub const Gateway = struct {
         const sharing = self.sharing orelse return;
         const owner = self.lease_owner orelse self.random.int(i64);
         self.lease_owner = owner;
-        const now = self.wall_clock.nowMs();
-        if (!try sharing.store.claim(sharing.service, owner, now, now +| lease_duration_ms))
-            return error.ProviderBusy;
+        while (true) {
+            const now = self.wall_clock.nowMs();
+            if (try sharing.store.claim(sharing.service, owner, now, now +| lease_duration_ms)) break;
+            const deadline = self.deadline_ms orelse return error.ProviderBusy;
+            const left = deadline -| self.clock.nowMs();
+            if (left <= 0) return error.ProviderBusy;
+            try self.sleepCancelable(@intCast(@min(left, lease_poll_ms)));
+        }
         try self.loadSharedState();
         if (self.blockedUntilMs() != null) return error.RateLimited;
+    }
+
+    fn requestTimeoutMs(self: *Gateway) error{Timeout}!u64 {
+        const deadline = self.deadline_ms orelse return self.config.request_timeout_ms;
+        const left = deadline -| self.clock.nowMs();
+        if (left <= 0) return error.Timeout;
+        return @min(self.config.request_timeout_ms, @as(u64, @intCast(left)));
     }
 
     fn saveSharedState(self: *Gateway) !void {
