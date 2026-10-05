@@ -374,7 +374,7 @@ test "a group's detail keeps at most a page of rows, whole files only, and still
             .expected_quick_hash = @splat(1),
         });
         try library_database.mutation_journal.transition(operation, .planned, .staged, null);
-        try library_database.mutation_journal.commit(operation, 2, 2, @splat(2));
+        try library_database.mutation_journal.commit(operation, 2, 2, @splat(2), @splat(2));
     }
 
     const bounded = try runtime.libraryTagWriteGroup(library, std.testing.allocator, std.testing.io, 7);

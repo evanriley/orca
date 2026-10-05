@@ -1,5 +1,6 @@
 const std = @import("std");
 const sqlite = @import("../sqlite.zig");
+const content_hash = @import("../../storage/content_hash.zig");
 const quick_hash = @import("../../storage/quick_hash.zig");
 const columns = @import("../columns.zig");
 
@@ -178,6 +179,7 @@ pub const MutationOperationInput = struct {
     expected_size: u64,
     expected_modified_ns: i64,
     expected_quick_hash: quick_hash.Digest,
+    expected_content_hash: ?content_hash.Digest = null,
 };
 
 pub const MutationOperation = struct {
@@ -194,9 +196,11 @@ pub const MutationOperation = struct {
     expected_size: u64,
     expected_modified_ns: i64,
     expected_quick_hash: ?quick_hash.Digest,
+    expected_content_hash: ?content_hash.Digest,
     committed_size: ?u64,
     committed_modified_ns: ?i64,
     committed_quick_hash: ?quick_hash.Digest,
+    committed_content_hash: ?content_hash.Digest,
     state: MutationState,
 
     pub fn deinit(self: MutationOperation) void {
@@ -250,8 +254,8 @@ pub const MutationJournalRepository = struct {
             \\INSERT INTO mutation_operations(
             \\    plan_id, group_id, action_index, kind, source_path, destination_path,
             \\    stage_path, backup_path, expected_size, expected_modified_ns, state,
-            \\    file_id, expected_quick_hash
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
+            \\    file_id, expected_quick_hash, expected_content_hash
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);
         );
         defer statement.deinit();
         try statement.bindInt64(1, @intCast(input.plan_id));
@@ -267,6 +271,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(11, @intFromEnum(MutationState.planned));
         try statement.bindOptionalInt64(12, input.file_id);
         try statement.bindBlob(13, &input.expected_quick_hash);
+        try statement.bindOptionalBlob(14, if (input.expected_content_hash) |*digest| digest else null);
         if (try statement.step() != .done) return error.SqlFailed;
         return self.db.lastInsertRowId();
     }
@@ -332,6 +337,7 @@ pub const MutationJournalRepository = struct {
         committed_size: u64,
         committed_modified_ns: i64,
         committed_quick_hash: quick_hash.Digest,
+        committed_content_hash: content_hash.Digest,
     ) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
@@ -340,7 +346,7 @@ pub const MutationJournalRepository = struct {
         var statement = try self.db.prepare(
             \\UPDATE mutation_operations
             \\SET state=?1, committed_size=?2, committed_modified_ns=?3,
-            \\    committed_quick_hash=?6, updated_at=unixepoch()
+            \\    committed_quick_hash=?6, committed_content_hash=?7, updated_at=unixepoch()
             \\WHERE id=?4 AND state=?5;
         );
         defer statement.deinit();
@@ -350,6 +356,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(4, operation_id);
         try statement.bindInt64(5, @intFromEnum(MutationState.staged));
         try statement.bindBlob(6, &committed_quick_hash);
+        try statement.bindBlob(7, &committed_content_hash);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -361,6 +368,7 @@ pub const MutationJournalRepository = struct {
         size: u64,
         modified_ns: i64,
         digest: quick_hash.Digest,
+        content: content_hash.Digest,
     ) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
@@ -369,7 +377,7 @@ pub const MutationJournalRepository = struct {
         var statement = try self.db.prepare(
             \\UPDATE mutation_operations
             \\SET committed_size=?1, committed_modified_ns=?2, committed_quick_hash=?5,
-            \\    updated_at=unixepoch()
+            \\    committed_content_hash=?6, updated_at=unixepoch()
             \\WHERE id=?3 AND state=?4;
         );
         defer statement.deinit();
@@ -378,6 +386,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(3, operation_id);
         try statement.bindInt64(4, @intFromEnum(expected_state));
         try statement.bindBlob(5, &digest);
+        try statement.bindBlob(6, &content);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -387,14 +396,20 @@ pub const MutationJournalRepository = struct {
         allocator: std.mem.Allocator,
         operation_id: i64,
     ) !MutationOperation {
-        var statement = try self.db.prepare(
+        const columns_before_content_hash =
             \\SELECT kind, source_path, destination_path, stage_path, backup_path,
             \\       expected_size, expected_modified_ns,
             \\       committed_size, committed_modified_ns, state,
             \\       file_id, expected_quick_hash, committed_quick_hash,
-            \\       plan_id, action_index
-            \\FROM mutation_operations WHERE id=?1;
-        );
+            \\       plan_id, action_index,
+        ;
+        const from = " FROM mutation_operations WHERE id=?1;";
+        // Startup recovery reads the journal at `journal_ready_version`,
+        // before the migration that adds the content hash columns.
+        var statement = try self.db.prepare(if (try self.hasContentHashColumns())
+            columns_before_content_hash ++ " expected_content_hash, committed_content_hash" ++ from
+        else
+            columns_before_content_hash ++ " NULL, NULL" ++ from);
         defer statement.deinit();
         try statement.bindInt64(1, operation_id);
         if (try statement.step() != .row) return error.MutationOperationNotFound;
@@ -410,6 +425,8 @@ pub const MutationJournalRepository = struct {
         errdefer if (backup_path) |value| allocator.free(value);
         const state_value = std.enums.fromInt(MutationState, statement.columnInt64(9)) orelse
             return error.InvalidStoredMutationState;
+        const expected_content_hash = try contentHashColumn(statement, 15);
+        const committed_content_hash = try contentHashColumn(statement, 16);
         return .{
             .allocator = allocator,
             .id = operation_id,
@@ -424,11 +441,23 @@ pub const MutationJournalRepository = struct {
             .expected_size = @intCast(statement.columnInt64(5)),
             .expected_modified_ns = statement.columnInt64(6),
             .expected_quick_hash = digestColumn(statement, 11),
+            .expected_content_hash = expected_content_hash,
             .committed_size = if (statement.columnIsNull(7)) null else @intCast(statement.columnInt64(7)),
             .committed_modified_ns = if (statement.columnIsNull(8)) null else statement.columnInt64(8),
             .committed_quick_hash = digestColumn(statement, 12),
+            .committed_content_hash = committed_content_hash,
             .state = state_value,
         };
+    }
+
+    fn hasContentHashColumns(self: *const MutationJournalRepository) !bool {
+        var statement = try self.db.prepare(
+            \\SELECT count(*) FROM pragma_table_info('mutation_operations')
+            \\WHERE name IN ('expected_content_hash', 'committed_content_hash');
+        );
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0) == 2;
     }
 
     /// Groups holding at least one operation that has not reached a terminal
@@ -634,6 +663,17 @@ fn validMutationTransition(from: MutationState, to: MutationState) bool {
     };
 }
 
+/// A malformed blob is an error rather than null, because null would weaken
+/// the operation's identity check to the quick hash.
+fn contentHashColumn(statement: sqlite.Statement, column: c_int) !?content_hash.Digest {
+    if (statement.columnIsNull(column)) return null;
+    const bytes = statement.columnBlob(column);
+    if (bytes.len != @typeInfo(content_hash.Digest).array.len) return error.InvalidStoredContentHash;
+    var digest: content_hash.Digest = undefined;
+    @memcpy(&digest, bytes);
+    return digest;
+}
+
 const JournalFixture = struct {
     db: sqlite.Database,
     lane: WriteLane,
@@ -667,7 +707,7 @@ const JournalFixture = struct {
     fn committed(self: *JournalFixture, group_id: u64, action_index: u32) !i64 {
         const id = try self.prepare(group_id, action_index);
         try self.journal.transition(id, .planned, .staged, null);
-        try self.journal.commit(id, 2, 2, @splat(2));
+        try self.journal.commit(id, 2, 2, @splat(2), @splat(2));
         return id;
     }
 };
@@ -726,7 +766,7 @@ fn prepareWrite(fixture: *JournalFixture, group_id: u64, action_index: u32) !i64
 fn committedWrite(fixture: *JournalFixture, group_id: u64, action_index: u32) !i64 {
     const id = try prepareWrite(fixture, group_id, action_index);
     try fixture.journal.transition(id, .planned, .staged, null);
-    try fixture.journal.commit(id, 2, 2, @splat(2));
+    try fixture.journal.commit(id, 2, 2, @splat(2), @splat(2));
     return id;
 }
 
@@ -769,7 +809,7 @@ test "the group history lists finished tag-write groups newest first and leaves 
         .expected_quick_hash = @splat(1),
     });
     try fixture.journal.transition(moved, .planned, .staged, null);
-    try fixture.journal.commit(moved, 1, 1, @splat(1));
+    try fixture.journal.commit(moved, 1, 1, @splat(1), @splat(1));
 
     const first = try fixture.journal.groupSummaryPage(std.testing.allocator, 2, 0);
     defer first.deinit();
@@ -842,4 +882,47 @@ test "a group's history state tells an undo from a failed write and from a recov
         try std.testing.expectEqual(want[0], item.state());
         try std.testing.expectEqual(want[1], item.undo());
     }
+}
+
+test "the journal keeps content hashes, reads a journal from before them, and refuses a malformed one" {
+    var fixture: JournalFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const hashed = try fixture.journal.prepare(.{
+        .plan_id = 1,
+        .group_id = 1,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = "/music/a.flac",
+        .expected_size = 1,
+        .expected_modified_ns = 1,
+        .expected_quick_hash = @splat(1),
+        .expected_content_hash = @splat(3),
+    });
+    try fixture.journal.recordResultIdentity(hashed, .planned, 2, 2, @splat(2), @splat(5));
+    try fixture.journal.transition(hashed, .planned, .staged, null);
+    try fixture.journal.commit(hashed, 2, 2, @splat(2), @splat(4));
+    const legacy = try fixture.prepare(2, 0);
+
+    var operation = try fixture.journal.get(std.testing.allocator, hashed);
+    try std.testing.expectEqualSlices(u8, &@as(content_hash.Digest, @splat(3)), &operation.expected_content_hash.?);
+    try std.testing.expectEqualSlices(u8, &@as(content_hash.Digest, @splat(4)), &operation.committed_content_hash.?);
+    operation.deinit();
+    operation = try fixture.journal.get(std.testing.allocator, legacy);
+    try std.testing.expect(operation.expected_content_hash == null);
+    try std.testing.expect(operation.committed_content_hash == null);
+    operation.deinit();
+
+    try fixture.db.exec("UPDATE mutation_operations SET expected_content_hash = X'0102' WHERE plan_id = 1;");
+    try std.testing.expectError(error.InvalidStoredContentHash, fixture.journal.get(std.testing.allocator, hashed));
+
+    try fixture.db.exec(
+        \\ALTER TABLE mutation_operations DROP COLUMN expected_content_hash;
+        \\ALTER TABLE mutation_operations DROP COLUMN committed_content_hash;
+    );
+    operation = try fixture.journal.get(std.testing.allocator, hashed);
+    defer operation.deinit();
+    try std.testing.expect(operation.expected_content_hash == null);
+    try std.testing.expect(operation.committed_content_hash == null);
+    try std.testing.expectEqualSlices(u8, &@as(quick_hash.Digest, @splat(2)), &operation.committed_quick_hash.?);
 }

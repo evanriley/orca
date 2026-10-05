@@ -1276,6 +1276,59 @@ test "a file's audio hash survives an update only while its quick hash stays the
     try expectAudioHash(&library, file_id, &remeasured_audio);
 }
 
+fn expectContentHash(library: *LibraryDatabase, file_id: i64, expected: ?[]const u8) !void {
+    var statement = try library.database.prepare(
+        "SELECT content_hash, content_hash_algorithm FROM files WHERE id = ?1;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+    if (expected) |bytes| {
+        try std.testing.expectEqualSlices(u8, bytes, statement.columnBlob(0));
+        try std.testing.expectEqual(@as(i64, 1), statement.columnInt64(1));
+    } else {
+        try std.testing.expect(statement.columnIsNull(0));
+        try std.testing.expect(statement.columnIsNull(1));
+    }
+}
+
+test "a file's content hash and its algorithm survive an update only while its quick hash stays the same" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-content-hash?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const original_bytes: [32]u8 = @splat(1);
+    const changed_bytes: [32]u8 = @splat(2);
+    const measured: [32]u8 = @splat(0xaa);
+    const remeasured: [32]u8 = @splat(0xbb);
+    const file_id = try library.files.create(.{
+        .audio_format = 1,
+        .size_bytes = 4096,
+        .quick_hash = &original_bytes,
+        .content_hash = &measured,
+    });
+    try expectContentHash(&library, file_id, &measured);
+
+    try library.files.update(file_id, .{ .audio_format = 1, .size_bytes = 4096, .quick_hash = &original_bytes });
+    try expectContentHash(&library, file_id, &measured);
+
+    try library.files.update(file_id, .{ .audio_format = 1, .size_bytes = 4096, .quick_hash = &changed_bytes });
+    try expectContentHash(&library, file_id, null);
+
+    try library.files.update(file_id, .{
+        .audio_format = 1,
+        .size_bytes = 4096,
+        .quick_hash = &changed_bytes,
+        .content_hash = &remeasured,
+    });
+    try expectContentHash(&library, file_id, &remeasured);
+
+    const unhashed = try library.files.create(.{ .audio_format = 1, .size_bytes = 10 });
+    try expectContentHash(&library, unhashed, null);
+}
+
 test "a renamed file keeps its identity and everything attached to it" {
     var library = try LibraryDatabase.open(
         std.testing.allocator,

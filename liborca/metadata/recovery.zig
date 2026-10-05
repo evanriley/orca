@@ -293,6 +293,11 @@ const Harness = struct {
         try std.testing.expect(!try exists(self.second_backup));
     }
 
+    fn lengthenSource(self: *Harness) !void {
+        try file_mutation.writeLongMpeg(self.source, "Original");
+        self.original = try file_mutation.identity(std.testing.io, self.source);
+    }
+
     fn writeFile(self: *Harness, sub_path: []const u8, data: []const u8) !void {
         try self.temporary.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
     }
@@ -503,6 +508,7 @@ test "recovery removes a stage torn by a crash before it was journaled" {
             .expected_size = harness.original.size_bytes,
             .expected_modified_ns = harness.original.modified_ns,
             .expected_quick_hash = harness.original.quick_hash,
+            .expected_content_hash = harness.original.content_hash,
         });
         // A stage whose bytes never reached the disk in full and whose identity
         // was therefore never journaled.
@@ -553,6 +559,69 @@ test "recovery keeps every file when the backup no longer holds the original" {
     try std.testing.expect(try exists(harness.backup));
 }
 
+test "recovery keeps every file when the replacement changed in its middle with its size and timestamp kept" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.lengthenSource();
+    try harness.crashWrite(.after_source_rename);
+    const replaced = try file_mutation.identity(std.testing.io, harness.source);
+    try file_mutation.forgeInPlaceEdit(harness.source, replaced.size_bytes / 2, "EDITED");
+    const edited = try file_mutation.identity(std.testing.io, harness.source);
+    try std.testing.expectEqualSlices(u8, &replaced.quick_hash, &edited.quick_hash);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try reopened.mutation_journal.state(1),
+    );
+    try std.testing.expect(edited.eql(try file_mutation.identity(std.testing.io, harness.source)));
+    try std.testing.expect(harness.original.eql(try file_mutation.identity(std.testing.io, harness.backup)));
+}
+
+test "recovery keeps every file when the backup changed in its middle with its size and timestamp kept" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.lengthenSource();
+    try harness.crashWrite(.after_source_rename);
+    const replaced = try file_mutation.identity(std.testing.io, harness.source);
+    try file_mutation.forgeInPlaceEdit(harness.backup, harness.original.size_bytes / 2, "EDITED");
+    const damaged = try file_mutation.identity(std.testing.io, harness.backup);
+    try std.testing.expectEqualSlices(u8, &harness.original.quick_hash, &damaged.quick_hash);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try reopened.mutation_journal.state(1),
+    );
+    try std.testing.expect(replaced.eql(try file_mutation.identity(std.testing.io, harness.source)));
+    try std.testing.expect(damaged.eql(try file_mutation.identity(std.testing.io, harness.backup)));
+}
+
+test "recovery restores a write journaled before content hashes by the other three parts of its identity" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.lengthenSource();
+    try harness.crashWrite(.after_source_rename);
+    {
+        const db = try sqlite.Database.open(harness.database_path);
+        defer db.close();
+        try rewindToVersion55(db);
+    }
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(@as(i64, migrations.current_version), try migrations.userVersion(reopened.database));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try reopened.mutation_journal.state(1));
+    var operation = try reopened.mutation_journal.get(std.testing.allocator, 1);
+    defer operation.deinit();
+    try std.testing.expect(operation.expected_content_hash == null);
+    try std.testing.expect(operation.committed_content_hash == null);
+    try harness.expectOriginal();
+    try harness.expectNoResidue();
+}
+
 test "recovery reconciles a source that vanished along with its backup" {
     var harness = try Harness.init();
     defer harness.deinit();
@@ -570,6 +639,7 @@ test "recovery reconciles a source that vanished along with its backup" {
             .expected_size = harness.original.size_bytes,
             .expected_modified_ns = harness.original.modified_ns,
             .expected_quick_hash = harness.original.quick_hash,
+            .expected_content_hash = harness.original.content_hash,
         });
         try library.mutation_journal.recordResultIdentity(
             operation,
@@ -577,6 +647,7 @@ test "recovery reconciles a source that vanished along with its backup" {
             harness.original.size_bytes,
             harness.original.modified_ns,
             harness.original.quick_hash,
+            harness.original.content_hash.?,
         );
         try library.mutation_journal.transition(operation, .planned, .staged, null);
         try std.Io.Dir.cwd().deleteFile(std.testing.io, harness.source);
@@ -676,6 +747,7 @@ test "recovery restores a write journaled with its backup beside the music" {
             .expected_size = harness.original.size_bytes,
             .expected_modified_ns = harness.original.modified_ns,
             .expected_quick_hash = harness.original.quick_hash,
+            .expected_content_hash = harness.original.content_hash,
         });
         try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, legacy_stage, harness.original, &.{
             .{ .field = .title, .before = "Original", .after = "Replaced" },
@@ -687,6 +759,7 @@ test "recovery restores a write journaled with its backup beside the music" {
             staged.size_bytes,
             staged.modified_ns,
             staged.quick_hash,
+            staged.content_hash.?,
         );
         try library.mutation_journal.transition(operation, .planned, .staged, null);
         const cwd = std.Io.Dir.cwd();
@@ -779,12 +852,13 @@ test "opening a Library leaves another process's in-flight write alone" {
         .expected_size = harness.original.size_bytes,
         .expected_modified_ns = harness.original.modified_ns,
         .expected_quick_hash = harness.original.quick_hash,
+        .expected_content_hash = harness.original.content_hash,
     });
     try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, harness.stage, harness.original, &.{
         .{ .field = .title, .before = "Original", .after = "Replaced" },
     }, null);
     const staged = try file_mutation.identity(std.testing.io, harness.stage);
-    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash, staged.content_hash.?);
     try journal.transition(operation, .planned, .staged, null);
 
     {
@@ -798,7 +872,7 @@ test "opening a Library leaves another process's in-flight write alone" {
     try file_mutation.createDirectoryDurably(std.testing.io, harness.backup_directory);
     try file_mutation.createDirectoryDurably(std.testing.io, std.Io.Dir.path.dirname(harness.backup).?);
     try file_mutation.commitReplacement(std.testing.io, harness.source, harness.stage, harness.backup, harness.original);
-    try journal.commit(operation, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.commit(operation, staged.size_bytes, staged.modified_ns, staged.quick_hash, staged.content_hash.?);
     Harness.releaseForeignLock(&lock);
 
     var reopened = try harness.open();
@@ -808,7 +882,18 @@ test "opening a Library leaves another process's in-flight write alone" {
     try expectTitle(harness.source, "Replaced");
 }
 
+fn rewindToVersion55(db: sqlite.Database) !void {
+    try db.exec(
+        \\DROP INDEX files_content_hash;
+        \\ALTER TABLE files DROP COLUMN content_hash_algorithm;
+        \\ALTER TABLE mutation_operations DROP COLUMN committed_content_hash;
+        \\ALTER TABLE mutation_operations DROP COLUMN expected_content_hash;
+        \\PRAGMA user_version=55;
+    );
+}
+
 fn rewindToVersion25(db: sqlite.Database) !void {
+    try rewindToVersion55(db);
     try db.exec(
         \\DROP TABLE metadata_proposals;
         \\DROP TABLE track_positions;

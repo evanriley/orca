@@ -1498,6 +1498,13 @@
 
 ### Fixed
 
+- **Tag writes, undo and recovery prove a file unchanged by its whole
+  content.** A file's identity now ends in a BLAKE3-256 hash of every byte,
+  stored in the mutation journal (migration 56). A plan approved for one
+  version of a file no longer overwrites a later edit to its middle that kept
+  its size and modification time, and undo no longer restores a backup over
+  such an edit. An operation journaled before migration 56 is still checked by
+  size, time and quick hash.
 - **A failed scan ends failed and sweeps nothing.** A scan or reconcile
   whose walk fails, on a root directory that is gone or a folder that cannot
   be opened, finishes its scan run `failed` instead of leaving it `running`,

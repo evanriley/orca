@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 55;
+pub const current_version = 56;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1577,6 +1577,14 @@ const migration_55 =
     \\
 ;
 
+const migration_56 =
+    \\ALTER TABLE mutation_operations ADD COLUMN expected_content_hash BLOB;
+    \\ALTER TABLE mutation_operations ADD COLUMN committed_content_hash BLOB;
+    \\ALTER TABLE files ADD COLUMN content_hash_algorithm SMALLINT;
+    \\CREATE INDEX files_content_hash ON files(content_hash);
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2116,6 +2124,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 53 and target_version >= 53) try db.exec(migration_53);
     if (version < 54 and target_version >= 54) try db.exec(migration_54);
     if (version < 55 and target_version >= 55) try db.exec(migration_55);
+    if (version < 56 and target_version >= 56) try db.exec(migration_56);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -4222,5 +4231,38 @@ test "a version-54 library keeps its metadata issues and gains option track coun
     try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT sum(COALESCE(gap, 0) + COALESCE(tracks, 0)) FROM metadata_proposals;"));
     try std.testing.expectError(error.SqlFailed, db.exec("UPDATE metadata_proposals SET gap = 0 WHERE id = 1;"));
     try std.testing.expectError(error.SqlFailed, db.exec("UPDATE metadata_proposals SET tracks = -1 WHERE id = 2;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-55 library keeps its journal and files and gains content hash columns" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v55-content-hash.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 55);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes, quick_hash) VALUES (1, 1, 10, zeroblob(32));
+        \\INSERT INTO mutation_operations(id, plan_id, group_id, action_index, kind, source_path, expected_size, expected_modified_ns, state, expected_quick_hash, committed_quick_hash)
+        \\VALUES (1, 1, 1, 0, 0, '/m/a.flac', 10, 1, 2, zeroblob(32), zeroblob(32));
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM mutation_operations
+        \\WHERE expected_content_hash IS NULL AND committed_content_hash IS NULL
+        \\  AND length(expected_quick_hash) = 32 AND state = 2;
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(
+        db,
+        "SELECT count(*) FROM files WHERE content_hash IS NULL AND content_hash_algorithm IS NULL AND size_bytes = 10;",
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(
+        db,
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'files_content_hash' AND tbl_name = 'files';",
+    ));
     try checkForeignKeys(db);
 }

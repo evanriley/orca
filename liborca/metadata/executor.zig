@@ -148,6 +148,7 @@ pub const Executor = struct {
                     .expected_size = write.expected.size_bytes,
                     .expected_modified_ns = write.expected.modified_ns,
                     .expected_quick_hash = write.expected.quick_hash,
+                    .expected_content_hash = write.expected.content_hash,
                 });
                 prepared.appendAssumeCapacity(.{
                     .id = operation,
@@ -166,6 +167,7 @@ pub const Executor = struct {
                     .expected_size = move.expected.size_bytes,
                     .expected_modified_ns = move.expected.modified_ns,
                     .expected_quick_hash = move.expected.quick_hash,
+                    .expected_content_hash = move.expected.content_hash,
                 });
                 prepared.appendAssumeCapacity(.{ .id = operation });
             },
@@ -204,13 +206,7 @@ pub const Executor = struct {
                 };
                 try self.interrupt(.after_stage, action_index);
                 const staged_identity = try file_mutation.identity(self.io, stage_path);
-                try self.recordResultIdentity(
-                    operation,
-                    .planned,
-                    staged_identity.size_bytes,
-                    staged_identity.modified_ns,
-                    staged_identity.quick_hash,
-                );
+                try self.recordResultIdentity(operation, .planned, staged_identity);
                 try self.transition(operation, .planned, .staged, null);
                 try self.interrupt(.after_stage_journaled, action_index);
                 const commit_interrupt = self.commitInterrupt(action_index);
@@ -232,13 +228,7 @@ pub const Executor = struct {
                     .action_index = @intCast(action_index),
                 });
                 try self.interrupt(.before_journal_commit, action_index);
-                const committed = try file_mutation.identity(self.io, write.path);
-                try self.commit(
-                    operation,
-                    committed.size_bytes,
-                    committed.modified_ns,
-                    committed.quick_hash,
-                );
+                try self.commit(operation, try file_mutation.identity(self.io, write.path));
             },
             .move => |move| {
                 self.failed_action_index = @intCast(action_index);
@@ -248,13 +238,7 @@ pub const Executor = struct {
                     !try self.groupProducedIdentity(completed.items, move.source_path, current))
                     return error.FileIdentityChanged;
                 if (try pathExists(self.io, move.destination_path)) return error.DestinationExists;
-                try self.recordResultIdentity(
-                    operation,
-                    .planned,
-                    current.size_bytes,
-                    current.modified_ns,
-                    current.quick_hash,
-                );
+                try self.recordResultIdentity(operation, .planned, current);
                 try self.transition(operation, .planned, .staged, null);
                 try self.interrupt(.after_stage_journaled, action_index);
                 file_mutation.commitMove(
@@ -270,13 +254,7 @@ pub const Executor = struct {
                     .action_index = @intCast(action_index),
                 });
                 try self.interrupt(.after_move_rename, action_index);
-                const committed = try file_mutation.identity(self.io, move.destination_path);
-                try self.commit(
-                    operation,
-                    committed.size_bytes,
-                    committed.modified_ns,
-                    committed.quick_hash,
-                );
+                try self.commit(operation, try file_mutation.identity(self.io, move.destination_path));
             },
         };
         self.failed_action_index = null;
@@ -355,24 +333,29 @@ pub const Executor = struct {
         self: *Executor,
         operation_id: i64,
         expected: database.MutationState,
-        size: u64,
-        modified_ns: i64,
-        digest: storage.quick_hash.Digest,
+        result: mutation.FileIdentity,
     ) !void {
-        self.journal.recordResultIdentity(operation_id, expected, size, modified_ns, digest) catch |err| {
+        self.journal.recordResultIdentity(
+            operation_id,
+            expected,
+            result.size_bytes,
+            result.modified_ns,
+            result.quick_hash,
+            result.content_hash orelse return error.MissingContentHash,
+        ) catch |err| {
             self.stopIfStale(err);
             return err;
         };
     }
 
-    fn commit(
-        self: *Executor,
-        operation_id: i64,
-        size: u64,
-        modified_ns: i64,
-        digest: storage.quick_hash.Digest,
-    ) !void {
-        self.journal.commit(operation_id, size, modified_ns, digest) catch |err| {
+    fn commit(self: *Executor, operation_id: i64, committed: mutation.FileIdentity) !void {
+        self.journal.commit(
+            operation_id,
+            committed.size_bytes,
+            committed.modified_ns,
+            committed.quick_hash,
+            committed.content_hash orelse return error.MissingContentHash,
+        ) catch |err| {
             self.stopIfStale(err);
             return err;
         };
@@ -391,8 +374,7 @@ pub const Executor = struct {
             defer operation.deinit();
             if (operation.kind == .write_tags and
                 std.mem.eql(u8, operation.source_path, path) and
-                operation.committed_size == current.size_bytes and
-                operation.committed_modified_ns == current.modified_ns)
+                (try resultIdentity(operation)).eql(current))
                 return true;
         }
         return false;
@@ -411,8 +393,7 @@ pub const Executor = struct {
             .write_tags => operation.source_path,
             .move => operation.destination_path orelse return error.MissingMutationDestination,
         };
-        const current = try file_mutation.identity(self.io, current_path);
-        if (!expected.eql(current)) {
+        if (!try file_mutation.matches(self.io, current_path, expected)) {
             try self.reconcile(operation_id, .committed, "undo target changed externally");
             return error.MutationNeedsReconciliation;
         }
@@ -475,8 +456,7 @@ pub const Executor = struct {
                 try self.reconcile(operation.id, operation.state, "group undo target is missing");
                 return error.MutationNeedsReconciliation;
             }
-            const current = try file_mutation.identity(self.io, current_path);
-            if (!(try resultIdentity(operation)).eql(current)) {
+            if (!try file_mutation.matches(self.io, current_path, try resultIdentity(operation))) {
                 try self.reconcile(operation.id, operation.state, "group undo target changed externally");
                 return error.MutationNeedsReconciliation;
             }
@@ -611,8 +591,7 @@ pub const Executor = struct {
                 );
                 return error.MutationNeedsReconciliation;
             };
-            const current = try file_mutation.identity(self.io, destination);
-            if (!journaled.eql(current)) {
+            if (!try file_mutation.matches(self.io, destination, journaled)) {
                 try self.reconcile(
                     operation.id,
                     operation.state,
@@ -659,12 +638,13 @@ pub const Executor = struct {
         );
         defer self.allocator.free(legacy_displaced_path);
         const temporaries = [_][]const u8{ stage_path, restore_path, legacy_displaced_path };
-        const current = try identityIfPresent(self.io, operation.source_path);
 
-        if (current != null and original != null and current.?.eql(original.?)) {
-            for (temporaries) |path| try file_mutation.deleteIfPresent(self.io, path);
-            try self.discardBackup(backup_path);
-            return self.finishRecoveryState(operation.id, operation.state);
+        if (original) |identity| {
+            if (try matchesIfPresent(self.io, operation.source_path, identity) orelse false) {
+                for (temporaries) |path| try file_mutation.deleteIfPresent(self.io, path);
+                try self.discardBackup(backup_path);
+                return self.finishRecoveryState(operation.id, operation.state);
+            }
         }
         // Nothing was ever staged, so no Orca write can be in effect: removing
         // a torn stage is the whole recovery, and claiming anything about the
@@ -673,7 +653,7 @@ pub const Executor = struct {
             for (temporaries) |path| try file_mutation.deleteIfPresent(self.io, path);
             return self.finishRecoveryState(operation.id, operation.state);
         };
-        const in_place = current orelse {
+        const in_place = try matchesIfPresent(self.io, operation.source_path, replacement) orelse {
             // A missing folder is most likely an unmounted drive: a terminal
             // state now would stop recovery for good once it is back.
             if (!try directoryExists(self.io, std.Io.Dir.path.dirname(operation.source_path) orelse "."))
@@ -681,7 +661,7 @@ pub const Executor = struct {
             try self.reconcile(operation.id, operation.state, "the tag target is missing");
             return error.MutationNeedsReconciliation;
         };
-        if (!in_place.eql(replacement)) {
+        if (!in_place) {
             try self.reconcile(operation.id, operation.state, "tag target changed externally");
             return error.MutationNeedsReconciliation;
         }
@@ -827,6 +807,7 @@ fn resultIdentity(operation: database.MutationOperation) !mutation.FileIdentity 
             return error.MissingCommittedIdentity,
         .quick_hash = operation.committed_quick_hash orelse
             return error.MissingCommittedIdentity,
+        .content_hash = operation.committed_content_hash,
     };
 }
 
@@ -835,14 +816,14 @@ fn expectedIdentity(operation: database.MutationOperation) !mutation.FileIdentit
         .size_bytes = operation.expected_size,
         .modified_ns = operation.expected_modified_ns,
         .quick_hash = operation.expected_quick_hash orelse return error.MissingExpectedIdentity,
+        .content_hash = operation.expected_content_hash,
     };
 }
 
 fn backupHoldsOriginal(io: std.Io, operation: database.MutationOperation) !bool {
     const backup_path = operation.backup_path orelse return false;
     const original = expectedIdentity(operation) catch return false;
-    const backup = try identityIfPresent(io, backup_path) orelse return false;
-    return backup.eql(original);
+    return try matchesIfPresent(io, backup_path, original) orelse false;
 }
 
 fn siblingPath(
@@ -936,8 +917,8 @@ fn deleteDirectoryIfEmpty(io: std.Io, path: []const u8) !void {
     };
 }
 
-fn identityIfPresent(io: std.Io, path: []const u8) !?mutation.FileIdentity {
-    return file_mutation.identity(io, path) catch |err| switch (err) {
+fn matchesIfPresent(io: std.Io, path: []const u8, expected: mutation.FileIdentity) !?bool {
+    return file_mutation.matches(io, path, expected) catch |err| switch (err) {
         error.FileNotFound => null,
         else => err,
     };
@@ -1105,6 +1086,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_size = expected.size_bytes,
         .expected_modified_ns = expected.modified_ns,
         .expected_quick_hash = expected.quick_hash,
+        .expected_content_hash = expected.content_hash,
     });
     try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, source, stage, expected, &.{.{
         .field = .title,
@@ -1118,6 +1100,7 @@ test "recovery restores original after replacement before journal commit" {
         staged_identity.size_bytes,
         staged_identity.modified_ns,
         staged_identity.quick_hash,
+        staged_identity.content_hash.?,
     );
     try library.mutation_journal.transition(operation, .planned, .staged, null);
     try file_mutation.commitReplacement(std.testing.io, source, stage, backup, expected);
@@ -1150,6 +1133,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_size = expected_again.size_bytes,
         .expected_modified_ns = expected_again.modified_ns,
         .expected_quick_hash = expected_again.quick_hash,
+        .expected_content_hash = expected_again.content_hash,
     });
     try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, source, stage, expected_again, &.{.{
         .field = .title,
@@ -1163,6 +1147,7 @@ test "recovery restores original after replacement before journal commit" {
         staged_only_identity.size_bytes,
         staged_only_identity.modified_ns,
         staged_only_identity.quick_hash,
+        staged_only_identity.content_hash.?,
     );
     try library.mutation_journal.transition(staged_only, .planned, .staged, null);
     try executor.recoverOperation(staged_only);
@@ -1180,6 +1165,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_size = expected_again.size_bytes,
         .expected_modified_ns = expected_again.modified_ns,
         .expected_quick_hash = expected_again.quick_hash,
+        .expected_content_hash = expected_again.content_hash,
     });
     try executor.recoverOperation(planned_only);
     try std.testing.expectEqual(
@@ -1198,6 +1184,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_size = expected_again.size_bytes,
         .expected_modified_ns = expected_again.modified_ns,
         .expected_quick_hash = expected_again.quick_hash,
+        .expected_content_hash = expected_again.content_hash,
     });
     try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, source, stage, expected_again, &.{.{
         .field = .title,
@@ -1211,6 +1198,7 @@ test "recovery restores original after replacement before journal commit" {
         changed_stage_identity.size_bytes,
         changed_stage_identity.modified_ns,
         changed_stage_identity.quick_hash,
+        changed_stage_identity.content_hash.?,
     );
     try library.mutation_journal.transition(changed_during_recovery, .planned, .staged, null);
     try file_mutation.commitReplacement(std.testing.io, source, stage, backup, expected_again);
@@ -1371,6 +1359,7 @@ test "move recovery restores a rename interrupted before journal commit" {
         .expected_size = expected.size_bytes,
         .expected_modified_ns = expected.modified_ns,
         .expected_quick_hash = expected.quick_hash,
+        .expected_content_hash = expected.content_hash,
     });
     try library.mutation_journal.recordResultIdentity(
         operation,
@@ -1378,6 +1367,7 @@ test "move recovery restores a rename interrupted before journal commit" {
         expected.size_bytes,
         expected.modified_ns,
         expected.quick_hash,
+        expected.content_hash.?,
     );
     try library.mutation_journal.transition(operation, .planned, .staged, null);
     try std.Io.Dir.cwd().renamePreserve(source, std.Io.Dir.cwd(), destination, std.testing.io);
@@ -1622,6 +1612,19 @@ const WriteFixture = struct {
         return file_mutation.identity(std.testing.io, self.second);
     }
 
+    fn lengthenSource(self: *WriteFixture) !void {
+        try file_mutation.writeLongMpeg(self.source, "Before write");
+        self.original = try self.current();
+    }
+
+    fn forgeMiddleEdit(self: *WriteFixture) !mutation.FileIdentity {
+        const before = try self.current();
+        try file_mutation.forgeInPlaceEdit(self.source, before.size_bytes / 2, "EDITED");
+        const edited = try self.current();
+        try std.testing.expectEqualSlices(u8, &before.quick_hash, &edited.quick_hash);
+        return edited;
+    }
+
     fn journaledError(self: *WriteFixture, operation_id: i64) ![]u8 {
         var statement = try self.library.database.prepare("SELECT error FROM mutation_operations WHERE id=?1;");
         defer statement.deinit();
@@ -1766,17 +1769,18 @@ fn commitLegacyWrite(fixture: *WriteFixture, plan_id: u64) ![]u8 {
         .expected_size = fixture.original.size_bytes,
         .expected_modified_ns = fixture.original.modified_ns,
         .expected_quick_hash = fixture.original.quick_hash,
+        .expected_content_hash = fixture.original.content_hash,
     });
     try file_mutation.stageMpeg(allocator, std.testing.io, fixture.source, stage, fixture.original, &.{
         .{ .field = .title, .before = "Before write", .after = "After write" },
     }, null);
     const staged = try file_mutation.identity(std.testing.io, stage);
-    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash, staged.content_hash.?);
     try journal.transition(operation, .planned, .staged, null);
     const cwd = std.Io.Dir.cwd();
     try cwd.rename(fixture.source, cwd, backup, std.testing.io);
     try cwd.rename(stage, cwd, fixture.source, std.testing.io);
-    try journal.commit(operation, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.commit(operation, staged.size_bytes, staged.modified_ns, staged.quick_hash, staged.content_hash.?);
     return backup;
 }
 
@@ -1986,4 +1990,92 @@ test "recovery keeps the error a failed write recorded" {
     try fixture.library.recoverPendingMutations(std.testing.io, &lock);
     try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
     try fixture.expectJournaledError(1, "AccessDenied");
+}
+
+test "a tag write refuses a file whose middle changed after approval with its size and timestamp kept" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.lengthenSource();
+    const actions = [_]mutation.Action{.{ .write_tags = .{
+        .path = fixture.source,
+        .expected = fixture.original,
+        .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+    } }};
+    var plan = try mutation.Plan.init(std.testing.allocator, 7, &actions);
+    defer plan.deinit();
+    try plan.approve(plan.approval());
+    const edited = try fixture.forgeMiddleEdit();
+    var lock = try fixture.acquireLock();
+    defer lock.release(std.testing.io);
+    var executor = fixture.executorWith(&lock);
+
+    try std.testing.expectError(error.FileIdentityChanged, executor.executePlan(&plan, 7));
+    try std.testing.expect(edited.eql(try fixture.current()));
+    try expectTitle(fixture.source, "Before write");
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try fixture.expectJournaledError(1, "FileIdentityChanged");
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
+}
+
+test "undo refuses a written file whose middle changed with its size and timestamp kept, and keeps its backup" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.lengthenSource();
+    try fixture.write(7);
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    const edited = try fixture.forgeMiddleEdit();
+    var lock = try fixture.acquireLock();
+    defer lock.release(std.testing.io);
+    var executor = fixture.executorWith(&lock);
+
+    try std.testing.expectError(error.MutationNeedsReconciliation, executor.undoOperation(1));
+    try std.testing.expect(edited.eql(try fixture.current()));
+    try std.testing.expect(fixture.original.eql(try file_mutation.identity(std.testing.io, backup)));
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try fixture.library.mutation_journal.state(1),
+    );
+    try fixture.expectJournaledError(1, "undo target changed externally");
+}
+
+test "undoing a group refuses a file whose middle changed with its size and timestamp kept, and changes nothing" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.lengthenSource();
+    try fixture.writeBoth(7);
+    const second_written = try fixture.currentSecond();
+    const edited = try fixture.forgeMiddleEdit();
+
+    try std.testing.expectError(error.MutationNeedsReconciliation, fixture.undo(7));
+    try std.testing.expect(edited.eql(try fixture.current()));
+    try std.testing.expect(second_written.eql(try fixture.currentSecond()));
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try fixture.library.mutation_journal.state(1),
+    );
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(2));
+    try fixture.expectMusicFolderUntouched();
+}
+
+test "undo of a write journaled without content hashes compares the other three parts of its identity" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.lengthenSource();
+    try fixture.write(7);
+    try fixture.library.database.exec(
+        "UPDATE mutation_operations SET expected_content_hash = NULL, committed_content_hash = NULL;",
+    );
+    {
+        var operation = try fixture.library.mutation_journal.get(std.testing.allocator, 1);
+        defer operation.deinit();
+        try std.testing.expectEqual(@as(?storage.content_hash.Digest, null), operation.expected_content_hash);
+        try std.testing.expectEqual(@as(?storage.content_hash.Digest, null), operation.committed_content_hash);
+    }
+
+    try fixture.undo(7);
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try fixture.expectMusicFolderUntouched();
 }

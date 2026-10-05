@@ -1,3 +1,4 @@
+pub const content_hash = @import("content_hash.zig");
 pub const format = @import("format.zig");
 pub const iso_bmff = @import("iso_bmff.zig");
 pub const quick_hash = @import("quick_hash.zig");
@@ -13,6 +14,7 @@ pub const ReadableSource = source.ReadableSource;
 pub const StorageIdentity = source.StorageIdentity;
 
 test {
+    _ = @import("content_hash.zig");
     _ = @import("format.zig");
     _ = @import("iso_bmff.zig");
     _ = @import("quick_hash.zig");

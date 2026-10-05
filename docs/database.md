@@ -414,8 +414,14 @@ and the migrations after it run only under the journal lock; see
 
 `mutation_operations` keeps its paths: the subject of a filesystem operation
 genuinely is a path. It also carries `file_id` and the full journaled
-`FileIdentity` (size, modification time and quick hash), so recovery compares
-the same identity an in-process check does. `backup_path` is NULL once pruning
+`FileIdentity` (size, modification time, quick hash and content hash), so
+recovery compares the same identity an in-process check does: `expected_*` is
+the file the plan approved, and `committed_*` the stage once it is built, then
+the file once the write commits. `expected_content_hash` and
+`committed_content_hash` are BLAKE3-256 over every byte. They are NULL on rows
+journaled before migration 56, which are compared by the other three parts; a
+stored value that is not 32 bytes fails the read rather than weakening the
+check. `backup_path` is NULL once pruning
 has deleted the backup; `prunableBackups` and `clearBackupPath` select and
 record that. See [metadata.md](metadata.md#pruning-backups).
 
@@ -535,6 +541,17 @@ option's count of Tracks stating its value (at least 0), and `gap`, on a
 `track_numbering` header, the lowest number it fills below the disc's
 highest (at least 1). Issues stored before it have neither until the pass
 runs again.
+
+Migration 56 adds `mutation_operations.expected_content_hash` and
+`committed_content_hash` (described above), `files.content_hash_algorithm`
+(1 for BLAKE3-256 over the whole file, NULL when `content_hash` is NULL), and
+the index `files_content_hash` on `files(content_hash)`. Existing rows keep NULL
+in all three columns; nothing is backfilled. The file update that records a
+different `quick_hash` clears `content_hash` and `content_hash_algorithm`
+together, as it clears `audio_hash`. Neither the scanner nor the executor writes
+`files.content_hash`. Startup recovery reads the journal before this
+migration runs, so `MutationJournalRepository.get` reads NULL content hashes
+from a table that does not have the columns.
 
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables

@@ -197,8 +197,10 @@ pub const FileRepository = struct {
         var statement = try self.db.prepare(
             \\INSERT INTO files(
             \\    audio_format, codec, size_bytes, sample_rate, bit_depth, channels,
-            \\    duration_ms, quick_hash, audio_hash, content_hash, first_seen_at
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, unixepoch())
+            \\    duration_ms, quick_hash, audio_hash, content_hash, content_hash_algorithm,
+            \\    first_seen_at
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+            \\    CASE WHEN ?10 IS NOT NULL THEN 1 END, unixepoch())
             \\RETURNING id;
         );
         defer statement.deinit();
@@ -220,7 +222,9 @@ pub const FileRepository = struct {
             \\    audio_hash=CASE WHEN ?9 IS NOT NULL THEN ?9
             \\        WHEN quick_hash IS ?8 THEN audio_hash ELSE NULL END,
             \\    content_hash=CASE WHEN ?10 IS NOT NULL THEN ?10
-            \\        WHEN quick_hash IS ?8 THEN content_hash ELSE NULL END
+            \\        WHEN quick_hash IS ?8 THEN content_hash ELSE NULL END,
+            \\    content_hash_algorithm=CASE WHEN ?10 IS NOT NULL THEN 1
+            \\        WHEN quick_hash IS ?8 THEN content_hash_algorithm ELSE NULL END
             \\WHERE id=?11;
         );
         defer statement.deinit();

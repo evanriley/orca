@@ -1,26 +1,34 @@
 const std = @import("std");
 const model = @import("model.zig");
+const content_hash = @import("../storage/content_hash.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
 
 /// What a file must currently be for a planned mutation to remain valid.
 ///
 /// Size and modification time alone are forgeable by any editor that rewrites
-/// a file in place and restores its timestamp, so identity also carries the
-/// storage-wide `quick_hash` definition — BLAKE3 over
-/// (first 64 KiB ‖ last 64 KiB ‖ size). The same digest is reused as a scanner
-/// identity tier and as the analysis cache key, so it lives in `storage`.
+/// a file in place and restores its timestamp, and the storage-wide
+/// `quick_hash` (BLAKE3 over first 64 KiB ‖ last 64 KiB ‖ size) misses an edit
+/// confined to the middle of a larger file. Identity therefore ends in
+/// `content_hash`, BLAKE3-256 over every byte; the cheaper parts are compared
+/// first so a changed file is rejected without reading all of it.
 ///
-/// The journal persists all three parts, so recovery compares the same identity
-/// an in-process check does.
+/// The journal persists all four parts, so recovery compares the same identity
+/// an in-process check does. `content_hash` is null only for an operation
+/// journaled before the column existed; such an identity is compared by the
+/// other three parts.
 pub const FileIdentity = struct {
     size_bytes: u64,
     modified_ns: i64,
     quick_hash: quick_hash.Digest,
+    content_hash: ?content_hash.Digest,
 
     pub fn eql(self: FileIdentity, other: FileIdentity) bool {
-        return self.size_bytes == other.size_bytes and
-            self.modified_ns == other.modified_ns and
-            std.mem.eql(u8, &self.quick_hash, &other.quick_hash);
+        if (self.size_bytes != other.size_bytes or
+            self.modified_ns != other.modified_ns or
+            !std.mem.eql(u8, &self.quick_hash, &other.quick_hash)) return false;
+        const own = self.content_hash orelse return true;
+        const theirs = other.content_hash orelse return true;
+        return std.mem.eql(u8, &own, &theirs);
     }
 };
 
@@ -96,7 +104,8 @@ pub const Plan = struct {
         if (id == 0 or actions.len == 0) return error.InvalidMutationPlan;
         for (actions) |action| switch (action) {
             .write_tags => |write| {
-                if (write.path.len == 0 or (write.changes.len == 0 and write.genres == null))
+                if (write.path.len == 0 or write.expected.content_hash == null or
+                    (write.changes.len == 0 and write.genres == null))
                     return error.InvalidMutationPlan;
                 if (write.genres) |genres| {
                     if (genres.after.len == 0) return error.InvalidMutationPlan;
@@ -125,6 +134,7 @@ pub const Plan = struct {
             },
             .move => |move| {
                 if (move.source_path.len == 0 or move.destination_path.len == 0 or
+                    move.expected.content_hash == null or
                     std.mem.eql(u8, move.source_path, move.destination_path))
                     return error.InvalidMutationPlan;
             },
@@ -362,12 +372,15 @@ fn updateIdentity(hasher: *std.crypto.hash.Blake3, value: FileIdentity) void {
     std.mem.writeInt(i64, &modified, value.modified_ns, .little);
     hasher.update(&modified);
     hasher.update(&value.quick_hash);
+    hasher.update(&.{if (value.content_hash == null) 0 else 1});
+    const content: content_hash.Digest = value.content_hash orelse @splat(0);
+    hasher.update(&content);
 }
 
 test "mutation preview is inert and execution requires exact approval" {
     const actions = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{.{ .field = .title, .before = "Old", .after = "New" }},
     } }};
     var plan = try Plan.init(std.testing.allocator, 42, &actions);
@@ -389,7 +402,7 @@ test "mutation preview is inert and execution requires exact approval" {
 test "a plan writes a recording id only when it is a MusicBrainz id" {
     const valid = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{.{ .field = .musicbrainz_recording_id, .before = null, .after = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }},
     } }};
     var plan = try Plan.init(std.testing.allocator, 42, &valid);
@@ -398,7 +411,7 @@ test "a plan writes a recording id only when it is a MusicBrainz id" {
 
     const uppercase = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{.{ .field = .musicbrainz_recording_id, .before = null, .after = "8F3471B5-7E6A-48DA-86A9-C1C07A0F5B4A" }},
     } }};
     try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &uppercase));
@@ -413,7 +426,7 @@ test "a plan writes a release, release-group, release-track or album-artist id o
     }) |field| {
         const valid = [_]Action{.{ .write_tags = .{
             .path = "/music/example.flac",
-            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
             .changes = &.{.{ .field = field, .before = null, .after = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }},
         } }};
         var plan = try Plan.init(std.testing.allocator, 42, &valid);
@@ -421,7 +434,7 @@ test "a plan writes a release, release-group, release-track or album-artist id o
 
         const invalid = [_]Action{.{ .write_tags = .{
             .path = "/music/example.flac",
-            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
             .changes = &.{.{ .field = field, .before = null, .after = "Some Album" }},
         } }};
         try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &invalid));
@@ -433,7 +446,7 @@ test "an approved plan cannot be altered through a caller-held alias" {
     var title_buffer = "Approved title".*;
     var actions = [_]Action{.{ .write_tags = .{
         .path = &path_buffer,
-        .expected = .{ .size_bytes = 10, .modified_ns = 20, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 10, .modified_ns = 20, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{.{ .field = .title, .before = null, .after = &title_buffer }},
     } }};
     var plan = try Plan.init(std.testing.allocator, 7, &actions);
@@ -447,7 +460,7 @@ test "an approved plan cannot be altered through a caller-held alias" {
     actions[0] = .{ .move = .{
         .source_path = "/music/original.mp3",
         .destination_path = "/music/attacker.mp3",
-        .expected = .{ .size_bytes = 10, .modified_ns = 20, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 10, .modified_ns = 20, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
     } };
 
     try plan.beginExecution();
@@ -463,12 +476,12 @@ test "an approved plan cannot be altered through a caller-held alias" {
 test "approval digests separate plans that differ only in a single value" {
     const first = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{.{ .field = .title, .before = "Old", .after = "New" }},
     } }};
     const second = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{.{ .field = .title, .before = "Old", .after = "Different" }},
     } }};
     var first_plan = try Plan.init(std.testing.allocator, 5, &first);
@@ -490,7 +503,7 @@ test "a genre list alone is a tag write, sealed into the digest and copied away 
     var genre_buffer = "Shoegaze".*;
     const genres_only = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{},
         .genres = .{ .before = &.{"Rock, Pop"}, .after = &.{ &genre_buffer, "Dream Pop" } },
     } }};
@@ -502,7 +515,7 @@ test "a genre list alone is a tag write, sealed into the digest and copied away 
 
     const reordered = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
-        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
         .changes = &.{},
         .genres = .{ .before = &.{"Rock, Pop"}, .after = &.{ "Dream Pop", "Shoegaze" } },
     } }};
@@ -516,7 +529,7 @@ test "a genre write refuses an empty list, a blank genre or one containing NUL" 
     for ([_][]const []const u8{ &.{}, &.{""}, &.{ "Rock", "Po\x00p" } }) |after| {
         const actions = [_]Action{.{ .write_tags = .{
             .path = "/music/example.flac",
-            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero, .content_hash = @splat(0) },
             .changes = &.{},
             .genres = .{ .before = &.{}, .after = after },
         } }};
@@ -529,10 +542,69 @@ test "file identity separates same-size edits that preserve a timestamp" {
         .size_bytes = 4096,
         .modified_ns = 1234,
         .quick_hash = quick_hash.zero,
+        .content_hash = @splat(0),
     };
     var edited = base;
     edited.quick_hash[0] = 1;
     // Same size, same timestamp, different bytes: only the quick hash separates
     // them, and the journal stores it so recovery can tell them apart too.
     try std.testing.expect(!base.eql(edited));
+
+    var middle = base;
+    middle.content_hash.?[0] = 1;
+    try std.testing.expect(!base.eql(middle));
+
+    var legacy = middle;
+    legacy.content_hash = null;
+    try std.testing.expect(base.eql(legacy));
+    try std.testing.expect(legacy.eql(base));
+}
+
+test "approval digests separate identities that differ only in content hash" {
+    var identity: FileIdentity = .{
+        .size_bytes = 100,
+        .modified_ns = 200,
+        .quick_hash = quick_hash.zero,
+        .content_hash = @splat(0),
+    };
+    const first = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = identity,
+        .changes = &.{.{ .field = .title, .before = "Old", .after = "New" }},
+    } }};
+    identity.content_hash.?[31] = 1;
+    const second = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = identity,
+        .changes = &.{.{ .field = .title, .before = "Old", .after = "New" }},
+    } }};
+    var first_plan = try Plan.init(std.testing.allocator, 5, &first);
+    defer first_plan.deinit();
+    var second_plan = try Plan.init(std.testing.allocator, 5, &second);
+    defer second_plan.deinit();
+    try std.testing.expectError(
+        error.MutationApprovalMismatch,
+        second_plan.approve(first_plan.approval()),
+    );
+}
+
+test "a plan refuses a file identity without a content hash" {
+    const identity: FileIdentity = .{
+        .size_bytes = 100,
+        .modified_ns = 200,
+        .quick_hash = quick_hash.zero,
+        .content_hash = null,
+    };
+    const write = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = identity,
+        .changes = &.{.{ .field = .title, .before = "Old", .after = "New" }},
+    } }};
+    try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 5, &write));
+    const move = [_]Action{.{ .move = .{
+        .source_path = "/music/a.flac",
+        .destination_path = "/music/b.flac",
+        .expected = identity,
+    } }};
+    try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 5, &move));
 }

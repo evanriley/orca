@@ -449,12 +449,25 @@ a BLAKE3 content digest; approval names the digest as well as the plan ID, and `
 reverifies the seal. A caller therefore cannot preview one plan and execute
 another through an alias it still holds.
 
-Identity is `(size, modified_ns, quick_hash)`, where `quick_hash` is the
-storage-wide definition — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size), in
-`storage/quick_hash.zig` — so a same-size edit that preserves the modification
-time is still detected. The mutation journal persists the full identity, so
-recovery compares the same `FileIdentity` an in-process check does; see
-[database.md](database.md).
+Identity is `(size, modified_ns, quick_hash, content_hash)`. `quick_hash` is
+the storage-wide definition — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size),
+in `storage/quick_hash.zig` — and only nominates a match: an edit confined to
+the middle of a file larger than 128 KiB that keeps its size and modification
+time leaves it unchanged. `content_hash` is BLAKE3-256 over every byte, from
+`storage/content_hash.zig`, and is what proves the file unchanged. A check
+compares size, modification time and quick hash first and reads the whole file
+only when all three match; it streams the file through a fixed buffer and never
+holds it in memory.
+
+The content hash is computed when the plan is built, as the backup copy is
+written (from the bytes being copied, with no second read), and by every check
+that compares a file with a journaled identity: staging, the revalidation
+before the rename, undo and recovery. The mutation journal persists the full
+identity, so recovery compares the same `FileIdentity` an in-process check
+does; see [database.md](database.md). `Plan.init` refuses an identity without
+a content hash with `error.InvalidMutationPlan`, so only an operation journaled
+before migration 56 lacks one; it is compared by the other three parts. The
+executor does not write `files.content_hash`.
 
 Every action of a group is journaled before any filesystem work begins, and
 journal writes raise SQLite durability for their own transaction, so a group is
@@ -526,9 +539,17 @@ or a durable, verified copy of it exists:
 1. Build the complete replacement at the stage, and fsync it and its directory.
 2. Copy the original into the backup directory with its modification time, fsync
    the copy and every directory created for it, and verify that the copy's
-   identity is the original's.
-3. Revalidate the file's identity, rename the stage onto it, and fsync the
+   size, modification time and quick hash, and the content hash of the bytes
+   copied into it, are the identity the plan approved.
+3. Revalidate the file's full identity, rename the stage onto it, and fsync the
    directory.
+
+The journal records the stage's identity before step 2 and the file's identity
+after step 3; undo and recovery compare the file against that record. A write
+that succeeds reads a file's full length eight times: the original once when
+the plan is built, twice while staging and three times in steps 2 and 3, and
+the replacement once as the stage and once after the rename. After the first
+read these usually come from the page cache.
 
 The backup is a copy rather than a rename, so it may sit on another disk:
 backups use space on the database's disk until they are undone or pruned. A
@@ -554,7 +575,8 @@ Before a fresh undo changes any file, it checks every operation of the group:
 - A write whose backup was pruned returns `error.TagWriteBackupPruned`.
 - A file that changed since the write, or a backup that is missing or no longer
   has the original's identity, records `needs_reconciliation` and returns
-  `error.MutationNeedsReconciliation`.
+  `error.MutationNeedsReconciliation`. Both are compared by content hash, so an
+  edit that kept the size, modification time and quick hash is still refused.
 
 It then journals its intent: every operation of the group becomes `undoing` in
 one durable transaction, or none does. A crash or an error from here on leaves

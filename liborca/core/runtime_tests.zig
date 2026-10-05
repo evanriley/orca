@@ -3428,6 +3428,7 @@ fn foreignWrites(
         .expected_size = original.size_bytes,
         .expected_modified_ns = original.modified_ns,
         .expected_quick_hash = original.quick_hash,
+        .expected_content_hash = original.content_hash,
     });
     const bytes = try temporary.dir.readFileAlloc(io, "c.m4a", allocator, .limited(1 << 22));
     defer allocator.free(bytes);
@@ -3435,7 +3436,7 @@ fn foreignWrites(
     defer allocator.free(replacement);
     try temporary.dir.writeFile(io, .{ .sub_path = ".c.m4a.orca-stage-901-0", .data = replacement });
     const staged = try metadata.file_mutation.identity(io, stage);
-    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash, staged.content_hash.?);
     try journal.transition(operation, .planned, .staged, null);
     try metadata.file_mutation.createDirectoryDurably(io, library_database.backup_directory.?);
     try metadata.file_mutation.createDirectoryDurably(io, plan_backups);
