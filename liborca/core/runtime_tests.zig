@@ -17,6 +17,7 @@ const work = @import("work.zig");
 const runtime_module = @import("runtime.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const runtime_queue = @import("runtime_queue.zig");
+const runtime_provider_tests = @import("runtime_provider_tests.zig");
 
 const ArtworkResult = runtime_module.ArtworkResult;
 const BrowseResult = runtime_module.BrowseResult;
@@ -161,6 +162,40 @@ test "a completed scan projects what it observed" {
     // browsable, which is why the projection runs inside the scan job.
     try std.testing.expect(stats.tracks_written > 0);
     try std.testing.expect(try runtime.libraryTrackCount(library) > 0);
+}
+
+/// Two WAVE files of one size whose first and last 64 KiB match and whose
+/// middles differ, so their quick hashes are equal and their bytes are not.
+fn writeQuickHashTwins(dir: std.Io.Dir, first: []const u8, second: []const u8) !void {
+    const frames = 100_000;
+    try runtime_provider_tests.writeSilentWave(dir, first, frames);
+    try runtime_provider_tests.writeSilentWave(dir, second, frames);
+    const file = try dir.openFile(std.testing.io, second, .{ .mode = .read_write });
+    defer file.close(std.testing.io);
+    try file.writePositionalAll(std.testing.io, "middle", 44 + frames);
+}
+
+test "two files whose quick hashes collide stay two files and neither is an exact duplicate" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeQuickHashTwins(temporary.dir, "one.wav", "two.wav");
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-scan-quick-hash-twins?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(u64, 2), try library_database.files.count());
+    var statement = try library_database.database.prepare("SELECT file_id FROM locations ORDER BY id;");
+    defer statement.deinit();
+    while (try statement.step() == .row) {
+        const copy = try library_database.locations.secondPresentPath(std.testing.allocator, statement.columnInt64(0));
+        defer if (copy) |path| std.testing.allocator.free(path);
+        try std.testing.expectEqual(@as(?[]u8, null), copy);
+    }
+
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryDuplicateScan(library, .{})));
+    var exact = try library_database.health_issues.pageOfKind(std.testing.allocator, .exact_duplicate, 8, 0);
+    defer exact.deinit();
+    try std.testing.expectEqual(@as(usize, 0), exact.items.len);
 }
 
 test "a scan Job reports the files its walk will reach as its total" {

@@ -552,12 +552,15 @@ pub const LocationRepository = struct {
     /// one.
     ///
     /// A byte-identical copy is not a second `files` row: the scanner's
-    /// identity cascade resolves it by quick hash to the row that already
-    /// exists, so the Library models it as one file at two locations. That is
-    /// still the same audio stored twice, and it is what a person asking about
-    /// duplicates means, so the duplicate scan reads it here rather than
-    /// pretending the copy does not exist. A copy whose bytes change is split
-    /// off into a file of its own and is no longer a location of this one.
+    /// identity cascade joins it to the row that already exists only once
+    /// their content hashes are equal, so the Library models it as one file at
+    /// two locations. That is still the same audio stored twice, and it is
+    /// what a person asking about duplicates means, so the duplicate scan reads
+    /// it here rather than pretending the copy does not exist. Two present
+    /// locations of one file are therefore bytes confirmed equal, or a path
+    /// re-found by uri or by inode, size and mtime, as a hard link is. A copy
+    /// whose bytes change is split off into a file of its own and is no longer
+    /// a location of this one.
     ///
     /// Only `present` locations count. A file that *moved* leaves a `missing`
     /// row behind and a `present` one ahead, and reporting that pair as a

@@ -336,14 +336,10 @@ removed.
 
 ### Before the public preview
 
-- Quick hashes only nominate candidates. Two files of the same length whose
-  first and last 64 KiB are equal merge into one File in the scanner
-  (`liborca/database/repository/files.zig`) and `duplicate_pass.zig` calls
-  them exact copies. A change confined to the middle of a file, with its size
-  and first and last 64 KiB unchanged, keeps its quick hash, so analysis and
-  the identity cascade still treat it as the old bytes. A merge or an exact
-  verdict requires a full-content comparison. Checked by tests with files that
-  differ only in the middle.
+- Quick hashes only nominate candidates. A change confined to the middle of
+  a file, with its size and first and last 64 KiB unchanged, keeps its quick
+  hash, so analysis results and the fork rule still treat it as the old
+  bytes. Checked by tests with files that differ only in the middle.
 - Root paths are sound. A root path is stored as given: neither `orca-cli
   add-root` nor `orca_library_add_root` makes it absolute or refuses a
   relative one, and an absolute playlist export from a relative root writes

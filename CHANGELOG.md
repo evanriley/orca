@@ -1517,6 +1517,14 @@
 
 ### Fixed
 
+- **Files that only look alike stay apart.** A scan or `orca-cli analyze`
+  made two different files one File when they shared their size and first
+  and last 64 KiB, and the duplicate scan then called them exact
+  duplicates. A path now joins a File found by its quick hash only when the
+  content hash of its whole bytes matches, and the hash is recorded on the
+  File. A File whose every location is gone, as after a move between
+  volumes, is still joined on the quick hash, so what Orca recorded for it
+  survives the move.
 - **Artist info is fetched in optimized builds.** A `ReleaseFast` or
   `ReleaseSmall` build read every Artist's MusicBrainz ID as missing, so the
   fetch ended `no_musicbrainz_id` without asking any provider.

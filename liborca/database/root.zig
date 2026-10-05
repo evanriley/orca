@@ -1,4 +1,5 @@
 pub const columns = @import("columns.zig");
+pub const content_measurements = @import("content_measurements.zig");
 pub const library = @import("library.zig");
 pub const migrations = @import("migrations.zig");
 pub const repository = @import("repository.zig");
@@ -6,6 +7,7 @@ pub const sqlite = @import("sqlite.zig");
 pub const sqlite_locks = @import("sqlite_locks.zig");
 pub const text_key = @import("text_key.zig");
 
+pub const ContentMeasurements = content_measurements.ContentMeasurements;
 pub const LibraryDatabase = library.LibraryDatabase;
 pub const VolumeOptions = library.VolumeOptions;
 pub const RootBinding = library.RootBinding;
@@ -267,6 +269,7 @@ pub const AcoustIdSubmissionRepository = repository.AcoustIdSubmissionRepository
 
 test {
     _ = @import("columns.zig");
+    _ = @import("content_measurements.zig");
     _ = @import("library.zig");
     _ = @import("migrations.zig");
     _ = @import("repository.zig");

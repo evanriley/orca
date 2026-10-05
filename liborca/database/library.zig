@@ -1,4 +1,6 @@
 const std = @import("std");
+const content_hash = @import("../storage/content_hash.zig");
+const ContentMeasurements = @import("content_measurements.zig").ContentMeasurements;
 const metadata = @import("../metadata/model.zig");
 const migrations = @import("migrations.zig");
 const JournalLock = @import("../metadata/journal_lock.zig").JournalLock;
@@ -386,12 +388,12 @@ pub const LibraryDatabase = struct {
     /// Resolve the file a path names, creating `files` and `locations` rows for
     /// it when no scan has seen it yet.
     ///
-    /// This is the identity cascade in its cheapest useful form: the same path
-    /// on the same volume, then the same inode/size/mtime elsewhere on that
-    /// volume, then the same quick hash anywhere. It is what lets
-    /// `orca-cli analyze` cache a result against a file rather than a path. A
-    /// path whose bytes diverged from a file still present elsewhere becomes a
-    /// file of its own, as a scan would make it.
+    /// This is the identity cascade a scan runs: the same path on the same
+    /// volume, then the same inode/size/mtime elsewhere on that volume, then a
+    /// file with the same quick hash whose content hash proves the bytes
+    /// equal. It is what lets `orca-cli analyze` cache a result against a file
+    /// rather than a path. A path whose bytes diverged from a file still
+    /// present elsewhere becomes a file of its own, as a scan would make it.
     pub fn resolveOrCreateFile(
         self: *LibraryDatabase,
         io: std.Io,
@@ -403,24 +405,35 @@ pub const LibraryDatabase = struct {
         const stat = try file.stat(io);
         const digest = try quick_hash.fromFile(io, file, stat.size);
         const volume_id = try self.volumeFor(io, path, options);
-        const size: i64 = @intCast(stat.size);
-        const modified_ns: i64 = @intCast(stat.mtime.nanoseconds);
-        const inode: i64 = @bitCast(@as(u64, stat.inode));
-        const upsert: repository.FileUpsert = .{ .size_bytes = size, .quick_hash = &digest };
+        const identity: repository.StorageIdentityKey = .{
+            .volume_id = volume_id,
+            .native_inode = @bitCast(@as(u64, stat.inode)),
+            .size_bytes = @intCast(stat.size),
+            .modified_ns = @intCast(stat.mtime.nanoseconds),
+        };
+        var measurements: ContentMeasurements = .{};
+        defer measurements.deinit(self.allocator);
+        var own: ?content_hash.Digest = null;
+        if (try self.files.reachesQuickHash(path, identity, &digest)) {
+            own = try content_hash.fromFile(io, file, stat.size);
+            try measurements.measureNominees(self.allocator, io, &self.files, path, identity, &digest);
+        }
+        const own_digest: ?*const content_hash.Digest = if (own) |*bytes| bytes else null;
+        const upsert: repository.FileUpsert = .{
+            .size_bytes = identity.size_bytes,
+            .quick_hash = &digest,
+            .content_hash = if (own_digest) |bytes| bytes else null,
+        };
 
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.database.exec("BEGIN IMMEDIATE;");
         errdefer self.database.exec("ROLLBACK;") catch {};
-        const file_id = switch (try self.files.resolveForBytes(path, .{
-            .volume_id = volume_id,
-            .native_inode = inode,
-            .size_bytes = size,
-            .modified_ns = modified_ns,
-        }, &digest)) {
+        const file_id = switch (try self.files.resolveForBytes(path, identity, &digest, measurements.evidence(own_digest))) {
             .new => try self.files.createLocked(upsert),
             .same => |id| same: {
                 try self.files.updateLocked(id, upsert);
+                if (own_digest == null) try self.files.forgetUnheldContentHashLocked(id, identity);
                 break :same id;
             },
             .diverged => |shared| try self.files.forkLocked(shared, path, upsert),
@@ -429,9 +442,9 @@ pub const LibraryDatabase = struct {
             .file_id = file_id,
             .volume_id = volume_id,
             .uri = path,
-            .native_inode = inode,
-            .size_bytes = size,
-            .modified_ns = modified_ns,
+            .native_inode = identity.native_inode,
+            .size_bytes = identity.size_bytes,
+            .modified_ns = identity.modified_ns,
             .state = .present,
         });
         try self.database.exec("COMMIT;");
@@ -1586,6 +1599,40 @@ test "analyzing a path whose bytes diverged from a shared file splits it as a sc
     try std.testing.expectEqual(binding.file_id, (try library.resolveOrCreateFile(std.testing.io, first, options)).file_id);
     try std.testing.expectEqual(shared, (try library.resolveOrCreateFile(std.testing.io, second, options)).file_id);
     try std.testing.expectEqual(@as(u64, 2), try library.files.count());
+}
+
+test "analyzing paths whose quick hashes collide joins only those with equal bytes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const bytes = try std.testing.allocator.alloc(u8, 4 * quick_hash.window_bytes);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 0);
+    bytes[bytes.len / 2] = 1;
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "one.bin", .data = bytes });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "copy.bin", .data = bytes });
+    bytes[bytes.len / 2] = 2;
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "two.bin", .data = bytes });
+    var paths: [3][]u8 = undefined;
+    for (&paths, [_][]const u8{ "one.bin", "two.bin", "copy.bin" }) |*path, name| {
+        path.* = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+    }
+    defer for (paths) |path| std.testing.allocator.free(path);
+
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-analyze-quick-hash-twins?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const options: VolumeOptions = .{ .stable_key = "test:analyze-quick-hash-twins" };
+    const one = (try library.resolveOrCreateFile(std.testing.io, paths[0], options)).file_id;
+    try expectContentHash(&library, one, null);
+    const two = (try library.resolveOrCreateFile(std.testing.io, paths[1], options)).file_id;
+    try std.testing.expect(two != one);
+    try std.testing.expectEqual(one, (try library.resolveOrCreateFile(std.testing.io, paths[2], options)).file_id);
+    try std.testing.expectEqual(@as(u64, 2), try library.files.count());
+    try expectContentHash(&library, one, &(try content_hash.fromPath(std.testing.io, paths[0])));
+    try expectContentHash(&library, two, &(try content_hash.fromPath(std.testing.io, paths[1])));
 }
 
 test "observed tags round trip every field a reader can produce" {

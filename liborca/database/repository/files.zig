@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const quick_hash = @import("../../storage/quick_hash.zig");
+const content_hash = @import("../../storage/content_hash.zig");
 const columns = @import("../columns.zig");
 
 const digestColumn = columns.digestColumn;
@@ -152,6 +153,84 @@ pub const FileResolution = union(enum) {
     /// path leaves it for a file of its own, forked from it.
     diverged: i64,
 };
+
+/// Most files recording one quick hash that tier 3 weighs for a path.
+pub const max_nominees = 8;
+/// Most locations of one such file whose bytes tier 3 reads.
+pub const max_nominee_locations = 4;
+
+/// What the bytes at one location hashed to, read before the transaction
+/// that weighs them.
+pub const MeasuredLocation = struct {
+    volume_id: i64,
+    uri: []const u8,
+    bytes: MeasuredBytes,
+};
+
+pub const MeasuredBytes = union(enum) {
+    /// Read whole while the location had `identity`.
+    read: Read,
+    /// Nothing is at the path.
+    gone,
+    /// Something is at the path and could not be read.
+    unreadable,
+
+    pub const Read = struct {
+        identity: StorageIdentityKey,
+        digest: content_hash.Digest,
+
+        /// Whether these are the bytes a location recording `recorded` holds.
+        pub fn holds(self: Read, recorded: ?StorageIdentityKey) bool {
+            return if (recorded) |identity| std.meta.eql(identity, self.identity) else false;
+        }
+    };
+};
+
+/// The content hashes a resolution may weigh, all taken before its
+/// transaction began, because nothing under the write lane reads a file.
+pub const ContentEvidence = struct {
+    /// The content hash of the bytes being resolved, when one was taken.
+    own: ?*const content_hash.Digest = null,
+    measured: []const MeasuredLocation = &.{},
+
+    fn find(self: ContentEvidence, volume_id: i64, uri: []const u8) ?MeasuredBytes {
+        for (self.measured) |location| {
+            if (location.volume_id == volume_id and std.mem.eql(u8, location.uri, uri)) return location.bytes;
+        }
+        return null;
+    }
+};
+
+/// A location whose bytes tier 3 would read to weigh its file.
+pub const NomineeLocation = struct {
+    file_id: i64,
+    volume_id: i64,
+    uri: []u8,
+    recorded: ?StorageIdentityKey,
+};
+
+pub const NomineeLocations = struct {
+    allocator: std.mem.Allocator,
+    items: []NomineeLocation,
+
+    pub fn deinit(self: NomineeLocations) void {
+        for (self.items) |item| self.allocator.free(item.uri);
+        self.allocator.free(self.items);
+    }
+};
+
+const Weight = enum { equal, different, unknown, absent };
+
+const nominees_sql =
+    \\SELECT id, CASE WHEN content_hash_algorithm = 1 THEN content_hash END
+    \\FROM files WHERE quick_hash = ?1 ORDER BY id LIMIT ?2;
+;
+
+const nominee_locations_sql =
+    \\SELECT volume_id, uri, native_inode, size_bytes, modified_ns FROM locations
+    \\WHERE file_id = ?1 AND state <> 'missing' AND NOT (volume_id = ?2 AND uri = ?3)
+    \\ORDER BY id LIMIT ?4;
+;
 
 /// One incomplete file and where to read it.
 pub const IncompleteFile = struct {
@@ -598,20 +677,158 @@ pub const FileRepository = struct {
         return statement.columnInt64(0);
     }
 
-    /// Tier 3: the same leading and trailing bytes and length — a copy, a
-    /// cross-volume move, or a restore from backup.
-    pub fn resolveByQuickHash(self: *const FileRepository, digest: []const u8) !?i64 {
-        var statement = try self.db.prepare(
-            "SELECT id FROM files WHERE quick_hash=?1 ORDER BY id LIMIT 1;",
-        );
+    /// Whether resolving the bytes at `uri` reaches tier 3: no location has
+    /// this path or identity, and a file records `digest` as its quick hash.
+    /// Only then does the resolution weigh content hashes.
+    pub fn reachesQuickHash(
+        self: *const FileRepository,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+        digest: []const u8,
+    ) !bool {
+        if (try self.resolveByUri(identity.volume_id, uri) != null) return false;
+        if (try self.resolveByIdentity(identity) != null) return false;
+        var statement = try self.db.prepare("SELECT EXISTS (SELECT 1 FROM files WHERE quick_hash = ?1);");
         defer statement.deinit();
         try statement.bindBlob(1, digest);
-        if (try statement.step() != .row) return null;
-        return statement.columnInt64(0);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0) != 0;
+    }
+
+    /// The locations whose bytes tier 3 would read for `uri`: those of each
+    /// file recording `digest` and no content hash, other than `uri` itself,
+    /// in the order `resolveForBytes` weighs them.
+    pub fn nomineeLocations(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+        digest: []const u8,
+    ) !NomineeLocations {
+        var found: std.ArrayList(NomineeLocation) = .empty;
+        errdefer {
+            for (found.items) |item| allocator.free(item.uri);
+            found.deinit(allocator);
+        }
+        var nominees = try self.db.prepare(nominees_sql);
+        defer nominees.deinit();
+        try nominees.bindBlob(1, digest);
+        try nominees.bindInt64(2, max_nominees);
+        while (try nominees.step() == .row) {
+            if (digestColumn(nominees, 1) != null) continue;
+            const file_id = nominees.columnInt64(0);
+            var locations = try self.db.prepare(nominee_locations_sql);
+            defer locations.deinit();
+            try locations.bindInt64(1, file_id);
+            try locations.bindInt64(2, identity.volume_id);
+            try locations.bindText(3, uri);
+            try locations.bindInt64(4, max_nominee_locations);
+            while (try locations.step() == .row) {
+                const location_uri = try allocator.dupe(u8, locations.columnText(1));
+                errdefer allocator.free(location_uri);
+                try found.append(allocator, .{
+                    .file_id = file_id,
+                    .volume_id = locations.columnInt64(0),
+                    .uri = location_uri,
+                    .recorded = recordedIdentity(locations),
+                });
+            }
+        }
+        return .{ .allocator = allocator, .items = try found.toOwnedSlice(allocator) };
+    }
+
+    /// Tier 3: a file recording the same leading and trailing bytes and
+    /// length — a copy, a cross-volume move, or a restore from backup. The
+    /// quick hash only nominates; equal content hashes join.
+    ///
+    /// A nominee's own content hash is compared when it records one. Without
+    /// one, the bytes measured at its other locations are, and a location
+    /// that cannot be read, or whose identity changed since it was measured,
+    /// leaves the nominee undecided. A nominee that has no location left to
+    /// read is joined on the quick hash alone, and given this path's content
+    /// hash, when no other nominee is equal, undecided or as absent: that
+    /// keeps Orca's values across a move from a path that is gone, and is the
+    /// one tier-3 join that rests on less than equal bytes.
+    fn resolveByContent(
+        self: *const FileRepository,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+        digest: []const u8,
+        evidence: ContentEvidence,
+    ) !FileResolution {
+        var nominees = try self.db.prepare(nominees_sql);
+        defer nominees.deinit();
+        try nominees.bindBlob(1, digest);
+        try nominees.bindInt64(2, max_nominees + 1);
+        var weighed: usize = 0;
+        var undecided = false;
+        var absent: ?i64 = null;
+        var absences: usize = 0;
+        while (try nominees.step() == .row) {
+            if (weighed == max_nominees) {
+                undecided = true;
+                break;
+            }
+            weighed += 1;
+            const file_id = nominees.columnInt64(0);
+            const weight: Weight = if (digestColumn(nominees, 1)) |stored|
+                weighDigest(evidence.own, &stored)
+            else
+                try self.weighLocations(file_id, uri, identity.volume_id, evidence);
+            switch (weight) {
+                .equal => return .{ .same = file_id },
+                .different => {},
+                .unknown => undecided = true,
+                .absent => {
+                    absent = file_id;
+                    absences += 1;
+                },
+            }
+        }
+        if (evidence.own != null and !undecided and absences == 1) return .{ .same = absent.? };
+        return .new;
+    }
+
+    fn weighLocations(
+        self: *const FileRepository,
+        file_id: i64,
+        uri: []const u8,
+        volume_id: i64,
+        evidence: ContentEvidence,
+    ) !Weight {
+        var locations = try self.db.prepare(nominee_locations_sql);
+        defer locations.deinit();
+        try locations.bindInt64(1, file_id);
+        try locations.bindInt64(2, volume_id);
+        try locations.bindText(3, uri);
+        try locations.bindInt64(4, max_nominee_locations + 1);
+        var listed: usize = 0;
+        var unknown = false;
+        while (try locations.step() == .row) {
+            if (listed == max_nominee_locations) return .unknown;
+            listed += 1;
+            const measured = evidence.find(locations.columnInt64(0), locations.columnText(1)) orelse {
+                unknown = true;
+                continue;
+            };
+            switch (measured) {
+                .gone => {},
+                .unreadable => unknown = true,
+                .read => |read| {
+                    if (!read.holds(recordedIdentity(locations))) {
+                        unknown = true;
+                        continue;
+                    }
+                    return weighDigest(evidence.own, &read.digest);
+                },
+            }
+        }
+        return if (unknown) .unknown else .absent;
     }
 
     /// The identity cascade for the bytes now at `uri`, whose quick hash is
-    /// `digest`.
+    /// `digest`. `evidence` holds the content hashes tier 3 weighs; it never
+    /// reads a file itself, because it runs inside the caller's transaction.
     ///
     /// A file is one set of bytes. When the cascade finds a file whose recorded
     /// quick hash differs from `digest` and that is still present at another
@@ -619,16 +836,17 @@ pub const FileRepository = struct {
     /// diverged from it and must not rewrite it. A missing location does not
     /// count, because it is usually what a move left behind, and neither does
     /// a hard link to this path on the same volume, which cannot hold other
-    /// bytes.
+    /// bytes. A tier-3 file never diverges: it records `digest` itself.
     pub fn resolveForBytes(
         self: *const FileRepository,
         uri: []const u8,
         identity: StorageIdentityKey,
         digest: []const u8,
+        evidence: ContentEvidence,
     ) !FileResolution {
         const existing = (try self.resolveByUri(identity.volume_id, uri)) orelse
             (try self.resolveByIdentity(identity)) orelse
-            (try self.resolveByQuickHash(digest)) orelse return .new;
+            return self.resolveByContent(uri, identity, digest, evidence);
         var statement = try self.db.prepare(
             \\SELECT EXISTS (
             \\    SELECT 1 FROM files JOIN locations ON locations.file_id = files.id
@@ -647,6 +865,33 @@ pub const FileRepository = struct {
         if (try statement.step() != .row) return error.SqlFailed;
         if (statement.columnInt64(0) != 0) return .{ .diverged = existing };
         return .{ .same = existing };
+    }
+
+    /// Forgets `file_id`'s content hash unless one of its locations already
+    /// has `identity`.
+    ///
+    /// A path resolved by uri or identity is not hashed. When its bytes
+    /// changed without changing the quick hash, a kept content hash would
+    /// vouch for bytes the file no longer holds, and tier 3 would join a copy
+    /// of the old bytes to it.
+    pub fn forgetUnheldContentHashLocked(
+        self: *FileRepository,
+        file_id: i64,
+        identity: StorageIdentityKey,
+    ) !void {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET content_hash = NULL, content_hash_algorithm = NULL
+            \\WHERE id = ?1 AND content_hash IS NOT NULL AND NOT EXISTS (
+            \\    SELECT 1 FROM locations WHERE file_id = ?1 AND volume_id = ?2
+            \\      AND native_inode = ?3 AND size_bytes = ?4 AND modified_ns = ?5);
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, identity.volume_id);
+        try statement.bindInt64(3, identity.native_inode);
+        try statement.bindInt64(4, identity.size_bytes);
+        try statement.bindInt64(5, identity.modified_ns);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 
     /// A new file for the bytes at `uri`, which diverged from `shared`.
@@ -770,6 +1015,22 @@ pub const FileRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 };
+
+/// The identity a row of `nominee_locations_sql` records.
+fn recordedIdentity(statement: sqlite.Statement) ?StorageIdentityKey {
+    if (statement.columnIsNull(2)) return null;
+    return .{
+        .volume_id = statement.columnInt64(0),
+        .native_inode = statement.columnInt64(2),
+        .size_bytes = statement.columnInt64(3),
+        .modified_ns = statement.columnInt64(4),
+    };
+}
+
+fn weighDigest(own: ?*const content_hash.Digest, other: *const content_hash.Digest) Weight {
+    const digest = own orelse return .unknown;
+    return if (std.mem.eql(u8, digest, other)) .equal else .different;
+}
 
 fn bindFile(statement: sqlite.Statement, input: FileUpsert) !void {
     try statement.bindInt64(1, input.audio_format);

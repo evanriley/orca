@@ -97,6 +97,8 @@ const PendingEntry = struct {
     audio_format: storage.AudioFormat,
     identity: database.StorageIdentityKey,
     quick_hash: storage.QuickHash,
+    /// Taken only when a file or another entry has the same quick hash.
+    content_hash: ?storage.content_hash.Digest,
     properties: codec.registry.Properties,
     tags: ?tag_reader.Tags,
     unreadable: ?[]const u8,
@@ -206,8 +208,12 @@ pub const Scanner = struct {
     /// Root-relative folders this run finished walking, recorded with the
     /// next batch so a folder's scan time commits with its files.
     finished_folders: std.ArrayList([]u8) = .empty,
+    /// The content hashes the pending batch's resolutions will weigh, taken
+    /// before `flush` takes the write lane.
+    measurements: database.ContentMeasurements = .{},
 
     pub fn deinit(self: *Scanner) void {
+        self.measurements.deinit(self.allocator);
         self.seen.deinit(self.allocator);
         self.seen_images.deinit(self.allocator);
         self.clearPendingImages();
@@ -243,6 +249,7 @@ pub const Scanner = struct {
 
     fn walk(self: *Scanner, root_path: []const u8, subtree: ?[]const u8) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
+        self.measurements.clear(self.allocator);
         if (self.cancellation) |token| {
             if (token.checkpoint()) return .{ .cancelled = true };
         }
@@ -444,6 +451,18 @@ pub const Scanner = struct {
             return;
         };
         const quick_hash = storage.quick_hash.fromSource(local.readable()) catch return self.keepUnobserved(path, result);
+        const nominated = try self.files.reachesQuickHash(path, identity, &quick_hash);
+        var content_hash: ?storage.content_hash.Digest = null;
+        if (nominated or hasPeer(pending.items, &quick_hash, identity)) {
+            const digest = storage.content_hash.fromFile(self.io, local.file, local.stat.size) catch |err| switch (err) {
+                error.Canceled => return err,
+                else => return self.keepUnobserved(path, result),
+            };
+            content_hash = digest;
+            try self.measurements.record(self.allocator, path, identity, &digest);
+            if (nominated) try self.measurements.measureNominees(self.allocator, self.io, self.files, path, identity, &quick_hash);
+            try self.measurePeers(pending.items, &quick_hash, identity);
+        }
         const audio_format = detection.format;
         // A tag reader is defined over the container it is handed, so an
         // ID3v2 tag in front of a FLAC stream has to be stepped over before
@@ -487,6 +506,7 @@ pub const Scanner = struct {
             .audio_format = audio_format,
             .identity = identity,
             .quick_hash = quick_hash,
+            .content_hash = content_hash,
             .properties = properties,
             .tags = tags,
             .unreadable = unreadable,
@@ -504,6 +524,7 @@ pub const Scanner = struct {
     /// and projects them. For files Orca itself just rewrote: their bytes are
     /// known to have changed, so the unchanged fast path is not consulted.
     pub fn observeFiles(self: *Scanner, paths: []const []const u8) !Result {
+        self.measurements.clear(self.allocator);
         var builtin_codecs = codec.CodecRegistry.builtins();
         const codecs = self.codecs orelse &builtin_codecs;
         var pending: std.ArrayList(PendingEntry) = .empty;
@@ -523,6 +544,27 @@ pub const Scanner = struct {
         try self.flushSeen();
         try self.project(&result);
         return result;
+    }
+
+    /// Gives each earlier entry of the batch with these leading and trailing
+    /// bytes the content hash of its bytes, read again now, so that whichever
+    /// of them flushes first is weighed on content by the rest. An entry whose
+    /// bytes changed since it was examined is given none.
+    fn measurePeers(
+        self: *Scanner,
+        pending: []PendingEntry,
+        quick_hash: *const storage.QuickHash,
+        identity: database.StorageIdentityKey,
+    ) !void {
+        for (pending) |*peer| {
+            if (peer.content_hash != null or !isPeer(peer, quick_hash, identity)) continue;
+            switch (try self.measurements.measure(self.allocator, self.io, peer.identity.volume_id, peer.path)) {
+                .read => |read| if (read.holds(peer.identity)) {
+                    peer.content_hash = read.digest;
+                },
+                .gone, .unreadable => {},
+            }
+        }
     }
 
     /// A listed file that cannot be read is still present: its Location is
@@ -594,13 +636,15 @@ pub const Scanner = struct {
     }
 
     /// One bounded commit per batch, resolving each entry's file identity
-    /// inside the same transaction that records it.
+    /// inside the same transaction that records it, from content hashes
+    /// taken before it.
     fn flush(self: *Scanner, pending: *std.ArrayList(PendingEntry)) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.database_handle.exec("BEGIN IMMEDIATE;");
         errdefer self.database_handle.exec("ROLLBACK;") catch {};
-        for (pending.items) |entry| {
+        for (pending.items) |*entry| {
+            const content_hash: ?*const storage.content_hash.Digest = if (entry.content_hash) |*digest| digest else null;
             const upsert = database.FileUpsert{
                 .audio_format = @intFromEnum(entry.audio_format),
                 // Empty only for a file that sniffed as audio and then refused
@@ -613,12 +657,19 @@ pub const Scanner = struct {
                 .channels = optionalCount(entry.properties.channels),
                 .duration_ms = optionalCount(entry.properties.duration_ms),
                 .quick_hash = &entry.quick_hash,
+                .content_hash = if (content_hash) |digest| digest else null,
             };
-            const resolution = try self.files.resolveForBytes(entry.path, entry.identity, &entry.quick_hash);
+            const resolution = try self.files.resolveForBytes(
+                entry.path,
+                entry.identity,
+                &entry.quick_hash,
+                self.measurements.evidence(content_hash),
+            );
             const file_id = switch (resolution) {
                 .new => try self.files.createLocked(upsert),
                 .same => |id| same: {
                     try self.files.updateLocked(id, upsert);
+                    if (content_hash == null) try self.files.forgetUnheldContentHashLocked(id, entry.identity);
                     break :same id;
                 },
                 .diverged => |shared| try self.files.forkLocked(shared, entry.path, upsert),
@@ -659,6 +710,7 @@ pub const Scanner = struct {
             for (self.finished_folders.items) |folder| try self.locations.recordFolderScanLocked(root_id, folder);
         }
         try self.database_handle.exec("COMMIT;");
+        self.measurements.clear(self.allocator);
         for (pending.items) |entry| entry.deinit(self.allocator);
         pending.clearRetainingCapacity();
         self.clearPendingImages();
@@ -667,6 +719,15 @@ pub const Scanner = struct {
 };
 
 const optionalCount = database.columns.optionalCount;
+
+fn isPeer(entry: *const PendingEntry, quick_hash: *const storage.QuickHash, identity: database.StorageIdentityKey) bool {
+    return std.mem.eql(u8, &entry.quick_hash, quick_hash) and !std.meta.eql(entry.identity, identity);
+}
+
+fn hasPeer(pending: []const PendingEntry, quick_hash: *const storage.QuickHash, identity: database.StorageIdentityKey) bool {
+    for (pending) |*entry| if (isPeer(entry, quick_hash, identity)) return true;
+    return false;
+}
 
 /// The uri a file or directory `relative` to a root is stored under. Every
 /// walk builds uris through this, so a subtree walk and a full scan name the
@@ -2060,6 +2121,316 @@ test "a shared file with no quick hash is updated in place rather than split" {
     try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
     try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
     try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
+}
+
+/// Two roots on two volumes, holding files whose quick hashes collide at will.
+const TwinRoots = struct {
+    temporary: std.testing.TmpDir,
+    library: database.LibraryDatabase,
+    paths: [2][]u8,
+    bindings: [2]database.RootBinding,
+
+    const folders = [2][]const u8{ "here", "there" };
+    const volumes = [2][]const u8{ "test:twins-here", "test:twins-there" };
+    const size = 4 * storage.quick_hash.window_bytes;
+
+    fn init(self: *TwinRoots, name: [:0]const u8) !void {
+        self.temporary = std.testing.tmpDir(.{});
+        self.library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, name);
+        for (&self.paths, &self.bindings, folders, volumes) |*path, *binding, folder, volume| {
+            try self.temporary.dir.createDir(std.testing.io, folder, .default_dir);
+            path.* = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, folder });
+            binding.* = try self.library.ensureRoot(std.testing.io, path.*, .{ .stable_key = volume });
+        }
+    }
+
+    fn deinit(self: *TwinRoots) void {
+        self.library.close();
+        for (self.paths) |path| std.testing.allocator.free(path);
+        self.temporary.cleanup();
+    }
+
+    /// Bytes that sniff as FLAC, whose first and last 64 KiB depend on `head`
+    /// alone and whose middle holds `middle`, so files of one `head` share a
+    /// quick hash whatever their middles.
+    fn write(self: *TwinRoots, root: usize, name: []const u8, head: u8, middle: u8) !void {
+        const bytes = try std.testing.allocator.alloc(u8, size);
+        defer std.testing.allocator.free(bytes);
+        @memset(bytes, head);
+        @memcpy(bytes[0..4], "fLaC");
+        bytes[size / 2] = middle;
+        const sub_path = try pathUnder(std.testing.allocator, folders[root], name);
+        defer std.testing.allocator.free(sub_path);
+        try self.temporary.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = bytes });
+    }
+
+    fn scan(self: *TwinRoots, root: usize) !Result {
+        return self.scanWith(root, false);
+    }
+
+    /// A completed scan of one root, swept as a scan job sweeps it.
+    fn scanWith(self: *TwinRoots, root: usize, reprobe: bool) !Result {
+        const binding = self.bindings[root];
+        const run = try self.library.scan_runs.begin(binding.root_id);
+        var scanner = Scanner{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+            .files = &self.library.files,
+            .locations = &self.library.locations,
+            .observed_tags = &self.library.observed_tags,
+            .write_lane = self.library.write_lane,
+            .database_handle = self.library.database,
+            .volume_id = binding.volume_id,
+            .root_id = binding.root_id,
+            .generation = run.generation,
+            .reprobe = reprobe,
+        };
+        defer scanner.deinit();
+        const result = try scanner.scan(self.paths[root]);
+        _ = try self.library.files.markMissingBelowGeneration(binding.root_id, run.generation);
+        return result;
+    }
+
+    fn fileAt(self: *TwinRoots, root: usize, name: []const u8) !?i64 {
+        const uri = try pathUnder(std.testing.allocator, self.paths[root], name);
+        defer std.testing.allocator.free(uri);
+        return self.library.files.resolveByUri(self.bindings[root].volume_id, uri);
+    }
+
+    fn bytesHashOf(self: *TwinRoots, root: usize, name: []const u8) !storage.content_hash.Digest {
+        const uri = try pathUnder(std.testing.allocator, self.paths[root], name);
+        defer std.testing.allocator.free(uri);
+        return storage.content_hash.fromPath(std.testing.io, uri);
+    }
+
+    fn contentHashOf(self: *TwinRoots, file_id: i64) !?storage.content_hash.Digest {
+        var statement = try self.library.database.prepare(
+            "SELECT content_hash, content_hash_algorithm FROM files WHERE id=?1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        const digest = database.columns.digestColumn(statement, 0) orelse {
+            try std.testing.expect(statement.columnIsNull(1));
+            return null;
+        };
+        try std.testing.expectEqual(@as(i64, 1), statement.columnInt64(1));
+        return digest;
+    }
+
+    fn expectNoSecondPresentPath(self: *TwinRoots, file_id: i64) !void {
+        const second = try self.library.locations.secondPresentPath(std.testing.allocator, file_id);
+        defer if (second) |path| std.testing.allocator.free(path);
+        try std.testing.expectEqual(@as(?[]u8, null), second);
+    }
+};
+
+test "a byte-identical copy of a scanned file joins it and records the content hash of their bytes" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-identical-copy?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    _ = try twins.scan(0);
+    const file_id = (try twins.fileAt(0, "one.flac")).?;
+    try std.testing.expectEqual(@as(?storage.content_hash.Digest, null), try twins.contentHashOf(file_id));
+
+    try twins.write(0, "copy.flac", 0, 1);
+    const rescan = try twins.scan(0);
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+    try std.testing.expectEqual(file_id, (try twins.fileAt(0, "copy.flac")).?);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.locations.countPresent());
+    try std.testing.expectEqual(
+        @as(?storage.content_hash.Digest, try twins.bytesHashOf(0, "one.flac")),
+        try twins.contentHashOf(file_id),
+    );
+    const second = (try twins.library.locations.secondPresentPath(std.testing.allocator, file_id)).?;
+    std.testing.allocator.free(second);
+}
+
+test "a file whose quick hash matches a scanned file's and whose bytes do not is a file of its own" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-quick-hash-twin?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    _ = try twins.scan(0);
+    const one = (try twins.fileAt(0, "one.flac")).?;
+
+    try twins.write(0, "two.flac", 0, 2);
+    _ = try twins.scan(0);
+    const two = (try twins.fileAt(0, "two.flac")).?;
+    try std.testing.expect(two != one);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+    try twins.expectNoSecondPresentPath(one);
+    try twins.expectNoSecondPresentPath(two);
+    try std.testing.expectEqual(
+        @as(?storage.content_hash.Digest, try twins.bytesHashOf(0, "two.flac")),
+        try twins.contentHashOf(two),
+    );
+}
+
+test "files of one batch whose quick hashes collide join only those with equal bytes" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-quick-hash-batch?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    try twins.write(0, "two.flac", 0, 2);
+    try twins.write(0, "copy.flac", 0, 1);
+    const scanned = try twins.scan(0);
+    try std.testing.expectEqual(@as(u64, 3), scanned.changed);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+    const one = (try twins.fileAt(0, "one.flac")).?;
+    const two = (try twins.fileAt(0, "two.flac")).?;
+    try std.testing.expect(two != one);
+    try std.testing.expectEqual(one, (try twins.fileAt(0, "copy.flac")).?);
+    try twins.expectNoSecondPresentPath(two);
+}
+
+test "a file whose recorded content hash differs from a copy's bytes leaves the copy a file of its own" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-content-hash-differs?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    try twins.write(0, "copy.flac", 0, 1);
+    _ = try twins.scan(0);
+    const one = (try twins.fileAt(0, "one.flac")).?;
+    try std.testing.expect(try twins.contentHashOf(one) != null);
+
+    try twins.write(1, "two.flac", 0, 2);
+    _ = try twins.scan(1);
+    const two = (try twins.fileAt(1, "two.flac")).?;
+    try std.testing.expect(two != one);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+}
+
+test "a copy of a file whose other location cannot be read becomes a file of its own and the scan goes on" {
+    try skipWhenPermissionsAreIgnored();
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-candidate-unreadable?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    _ = try twins.scan(0);
+    const one = (try twins.fileAt(0, "one.flac")).?;
+    try twins.temporary.dir.setFilePermissions(std.testing.io, "here/one.flac", .fromMode(0), .{});
+    defer twins.temporary.dir.setFilePermissions(std.testing.io, "here/one.flac", .default_file, .{}) catch {};
+
+    try twins.write(1, "copy.flac", 0, 1);
+    const scanned = try twins.scan(1);
+    try std.testing.expectEqual(@as(u64, 1), scanned.changed);
+    try std.testing.expectEqual(@as(u64, 0), scanned.errors);
+    const copy = (try twins.fileAt(1, "copy.flac")).?;
+    try std.testing.expect(copy != one);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+}
+
+fn expectMoveAcrossVolumesJoins(name: [:0]const u8, sweep_old_root: bool) !void {
+    var twins: TwinRoots = undefined;
+    try twins.init(name);
+    defer twins.deinit();
+    try twins.write(0, "song.flac", 0, 1);
+    _ = try twins.scan(0);
+    const file_id = (try twins.fileAt(0, "song.flac")).?;
+    try twins.library.orca_metadata.upsert(.{
+        .file_id = file_id,
+        .field = .title,
+        .value = "Curated Title",
+        .provenance = .user,
+        .locked = true,
+    });
+
+    try twins.temporary.dir.rename("here/song.flac", twins.temporary.dir, "there/song.flac", std.testing.io);
+    if (sweep_old_root) _ = try twins.scan(0);
+    const moved = try twins.scan(1);
+    try std.testing.expectEqual(@as(u64, 1), moved.changed);
+    try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+    try std.testing.expectEqual(file_id, (try twins.fileAt(1, "song.flac")).?);
+    try std.testing.expectEqual(
+        @as(?storage.content_hash.Digest, try twins.bytesHashOf(1, "song.flac")),
+        try twins.contentHashOf(file_id),
+    );
+    const kept = (try twins.library.orca_metadata.get(std.testing.allocator, file_id, .title)).?;
+    defer kept.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Curated Title", kept.text);
+    try std.testing.expect(kept.locked);
+}
+
+test "a file moved to another volume after its old root was swept keeps its file and Orca values" {
+    try expectMoveAcrossVolumesJoins("file:orca-scanner-moved-volume-swept?mode=memory&cache=shared", true);
+}
+
+test "a file moved to another volume before its old root is rescanned keeps its file and Orca values" {
+    try expectMoveAcrossVolumesJoins("file:orca-scanner-moved-volume-unswept?mode=memory&cache=shared", false);
+}
+
+test "a scan of files whose quick hashes all differ takes no content hash" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-no-collisions?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 1, 1);
+    try twins.write(0, "two.flac", 2, 1);
+    try twins.write(1, "three.flac", 3, 1);
+    for ([_]bool{ false, true }) |reprobe| {
+        for (0..2) |root| _ = try twins.scanWith(root, reprobe);
+    }
+    try std.testing.expectEqual(@as(u64, 3), try twins.library.files.count());
+    var statement = try twins.library.database.prepare("SELECT count(*) FROM files WHERE content_hash IS NOT NULL;");
+    defer statement.deinit();
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    try std.testing.expectEqual(@as(i64, 0), statement.columnInt64(0));
+}
+
+test "a file whose bytes change under an unchanged quick hash forgets its content hash" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-content-hash-stale?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    try twins.write(0, "copy.flac", 0, 1);
+    _ = try twins.scan(0);
+    const file_id = (try twins.fileAt(0, "one.flac")).?;
+    try twins.temporary.dir.deleteFile(std.testing.io, "here/copy.flac");
+    _ = try twins.scan(0);
+    try std.testing.expect(try twins.contentHashOf(file_id) != null);
+
+    try twins.write(0, "one.flac", 0, 2);
+    try twins.temporary.dir.setTimestamps(std.testing.io, "here/one.flac", .{
+        .modify_timestamp = .{ .new = .fromNanoseconds(1_800_000_000 * std.time.ns_per_s) },
+    });
+    const edited = try twins.scan(0);
+    try std.testing.expectEqual(@as(u64, 1), edited.changed);
+    try std.testing.expectEqual(file_id, (try twins.fileAt(0, "one.flac")).?);
+    try std.testing.expectEqual(@as(?storage.content_hash.Digest, null), try twins.contentHashOf(file_id));
+
+    try twins.write(1, "old.flac", 0, 1);
+    _ = try twins.scan(1);
+    try std.testing.expect((try twins.fileAt(1, "old.flac")).? != file_id);
+    try std.testing.expectEqual(@as(u64, 2), try twins.library.files.count());
+}
+
+test "a copy of a file with no content hash joins it through a location still as recorded when another changed" {
+    var twins: TwinRoots = undefined;
+    try twins.init("file:orca-scanner-nominee-stale-location?mode=memory&cache=shared");
+    defer twins.deinit();
+    try twins.write(0, "one.flac", 0, 1);
+    try twins.write(0, "copy.flac", 0, 1);
+    _ = try twins.scan(0);
+    const file_id = (try twins.fileAt(0, "one.flac")).?;
+    try twins.library.database.exec("UPDATE files SET content_hash = NULL, content_hash_algorithm = NULL;");
+    var first = try twins.library.database.prepare("SELECT uri FROM locations WHERE file_id = ?1 ORDER BY id LIMIT 1;");
+    defer first.deinit();
+    try first.bindInt64(1, file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try first.step());
+    try std.Io.Dir.cwd().setTimestamps(std.testing.io, first.columnText(0), .{
+        .modify_timestamp = .{ .new = .fromNanoseconds(1_800_000_000 * std.time.ns_per_s) },
+    });
+
+    try twins.write(1, "third.flac", 0, 1);
+    _ = try twins.scan(1);
+    try std.testing.expectEqual(file_id, (try twins.fileAt(1, "third.flac")).?);
+    try std.testing.expectEqual(@as(u64, 1), try twins.library.files.count());
+    try std.testing.expectEqual(
+        @as(?storage.content_hash.Digest, try twins.bytesHashOf(1, "third.flac")),
+        try twins.contentHashOf(file_id),
+    );
 }
 
 test "an image in a scanned folder is listed as a front cover beside the music, never as a Track" {

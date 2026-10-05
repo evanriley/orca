@@ -21,7 +21,9 @@ A scan re-finds a file through a cascade, cheapest first:
 2. `locations(volume_id, native_inode, size_bytes, modified_ns)` — a rename or
    move within one filesystem.
 3. `files.quick_hash` — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size), from
-   `storage/quick_hash.zig`. Catches copies, cross-volume moves and restores.
+   `storage/quick_hash.zig`, nominates; `files.content_hash` — BLAKE3-256 over
+   every byte, from `storage/content_hash.zig` — confirms. Catches copies,
+   cross-volume moves and restores.
 4. `files.audio_hash` — over the decoded audio payload only, so a tag write
    does not change it. Written by `library/analysis_pass.zig`, which is the
    only pass that decodes a whole file, and never by a scanner. It holds for
@@ -32,12 +34,52 @@ A scan re-finds a file through a cascade, cheapest first:
    no hash. Only equal tier-1 hashes are the same audio (see
    [analysis.md](analysis.md#the-audio-hash)).
 
+**Tier 3 nominates; the content hash confirms.** Files of one size and the same
+first and last 64 KiB can differ in the middle, so a quick hash alone never
+joins a path to a file. A nominee — a file recording the path's quick hash — is
+joined when:
+
+- it records a `content_hash` with `content_hash_algorithm` 1 equal to the
+  path's; or
+- it records none, and the bytes now at one of its other `present` or
+  `unverified` locations, still with the inode, size and mtime that location
+  records, hash the same.
+
+A nominee is undecided when none of those locations can be read as recorded
+and something is at one of them that cannot be read or has changed since a
+scan recorded it. So is every nominee past the eighth for one quick hash, and
+one with no content hash and more than four other locations when none of the
+first four is read as recorded. An undecided nominee is never joined, and the path becomes a file of its own unless another
+nominee confirms. A join records the path's content hash on the file, as does a
+new file whose bytes were hashed.
+
+Only a path that reaches tier 3, or that shares a quick hash with another path
+in the same scan batch, is hashed whole; a scan with no collision reads no more
+than before. The hashes are taken before the batch's transaction begins,
+because nothing under the write lane reads a file. Inside it,
+`FileRepository.resolveForBytes` re-reads the nominees and their locations and
+treats one it holds no hash for as undecided, so a candidate that appeared
+since makes the path a new file rather than an unproven join. The hashes are
+written in the transaction that records their paths, so a cancelled or failed
+batch leaves none behind. A path re-found through tier 1 or 2 is not hashed,
+so a file re-found at an inode, size and mtime none of its locations records
+forgets its content hash: it may no longer hold the bytes the hash describes.
+
+Known limit: a nominee with no content hash and no location left to read —
+each is `missing`, or nothing is at its path — is joined on the quick hash
+alone, and takes the path's content hash, when no other nominee confirms, is
+undecided, or has no location left either. That is a cross-volume move or a restore whose old path is gone,
+and the join keeps Orca's values and locks across it. A different file of one
+size, head and tail that appears where only such a file was known joins it the
+same way.
+
 **A file is one set of bytes.** Byte-identical copies are one file at several
 locations: a new path holding bytes the Library already has joins that file
-through tier 3. When a changed path resolves to a file that is still present at
-another path and records a different `quick_hash`, the path has *diverged*:
-the other path still holds the bytes the file describes, so the path gets a
-file of its own instead of rewriting the shared one.
+through tier 3 once its content hash confirms them. When a changed path
+resolves to a file that is still present at another path and records a
+different `quick_hash`, the path has *diverged*: the other path still holds the
+bytes the file describes, so the path gets a file of its own instead of
+rewriting the shared one.
 `FileRepository.resolveForBytes` decides this and `forkLocked` makes the new
 file, in the scan batch's transaction, and `resolveOrCreateFile` applies the
 same rule. The split moves the location to the new file, copies Orca's values
@@ -561,8 +603,9 @@ Migration 56 adds `mutation_operations.expected_content_hash` and
 the index `files_content_hash` on `files(content_hash)`. Existing rows keep NULL
 in all three columns; nothing is backfilled. The file update that records a
 different `quick_hash` clears `content_hash` and `content_hash_algorithm`
-together, as it clears `audio_hash`. Neither the scanner nor the executor writes
-`files.content_hash`. Startup recovery reads the journal before this
+together, as it clears `audio_hash`. The executor does not write
+`files.content_hash`; the identity cascade records it when tier 3 hashes a path
+(see [Identity](#identity)). Startup recovery reads the journal before this
 migration runs, so `MutationJournalRepository.get` reads NULL content hashes
 from a table that does not have the columns.
 

@@ -677,9 +677,9 @@ test "each exact duplicate names the other file, and keeps its finding when that
 }
 
 test "a byte-identical copy is one file at two paths and is still reported" {
-    // The scanner's identity cascade resolves a copy by quick hash to the row
-    // that already exists, so it never becomes a second `files` row and no
-    // amount of comparing rows could find it. The Library records it as one
+    // The scanner's identity cascade joins a copy to the row that already
+    // exists once their content hashes are equal, so it never becomes a second
+    // `files` row and no amount of comparing rows could find it. The Library records it as one
     // file at two present locations, which is the same audio stored twice and
     // is exactly what a person asking about duplicates means.
     var fixture = try Fixture.init("file:orca-duplicate-copy?mode=memory&cache=shared");
