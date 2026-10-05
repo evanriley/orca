@@ -1532,6 +1532,12 @@
 
 ### Fixed
 
+- **Long sessions pick up renewed server certificates.** The HTTP client
+  read the CA bundle and the current time once, at its first TLS
+  connection, and the ListenBrainz worker keeps one client for the whole
+  session, so a certificate issued after Orca started failed as not yet
+  valid until a restart. A provider transport now reloads both before the
+  next request once they are an hour old.
 - **Files that only look alike stay apart.** A scan or `orca-cli analyze`
   made two different files one File when they shared their size and first
   and last 64 KiB, and the duplicate scan then called them exact

@@ -769,8 +769,10 @@ fn retryableStatus(status: u16) bool {
 
 pub const StandardTransport = struct {
     client: std.http.Client,
+    trust_loaded_at: ?std.Io.Timestamp = null,
 
     const max_idle_connections = 16;
+    const trust_refresh_interval: std.Io.Duration = .fromSeconds(60 * 60);
 
     const Verdict = enum { canceled, timed_out, stopped };
 
@@ -812,6 +814,9 @@ pub const StandardTransport = struct {
         if (request.cancel) |flag| {
             if (flag.load(.acquire)) return error.Canceled;
         }
+        const requested_at = std.Io.Clock.boot.now(io);
+        try self.refreshTrust(requested_at);
+        defer self.noteTrustLoaded(requested_at);
         const started_ms = std.Io.Clock.awake.now(io).toMilliseconds();
         var outcomes: [2]Outcome = undefined;
         var race: Race = .init(io, &outcomes);
@@ -840,6 +845,26 @@ pub const StandardTransport = struct {
                 };
             },
         }
+    }
+
+    fn trustRefreshDue(loaded_at: std.Io.Timestamp, now: std.Io.Timestamp) bool {
+        return loaded_at.durationTo(now).nanoseconds >= trust_refresh_interval.nanoseconds;
+    }
+
+    /// Called only between requests: `std.http.Client` reads `now` outside
+    /// its lock while it opens a TLS connection.
+    fn refreshTrust(self: *StandardTransport, now: std.Io.Timestamp) std.Io.Cancelable!void {
+        const loaded_at = self.trust_loaded_at orelse return;
+        if (!trustRefreshDue(loaded_at, now)) return;
+        const io = self.client.io;
+        try self.client.ca_bundle_lock.lock(io);
+        defer self.client.ca_bundle_lock.unlock(io);
+        self.client.now = null;
+        self.trust_loaded_at = null;
+    }
+
+    fn noteTrustLoaded(self: *StandardTransport, requested_at: std.Io.Timestamp) void {
+        if (self.trust_loaded_at == null and self.client.now != null) self.trust_loaded_at = requested_at;
     }
 
     fn discardRemaining(race: *Race) void {
@@ -1388,6 +1413,60 @@ test "a transport without concurrency is a configuration error and is not retrie
         &.{},
     ));
     try std.testing.expect(std.Io.Clock.awake.now(threaded.io()).toMilliseconds() - started < 200);
+}
+
+test "trust is due for a refresh an hour after the bundle was loaded" {
+    const loaded_at: std.Io.Timestamp = .fromNanoseconds(5 * std.time.ns_per_s);
+    try std.testing.expect(!StandardTransport.trustRefreshDue(loaded_at, loaded_at));
+    try std.testing.expect(!StandardTransport.trustRefreshDue(loaded_at, loaded_at.addDuration(.fromSeconds(60 * 60 - 1))));
+    try std.testing.expect(StandardTransport.trustRefreshDue(loaded_at, loaded_at.addDuration(.fromSeconds(60 * 60))));
+    try std.testing.expect(StandardTransport.trustRefreshDue(loaded_at, loaded_at.addDuration(.fromSeconds(3 * 24 * 60 * 60))));
+}
+
+test "the client's trust is reset before a request once due, and kept until then" {
+    var transport: StandardTransport = .init(std.testing.allocator, std.testing.io);
+    defer transport.deinit();
+    const requested_at: std.Io.Timestamp = .fromNanoseconds(100 * std.time.ns_per_s);
+    const loaded_now: std.Io.Timestamp = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s);
+
+    transport.noteTrustLoaded(requested_at);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), transport.trust_loaded_at);
+    transport.client.now = loaded_now;
+    transport.noteTrustLoaded(requested_at);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, requested_at), transport.trust_loaded_at);
+    transport.noteTrustLoaded(requested_at.addDuration(.fromSeconds(10)));
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, requested_at), transport.trust_loaded_at);
+
+    try transport.refreshTrust(requested_at.addDuration(.fromSeconds(60 * 60 - 1)));
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, loaded_now), transport.client.now);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, requested_at), transport.trust_loaded_at);
+
+    try transport.refreshTrust(requested_at.addDuration(.fromSeconds(60 * 60)));
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), transport.client.now);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), transport.trust_loaded_at);
+}
+
+test "a request through a transport whose trust is an hour old makes the client reload it" {
+    const io = std.testing.io;
+    var server = try LocalServer.listen(io);
+    defer server.deinit();
+    var serving = try io.concurrent(LocalServer.replyOnce, .{&server});
+    defer serving.cancel(io) catch {};
+    var transport: StandardTransport = .init(std.testing.allocator, io);
+    defer transport.deinit();
+    transport.client.now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s);
+    transport.trust_loaded_at = std.Io.Clock.boot.now(io).subDuration(.fromSeconds(60 * 60));
+    var system_clock: SystemClock = .{ .io = io };
+    const random: std.Random.IoSource = .{ .io = io };
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .identity = net_testing.test_identity, .request_timeout_ms = 5000 });
+
+    var url_buffer: [64]u8 = undefined;
+    const response = try gateway.execute(std.testing.allocator, .get, try server.url(&url_buffer), null, &.{});
+    defer response.deinit();
+    try serving.await(io);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), transport.client.now);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), transport.trust_loaded_at);
 }
 
 test "requests are spaced by the minimum interval" {
