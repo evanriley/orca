@@ -305,7 +305,8 @@ names each `Runtime` method the C ABI does not reach and why.
   submission, ListenBrainz scrobbling, idle maintenance, provider servers
   and a credential callback for the host's secure storage.
   `tests/c_abi_layout.zig` checks every struct and enum value against the
-  Zig side.
+  Zig side, and `tests/abi/compat.zig` checks `orca.h` against the released
+  0.8.1 header.
 
 ### Builds
 

@@ -177,6 +177,46 @@ pub fn build(b: *std.Build) void {
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
+    const released_header_translate = b.addTranslateC(.{
+        .root_source_file = b.path("tests/abi/orca-0.8.1.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const abi_compat_module = b.createModule(.{
+        .root_source_file = b.path("tests/abi/compat.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "orca_h", .module = orca_header_translate.createModule() },
+            .{ .name = "orca_h_released", .module = released_header_translate.createModule() },
+        },
+    });
+    abi_compat_module.linkLibrary(liborca);
+    const abi_compat_tests = b.addTest(.{
+        .name = "abi-compat",
+        .root_module = abi_compat_module,
+    });
+    const run_abi_compat_tests = b.addRunArtifact(abi_compat_tests);
+
+    const released_client_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    released_client_module.addCSourceFile(.{
+        .file = b.path("tests/abi/scan_stats_0_8_1.c"),
+        .flags = &.{"-std=c11"},
+    });
+    released_client_module.addIncludePath(b.path("tests/abi"));
+    released_client_module.linkLibrary(liborca);
+    const released_client = b.addExecutable(.{
+        .name = "abi-0.8.1-scan-stats",
+        .root_module = released_client_module,
+    });
+    const run_released_client = b.addRunArtifact(released_client);
+
     const c_abi_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -213,6 +253,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_c_abi_smoke.step);
+    const abi_compat_step = b.step("abi-compat", "Check orca.h keeps the layouts, values and functions of the released 0.8.1 header");
+    abi_compat_step.dependOn(&run_abi_compat_tests.step);
+    abi_compat_step.dependOn(&run_released_client.step);
+    test_step.dependOn(&run_abi_compat_tests.step);
+    test_step.dependOn(&run_released_client.step);
     if (target.result.os.tag == .linux) {
         const check_exports = b.addSystemCommand(&.{"bash"});
         check_exports.addFileArg(b.path("scripts/check-exports.sh"));

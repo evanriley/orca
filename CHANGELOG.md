@@ -348,9 +348,11 @@
   (the file a scan or reconcile is reading) and `albums_found` (distinct
   Releases written that still exist). `orca-cli estimate PATH` prints
   `audio_files=N truncated=no|yes`, and `orca-cli scan` prints `progress`
-  lines with `stage=`, `files=`, `albums=` and `current=`. The C ABI appends
-  `albums_found`, `stage` and `current_path` to `orca_scan_stats` and adds
-  `orca_scan_stage`, `orca_folder_estimate` and `orca_estimate_audio_files`.
+  lines with `stage=`, `files=`, `albums=` and `current=`. The C ABI adds
+  `orca_scan_stats_v2`, which holds the 0.8.1 `orca_scan_stats` as `base`
+  with `albums_found`, `stage` and `current_path`, read through
+  `orca_library_scan_stats_v2`, and `orca_scan_stage`,
+  `orca_folder_estimate` and `orca_estimate_audio_files`.
 - **Job pause, waiting queue, history and progress telemetry.** A Library
   runs one host Job at a time; one started while another holds the slot, or
   while the Library is paused, is returned in the new `waiting` state and
@@ -389,7 +391,7 @@
   and its `signal:` line ends with `replay_gain_source=` and the settings.
   The C ABI adds `ORCA_REPLAY_GAIN_SMART`, `orca_untagged_fallback`,
   `orca_replay_gain_settings`, the matching `orca_player_*` setters and
-  getters, and the new `orca_signal_path_view` fields at its end.
+  getters, and the settings in `orca_signal_path_view_v2`.
 - **Playback failures, root availability and relocation.**
   `PlayerStatus.last_failure` names the last queue entry that could not be
   opened, as a `PlaybackFailure` with its Track and a reason (`file_missing`,
@@ -450,8 +452,8 @@
   integer format adds `sample_format_conversion`, and a rate other than the
   stream's `sample_rate_conversion`. `orca-cli play-tracks` ends its
   `signal:` line with `device_format= device_bits= device_rate=`, or
-  `device_format=-`. The C ABI appends `orca_device_format` to
-  `orca_signal_path_view` with `orca_device_sample_format`. orca-gtk's
+  `device_format=-`. The C ABI adds `orca_device_format` to
+  `orca_signal_path_view_v2` with `orca_device_sample_format`. orca-gtk's
   Output stage shows the device's format and the float stream converted into
   it, and the closing verdict names the conversion or says the format is
   unknown.
@@ -782,8 +784,8 @@
   `orca_parametric_equalizer_parse_apo`,
   `orca_parametric_equalizer_write_apo`, `orca_parametric_equalizer`,
   `orca_parametric_filter`, `orca_parametric_filter_kind`, the
-  `ORCA_PARAMETRIC_*` limits, and `parametric` and `has_parametric` at the
-  end of `orca_signal_path_view`. `orca-cli play-tracks` takes
+  `ORCA_PARAMETRIC_*` limits, and `parametric` and `has_parametric` in
+  `orca_signal_path_view_v2`. `orca-cli play-tracks` takes
   `--peq=FILE`, and `peq-check` and `peq-response` validate a file and
   print its curve. `dsp-bench` also times both equalizers.
 - **Artist totals, release types and appearances.**
@@ -936,7 +938,9 @@
   dates. `TrackSort` appends `play_count`, `last_played` and `year`. Play counts
   belong to the recording, so two files of one song played once each show two
   plays on both; migration 32 adds `recording_play_stats`, filled from the
-  listen history. Track and disc totals come from the tags of any of the Track's
+  listen history. In the C ABI, `play_count` in `orca_track_details_view`,
+  `orca_play_stats` and `orca_library_track_play_stats` changes meaning to
+  match: 0.8.1 counted the file's listens. Track and disc totals come from the tags of any of the Track's
   files, else the larger of the number of Tracks on the disc and its highest
   track number, and the Release's disc count. The advisory stays unknown on
   files scanned before this version until a rescan reads them. The C ABI adds
@@ -1109,6 +1113,14 @@
   a whole. Delete removes the selected entry of a manual playlist, and smart
   playlists ignore it. In the command palette and search page, Shift+Enter
   plays a track or album result next and Ctrl+Enter plays it now.
+- **A check against the 0.8.1 C ABI.** `zig build test` and
+  `zig build abi-compat` compare `orca.h` with the released header in
+  `tests/abi/orca-0.8.1.h`: every struct's size, alignment and field
+  offsets, every enum constant and define, every function's signature, and
+  that liborca still exports each function. A client built against that
+  header checks that `orca_library_scan_stats` writes nothing past its
+  88-byte struct. `orca_player_signal_path_v2` hands the
+  `orca_signal_path_view_v2` that holds the 0.8.1 view as `base`.
 
 ### Changed
 

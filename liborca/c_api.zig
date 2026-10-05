@@ -1146,6 +1146,10 @@ pub const SignalPathView = extern struct {
     replay_gain_source: u8,
     device_quantum_frames: u32,
     codec: StringView,
+};
+
+pub const SignalPathViewV2 = extern struct {
+    base: SignalPathView,
     parametric: ParametricEqualizerView,
     has_parametric: u8,
     has_replay_gain_track: u8,
@@ -1160,7 +1164,8 @@ pub const SignalPathView = extern struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(SignalPathView) == 416);
+    std.debug.assert(@sizeOf(SignalPathView) == 128);
+    std.debug.assert(@sizeOf(SignalPathViewV2) == 416);
 }
 
 pub const ReplayGainSettingsView = extern struct {
@@ -1172,6 +1177,7 @@ pub const ReplayGainSettingsView = extern struct {
 };
 
 pub const SignalPathCallback = *const fn (?*anyopaque, *const SignalPathView) callconv(.c) void;
+pub const SignalPathV2Callback = *const fn (?*anyopaque, *const SignalPathViewV2) callconv(.c) void;
 
 pub const ZoneStatus = extern struct {
     output_state: u8,
@@ -1247,11 +1253,15 @@ pub const ScanStats = extern struct {
     releases_written: u64,
     cancelled: u8,
     _reserved: [7]u8 = @splat(0),
+};
+
+pub const ScanStatsV2 = extern struct {
+    base: ScanStats,
     albums_found: u64,
     stage: u8,
-    _reserved2: [1]u8 = @splat(0),
+    _reserved: [1]u8 = @splat(0),
     current_path_length: u16,
-    _reserved3: [4]u8 = @splat(0),
+    _reserved2: [4]u8 = @splat(0),
     current_path: [512]u8,
 };
 
@@ -5829,7 +5839,31 @@ pub export fn orca_library_scan_stats(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const stats = box.runtime.jobScanStats(importJob(job_handle)) catch |err|
         return box.fail(@src(), err);
+    destination.* = exportScanStats(&stats);
+    return .ok;
+}
+
+pub export fn orca_library_scan_stats_v2(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*ScanStatsV2,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.jobScanStats(importJob(job_handle)) catch |err|
+        return box.fail(@src(), err);
     destination.* = .{
+        .base = exportScanStats(&stats),
+        .albums_found = stats.albums_found,
+        .stage = exportScanStage(stats.stage),
+        .current_path_length = stats.current_path.len,
+        .current_path = stats.current_path.bytes,
+    };
+    return .ok;
+}
+
+fn exportScanStats(stats: *const core.runtime.ScanStats) ScanStats {
+    return .{
         .files_seen = stats.files_seen,
         .changed = stats.changed,
         .unchanged = stats.unchanged,
@@ -5841,12 +5875,7 @@ pub export fn orca_library_scan_stats(
         .tracks_written = stats.tracks_written,
         .releases_written = stats.releases_written,
         .cancelled = @intFromBool(stats.cancelled),
-        .albums_found = stats.albums_found,
-        .stage = exportScanStage(stats.stage),
-        .current_path_length = stats.current_path.len,
-        .current_path = stats.current_path.bytes,
     };
-    return .ok;
 }
 
 pub export fn orca_estimate_audio_files(
@@ -6415,6 +6444,21 @@ pub export fn orca_player_signal_path(
     const path = box.runtime.playerSignalPath(importPlayer(player)) catch |err|
         return box.fail(@src(), err);
     const view = exportSignalPath(&path);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_player_signal_path_v2(
+    runtime: ?*Runtime,
+    player: Handle,
+    context: ?*anyopaque,
+    callback: ?SignalPathV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const path = box.runtime.playerSignalPath(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    const view = exportSignalPathV2(&path);
     visit(context, &view);
     return .ok;
 }
@@ -7852,6 +7896,14 @@ fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
         .replay_gain_source = exportReplayGainSource(path.replay_gain_source),
         .device_quantum_frames = path.device_quantum_frames orelse 0,
         .codec = stringView(path.codec orelse ""),
+    };
+    for (path.reasonList(), 0..) |reason, index| view.reasons[index] = exportSignalReason(reason);
+    return view;
+}
+
+fn exportSignalPathV2(path: *const audio.dsp.SignalPath) SignalPathViewV2 {
+    return .{
+        .base = exportSignalPath(path),
         .parametric = if (path.parametric) |*value| exportParametricEqualizer(value) else std.mem.zeroes(ParametricEqualizerView),
         .has_parametric = @intFromBool(path.parametric != null),
         .has_replay_gain_track = @intFromBool(path.replay_gain_track_db != null),
@@ -7862,8 +7914,6 @@ fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
         .peak_limited = @intFromBool(path.peak_limited),
         .device_format = exportDeviceFormat(path.device_format),
     };
-    for (path.reasonList(), 0..) |reason, index| view.reasons[index] = exportSignalReason(reason);
-    return view;
 }
 
 pub fn exportDeviceKind(kind: audio.backend.DeviceKind) u8 {
@@ -9293,6 +9343,11 @@ fn captureSignalPath(context: ?*anyopaque, view: *const SignalPathView) callconv
     destination.* = view.*;
 }
 
+fn captureSignalPathV2(context: ?*anyopaque, view: *const SignalPathViewV2) callconv(.c) void {
+    const destination: *SignalPathViewV2 = @ptrCast(@alignCast(context.?));
+    destination.* = view.*;
+}
+
 test "a Player with no output reports a signal path with no source, no output and only the processing it applies" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
@@ -9311,8 +9366,15 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(exportDeviceKind(.unknown), path.output_kind);
     try std.testing.expectEqual(@as(u8, 0), path.has_device_quantum);
     try std.testing.expectEqual(exportReplayGainSource(.none), path.replay_gain_source);
-    try std.testing.expectEqual(@as(u8, 0), path.has_replay_gain_track);
-    try std.testing.expectEqual(std.mem.zeroes(DeviceFormatView), path.device_format);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_signal_path_v2(runtime, player, null, null));
+    var path_v2: SignalPathViewV2 = std.mem.zeroes(SignalPathViewV2);
+    try std.testing.expectEqual(Status.ok, orca_player_signal_path_v2(runtime, player, &path_v2, captureSignalPathV2));
+    try std.testing.expectEqual(path.bit_perfect_eligible, path_v2.base.bit_perfect_eligible);
+    try std.testing.expectEqual(path.reason_count, path_v2.base.reason_count);
+    try std.testing.expectEqual(@as(u8, 0), path_v2.has_parametric);
+    try std.testing.expectEqual(@as(u8, 0), path_v2.has_replay_gain_track);
+    try std.testing.expectEqual(std.mem.zeroes(DeviceFormatView), path_v2.device_format);
 
     try std.testing.expectEqual(Status.ok, orca_player_set_crossfeed(runtime, player, 1, 0.5));
     try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
@@ -9344,8 +9406,8 @@ test "ReplayGain settings read back clamped, refuse unknown values and reach the
     try std.testing.expectEqual(Status.ok, orca_player_replay_gain_settings(runtime, player, &settings));
     try std.testing.expectEqual(ReplayGainSettingsView{ .preamp_db = 15, .mode = 3, .fallback = 0, .peak_protection = 0 }, settings);
 
-    var path: SignalPathView = std.mem.zeroes(SignalPathView);
-    try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
+    var path: SignalPathViewV2 = std.mem.zeroes(SignalPathViewV2);
+    try std.testing.expectEqual(Status.ok, orca_player_signal_path_v2(runtime, player, &path, captureSignalPathV2));
     try std.testing.expectEqual(@as(f32, 15), path.preamp_db);
     try std.testing.expectEqual(@as(u8, 0), path.peak_protection);
     try std.testing.expectEqual(exportUntaggedFallback(.minus_6_db), path.fallback);

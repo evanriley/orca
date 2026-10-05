@@ -235,12 +235,13 @@ The boundary covers the whole engine, not a fragment of it:
   atomically, in the form of `orca-cli changes`.
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
-  `orca_library_scan_stats` observe it. Scan progress is the files walked
-  out of the files the walk will reach, which the Job counts first, reading
-  directories only; `has_total = 0` until that count is done. A scan projects
-  as it commits;
-  `orca_library_start_projection` reprojects without a walk.
-  `orca_library_start_reconcile` walks only the given directories of one
+  `orca_library_scan_stats` observe it. `orca_library_scan_stats_v2` returns
+  those stats as `base` with the job's `orca_scan_stage`, the Releases found
+  so far and the file a scan or reconcile is reading. Scan progress is the
+  files walked out of the files the walk will reach, which the Job counts
+  first, reading directories only; `has_total = 0` until that count is done.
+  A scan projects as it commits; `orca_library_start_projection` reprojects
+  without a walk. `orca_library_start_reconcile` walks only the given directories of one
   root, or the whole root when given none, and reports as
   `ORCA_JOB_KIND_RECONCILE`. `orca_library_start_analysis` measures the files
   not measured yet, `orca_analysis_options.threads` at once; zero takes
@@ -309,7 +310,10 @@ The boundary covers the whole engine, not a fragment of it:
   format and codec, the output and device formats, the processing applied and
   each `orca_signal_reason` the path is not bit-perfect, with the device's
   period in `device_quantum_frames` (valid when `has_device_quantum`) and how
-  it is attached in `output_kind`, an `orca_device_kind`. `device_format`, an
+  it is attached in `output_kind`, an `orca_device_kind`.
+  `orca_player_signal_path_v2` hands an `orca_signal_path_view_v2`: that
+  view as `base`, with the parametric equalizer, the ReplayGain settings,
+  peak limiting and `device_format`. `device_format`, an
   `orca_device_format`, is the format the device itself runs at: an
   `orca_device_sample_format`, bits per sample, rate and channels, or
   `ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN` with every field zero while the device
@@ -317,12 +321,13 @@ The boundary covers the whole engine, not a fragment of it:
 - **Parametric equalizer.** `orca_player_set_parametric_equalizer` turns it
   on with an `orca_parametric_equalizer` of up to 16 `orca_parametric_filter`s
   and a preamp, turning the ten-band equalizer off, or off with NULL;
-  `orca_player_parametric_equalizer_get` reads it back, and the signal path
-  carries it as `parametric` with `has_parametric`. The `ORCA_PARAMETRIC_*`
-  defines state the ranges. Three calls take no runtime and work from any
-  thread: `orca_parametric_equalizer_response` fills the gain in dB at a
-  caller's frequencies for a curve view, `orca_parametric_equalizer_parse_apo`
-  reads EqualizerAPO text, and `orca_parametric_equalizer_write_apo` writes it
+  `orca_player_parametric_equalizer_get` reads it back, and
+  `orca_signal_path_view_v2` carries it as `parametric` with
+  `has_parametric`. The `ORCA_PARAMETRIC_*` defines state the ranges. Three
+  calls take no runtime and work from any thread:
+  `orca_parametric_equalizer_response` fills the gain in dB at a caller's
+  frequencies for a curve view, `orca_parametric_equalizer_parse_apo` reads
+  EqualizerAPO text, and `orca_parametric_equalizer_write_apo` writes it
   (called with capacity 0 first to learn the length).
 - **Devices and Zones.** Enumeration (`orca_enumerate_output_devices_v2`
   adds each device's `orca_device_kind`: USB, PCI, Bluetooth, HDMI, virtual
@@ -536,6 +541,17 @@ lib/liborca.so   -> liborca.so.0
 `liborca.so` exports exactly the functions `orca.h` declares; a version script
 hides everything else, and `zig build test` fails when the two differ
 (`scripts/check-exports.sh`).
+
+`tests/abi/orca-0.8.1.h` is the header of the 0.8.1 release. `zig build test`
+(and `zig build abi-compat` alone) fails when `orca.h` changes the size,
+alignment or a non-reserved field offset of any struct in it, the value of
+any of its enum constants or defines, or the parameters of any of its
+functions, or when liborca stops providing one of them
+(`tests/abi/compat.zig`). A client compiled against that header scans
+`fixtures/audio` and checks that `orca_library_scan_stats` writes nothing past
+its 88-byte struct (`tests/abi/scan_stats_0_8_1.c`). A struct that needs
+more fields gets a `_v2` that holds the old one as `base`, read through a new
+`_v2` function.
 
 ### Linking
 

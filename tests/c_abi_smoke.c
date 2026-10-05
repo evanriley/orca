@@ -1221,18 +1221,29 @@ static void capture_is_flac(void *context, const orca_track_details_view *detail
 
 struct signal_path_capture {
     uint32_t count;
-    orca_signal_path_view view;
+    orca_signal_path_view_v2 view;
     char codec[16];
 };
 
-static void capture_signal_path(void *context, const orca_signal_path_view *signal_path) {
+static void capture_signal_path(void *context, const orca_signal_path_view_v2 *signal_path) {
     struct signal_path_capture *capture = context;
     capture->count += 1;
     capture->view = *signal_path;
-    size_t length = signal_path->codec.length;
+    size_t length = signal_path->base.codec.length;
     if (length >= sizeof capture->codec) length = sizeof capture->codec - 1;
-    memcpy(capture->codec, signal_path->codec.pointer, length);
+    memcpy(capture->codec, signal_path->base.codec.pointer, length);
     capture->codec[length] = 0;
+}
+
+struct signal_path_v1_capture {
+    uint32_t count;
+    orca_signal_path_view view;
+};
+
+static void capture_signal_path_v1(void *context, const orca_signal_path_view *signal_path) {
+    struct signal_path_v1_capture *capture = context;
+    capture->count += 1;
+    capture->view = *signal_path;
 }
 
 static int has_reason(const orca_signal_path_view *signal_path, uint8_t reason) {
@@ -1244,9 +1255,17 @@ static int has_reason(const orca_signal_path_view *signal_path, uint8_t reason) 
 static int read_signal_path(orca_runtime *runtime, orca_handle player,
                             struct signal_path_capture *capture) {
     memset(capture, 0, sizeof *capture);
-    SMOKE_CHECK(orca_player_signal_path(runtime, player, capture, capture_signal_path) ==
+    SMOKE_CHECK(orca_player_signal_path_v2(runtime, player, capture, capture_signal_path) ==
                 ORCA_STATUS_OK);
     SMOKE_CHECK(capture->count == 1);
+    struct signal_path_v1_capture v1;
+    memset(&v1, 0, sizeof v1);
+    SMOKE_CHECK(orca_player_signal_path(runtime, player, &v1, capture_signal_path_v1) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(v1.count == 1);
+    SMOKE_CHECK(v1.view.has_source == capture->view.base.has_source);
+    SMOKE_CHECK(v1.view.has_equalizer == capture->view.base.has_equalizer);
+    SMOKE_CHECK(v1.view.codec.length == capture->view.base.codec.length);
     return 0;
 }
 
@@ -1296,21 +1315,21 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
         SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
         SMOKE_CHECK(drain_events(runtime) == 0);
         SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
-        heard = path.view.has_source && path.view.has_output && path.view.has_device_quantum &&
+        heard = path.view.base.has_source && path.view.base.has_output && path.view.base.has_device_quantum &&
                 strcmp(path.codec, "flac") == 0;
     }
     SMOKE_CHECK(heard);
-    SMOKE_CHECK(path.view.device_quantum_frames != 0);
-    SMOKE_CHECK(path.view.output_kind == ORCA_DEVICE_KIND_VIRTUAL);
+    SMOKE_CHECK(path.view.base.device_quantum_frames != 0);
+    SMOKE_CHECK(path.view.base.output_kind == ORCA_DEVICE_KIND_VIRTUAL);
     SMOKE_CHECK(path.view.device_format.sample_format == ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN);
     SMOKE_CHECK(path.view.device_format.sample_rate == 0);
-    SMOKE_CHECK(path.view.has_equalizer == 1);
-    SMOKE_CHECK(memcmp(&path.view.equalizer, &bass, sizeof bass) == 0);
-    SMOKE_CHECK(path.view.has_crossfeed == 1 && path.view.crossfeed == 0.5f);
-    SMOKE_CHECK(path.view.bit_perfect_eligible == 0);
-    SMOKE_CHECK(has_reason(&path.view, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING));
-    SMOKE_CHECK(!has_reason(&path.view, ORCA_SIGNAL_REASON_LOSSY_SOURCE));
-    SMOKE_CHECK(path.view.source.sample_rate != 0 && path.view.output.sample_rate != 0);
+    SMOKE_CHECK(path.view.base.has_equalizer == 1);
+    SMOKE_CHECK(memcmp(&path.view.base.equalizer, &bass, sizeof bass) == 0);
+    SMOKE_CHECK(path.view.base.has_crossfeed == 1 && path.view.base.crossfeed == 0.5f);
+    SMOKE_CHECK(path.view.base.bit_perfect_eligible == 0);
+    SMOKE_CHECK(has_reason(&path.view.base, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING));
+    SMOKE_CHECK(!has_reason(&path.view.base, ORCA_SIGNAL_REASON_LOSSY_SOURCE));
+    SMOKE_CHECK(path.view.base.source.sample_rate != 0 && path.view.base.output.sample_rate != 0);
 
     SMOKE_CHECK(orca_player_set_equalizer(runtime, player, 0) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_player_equalizer(runtime, player, &read_back, &enabled) == ORCA_STATUS_OK);
@@ -1325,13 +1344,13 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
         SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
         SMOKE_CHECK(drain_events(runtime) == 0);
         SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
-        unprocessed = path.view.has_source &&
-                      !has_reason(&path.view, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING);
+        unprocessed = path.view.base.has_source &&
+                      !has_reason(&path.view.base, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING);
     }
     SMOKE_CHECK(unprocessed);
-    SMOKE_CHECK(path.view.has_equalizer == 0 && path.view.has_crossfeed == 0);
-    SMOKE_CHECK(path.view.has_replay_gain == 0 && path.view.volume == 1.0f);
-    SMOKE_CHECK(path.view.replay_gain_source == ORCA_GAIN_SOURCE_NONE);
+    SMOKE_CHECK(path.view.base.has_equalizer == 0 && path.view.base.has_crossfeed == 0);
+    SMOKE_CHECK(path.view.base.has_replay_gain == 0 && path.view.base.volume == 1.0f);
+    SMOKE_CHECK(path.view.base.replay_gain_source == ORCA_GAIN_SOURCE_NONE);
     SMOKE_CHECK(path.view.has_replay_gain_track == 0);
     SMOKE_CHECK(strcmp(path.codec, "flac") == 0);
     SMOKE_CHECK(path.view.preamp_db == 0.0f && path.view.peak_protection == 1);
@@ -1480,19 +1499,19 @@ static int parametric_smoke(orca_runtime *runtime, orca_handle library, orca_han
         SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
         SMOKE_CHECK(drain_events(runtime) == 0);
         SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
-        heard = path.view.has_source && path.view.has_output && strcmp(path.codec, "flac") == 0;
+        heard = path.view.base.has_source && path.view.base.has_output && strcmp(path.codec, "flac") == 0;
     }
     SMOKE_CHECK(heard);
-    SMOKE_CHECK(path.view.has_parametric == 1 && path.view.has_equalizer == 0);
+    SMOKE_CHECK(path.view.has_parametric == 1 && path.view.base.has_equalizer == 0);
     SMOKE_CHECK(memcmp(&path.view.parametric, &correction, sizeof correction) == 0);
-    SMOKE_CHECK(has_reason(&path.view, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING));
+    SMOKE_CHECK(has_reason(&path.view.base, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING));
 
     SMOKE_CHECK(orca_player_set_equalizer(runtime, player, &bass) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_player_parametric_equalizer_get(runtime, player, &read_back, &has) ==
                 ORCA_STATUS_OK);
     SMOKE_CHECK(has == 0 && read_back.count == 0 && read_back.preamp_db == 0.0f);
     SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
-    SMOKE_CHECK(path.view.has_parametric == 0 && path.view.has_equalizer == 1);
+    SMOKE_CHECK(path.view.has_parametric == 0 && path.view.base.has_equalizer == 1);
 
     SMOKE_CHECK(orca_player_set_equalizer(runtime, player, 0) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_player_set_parametric_equalizer(runtime, player, 0) == ORCA_STATUS_OK);
@@ -4442,9 +4461,12 @@ int main(int argc, char **argv) {
     /* The scan projects as it commits: a scan that leaves no tracks behind has
      * not made the library browsable. */
     if (stats.tracks_written == 0) return 28;
-    if (stats.stage != ORCA_SCAN_STAGE_DONE) return 600;
-    if (stats.current_path_length != 0) return 601;
-    if (stats.albums_found == 0 || stats.albums_found > stats.releases_written) return 602;
+    orca_scan_stats_v2 progress;
+    if (orca_library_scan_stats_v2(runtime, scan_job, &progress) != ORCA_STATUS_OK) return 614;
+    if (memcmp(&progress.base, &stats, sizeof stats) != 0) return 615;
+    if (progress.stage != ORCA_SCAN_STAGE_DONE) return 600;
+    if (progress.current_path_length != 0) return 601;
+    if (progress.albums_found == 0 || progress.albums_found > stats.releases_written) return 602;
 
     /* The estimate counts by bytes exactly what the scan imported. */
     orca_folder_estimate estimate;

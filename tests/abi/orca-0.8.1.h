@@ -105,14 +105,6 @@ typedef enum orca_repeat_mode {
     ORCA_REPEAT_ONE = 2,
 } orca_repeat_mode;
 
-/* What orca_player_restore_state does with the saved queue: load it paused,
- * load it and play, or leave the Player as it is. */
-typedef enum orca_restore_mode {
-    ORCA_RESTORE_MODE_PAUSED = 0,
-    ORCA_RESTORE_MODE_PLAYING = 1,
-    ORCA_RESTORE_MODE_NONE = 2,
-} orca_restore_mode;
-
 typedef enum orca_render_policy {
     ORCA_RENDER_POLICY_ROBUST = 0,
     ORCA_RENDER_POLICY_INTERACTIVE = 1,
@@ -134,12 +126,6 @@ typedef enum orca_job_state {
     ORCA_JOB_CANCELLED = 3,
     ORCA_JOB_SUCCEEDED = 4,
     ORCA_JOB_FAILED = 5,
-    /* Held at its next cancellation poll by orca_job_pause or
-     * orca_library_pause_jobs; it keeps its thread until resumed or
-     * cancelled. */
-    ORCA_JOB_PAUSED = 6,
-    /* In its Library's waiting queue behind the Job holding the slot. */
-    ORCA_JOB_WAITING = 7,
 } orca_job_state;
 
 typedef enum orca_job_kind {
@@ -156,16 +142,6 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_ACOUSTID_SUBMISSION = 7,
     /* Writing an approved tag-write plan to files. */
     ORCA_JOB_KIND_MUTATION = 8,
-    /* Reading a Track's lyrics, and fetching them from LRCLIB. */
-    ORCA_JOB_KIND_LYRICS = 9,
-    /* Fetching an Artist's photo, biography, years active and links. */
-    ORCA_JOB_KIND_ARTIST_INFO = 10,
-    /* Release descriptions, or genres filled from MusicBrainz:
-     * orca_library_start_release_info and orca_library_start_genre_fill. */
-    ORCA_JOB_KIND_RELEASE_INFO = 11,
-    /* Finding where a Release's tracks disagree about its metadata. The
-     * ABI cannot start this Job yet; a history entry can name it. */
-    ORCA_JOB_KIND_CONSISTENCY = 12,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -180,16 +156,6 @@ typedef enum orca_feedback {
     ORCA_FEEDBACK_LOVED = 1,
     ORCA_FEEDBACK_HATED = 2,
 } orca_feedback;
-
-/* How long a play must be heard before it is kept as a listen. Only
- * ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES is ListenBrainz's rule: half the
- * track or four minutes, of a track of at least 30 seconds. A listen kept
- * under another policy that falls short of that rule is never sent. */
-typedef enum orca_listen_policy {
-    ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES = 0,
-    ORCA_LISTEN_POLICY_THIRTY_SECONDS = 1,
-    ORCA_LISTEN_POLICY_FULL_TRACK = 2,
-} orca_listen_policy;
 
 /* The `has_*` flags distinguish "zero" from "the library does not know". */
 typedef struct orca_track_view {
@@ -232,15 +198,6 @@ typedef enum orca_track_sort {
     /* Most recently loved first, or least recently when descending; Tracks
      * whose recording is not loved last either way. */
     ORCA_TRACK_SORT_LOVED = 8,
-    /* Fewest plays of the Track's recording first, or most when descending;
-     * every file of the recording counts. */
-    ORCA_TRACK_SORT_PLAY_COUNT = 9,
-    /* Least recently played first, or most recently when descending; Tracks
-     * never played last either way. */
-    ORCA_TRACK_SORT_LAST_PLAYED = 10,
-    /* Oldest Release year first, or newest when descending; undated Tracks
-     * last either way. */
-    ORCA_TRACK_SORT_YEAR = 11,
 } orca_track_sort;
 
 /* One bounded, ordered, filtered request for a page of Tracks.
@@ -262,61 +219,6 @@ typedef struct orca_track_query {
     uint32_t offset;
 } orca_track_query;
 
-/* Which Tracks orca_track_query_v2 keeps by the codec of the file each
- * plays. A Track whose file has no known codec is neither lossless nor
- * lossy. */
-typedef enum orca_track_format {
-    ORCA_TRACK_FORMAT_ANY = 0,
-    ORCA_TRACK_FORMAT_LOSSLESS = 1,
-    ORCA_TRACK_FORMAT_LOSSY = 2,
-} orca_track_format;
-
-/* orca_track_query with `has_*` flags in place of negative ids, and filters
- * that combine with AND. A nonzero `has_genre_id` keeps only the Tracks that
- * carry `genre_id`. `year_min` and `year_max`, each read when its `has_*`
- * flag is nonzero, bound the year of the Release's date inclusively and
- * leave out undated Tracks. A nonzero `min_sample_rate` keeps the Tracks
- * whose file runs at that many hertz or more; `explicit_only` those whose
- * advisory is ORCA_EXPLICIT_EXPLICIT. A nonempty `text` (the pointer may be
- * null when its length is 0) keeps the Tracks whose title, artist, album or
- * album artist holds a word beginning with each of its words, case and
- * diacritics ignored, and lists them by relevance in place of `sort`. A track search
- * has no count: orca_library_track_match_count_v2 refuses a nonempty
- * `text`. */
-typedef struct orca_track_query_v2 {
-    int64_t artist_id;
-    int64_t release_id;
-    int64_t genre_id;
-    int32_t year_min;
-    int32_t year_max;
-    uint32_t min_sample_rate;
-    uint8_t sort;  /* orca_track_sort */
-    uint8_t descending;
-    uint8_t loved_only;
-    uint8_t has_artist_id;
-    uint8_t has_release_id;
-    uint8_t has_genre_id;
-    uint8_t has_year_min;
-    uint8_t has_year_max;
-    uint8_t format;  /* orca_track_format */
-    uint8_t explicit_only;
-    uint8_t reserved[2];
-    uint32_t limit;
-    uint32_t offset;
-    orca_string_view text;
-} orca_track_query_v2;
-
-/* A recording's parental advisory, as its files' tags state it. */
-typedef enum orca_explicit {
-    /* No file states an advisory. */
-    ORCA_EXPLICIT_UNKNOWN = 0,
-    /* A file states that there is none. */
-    ORCA_EXPLICIT_NONE = 1,
-    ORCA_EXPLICIT_EXPLICIT = 2,
-    /* An edited version of explicit content. */
-    ORCA_EXPLICIT_CLEAN = 3,
-} orca_explicit;
-
 typedef struct orca_artist_view {
     int64_t id;
     uint32_t release_count;
@@ -330,19 +232,6 @@ typedef struct orca_artist_view {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_artist_callback)(void *context, const orca_artist_view *artist);
 
-/* An Artist with whether the user loved it (orca_library_set_artist_love)
- * and whether the Library stores a photo of it, which
- * orca_library_request_artwork returns for ORCA_ARTWORK_SUBJECT_ARTIST. */
-typedef struct orca_artist_view_v2 {
-    orca_artist_view base;
-    uint8_t loved;
-    uint8_t has_photo;
-    uint8_t reserved[6];
-} orca_artist_view_v2;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_artist_v2_callback)(void *context, const orca_artist_view_v2 *artist);
-
 typedef struct orca_release_view {
     int64_t id;
     int64_t album_artist_id;
@@ -355,9 +244,7 @@ typedef struct orca_release_view {
     uint8_t is_compilation;
     /* The album itself is loved, apart from any of its Tracks. */
     uint8_t loved;
-    /* orca_explicit: EXPLICIT when any Track is; else CLEAN, then NONE. */
-    uint8_t explicit;
-    uint8_t reserved[1];
+    uint8_t reserved[2];
     orca_string_view title;
     orca_string_view album_artist;
     /* Empty when the release has no date; a date is text, not a number, so it
@@ -379,8 +266,6 @@ typedef enum orca_release_sort {
     ORCA_RELEASE_SORT_RECENTLY_ADDED = 3,
     /* Most recently loved first; Releases that are not loved last. */
     ORCA_RELEASE_SORT_LOVED = 4,
-    /* Most listens of the Tracks' recordings first. */
-    ORCA_RELEASE_SORT_MOST_PLAYED = 5,
 } orca_release_sort;
 
 /* One bounded, ordered request for a page of Releases. `album_artist_id` of
@@ -406,216 +291,6 @@ typedef struct orca_artist_query {
     uint32_t offset;
 } orca_artist_query;
 
-/* Which Releases orca_release_query_v2 keeps by cover: one embedded in a
- * Track's file or fetched from the Cover Art Archive. */
-typedef enum orca_release_artwork {
-    ORCA_RELEASE_ARTWORK_ANY = 0,
-    ORCA_RELEASE_ARTWORK_PRESENT = 1,
-    ORCA_RELEASE_ARTWORK_ABSENT = 2,
-} orca_release_artwork;
-
-/* Which Releases orca_release_query_v2 keeps by release type, the
- * MusicBrainz primary type from the files' tags or, failing those, from
- * orca_library_release_info_fetch. ALBUM keeps "album" and "compilation",
- * and a Release whose type is unknown; EP_OR_SINGLE keeps "ep" and "single";
- * OTHER keeps every other type. */
-typedef enum orca_release_kind {
-    ORCA_RELEASE_KIND_ANY = 0,
-    ORCA_RELEASE_KIND_ALBUM = 1,
-    ORCA_RELEASE_KIND_EP_OR_SINGLE = 2,
-    ORCA_RELEASE_KIND_OTHER = 3,
-} orca_release_kind;
-
-/* orca_release_query with `has_*` flags in place of negative ids, and
- * filters that combine with AND. A nonzero
- * `has_genre_id` keeps the Releases with at least one Track that carries
- * `genre_id`. `high_resolution_only` keeps those with a Track whose file is
- * above 48 kHz or 16 bits; `needs_review_only` those whose
- * orca_release_facts_view `pending_reviews` is nonzero; `lossless_only`
- * those whose every Track plays a lossless file. `year_min` and `year_max`,
- * each read when its `has_*` flag is nonzero, bound the year of the release
- * date inclusively and leave out undated Releases. A nonempty `text` (the
- * pointer may be null when its length is 0) keeps the Releases whose title
- * or album artist holds a word beginning with each of its words, as
- * orca_library_search matches them, in the order `sort` gives; the count
- * honours it. A nonzero `has_appearing_artist_id` keeps the Releases with a
- * Track credited to `appearing_artist_id` that are not filed under that
- * Artist as album artist: the Releases they appear on. With
- * `has_album_artist_id`, a nonzero `own_releases_only` keeps only the
- * Releases filed under `album_artist_id` as album artist, leaving out those
- * the Artist only appears on; without it, the flag does nothing. */
-typedef struct orca_release_query_v2 {
-    int64_t album_artist_id;
-    int64_t genre_id;
-    int32_t year_min;
-    int32_t year_max;
-    uint8_t sort;  /* orca_release_sort */
-    uint8_t loved_only;
-    uint8_t has_album_artist_id;
-    uint8_t has_genre_id;
-    uint8_t high_resolution_only;
-    uint8_t needs_review_only;
-    uint8_t lossless_only;
-    uint8_t has_year_min;
-    uint8_t has_year_max;
-    uint8_t artwork;  /* orca_release_artwork */
-    uint8_t kind;  /* orca_release_kind */
-    uint8_t has_appearing_artist_id;
-    uint8_t own_releases_only;
-    uint8_t reserved[3];
-    uint32_t limit;
-    uint32_t offset;
-    orca_string_view text;
-    int64_t appearing_artist_id;
-} orca_release_query_v2;
-
-/* What orca_release_view leaves out, read from the files its Tracks play. */
-typedef struct orca_release_facts_view {
-    /* The codec every Track's file shares, such as "flac"; "mixed" when they
-     * differ; empty when none was probed. */
-    orca_string_view codec;
-    /* Such as "album"; empty when unknown. */
-    orca_string_view release_type;
-    /* The highest among the files; zero when unknown. */
-    uint32_t max_sample_rate;
-    uint32_t max_bit_depth;
-    /* Tracks with a pending match outside an album group, plus album groups
-     * with a pending correction of one of the Tracks. */
-    uint32_t pending_reviews;
-    /* Every Track plays a file in a lossless codec. */
-    uint8_t lossless;
-    uint8_t reserved[3];
-} orca_release_facts_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_release_facts_callback)(
-    void *context,
-    const orca_release_view *release,
-    const orca_release_facts_view *facts
-);
-
-/* Every order ends in the Artist id, so paging is a total order. */
-typedef enum orca_artist_sort {
-    /* By sort name. */
-    ORCA_ARTIST_SORT_NAME = 0,
-    /* Most Tracks first, counting every Track the Artist has, not only those
-     * in a filtered genre. */
-    ORCA_ARTIST_SORT_TRACK_COUNT = 1,
-    /* Most recently loved first, then the Artists not loved. */
-    ORCA_ARTIST_SORT_RECENTLY_LOVED = 2,
-    /* The Artist whose newest Release, in ORCA_RELEASE_SORT_RECENTLY_ADDED's
-     * order, came latest first; Artists with no Release last. */
-    ORCA_ARTIST_SORT_RECENTLY_ADDED = 3,
-} orca_artist_sort;
-
-/* orca_artist_query with a genre filter and a sort. A nonzero `has_genre_id`
- * keeps the Artists credited on a Track that carries `genre_id`, as the
- * Track's artist or as its Release's album artist. `loved_only` 1 keeps the
- * Artists the user loved; any value but 0 or 1 is INVALID_ARGUMENT. */
-typedef struct orca_artist_query_v2 {
-    orca_string_view filter;
-    int64_t genre_id;
-    uint32_t limit;
-    uint32_t offset;
-    uint8_t sort;  /* orca_artist_sort */
-    uint8_t has_genre_id;
-    uint8_t loved_only;
-    uint8_t reserved[5];
-} orca_artist_query_v2;
-
-/* Every order ends in the genre id, so paging is a total order. */
-typedef enum orca_genre_sort {
-    ORCA_GENRE_SORT_NAME = 0,
-    /* Most Tracks first. */
-    ORCA_GENRE_SORT_TRACK_COUNT = 1,
-} orca_genre_sort;
-
-/* One bounded request for a page of genres. `filter` keeps the genres whose
- * folded name contains it: case, spaces, hyphens, slashes and dots are
- * ignored, so "hip hop" finds "Hip-Hop" and "Alternative Hip Hop". An empty
- * filter (length 0, pointer may be null) keeps every genre. `limit` must be
- * between 1 and 512. */
-typedef struct orca_genre_query {
-    orca_string_view filter;
-    uint32_t limit;
-    uint32_t offset;
-    uint8_t sort;  /* orca_genre_sort */
-    uint8_t reserved[7];
-} orca_genre_query;
-
-/* A genre that at least one Track carries. Every count is over those
- * Tracks. */
-typedef struct orca_genre_view {
-    int64_t id;
-    /* Summed over the Tracks that declare a duration. */
-    int64_t total_duration_ms;
-    uint32_t track_count;
-    uint32_t release_count;
-    /* Track artists and the album artists of those Tracks' Releases. */
-    uint32_t artist_count;
-    uint8_t reserved[4];
-    orca_string_view name;
-} orca_genre_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_genre_callback)(void *context, const orca_genre_view *genre);
-
-/* What an orca_search_hit_view names; hits arrive in this order. */
-typedef enum orca_search_kind {
-    ORCA_SEARCH_KIND_ARTIST = 0,
-    ORCA_SEARCH_KIND_RELEASE = 1,
-    ORCA_SEARCH_KIND_TRACK = 2,
-    ORCA_SEARCH_KIND_PLAYLIST = 3,
-    ORCA_SEARCH_KIND_GENRE = 4,
-} orca_search_kind;
-
-/* The most hits of each kind orca_library_search returns, each at most 50. */
-typedef struct orca_search_limits {
-    uint8_t artists;
-    uint8_t releases;
-    uint8_t tracks;
-    uint8_t playlists;
-    uint8_t genres;
-    uint8_t reserved[3];
-} orca_search_limits;
-
-typedef struct orca_search_hit_view {
-    /* The id of the Artist, Release, Track, Playlist or genre `kind` names. */
-    int64_t id;
-    /* Its name or title. */
-    orca_string_view title;
-    /* A Release's album artist; a Track's artist and album, space separated;
-     * a Playlist's description; empty for an Artist or a genre. */
-    orca_string_view subtitle;
-    /* Lower is more relevant; comparable only within one kind of one search.
-     * For a Track, 0 when every word is a whole word of the title, 1 when
-     * every word begins a word of the title, 2 otherwise; for any other kind,
-     * bm25 over title and subtitle, title weighted higher. */
-    float rank;
-    uint8_t kind;  /* orca_search_kind */
-    uint8_t reserved[3];
-} orca_search_hit_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_search_hit_callback)(void *context, const orca_search_hit_view *hit);
-
-/* A genre and how many of a Release's or an Artist's Tracks carry it. */
-typedef struct orca_genre_count_view {
-    int64_t id;
-    uint32_t track_count;
-    uint8_t reserved[4];
-    orca_string_view name;
-} orca_genre_count_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_genre_count_callback)(void *context, const orca_genre_count_view *genre);
-
-/* `value` is valid only for the duration of this callback. */
-typedef void (*orca_string_callback)(void *context, const orca_string_view *value);
-
-/* `ids` is valid only for the duration of this callback. */
-typedef void (*orca_id_callback)(void *context, const int64_t *ids, size_t count);
-
 /* A Track with the ids it resolves to. */
 typedef struct orca_track_summary_view {
     orca_track_view track;
@@ -633,46 +308,6 @@ typedef struct orca_track_summary_view {
 typedef void (*orca_track_summary_callback)(
     void *context,
     const orca_track_summary_view *summary
-);
-
-/* What orca_track_summary_view leaves out, read from the file the Track
- * plays and its recording's listens. */
-typedef struct orca_track_facts_view {
-    /* Such as "flac" or "mp3"; empty when the file was never probed. */
-    orca_string_view codec;
-    /* Unix seconds at which a scan first saw the file. */
-    int64_t added_at;
-    /* Unix seconds at which the latest listen of the recording started. */
-    int64_t last_played_at;
-    /* Listens of the Track's recording, through any of its files. */
-    uint64_t play_count;
-    /* As the file states it; otherwise the number of the Release's Tracks on
-     * the disc. */
-    int64_t track_total;
-    /* As the file states it; otherwise the Release's disc count. */
-    int64_t disc_total;
-    /* Zero when unknown. */
-    uint32_t sample_rate;
-    uint32_t bit_depth;
-    /* The first four digits of the Release's date. */
-    int32_t year;
-    /* `codec` names an encoding that discards audio; zero for an unknown
-     * codec. */
-    uint8_t lossy;
-    uint8_t explicit;  /* orca_explicit */
-    uint8_t has_added_at;
-    uint8_t has_last_played_at;
-    uint8_t has_track_total;
-    uint8_t has_disc_total;
-    uint8_t has_year;
-    uint8_t reserved[5];
-} orca_track_facts_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_track_summary_facts_callback)(
-    void *context,
-    const orca_track_summary_view *summary,
-    const orca_track_facts_view *facts
 );
 
 /* Where a MusicBrainz ID came from. */
@@ -701,7 +336,7 @@ typedef struct orca_track_details_view {
     int64_t size_bytes;
     /* Unix seconds at which the latest listen started. */
     int64_t last_played_at;
-    /* Listens of the Track's recording, through any of its files. */
+    /* Listens of the file the Track plays. */
     uint64_t play_count;
     orca_string_view title;
     orca_string_view artist;
@@ -771,49 +406,8 @@ typedef void (*orca_track_details_callback)(
     const orca_track_details_view *details
 );
 
-/* What orca_track_details_view leaves out. */
-typedef struct orca_track_details_extra_view {
-    int64_t track_total;
-    int64_t disc_total;
-    /* Unix seconds at which a scan first saw the file. */
-    int64_t added_at;
-    /* Unix seconds of the file's modification time as the last scan saw it. */
-    int64_t modified_at;
-    uint8_t has_track_total;
-    uint8_t has_disc_total;
-    uint8_t has_added_at;
-    uint8_t has_modified_at;
-    /* No file states the total: it is the number of the Release's Tracks on
-     * the disc. */
-    uint8_t track_total_inferred;
-    uint8_t explicit;  /* orca_explicit */
-    uint8_t reserved[2];
-} orca_track_details_extra_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_track_details_v2_callback)(
-    void *context,
-    const orca_track_details_view *details,
-    const orca_track_details_extra_view *extra
-);
-
-/* The composer and comment: a locked edit, else the file's tag, else an
- * unlocked edit. Empty when none states one. */
-typedef struct orca_track_details_text_view {
-    orca_string_view composer;
-    orca_string_view comment;
-} orca_track_details_text_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_track_details_v3_callback)(
-    void *context,
-    const orca_track_details_view *details,
-    const orca_track_details_extra_view *extra,
-    const orca_track_details_text_view *text
-);
-
 typedef struct orca_play_stats {
-    /* Listens of the Track's recording, through any of its files. */
+    /* Listens of the file the Track plays. */
     uint64_t play_count;
     /* Unix seconds at which the latest listen started, when
      * `has_last_played_at`. */
@@ -821,20 +415,6 @@ typedef struct orca_play_stats {
     uint8_t has_last_played_at;
     uint8_t reserved[7];
 } orca_play_stats;
-
-typedef struct orca_artist_totals {
-    /* Summed over the Tracks `track_count` counts; a Track with no known
-     * duration adds 0. */
-    uint64_t duration_ms;
-    /* The Releases filed under the Artist as album artist, as
-     * orca_release_query_v2 `own_releases_only` keeps them. Unlike
-     * orca_artist_view `release_count`, it leaves out `appearance_count`. */
-    uint32_t release_count;
-    uint32_t track_count;
-    /* The Releases orca_release_query_v2 `appearing_artist_id` keeps. */
-    uint32_t appearance_count;
-    uint8_t reserved[4];
-} orca_artist_totals;
 
 /* What a bulk change to Tracks or Releases did. `updated` counts the ids whose
  * stored value changed; `skipped` counts ids that name nothing in the
@@ -937,115 +517,6 @@ typedef void (*orca_health_item_callback)(
     const orca_health_item_view *item
 );
 
-/* The visible issues of one kind: how many there are, and the highest
- * severity among them. `kind` and `severity` are orca_health_issue_kind and
- * orca_health_severity. */
-typedef struct orca_health_kind_summary_view {
-    uint64_t count;
-    uint8_t kind;
-    uint8_t severity;
-    uint8_t reserved[6];
-} orca_health_kind_summary_view;
-
-typedef void (*orca_health_kind_summary_callback)(
-    void *context,
-    const orca_health_kind_summary_view *summary
-);
-
-/* A kind's summary with the files that have such an issue and their summed
- * size. A file has at most one issue of a kind, so `files` equals
- * `base.count`. For ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE and
- * ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE, `bytes` counts only the redundant
- * copies, what removing them would free: of a kept copy and two duplicates of
- * 10 MB each, 20 MB. */
-typedef struct orca_health_kind_summary_view_v2 {
-    orca_health_kind_summary_view base;
-    uint64_t files;
-    uint64_t bytes;
-} orca_health_kind_summary_view_v2;
-
-typedef void (*orca_health_kind_summary_v2_callback)(
-    void *context,
-    const orca_health_kind_summary_view_v2 *summary
-);
-
-/* The size of a Library at a glance. `artists`, `releases` and `tracks` equal
- * the unfiltered counts; `files` and `total_bytes` cover the files with a
- * location that is not missing; `total_duration_ms` sums the Tracks'
- * durations. `last_scan_finished_at` is when the latest completed scan
- * finished and `last_analysis_at` when the latest analysis measurement was
- * stored, both in Unix seconds; each is 0 when its `has_*` flag is 0. */
-typedef struct orca_library_stats_view {
-    uint64_t artists;
-    uint64_t releases;
-    uint64_t tracks;
-    uint64_t files;
-    uint64_t total_bytes;
-    uint64_t total_duration_ms;
-    int64_t last_scan_finished_at;
-    int64_t last_analysis_at;
-    uint8_t has_last_scan_finished_at;
-    uint8_t has_last_analysis_at;
-    uint8_t reserved[6];
-} orca_library_stats_view;
-
-/* orca_library_stats_view with the last duplicate scan and the listen count.
- * `last_duplicate_scan_at` is when the latest duplicate scan a host started
- * succeeded, in Unix seconds, as the Job history records it; 0 when
- * `has_last_duplicate_scan_at` is 0. `listens` counts the local play history. */
-typedef struct orca_library_stats_view_v2 {
-    orca_library_stats_view base;
-    int64_t last_duplicate_scan_at;
-    uint64_t listens;
-    uint8_t has_last_duplicate_scan_at;
-    uint8_t reserved[7];
-} orca_library_stats_view_v2;
-
-/* The bytes of provider data a Library keeps. `artwork_bytes`: Cover Art
- * Archive covers of Releases and release groups. `photo_bytes`: Wikimedia
- * Commons photos of Artists and related artists. `lyrics_bytes`: LRCLIB
- * lyrics. `info_bytes`: artist and release descriptions, links, related
- * artists and release groups. */
-typedef struct orca_cache_size {
-    uint64_t artwork_bytes;
-    uint64_t photo_bytes;
-    uint64_t lyrics_bytes;
-    uint64_t info_bytes;
-} orca_cache_size;
-
-/* A service Orca takes data from, so every host credits the same sources. */
-typedef enum orca_provider_source_id {
-    ORCA_PROVIDER_SOURCE_MUSICBRAINZ = 0,
-    ORCA_PROVIDER_SOURCE_MUSICBRAINZ_GENRES = 1,
-    ORCA_PROVIDER_SOURCE_COVER_ART_ARCHIVE = 2,
-    ORCA_PROVIDER_SOURCE_ACOUSTID = 3,
-    ORCA_PROVIDER_SOURCE_LISTENBRAINZ = 4,
-    ORCA_PROVIDER_SOURCE_LRCLIB = 5,
-    ORCA_PROVIDER_SOURCE_WIKIDATA = 6,
-    ORCA_PROVIDER_SOURCE_WIKIMEDIA_COMMONS = 7,
-    ORCA_PROVIDER_SOURCE_WIKIPEDIA = 8,
-} orca_provider_source_id;
-
-/* One provider: `id` is an orca_provider_source_id, `supplies` says what Orca
- * takes from it, and `licence` names the terms its data is under.
- * `licence_url` is empty when the licence has no single page, as for
- * Wikimedia Commons, whose photos each carry their own. */
-typedef struct orca_provider_source_view {
-    uint8_t id;
-    uint8_t reserved[7];
-    orca_string_view name;
-    orca_string_view url;
-    orca_string_view supplies;
-    orca_string_view licence;
-    orca_string_view licence_url;
-} orca_provider_source_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_provider_source_callback)(
-    void *context,
-    const orca_provider_source_view *source
-);
-
 /* One file as a host shows it beside an issue. A value whose `has_*` flag is 0
  * is 0. `missing` is 1 when no location of the file is present, and then
  * `has_path` is 0 and `path` is empty. `codec` is a short identifier such as
@@ -1075,78 +546,6 @@ typedef void (*orca_health_file_callback)(
     const orca_health_file_view *file
 );
 
-/* Files the duplicate scan found to be copies of one another. `id` is the
- * group's lowest file id, the same on every read while its duplicate issues
- * are unchanged. `title` and `artist` are the suggested copy's Track's, or
- * its path and an empty artist when it backs none. `copies` counts each
- * further location of a file as a copy. `same_recording` is 1 when every
- * copy is an encoding of one recording, so they share one play count and
- * rating. `similarity`, 0..1, is how alike the least alike copies sound, 1
- * for exact copies; valid when `has_similarity`. `bytes_redundant` is what
- * removing every copy but the suggested one would free. */
-typedef struct orca_duplicate_group_view {
-    int64_t id;
-    uint64_t bytes_redundant;
-    uint32_t copies;
-    float similarity;
-    uint8_t same_recording;
-    uint8_t has_similarity;
-    uint8_t reserved[6];
-    orca_string_view title;
-    orca_string_view artist;
-} orca_duplicate_group_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_duplicate_group_callback)(
-    void *context,
-    const orca_duplicate_group_view *group
-);
-
-typedef struct orca_duplicate_group_totals {
-    uint64_t groups;
-    /* The summed `bytes_redundant` of every group. */
-    uint64_t bytes;
-} orca_duplicate_group_totals;
-
-/* One file of a duplicate group. `track_id` is the lowest-numbered Track the
- * file backs, valid when `has_track_id`. `suggested_keep` is 1 for exactly
- * one copy of a group: lossless over lossy, then the higher sample rate, the
- * higher bit depth, then the larger file. `playlist_count` counts the
- * playlists holding the file's recording; `locations` the file's locations
- * that are not missing, at least 1. */
-typedef struct orca_duplicate_copy_view {
-    int64_t file_id;
-    int64_t track_id;
-    uint64_t playlist_count;
-    uint32_t locations;
-    uint8_t has_track_id;
-    uint8_t suggested_keep;
-    uint8_t reserved[2];
-} orca_duplicate_copy_view;
-
-/* `details` is the Track as this file describes it, its format, size, path
- * and loudness being this file's; null when the file backs no Track. String
- * views are valid only for the duration of this callback. */
-typedef void (*orca_duplicate_copy_callback)(
-    void *context,
-    const orca_duplicate_copy_view *copy,
-    const orca_track_details_view *details
-);
-
-/* What orca_library_merge_duplicate_metadata changed. `track_id` is the kept
- * Track's id afterwards: a new id when a copied value moved it to another
- * Release. `values` counts Orca value rows written. `genres` is 1 when the
- * other Track's user genres replaced the kept Track's, which had none of its
- * own. */
-typedef struct orca_duplicate_merge {
-    int64_t track_id;
-    uint32_t values;
-    uint8_t rating;
-    uint8_t feedback;
-    uint8_t genres;
-    uint8_t reserved[1];
-} orca_duplicate_merge;
-
 typedef struct orca_root_view {
     int64_t id;
     int64_t volume_id;
@@ -1158,49 +557,6 @@ typedef struct orca_root_view {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_root_callback)(void *context, const orca_root_view *root);
 
-/* orca_root_view with the root's Tracks. `available` is 1 when the root's
- * directory can be listed and lies on the volume it was bound to.
- * `track_count` counts the Tracks whose preferred file has a location under
- * the root, and `unavailable_tracks` those of them with no location that is
- * not missing; while the root is unavailable it equals `track_count`. */
-typedef struct orca_root_view_v2 {
-    orca_root_view base;
-    uint64_t track_count;
-    uint64_t unavailable_tracks;
-    uint8_t available;
-    uint8_t reserved[7];
-} orca_root_view_v2;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_root_v2_callback)(void *context, const orca_root_view_v2 *root);
-
-typedef enum orca_folder_entry_kind {
-    ORCA_FOLDER_ENTRY_KIND_FOLDER = 0,
-    ORCA_FOLDER_ENTRY_KIND_FILE = 1,
-    ORCA_FOLDER_ENTRY_KIND_IMAGE = 2,
-} orca_folder_entry_kind;
-
-typedef struct orca_folder_entry_view {
-    /* The Track whose preferred file this is; files only. */
-    int64_t track_id;
-    /* Files only. */
-    int64_t file_id;
-    /* A folder's counts and duration cover every file below it, at any
-     * depth; a file's describe that file. */
-    int64_t total_duration_ms;
-    uint32_t file_count;
-    uint32_t track_count;
-    uint8_t kind;  /* orca_folder_entry_kind */
-    uint8_t has_track_id;
-    uint8_t has_file_id;
-    uint8_t reserved[5];
-    /* The last path component, as stored. */
-    orca_string_view name;
-} orca_folder_entry_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_folder_entry_callback)(void *context, const orca_folder_entry_view *entry);
-
 typedef struct orca_device_view {
     uint64_t id;
     orca_string_view name;
@@ -1208,61 +564,6 @@ typedef struct orca_device_view {
 
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_device_callback)(void *context, const orca_device_view *device);
-
-/* How an output is attached, as far as the platform says. */
-typedef enum orca_device_kind {
-    ORCA_DEVICE_KIND_UNKNOWN = 0,
-    ORCA_DEVICE_KIND_USB = 1,
-    ORCA_DEVICE_KIND_PCI = 2,
-    ORCA_DEVICE_KIND_BLUETOOTH = 3,
-    ORCA_DEVICE_KIND_HDMI = 4,
-    /* A software sink with no hardware behind it. */
-    ORCA_DEVICE_KIND_VIRTUAL = 5,
-} orca_device_kind;
-
-typedef struct orca_device_view_v2 {
-    orca_device_view base;
-    /* An orca_device_kind value. */
-    uint8_t kind;
-    uint8_t reserved[7];
-} orca_device_view_v2;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_device_v2_callback)(void *context, const orca_device_view_v2 *device);
-
-/* Whether an output is ready, as the platform's audio server says. */
-typedef enum orca_device_state {
-    /* Running, or idle and open. */
-    ORCA_DEVICE_STATE_ACTIVE = 0,
-    /* Suspended: the device may stay closed until something plays to it. */
-    ORCA_DEVICE_STATE_SUSPENDED = 1,
-    /* In error, or reporting no state. */
-    ORCA_DEVICE_STATE_UNAVAILABLE = 2,
-} orca_device_state;
-
-/* Bits of orca_device_view_v3.bit_depths. Float32 counts as 32. */
-#define ORCA_DEVICE_BIT_DEPTH_16 1
-#define ORCA_DEVICE_BIT_DEPTH_24 2
-#define ORCA_DEVICE_BIT_DEPTH_32 4
-
-typedef struct orca_device_view_v3 {
-    orca_device_view_v2 base;
-    /* Zero when the audio server did not report the output's capabilities
-     * within 500 ms; the fields below are then zero. */
-    uint8_t has_capabilities;
-    /* An orca_device_state value. */
-    uint8_t state;
-    /* ORCA_DEVICE_BIT_DEPTH_* bits. */
-    uint8_t bit_depths;
-    uint8_t channels_max;
-    /* The lowest and highest sample rates the output accepts. */
-    uint32_t rate_min_hz;
-    uint32_t rate_max_hz;
-    uint8_t reserved[4];
-} orca_device_view_v3;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_device_v3_callback)(void *context, const orca_device_view_v3 *device);
 
 typedef struct orca_queue_entry_view {
     /* Position in playback order, so a shuffled queue reads in the order it
@@ -1276,25 +577,6 @@ typedef struct orca_queue_entry_view {
 typedef void (*orca_queue_entry_callback)(
     void *context,
     const orca_queue_entry_view *entry
-);
-
-/* Why a queue history entry stopped playing. */
-typedef enum orca_queue_history_reason {
-    /* It played to its end, or the Player ran out of queue. */
-    ORCA_QUEUE_HISTORY_REASON_FINISHED = 0,
-    /* Next, previous or a jump moved to another entry. */
-    ORCA_QUEUE_HISTORY_REASON_SKIPPED = 1,
-    /* Playing new Tracks or clearing the queue replaced it. */
-    ORCA_QUEUE_HISTORY_REASON_REPLACED = 2,
-} orca_queue_history_reason;
-
-/* `ended_at` is Unix milliseconds; `reason` is an orca_queue_history_reason.
- * String views are valid only for the duration of this callback. */
-typedef void (*orca_queue_history_callback)(
-    void *context,
-    const orca_track_summary_view *summary,
-    int64_t ended_at,
-    uint8_t reason
 );
 
 /* Counters the Player's engine has kept since it started. */
@@ -1355,51 +637,6 @@ typedef struct orca_player_status {
     uint8_t reserved[4];
 } orca_player_status;
 
-/* Why a queue entry could not be opened. FOLDER_UNAVAILABLE: the root folder
- * or the volume it is on is not there, so the file is not marked missing.
- * FILE_MISSING: the root is there and the file is not. */
-typedef enum orca_playback_failure {
-    ORCA_PLAYBACK_FAILURE_FILE_MISSING = 0,
-    ORCA_PLAYBACK_FAILURE_FOLDER_UNAVAILABLE = 1,
-    ORCA_PLAYBACK_FAILURE_CODEC_UNAVAILABLE = 2,
-    ORCA_PLAYBACK_FAILURE_DECODE_ERROR = 3,
-    ORCA_PLAYBACK_FAILURE_UNSUPPORTED_CHANNELS = 4,
-} orca_playback_failure;
-
-/* orca_player_status with the last entry the Player could not open. Playback
- * moves past such an entry; the failure stays until an entry opened after it
- * is audible. `failure_track_id` and `failure_reason` are 0 when
- * `has_failure` is 0. */
-typedef struct orca_player_status_v2 {
-    orca_player_status base;
-    int64_t failure_track_id;
-    uint8_t has_failure;
-    uint8_t failure_reason;  /* orca_playback_failure */
-    uint8_t reserved[6];
-} orca_player_status_v2;
-
-/* orca_player_status_v2 with where the audible entry resumed when it began
- * part way through: a restored queue's position or a long Track's remembered
- * one. `resumed_from_ms` is 0 when `has_resumed` is 0. */
-typedef struct orca_player_status_v3 {
-    orca_player_status_v2 base;
-    uint64_t resumed_from_ms;
-    uint8_t has_resumed;
-    uint8_t reserved[7];
-} orca_player_status_v3;
-
-/* What orca_player_restore_state restored. `index` is the playback position
- * of the entry the queue resumes at and `position_ms` where in it, 0 from its
- * start. `skipped_missing` counts saved entries left out because neither
- * their Track nor another Track of their Recording is left. */
-typedef struct orca_restore_outcome {
-    uint32_t entries;
-    uint32_t index;
-    uint64_t position_ms;
-    uint32_t skipped_missing;
-    uint8_t reserved[4];
-} orca_restore_outcome;
-
 typedef struct orca_zone_status {
     uint8_t output_state;  /* orca_output_state */
     uint8_t reserved[3];
@@ -1413,21 +650,15 @@ typedef struct orca_zone_status {
 typedef struct orca_job_snapshot {
     uint8_t kind;   /* orca_job_kind */
     uint8_t state;  /* orca_job_state */
-    /* Zero for a scan or reconcile while it counts the files its walk will
-     * reach; one from then on, with `total_units` that count and
-     * `completed_units` the files walked. A property backfill knows its total
-     * before it starts - how many rows still owe a probe is one indexed count. */
+    /* Zero for a scan. A filesystem walk has no honest denominator until it
+     * has finished walking, and Orca does not invent one. A property backfill
+     * does have one before it starts - how many rows still owe a probe is one
+     * indexed count - so it reports a total and a host may show a fraction. */
     uint8_t has_total;
     uint8_t reserved[5];
     uint64_t completed_units;
     uint64_t total_units;
 } orca_job_snapshot;
-
-typedef enum orca_scan_stage {
-    ORCA_SCAN_STAGE_DISCOVER = 0,
-    ORCA_SCAN_STAGE_READ_TAGS = 1,
-    ORCA_SCAN_STAGE_DONE = 2,
-} orca_scan_stage;
 
 /* Mirrors the scanner's own result, plus what the projection made of it. */
 typedef struct orca_scan_stats {
@@ -1445,43 +676,10 @@ typedef struct orca_scan_stats {
     uint8_t reserved[7];
 } orca_scan_stats;
 
-/*
- * orca_scan_stats with where the job is.
- *
- * `stage` is an orca_scan_stage. A scan or reconcile is DISCOVER until its
- * walk starts and READ_TAGS while it walks; every job is DONE once its worker
- * has finished, and other jobs report DISCOVER until then. `albums_found`
- * counts the distinct Releases the job's projection wrote that still exist.
- * `current_path` holds `current_path_length` bytes of UTF-8, not
- * NUL-terminated: the file a scan or reconcile is reading during READ_TAGS,
- * and empty otherwise.
- */
-typedef struct orca_scan_stats_v2 {
-    orca_scan_stats base;
-    uint64_t albums_found;
-    uint8_t stage;  /* orca_scan_stage */
-    uint8_t reserved[1];
-    uint16_t current_path_length;
-    uint8_t reserved2[4];
-    char current_path[512];
-} orca_scan_stats_v2;
-
-/* How many audio files a folder holds; see orca_estimate_audio_files. */
-typedef struct orca_folder_estimate {
-    uint64_t audio_files;
-    uint8_t truncated;
-    uint8_t reserved[7];
-} orca_folder_estimate;
-
 typedef struct orca_scan_options {
     /* Rows per bounded commit. Zero selects the default. */
     uint32_t batch_size;
-    /*
-     * Nonzero reads every file again, even one whose path and identity are
-     * unchanged. Files, Tracks and their ids are kept.
-     */
-    uint8_t reprobe_all;
-    uint8_t reserved[3];
+    uint8_t reserved[4];
 } orca_scan_options;
 
 typedef struct orca_analysis_options {
@@ -1529,18 +727,6 @@ typedef struct orca_backfill_options {
     uint8_t reserved[3];
 } orca_backfill_options;
 
-/* What orca_library_start_property_backfill could repair now. `files` counts
- * the files that declare no duration, sample rate, channels or codec, less
- * those missing, on an offline root, in a format no codec decodes, or already
- * found unreadable with the bytes they have; `covers` the embedded covers,
- * folder images and kept covers not yet measured, less embedded covers of
- * files missing or on an offline root and folder images on an offline root.
- * The backfill itself still examines what these leave out. */
-typedef struct orca_backfill_pending {
-    uint64_t files;
-    uint64_t covers;
-} orca_backfill_pending;
-
 /* ---------------------------------------------------------------- events */
 
 typedef enum orca_event_kind {
@@ -1579,7 +765,6 @@ typedef enum orca_failure {
     ORCA_FAILURE_CODEC_UNAVAILABLE = 7,
     ORCA_FAILURE_QUEUE_FULL = 8,
     ORCA_FAILURE_NOT_PLAYABLE = 9,
-    ORCA_FAILURE_TRACK_FOLDER_UNAVAILABLE = 10,
     ORCA_FAILURE_INTERNAL = 255,
 } orca_failure;
 
@@ -1730,16 +915,6 @@ typedef enum orca_provider_service {
     ORCA_PROVIDER_SERVICE_MUSICBRAINZ = 1,
     ORCA_PROVIDER_SERVICE_ACOUSTID = 2,
     ORCA_PROVIDER_SERVICE_COVER_ART_ARCHIVE = 3,
-    ORCA_PROVIDER_SERVICE_LRCLIB = 4,
-    ORCA_PROVIDER_SERVICE_WIKIDATA = 5,
-    /* The Commons API; its images come from upload.wikimedia.org, or from a
-     * loopback server's own host. */
-    ORCA_PROVIDER_SERVICE_WIKIMEDIA_COMMONS = 6,
-    /* One server for every Wikipedia language. NULL asks
-     * https://{language}.wikipedia.org. */
-    ORCA_PROVIDER_SERVICE_WIKIPEDIA = 7,
-    /* The ListenBrainz Labs API that related artists come from. */
-    ORCA_PROVIDER_SERVICE_LISTENBRAINZ_LABS = 8,
 } orca_provider_service;
 
 /*
@@ -1986,72 +1161,6 @@ orca_status orca_library_query_health_items(
     void *context,
     orca_health_item_callback callback
 );
-/* The page of orca_library_query_health_items holding only issues of `kind`,
- * an orca_health_issue_kind, in the same order. An unknown `kind` is
- * ORCA_STATUS_INVALID_ARGUMENT, and so is a `limit` outside 1..512. */
-orca_status orca_library_query_health_items_of_kind(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t kind,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_health_item_callback callback
-);
-/* Calls `callback` once for each kind with at least one issue that is not
- * dismissed, highest severity first, then in orca_health_issue_kind order.
- * An empty Library calls it never. Its counts sum to
- * orca_library_health_issue_count. */
-orca_status orca_library_health_summary(
-    orca_runtime *runtime,
-    orca_handle library,
-    void *context,
-    orca_health_kind_summary_callback callback
-);
-/* orca_library_health_summary with each kind's files and bytes. */
-orca_status orca_library_health_summary_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    void *context,
-    orca_health_kind_summary_v2_callback callback
-);
-/* Fills `output` with the Library's counts, sizes, and last scan and analysis
- * times. A null `output` is ORCA_STATUS_INVALID_ARGUMENT. */
-orca_status orca_library_stats(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_library_stats_view *output
-);
-/* orca_library_stats with the last duplicate scan and the listen count. */
-orca_status orca_library_stats_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_library_stats_view_v2 *output
-);
-/* Fills `output` with the bytes of fetched provider data the Library keeps.
- * A null `output` is ORCA_STATUS_INVALID_ARGUMENT. */
-orca_status orca_library_cache_size(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_cache_size *output
-);
-/* Deletes fetched covers, artist and related artist photos, LRCLIB lyrics and
- * artist and release info, all fetched again when next wanted. Embedded and
- * folder artwork and local lyrics stay. `cleared`, which may be null,
- * receives what they held. */
-orca_status orca_library_clear_cache(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_cache_size *cleared
-);
-/* Calls `callback` once per provider Orca takes data from, in
- * orca_provider_source_id order. The list is fixed and needs no Library. A
- * null `callback` is ORCA_STATUS_INVALID_ARGUMENT. */
-orca_status orca_provider_sources(
-    orca_runtime *runtime,
-    void *context,
-    orca_provider_source_callback callback
-);
 /* Hides one issue of a file, an orca_health_issue_kind, until the file's bytes
  * change. Dismissing an issue the file does not have still hides it should it
  * appear. An unknown `kind` is ORCA_STATUS_INVALID_ARGUMENT and a `file_id`
@@ -2080,77 +1189,6 @@ orca_status orca_library_health_file(
     int64_t file_id,
     void *context,
     orca_health_file_callback callback
-);
-/* Calls `callback` once per duplicate group, ordered by id. Dismissed
- * duplicate issues form no group. `limit` is 1..512, else
- * ORCA_STATUS_INVALID_ARGUMENT. */
-orca_status orca_library_query_duplicate_groups(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_duplicate_group_callback callback
-);
-/* Fills `output` with the number of duplicate groups and their redundant
- * bytes. A null `output` is ORCA_STATUS_INVALID_ARGUMENT. */
-orca_status orca_library_duplicate_group_totals(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_duplicate_group_totals *output
-);
-/* Calls `callback` once per copy of group `group_id`, the suggested copy
- * first. `group`, which may be null, receives the group's row with empty
- * string views. ORCA_STATUS_NOT_FOUND, with the callback not called, when no
- * group has that id. */
-orca_status orca_library_query_duplicate_group(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t group_id,
-    orca_duplicate_group_view *group,
-    void *context,
-    orca_duplicate_copy_callback callback
-);
-/* Dismisses the duplicate issues of both files, until either file's bytes
- * change. Neither file is touched. ORCA_STATUS_INVALID_ARGUMENT when the two
- * files are not in one group. */
-orca_status orca_library_keep_both_duplicates(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t file_id,
-    int64_t other_file_id
-);
-/* Dismisses the duplicate issues of every file of group `group_id`.
- * ORCA_STATUS_NOT_FOUND when no group has that id. */
-orca_status orca_library_ignore_duplicate_group(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t group_id
-);
-/* In one transaction, gives Track `keep_track_id` the Orca values, user
- * genres, rating and feedback of Track `from_track_id` that it lacks. A value
- * locked on the kept Track always stays, as do its user genres; a value
- * locked on the other replaces an unlocked one.
- * The rating and feedback are copied only when the two are different
- * recordings and the kept one has none; listens stay with their recording.
- * No file is written or moved. `output` may be null. The same Track twice is
- * ORCA_STATUS_INVALID_ARGUMENT; an unknown Track ORCA_STATUS_NOT_FOUND. */
-orca_status orca_library_merge_duplicate_metadata(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t keep_track_id,
-    int64_t from_track_id,
-    orca_duplicate_merge *output
-);
-/* Calls `callback` with the name of each manual playlist holding file
- * `file_id`'s recording, by name, at most 512. ORCA_STATUS_NOT_FOUND, with the
- * callback not called, when no file has that id. */
-orca_status orca_library_duplicate_copy_playlists(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t file_id,
-    void *context,
-    orca_string_callback callback
 );
 
 
@@ -2182,15 +1220,6 @@ orca_status orca_library_artist_get(
     int64_t artist_id,
     void *context,
     orca_artist_callback callback
-);
-
-/* The Artist's release, track and appearance counts and summed duration.
- * NOT_FOUND for an unknown Artist. */
-orca_status orca_library_artist_totals(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    orca_artist_totals *output
 );
 
 orca_status orca_library_release_count(
@@ -2227,32 +1256,12 @@ orca_status orca_library_browse_tracks(
     void *context,
     orca_track_callback callback
 );
-/* orca_library_browse_tracks with each Track's ids and facts. `query` may not
- * be null; INVALID_ARGUMENT for a limit outside 1..512, an unknown sort, an
- * unknown format, a null text pointer with a nonzero length, or text over
- * 256 bytes. */
-orca_status orca_library_browse_tracks_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_track_query_v2 *query,
-    void *context,
-    orca_track_summary_facts_callback callback
-);
 /* How many Tracks the filters in `query` match, so a host can size a
  * scrollbar without walking the listing. Sort, limit and offset are ignored. */
 orca_status orca_library_track_match_count(
     orca_runtime *runtime,
     orca_handle library,
     const orca_track_query *query,
-    uint64_t *output
-);
-/* How many Tracks orca_library_browse_tracks_v2 would list for `query`.
- * Sort, limit and offset are ignored. A track search has no count:
- * INVALID_ARGUMENT for a nonempty `text`. */
-orca_status orca_library_track_match_count_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_track_query_v2 *query,
     uint64_t *output
 );
 
@@ -2293,151 +1302,6 @@ orca_status orca_library_artist_count_matching(
     uint64_t *output
 );
 
-/* orca_library_browse_releases with `has_*` flags, the filters of
- * orca_release_query_v2, and each Release's facts. INVALID_ARGUMENT for a
- * limit outside 1..512, an unknown sort, an unknown artwork filter, a null
- * text pointer with a nonzero length, or text over 256 bytes. */
-orca_status orca_library_browse_releases_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_release_query_v2 *query,
-    void *context,
-    orca_release_facts_callback callback
-);
-/* How many Releases orca_library_browse_releases_v2 would list for `query`.
- * Sort, limit and offset are ignored. */
-orca_status orca_library_release_count_matching_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_release_query_v2 *query,
-    uint64_t *output
-);
-
-/* orca_library_browse_artists with a genre filter and a sort. `query` may not
- * be null; INVALID_ARGUMENT for a limit outside 1..512, an unknown sort, or
- * a null filter pointer with a nonzero length. */
-orca_status orca_library_query_artists_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_artist_query_v2 *query,
-    void *context,
-    orca_artist_v2_callback callback
-);
-/* How many Artists orca_library_query_artists_v2 would list for `query`.
- * Sort, limit and offset are ignored. */
-orca_status orca_library_artist_count_matching_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_artist_query_v2 *query,
-    uint64_t *output
-);
-
-/* A page of the genres that some Track carries. A Track's genres come from
- * its file's tags, split where one value lists several ("Rock, Pop") and
- * folded so that spellings of one genre ("Hip-Hop", "hip hop",
- * "Hip Hop/Rap") are one, unless the user set them with
- * orca_library_set_track_genres. `query` may not be null; INVALID_ARGUMENT
- * for a limit outside 1..512, an unknown sort, or a null filter pointer with
- * a nonzero length. */
-orca_status orca_library_query_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_genre_query *query,
-    void *context,
-    orca_genre_callback callback
-);
-/* The Artists, Releases, Tracks, Playlists and genres where every
- * whitespace-separated word of `text` (`text_length` bytes; the pointer may
- * be null when it is 0) begins a word of the title or subtitle, case and
- * diacritics ignored. No character of `text` is query syntax: quotes, `*`,
- * `-`, brackets and words such as OR and NEAR are matched as text. Hits come
- * grouped by kind in orca_search_kind order, most relevant first within a
- * kind, up to that kind's cap in `limits`; a null `limits` means 5 Artists,
- * 5 Releases, 8 Tracks, 4 Playlists and 3 genres. Text with no word invokes
- * no callback. INVALID_ARGUMENT for text over 256 bytes or a cap over 50. */
-orca_status orca_library_search(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *text,
-    size_t text_length,
-    const orca_search_limits *limits,
-    void *context,
-    orca_search_hit_callback callback
-);
-/* How many genres orca_library_query_genres would list for `filter`
- * (`filter_length` bytes; the pointer may be null when it is 0). */
-orca_status orca_library_genre_count(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *filter,
-    size_t filter_length,
-    uint64_t *output
-);
-/* Invokes the callback once. NOT_FOUND, without a callback, when no Track
- * carries the genre. */
-orca_status orca_library_genre_get(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t genre_id,
-    void *context,
-    orca_genre_callback callback
-);
-/* Invokes the callback once per genre of the Track, in the order its tags or
- * the user gave them; not at all for a Track with none. */
-orca_status orca_library_track_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t track_id,
-    void *context,
-    orca_string_callback callback
-);
-/* Up to `limit` (1..512) genres of the Release's Tracks, most Tracks first. */
-orca_status orca_library_release_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    uint32_t limit,
-    void *context,
-    orca_genre_count_callback callback
-);
-/* Up to `limit` (1..512) genres of the Tracks an Artist is credited on, as
- * the Track's artist or its Release's album artist, most Tracks first. */
-orca_status orca_library_artist_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    uint32_t limit,
-    void *context,
-    orca_genre_count_callback callback
-);
-/* Gives each of 1 to 512 Tracks (`ids`, `count`) exactly `names` as its
- * genres, which then outrank its file's tags on every later scan. A name that
- * lists several genres with commas or semicolons ("Rock, Pop") gives each.
- * `name_count` 0 restores the genres the file's tags state. Kept in the
- * Library until orca_library_plan_tag_write writes them into the files.
- * INVALID_ARGUMENT for a name that is blank once split and folded, or for
- * more than 16 genres; NOT_FOUND when a Track does not exist, changing
- * nothing. */
-orca_status orca_library_set_track_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    const int64_t *ids,
-    size_t count,
-    const orca_string_view *names,
-    size_t name_count
-);
-/* Invokes the callback once with up to `limit` (1..512) ids of the Releases
- * whose Tracks carry the genre and that have a cover, most played first,
- * for a cover mosaic. */
-orca_status orca_library_genre_artwork(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t genre_id,
-    uint32_t limit,
-    void *context,
-    orca_id_callback callback
-);
-
 /* Invokes the callback once with the Track and the ids it resolves to.
  * NOT_FOUND, without a callback, when no such Track exists. */
 orca_status orca_library_track_get(
@@ -2457,25 +1321,8 @@ orca_status orca_library_track_details(
     void *context,
     orca_track_details_callback callback
 );
-/* orca_library_track_details with the totals, advisory and file dates. */
-orca_status orca_library_track_details_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t track_id,
-    void *context,
-    orca_track_details_v2_callback callback
-);
-/* orca_library_track_details_v2 with the composer and comment. */
-orca_status orca_library_track_details_v3(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t track_id,
-    void *context,
-    orca_track_details_v3_callback callback
-);
-/* How often the Track's recording has been heard through any of its files,
- * and when last. A Track with no recording, or an unknown id, has a play
- * count of zero. */
+/* How often the Track's file has been heard, and when last. A Track with no
+ * file, or an unknown id, has a play count of zero. */
 orca_status orca_library_track_play_stats(
     orca_runtime *runtime,
     orca_handle library,
@@ -2488,40 +1335,6 @@ orca_status orca_library_listens_recorded(
     orca_runtime *runtime,
     orca_handle library,
     uint64_t *output
-);
-/* Keeps the Library's orca_listen_policy. INVALID_ARGUMENT for a value that
- * is not one. */
-orca_status orca_library_set_listen_policy(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t policy
-);
-/* The Library's orca_listen_policy; ORCA_LISTEN_POLICY_HALF_OR_FOUR_MINUTES
- * unless set. */
-orca_status orca_library_listen_policy(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t *output
-);
-/* `enabled` 0 keeps no listens, so none is sent either; 1, the default, keeps
- * them. INVALID_ARGUMENT for any other value. */
-orca_status orca_library_set_listen_recording(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t enabled
-);
-orca_status orca_library_listen_recording(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t *output
-);
-/* Deletes every local listen and every listen waiting to be sent, and with
- * them every play count. Ratings, loves and feedback stay. `removed`, which
- * may be null, receives how many listens went. */
-orca_status orca_library_clear_listens(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint64_t *removed
 );
 /* Sets, or with ORCA_FEEDBACK_NONE clears, the feedback on the recordings of
  * `track_ids`: at most 512 ids; INVALID_ARGUMENT for more, for a null `ids`
@@ -2580,25 +1393,6 @@ orca_status orca_library_set_release_love(
     uint8_t loved,
     orca_change_count *output
 );
-/* Loves (`loved` 1) or clears (`loved` 0) Artists, under the same rules as
- * orca_library_set_release_love. Artist love is kept in the Library only and
- * is never sent to ListenBrainz. */
-orca_status orca_library_set_artist_love(
-    orca_runtime *runtime,
-    orca_handle library,
-    const int64_t *artist_ids,
-    size_t count,
-    uint8_t loved,
-    orca_change_count *output
-);
-/* Writes 1 to `output` when the user loved the Artist, else 0; an id that
- * names no Artist is 0. */
-orca_status orca_library_artist_loved(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    uint8_t *output
-);
 /* Files that still owe the default loudness and fingerprint measurement:
  * what orca_library_start_analysis would measure. */
 orca_status orca_library_unanalyzed_count(
@@ -2617,8 +1411,7 @@ typedef struct orca_playlist_view {
     int64_t id;
     /* Sum of the lengths of the available entries. */
     int64_t duration_ms;
-    /* Unix seconds. `updated_at` moves on a rename, an entry edit, a rules
-     * change and a description or tag change. */
+    /* Unix seconds. `updated_at` moves on a rename and on any entry edit. */
     int64_t created_at;
     int64_t updated_at;
     uint32_t entries;
@@ -2742,8 +1535,7 @@ orca_status orca_library_playlist_remove(
     uint32_t *removed
 );
 /* Moves the entry at `from` to `to`, shifting those between. INVALID_ARGUMENT
- * when either is past the end; NOT_FOUND for an unknown playlist. Insert,
- * remove and move on a smart playlist are INVALID_STATE. */
+ * when either is past the end; NOT_FOUND for an unknown playlist. */
 orca_status orca_library_playlist_move(
     orca_runtime *runtime,
     orca_handle library,
@@ -2795,182 +1587,6 @@ orca_status orca_library_export_playlist(
     uint32_t *skipped
 );
 
-/* A manual playlist holds the entries the user placed; a smart playlist's
- * entries are the Tracks its rules match each time it is read, one per
- * recording, and cannot be edited by position. */
-typedef enum orca_playlist_kind {
-    ORCA_PLAYLIST_KIND_MANUAL = 0,
-    ORCA_PLAYLIST_KIND_SMART = 1,
-} orca_playlist_kind;
-
-typedef enum orca_playlist_creator {
-    ORCA_PLAYLIST_CREATOR_USER = 0,
-    /* Created by orca_library_import_playlist. */
-    ORCA_PLAYLIST_CREATOR_IMPORTED = 1,
-} orca_playlist_creator;
-
-/* Every order ends in the playlist id, so paging is a total order. */
-typedef enum orca_playlist_sort {
-    ORCA_PLAYLIST_SORT_NAME = 0,
-    /* Most recently updated first. */
-    ORCA_PLAYLIST_SORT_RECENTLY_UPDATED = 1,
-    /* Most recently created first. */
-    ORCA_PLAYLIST_SORT_CREATED = 2,
-    /* Manual playlists by entry count, most first, then smart playlists by
-     * name. */
-    ORCA_PLAYLIST_SORT_ENTRIES = 3,
-} orca_playlist_sort;
-
-/* One bounded request for a page of playlists. `filter` keeps the playlists
- * whose name contains it, ignoring ASCII case; empty (length 0, pointer may
- * be null) keeps every playlist. `kind` and `creator` filter only when their
- * `has_` flag is 1. `limit` must be between 1 and 512. */
-typedef struct orca_playlist_query {
-    orca_string_view filter;
-    uint32_t limit;
-    uint32_t offset;
-    uint8_t sort;  /* orca_playlist_sort */
-    uint8_t has_kind;
-    uint8_t kind;  /* orca_playlist_kind */
-    uint8_t pinned_only;
-    uint8_t has_creator;
-    uint8_t creator;  /* orca_playlist_creator */
-    uint8_t reserved[2];
-} orca_playlist_query;
-
-/* What orca_playlist_view leaves out. For a smart playlist, the view's
- * `entries`, `available` and `duration_ms` are its rules evaluated now. */
-typedef struct orca_playlist_facts_view {
-    orca_string_view description;
-    uint8_t pinned;
-    uint8_t loved;
-    uint8_t kind;  /* orca_playlist_kind */
-    uint8_t creator;  /* orca_playlist_creator */
-    /* The available entries name more than one Artist. */
-    uint8_t mixed_artists;
-    /* Read the tags with orca_library_playlist_tags. */
-    uint8_t tag_count;
-    uint8_t reserved[2];
-} orca_playlist_facts_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_playlist_v2_callback)(
-    void *context,
-    const orca_playlist_view *playlist,
-    const orca_playlist_facts_view *facts
-);
-
-/* Each string is `_length` bytes, not NUL-terminated; a field changes only
- * when its `has_` flag is 1. The description is trimmed and at most 4096
- * bytes. `tags` replaces every tag: each is trimmed, non-empty and at most 64
- * bytes, repeats are kept once, and at most 8 remain; `tags` may be NULL only
- * when `tag_count` is 0. */
-typedef struct orca_playlist_update {
-    orca_string_view description;
-    const orca_string_view *tags;
-    size_t tag_count;
-    uint8_t has_description;
-    uint8_t has_pinned;
-    uint8_t pinned;
-    uint8_t has_loved;
-    uint8_t loved;
-    uint8_t has_tags;
-    uint8_t reserved[2];
-} orca_playlist_update;
-
-/* A page of playlists as `query` asks. A smart playlist whose stored rules
- * no longer compile fails the page with INTERNAL. */
-orca_status orca_library_query_playlists_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_playlist_query *query,
-    void *context,
-    orca_playlist_v2_callback callback
-);
-/* How many playlists `query` selects, ignoring its sort, limit and offset. */
-orca_status orca_library_playlist_count(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_playlist_query *query,
-    uint64_t *output
-);
-/* One playlist, as orca_library_query_playlists_v2 reports it. NOT_FOUND for
- * an unknown id. */
-orca_status orca_library_playlist_get(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t playlist_id,
-    void *context,
-    orca_playlist_v2_callback callback
-);
-/* The playlist's tags in the order they were given. NOT_FOUND for an unknown
- * id. */
-orca_status orca_library_playlist_tags(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t playlist_id,
-    void *context,
-    orca_string_callback callback
-);
-/* The genres the most available entries carry, most first, at most three.
- * NOT_FOUND for an unknown id. */
-orca_status orca_library_playlist_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t playlist_id,
-    void *context,
-    orca_string_callback callback
-);
-/* Changes the description, pin, love or tags; the Library keeps them and no
- * file is written. Only a description or tag change moves `updated_at`. A
- * bad value is INVALID_ARGUMENT; NOT_FOUND for an unknown id. */
-orca_status orca_library_update_playlist(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t playlist_id,
-    const orca_playlist_update *update
-);
-/* Creates a smart playlist named as for orca_library_create_playlist, whose
- * rules are the JSON `rules` (`rules_length` bytes, version 1, described in
- * docs/api.md). Rules that do not parse, name an unknown field or operator,
- * or nest too deep are INVALID_ARGUMENT, and nothing is stored. */
-orca_status orca_library_create_smart_playlist(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *name,
-    size_t name_length,
-    const char *rules,
-    size_t rules_length,
-    int64_t *playlist_id
-);
-/* Replaces a smart playlist's rules, checked as on create. INVALID_STATE for
- * a manual playlist; NOT_FOUND for an unknown id. */
-orca_status orca_library_set_smart_playlist_rules(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t playlist_id,
-    const char *rules,
-    size_t rules_length
-);
-/* A smart playlist's rules as stored. INVALID_STATE for a manual playlist;
- * NOT_FOUND for an unknown id. */
-orca_status orca_library_smart_playlist_rules(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t playlist_id,
-    void *context,
-    orca_string_callback callback
-);
-/* How many Tracks `rules` matches now, up to its limit, without storing
- * anything. Rules are checked as on create. */
-orca_status orca_library_smart_playlist_count(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *rules,
-    size_t rules_length,
-    uint64_t *output
-);
-
 /* -------------------------------------------------------------- artwork */
 
 /* What an embedded picture says it shows. */
@@ -2980,12 +1596,10 @@ typedef enum orca_artwork_kind {
     ORCA_ARTWORK_KIND_OTHER = 2,
 } orca_artwork_kind;
 
-/* What an artwork request asks about: a Track, a Release or an Artist id. An
- * Artist's image is the photo stored by its artist info. */
+/* What an artwork request asks about: a Track or a Release id. */
 typedef enum orca_artwork_subject {
     ORCA_ARTWORK_SUBJECT_TRACK = 0,
     ORCA_ARTWORK_SUBJECT_RELEASE = 1,
-    ORCA_ARTWORK_SUBJECT_ARTIST = 2,
 } orca_artwork_subject;
 
 /* One cover image. `bytes` and `mime_type` are valid only for the duration of
@@ -3003,9 +1617,8 @@ typedef struct orca_image_view {
 typedef void (*orca_image_callback)(void *context, const orca_image_view *image);
 
 /* One finished artwork request. `subject` is an orca_artwork_subject and
- * `subject_id` the Track, Release or Artist id it was asked for. A subject
- * with no readable cover or stored photo arrives with `has_image` 0 and an
- * `image` of length 0. */
+ * `subject_id` the Track or Release id it was asked for. A subject with no
+ * readable cover arrives with `has_image` 0 and an `image` of length 0. */
 typedef struct orca_artwork_result_view {
     uint64_t request;
     int64_t subject_id;
@@ -3044,9 +1657,8 @@ orca_status orca_library_release_artwork(
     void *context,
     orca_image_callback callback
 );
-/* Asks for the cover of a Track or Release, or the photo of an Artist
- * (`subject`, an orca_artwork_subject, and its `id`) without waiting for
- * it. The lookup runs
+/* Asks for the cover of a Track or Release (`subject`, an
+ * orca_artwork_subject, and its `id`) without waiting for it. The lookup runs
  * on the Library's artwork thread, which is started on the first request;
  * when it finishes, liborca calls the wake callback, and the host collects
  * the result with orca_library_take_artwork after its next pump. `request`
@@ -3080,531 +1692,6 @@ orca_status orca_library_take_artwork(
     orca_artwork_result_callback callback
 );
 
-/* --------------------------------------------------------------- lyrics */
-
-/* Pass to orca_library_start_lyrics to ask LRCLIB. */
-#define ORCA_LYRICS_FETCH 1
-
-/* Where a lyrics job found a Track's lyrics, or why it found none. LOCAL: the
- * Track's sidecar or file. FETCHED: LRCLIB answered now. CACHED: an answer
- * LRCLIB gave earlier for the same title, artist, album and duration is kept.
- * CACHED_MISS: LRCLIB had none for them less than 7 days ago, so it was not
- * asked. NOT_FOUND: no lyrics anywhere asked, or no such Track. NO_METADATA:
- * the Track has no title or no artist to ask LRCLIB with. REFUSED: LRCLIB's
- * answer was a redirect, a 4xx other than 404, or a body that is not a record
- * of at most 512 KiB. UNAVAILABLE: LRCLIB could not be reached or is backing
- * off. BUSY: another Orca process holds LRCLIB. NOT_REQUESTED: the job has
- * not finished. With ORCA_LYRICS_FETCH the outcome is what asking LRCLIB came
- * to, even when the Track's own plain lyrics are the ones returned; LOCAL
- * then means its own synced lyrics made asking needless. */
-typedef enum orca_lyrics_outcome {
-    ORCA_LYRICS_OUTCOME_LOCAL = 0,
-    ORCA_LYRICS_OUTCOME_FETCHED = 1,
-    ORCA_LYRICS_OUTCOME_CACHED = 2,
-    ORCA_LYRICS_OUTCOME_CACHED_MISS = 3,
-    ORCA_LYRICS_OUTCOME_NOT_FOUND = 4,
-    ORCA_LYRICS_OUTCOME_NO_METADATA = 5,
-    ORCA_LYRICS_OUTCOME_REFUSED = 6,
-    ORCA_LYRICS_OUTCOME_UNAVAILABLE = 7,
-    ORCA_LYRICS_OUTCOME_BUSY = 8,
-    ORCA_LYRICS_OUTCOME_CANCELLED = 9,
-    ORCA_LYRICS_OUTCOME_NOT_REQUESTED = 10,
-} orca_lyrics_outcome;
-
-/* SIDECAR: a `.lrc` file beside the Track's file with its base name.
- * EMBEDDED: the file's tags (ID3v2 SYLT or USLT, Vorbis comment LYRICS or
- * UNSYNCEDLYRICS, MP4 ©lyr). LRCLIB: an answer from LRCLIB. */
-typedef enum orca_lyrics_source {
-    ORCA_LYRICS_SOURCE_SIDECAR = 0,
-    ORCA_LYRICS_SOURCE_EMBEDDED = 1,
-    ORCA_LYRICS_SOURCE_LRCLIB = 2,
-} orca_lyrics_source;
-
-/* SYNCED lines carry start times; PLAIN lines do not. INSTRUMENTAL is
- * LRCLIB's word that the Track has no words, with no lines. */
-typedef enum orca_lyrics_kind {
-    ORCA_LYRICS_KIND_SYNCED = 0,
-    ORCA_LYRICS_KIND_PLAIN = 1,
-    ORCA_LYRICS_KIND_INSTRUMENTAL = 2,
-} orca_lyrics_kind;
-
-/* One line. `start_ms` is where it starts in the Track, or -1 for plain
- * lyrics. Synced lines come in start order. */
-typedef struct orca_lyrics_line {
-    int64_t start_ms;
-    orca_string_view text;
-} orca_lyrics_line;
-
-/* A Track's lyrics. `source` is an orca_lyrics_source and `kind` an
- * orca_lyrics_kind. `language` is a lower-case ISO 639-2 code when the
- * source names one, else empty. `lines` holds `line_count` lines, at most
- * 4096. Every string and the `lines` array are valid only for the duration of
- * the callback that receives the view; copy what you keep. */
-typedef struct orca_lyrics_view {
-    uint8_t source;
-    uint8_t kind;
-    uint8_t reserved[6];
-    orca_string_view language;
-    const orca_lyrics_line *lines;
-    size_t line_count;
-} orca_lyrics_view;
-
-typedef void (*orca_lyrics_callback)(void *context, const orca_lyrics_view *lyrics);
-
-/*
- * Starts reading a Track's lyrics as an ORCA_JOB_KIND_LYRICS job and returns
- * immediately: a synced `.lrc` sidecar beside its file, else synced lyrics in
- * the file, else synced lyrics from LRCLIB, else plain lyrics from the
- * sidecar, the file, then LRCLIB, else LRCLIB's word that the Track is
- * instrumental. Nothing is written to a file.
- *
- * LRCLIB is asked only with ORCA_LYRICS_FETCH in `flags`, which a host leaves
- * off until the person turns it on, and only with the Track's title, artist,
- * album and duration. Without it, only an answer the Library already keeps
- * for those values is used. LRCLIB grants use of its API but not of the
- * lyrics: rights to the words stay with their owners, and the host answers
- * for showing or keeping them.
- *
- * INVALID_ARGUMENT for an unknown bit in `flags`. INVALID_STATE with
- * ORCA_LYRICS_FETCH and no client identity (orca_runtime_set_client_identity).
- * A Track that does not exist is not an error: its job finishes with
- * ORCA_LYRICS_OUTCOME_NOT_FOUND.
- */
-orca_status orca_library_start_lyrics(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t track_id,
-    uint8_t flags,
-    orca_handle *job
-);
-
-/* Writes the lyrics job's orca_lyrics_outcome to `outcome`;
- * ORCA_LYRICS_OUTCOME_NOT_REQUESTED until it finishes. INVALID_ARGUMENT for a
- * job of another kind, STALE_HANDLE for an unknown job. */
-orca_status orca_job_lyrics_outcome(
-    orca_runtime *runtime,
-    orca_handle job,
-    uint8_t *outcome
-);
-
-/* Invokes the callback once with the lyrics a finished lyrics job found, and
- * releases them: the job hands its lyrics over once, so a second call is
- * NOT_FOUND. NOT_FOUND, without a callback, also while the job runs and when
- * it found none. INVALID_ARGUMENT for a job of another kind, STALE_HANDLE for
- * an unknown job. */
-orca_status orca_job_lyrics(
-    orca_runtime *runtime,
-    orca_handle job,
-    void *context,
-    orca_lyrics_callback callback
-);
-
-/* ---------------------------------------------------------- artist info */
-
-/* What an artist info job came to: the first step that failed, else how the
- * info was found. NOT_REQUESTED: the job has not finished. FETCHED: every
- * service asked answered. CACHED: info fetched less than 30 days ago for the
- * same MusicBrainz artist ID is kept, and nothing was asked.
- * NO_MUSICBRAINZ_ID: the Artist has none, so only a local image was looked
- * for. OFFLINE: only the local image and answers already cached were used.
- * NOT_FOUND: no such Artist. REFUSED: a service's answer was a 4xx, a
- * redirect off the service, or a body Orca does not accept. UNAVAILABLE: a
- * service could not be reached or is backing off. BUSY: another Orca process
- * holds one of the services. CANCELLED: the job was cancelled, and nothing
- * was kept. Otherwise what the steps before a failure found is kept. */
-typedef enum orca_artist_info_outcome {
-    ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED = 0,
-    ORCA_ARTIST_INFO_OUTCOME_FETCHED = 1,
-    ORCA_ARTIST_INFO_OUTCOME_CACHED = 2,
-    ORCA_ARTIST_INFO_OUTCOME_NO_MUSICBRAINZ_ID = 3,
-    ORCA_ARTIST_INFO_OUTCOME_OFFLINE = 4,
-    ORCA_ARTIST_INFO_OUTCOME_NOT_FOUND = 5,
-    ORCA_ARTIST_INFO_OUTCOME_REFUSED = 6,
-    ORCA_ARTIST_INFO_OUTCOME_UNAVAILABLE = 7,
-    ORCA_ARTIST_INFO_OUTCOME_BUSY = 8,
-    ORCA_ARTIST_INFO_OUTCOME_CANCELLED = 9,
-} orca_artist_info_outcome;
-
-/* LOCAL: an image in the Artist's folder (artist.jpg, artist.png,
- * folder.jpg, thumb.jpg or fanart.jpg). COMMONS: a Wikimedia Commons image,
- * shown with its licence and credit. */
-typedef enum orca_artist_photo_source {
-    ORCA_ARTIST_PHOTO_SOURCE_LOCAL = 0,
-    ORCA_ARTIST_PHOTO_SOURCE_COMMONS = 1,
-} orca_artist_photo_source;
-
-typedef enum orca_artist_link_kind {
-    ORCA_ARTIST_LINK_KIND_OFFICIAL = 0,
-    ORCA_ARTIST_LINK_KIND_WIKIPEDIA = 1,
-    ORCA_ARTIST_LINK_KIND_WIKIDATA = 2,
-    ORCA_ARTIST_LINK_KIND_MUSICBRAINZ = 3,
-    ORCA_ARTIST_LINK_KIND_DISCOGS = 4,
-    ORCA_ARTIST_LINK_KIND_LASTFM = 5,
-    ORCA_ARTIST_LINK_KIND_BANDCAMP = 6,
-    ORCA_ARTIST_LINK_KIND_SOUNDCLOUD = 7,
-    ORCA_ARTIST_LINK_KIND_YOUTUBE = 8,
-    ORCA_ARTIST_LINK_KIND_SPOTIFY = 9,
-    ORCA_ARTIST_LINK_KIND_APPLE_MUSIC = 10,
-    ORCA_ARTIST_LINK_KIND_TIDAL = 11,
-    ORCA_ARTIST_LINK_KIND_DEEZER = 12,
-    ORCA_ARTIST_LINK_KIND_INSTAGRAM = 13,
-    ORCA_ARTIST_LINK_KIND_X = 14,
-    ORCA_ARTIST_LINK_KIND_FACEBOOK = 15,
-    ORCA_ARTIST_LINK_KIND_TIKTOK = 16,
-    ORCA_ARTIST_LINK_KIND_OTHER = 17,
-} orca_artist_link_kind;
-
-/* `language` is the Wikipedia whose article is the biography, falling back to
- * English: a code such as "en", "de" or "zh-yue"; empty means "en". `force` 1
- * fetches again even when the kept info is recent, and prefers a Commons
- * photo to a local image. `offline` 1 makes no request and uses only the
- * local image and answers already cached. `include_releases` 1 then fetches
- * the info of each of the Artist's Releases with a MusicBrainz release ID,
- * at most 64, as orca_library_start_release_info does. */
-typedef struct orca_artist_info_options {
-    orca_string_view language;
-    uint8_t force;
-    uint8_t offline;
-    uint8_t include_releases;
-    uint8_t reserved[5];
-} orca_artist_info_options;
-
-/* What the Library keeps for an Artist. `fetched_at` is Unix seconds.
- * `begin_year` and `end_year` are valid when their `has_` flag is 1; `ended`
- * is 1 when MusicBrainz says the Artist ended. `photo_source` is an
- * orca_artist_photo_source when `has_photo` is 1; a COMMONS photo carries
- * `photo_url` (its Commons page), `photo_licence` (such as "CC BY 2.0"),
- * `photo_licence_url` and `photo_credit` (plain text), which a host shows
- * with it. `biography` is the lead of the Artist's Wikipedia article,
- * `biography_licence` "CC BY-SA 4.0", shown with a link to `biography_url`.
- * `outcome` is the orca_artist_info_outcome of the fetch that kept this.
- * `listeners`, valid when `has_listeners` is 1, is how many ListenBrainz
- * users listened to the Artist, refreshed at most weekly.
- * Absent strings are empty. Every string is valid only for the duration of
- * the callback. */
-typedef struct orca_artist_info_view {
-    int64_t fetched_at;
-    int32_t begin_year;
-    int32_t end_year;
-    uint8_t has_begin_year;
-    uint8_t has_end_year;
-    uint8_t ended;
-    uint8_t has_photo;
-    uint8_t photo_source;
-    uint8_t has_biography;
-    uint8_t outcome;
-    uint8_t has_listeners;
-    orca_string_view musicbrainz_artist_id;
-    orca_string_view wikidata_id;
-    orca_string_view artist_type;
-    orca_string_view biography;
-    orca_string_view biography_url;
-    orca_string_view biography_licence;
-    orca_string_view biography_language;
-    orca_string_view photo_url;
-    orca_string_view photo_licence;
-    orca_string_view photo_licence_url;
-    orca_string_view photo_credit;
-    int64_t listeners;
-} orca_artist_info_view;
-
-typedef void (*orca_artist_info_callback)(void *context, const orca_artist_info_view *info);
-
-/* `kind` is an orca_artist_link_kind. */
-typedef struct orca_artist_link_view {
-    uint8_t kind;
-    uint8_t reserved[7];
-    orca_string_view url;
-} orca_artist_link_view;
-
-/* `links` holds `count` links, at most 64, valid only for the duration of the
- * callback. */
-typedef void (*orca_artist_links_callback)(
-    void *context,
-    const orca_artist_link_view *links,
-    size_t count
-);
-
-/*
- * Starts fetching an Artist's info as an ORCA_JOB_KIND_ARTIST_INFO job and
- * returns immediately. The photo is an image in the Artist's folder, else the
- * Wikimedia Commons image that the Artist's Wikidata item or MusicBrainz
- * names; the biography is the lead of its Wikipedia article; years active,
- * type and links come from MusicBrainz. Everything is kept in the Library;
- * nothing is written to a file. Only an Artist with a MusicBrainz artist ID
- * is looked up online.
- *
- * `options` may not be null. INVALID_ARGUMENT for a malformed language or a
- * flag other than 0 or 1, NOT_FOUND for an unknown Artist, INVALID_STATE
- * without a client identity (orca_runtime_set_client_identity).
- */
-orca_status orca_library_start_artist_info(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    const orca_artist_info_options *options,
-    orca_handle *job
-);
-
-/* Writes the artist info job's orca_artist_info_outcome to `outcome`;
- * ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED until it finishes. INVALID_ARGUMENT
- * for a job of another kind, STALE_HANDLE for an unknown job. */
-orca_status orca_job_artist_info_outcome(
-    orca_runtime *runtime,
-    orca_handle job,
-    uint8_t *outcome
-);
-
-/* Writes to `stores` how many times the artist info job has stored part of
- * what it found, while it runs: the Artist's info first, then its listeners
- * and related artists, then their photos. INVALID_ARGUMENT for a job of
- * another kind, STALE_HANDLE for an unknown job. */
-orca_status orca_job_artist_info_stores(
-    orca_runtime *runtime,
-    orca_handle job,
-    uint32_t *stores
-);
-
-/* Invokes the callback once with what the Library keeps for the Artist.
- * NOT_FOUND, without a callback, when nothing was ever fetched for it. */
-orca_status orca_library_artist_info(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    void *context,
-    orca_artist_info_callback callback
-);
-
-/* Invokes the callback once with the Artist's kept photo; its `kind` is
- * ORCA_ARTWORK_KIND_OTHER. NOT_FOUND, without a callback, when there is none. */
-orca_status orca_library_artist_photo(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    void *context,
-    orca_image_callback callback
-);
-
-/* Invokes the callback once with the Artist's kept links, by kind and then
- * URL; `count` is 0 when there are none. */
-orca_status orca_library_artist_links(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    void *context,
-    orca_artist_links_callback callback
-);
-
-/* An artist ListenBrainz Labs finds similar, `score` higher for more
- * similar. `library_artist_id`, valid when `has_library_artist_id` is 1, is
- * the Library Artist with that MusicBrainz artist ID, or else that name.
- * `has_photo` is 1 when a photo is kept: for a Library Artist the one
- * orca_library_artist_photo reads, otherwise the one
- * orca_library_related_artist_photo reads by `mbid`. */
-typedef struct orca_related_artist_view {
-    orca_string_view name;
-    orca_string_view mbid;
-    int64_t library_artist_id;
-    uint8_t has_library_artist_id;
-    uint8_t has_photo;
-    uint8_t reserved[2];
-    uint32_t score;
-} orca_related_artist_view;
-
-/* `artists` holds `count` related artists, most similar first, at most 12,
- * valid only for the duration of the callback. */
-typedef void (*orca_related_artists_callback)(
-    void *context,
-    const orca_related_artist_view *artists,
-    size_t count
-);
-
-/* Invokes the callback once with the Artist's kept related artists, which
- * orca_library_start_artist_info fetches; `count` is 0 when there are none. */
-orca_status orca_library_related_artists(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t artist_id,
-    void *context,
-    orca_related_artists_callback callback
-);
-
-/* Invokes the callback once with the photo kept for the related artist
- * outside the Library whose MusicBrainz artist ID is `musicbrainz_artist_id`
- * (`musicbrainz_artist_id_length` bytes, compared without case);
- * orca_library_start_artist_info fetches it. Its `kind` is
- * ORCA_ARTWORK_KIND_OTHER. NOT_FOUND, without a callback, when none is kept,
- * including when the artist was found to have none. Reads only the Library;
- * it never fetches. */
-orca_status orca_library_related_artist_photo(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *musicbrainz_artist_id,
-    size_t musicbrainz_artist_id_length,
-    void *context,
-    orca_image_callback callback
-);
-
-/* Where a related artist's kept photo came from and the credit a host shows
- * with it. `fetched_at` is Unix seconds. `photo_source` is an
- * orca_artist_photo_source, always COMMONS: `photo_url` is the photo's
- * Commons page, `photo_licence` its licence (such as "CC BY 2.0"),
- * `photo_licence_url` the licence's page and `photo_credit` its author as
- * plain text. Absent strings are empty. Every string is valid only for the
- * duration of the callback. */
-typedef struct orca_related_artist_photo_info_view {
-    int64_t fetched_at;
-    uint8_t photo_source;
-    uint8_t reserved[7];
-    orca_string_view photo_url;
-    orca_string_view photo_licence;
-    orca_string_view photo_licence_url;
-    orca_string_view photo_credit;
-} orca_related_artist_photo_info_view;
-
-typedef void (*orca_related_artist_photo_info_callback)(
-    void *context,
-    const orca_related_artist_photo_info_view *info
-);
-
-/* Invokes the callback once with the source and credit of the photo
- * orca_library_related_artist_photo returns for `musicbrainz_artist_id`
- * (`musicbrainz_artist_id_length` bytes, compared without case). NOT_FOUND,
- * without a callback, when no photo is kept. Reads only the Library. */
-orca_status orca_library_related_artist_photo_info(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *musicbrainz_artist_id,
-    size_t musicbrainz_artist_id_length,
-    void *context,
-    orca_related_artist_photo_info_callback callback
-);
-
-/* ---------------------------------------------------------- release info */
-
-typedef enum orca_release_description_source {
-    ORCA_RELEASE_DESCRIPTION_SOURCE_WIKIPEDIA = 0,
-} orca_release_description_source;
-
-/* `language` is the Wikipedia whose article is the description, falling back
- * to English; empty means "en". `force` 1 fetches again even when the kept
- * info is recent. `offline` 1 makes no request and uses only answers already
- * cached. */
-typedef struct orca_release_info_options {
-    orca_string_view language;
-    uint8_t force;
-    uint8_t offline;
-    uint8_t reserved[6];
-} orca_release_info_options;
-
-/* What the Library keeps for a Release. `fetched_at` is Unix seconds.
- * `description` is the lead of the Wikipedia article on the Release's
- * release group, valid when `has_description` is 1, with `description_source`
- * an orca_release_description_source and `description_licence`
- * "CC BY-SA 4.0", shown with a link to `description_url`. `outcome` is the
- * orca_artist_info_outcome of the fetch that kept this. Absent strings are
- * empty. Every string is valid only for the duration of the callback. */
-typedef struct orca_release_info_view {
-    int64_t fetched_at;
-    uint8_t has_description;
-    uint8_t description_source;
-    uint8_t outcome;
-    uint8_t reserved[5];
-    orca_string_view description;
-    orca_string_view description_url;
-    orca_string_view description_licence;
-    orca_string_view description_language;
-    orca_string_view musicbrainz_release_id;
-    orca_string_view musicbrainz_release_group_id;
-} orca_release_info_view;
-
-typedef void (*orca_release_info_callback)(void *context, const orca_release_info_view *info);
-
-/*
- * Starts fetching a Release's description as an ORCA_JOB_KIND_RELEASE_INFO
- * job and returns immediately. MusicBrainz names the release group, whose
- * Wikidata item, or failing that its Wikipedia link, names the article.
- * Unless orca_library_set_genre_fill turned it off, the release group's
- * MusicBrainz genres go on the Release's Tracks with no genre from a file or
- * an edit. Kept in the Library; nothing is written to a file.
- *
- * `options` may not be null. INVALID_ARGUMENT for a malformed language or a
- * flag other than 0 or 1, NOT_FOUND for an unknown Release, INVALID_STATE
- * without a client identity.
- */
-orca_status orca_library_start_release_info(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    const orca_release_info_options *options,
-    orca_handle *job
-);
-
-/* Writes the release info job's orca_artist_info_outcome to `outcome`;
- * ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED until it finishes. INVALID_ARGUMENT
- * for a job of another kind, STALE_HANDLE for an unknown job. */
-orca_status orca_job_release_info_outcome(
-    orca_runtime *runtime,
-    orca_handle job,
-    uint8_t *outcome
-);
-
-/* Invokes the callback once with what the Library keeps for the Release.
- * NOT_FOUND, without a callback, when nothing was ever fetched for it. */
-orca_status orca_library_release_info(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    void *context,
-    orca_release_info_callback callback
-);
-
-/* ------------------------------------------------------------ genre fill */
-
-/* `musicbrainz` 1 lets artist and release info fetches fill genres from
- * MusicBrainz, licensed CC BY-NC-SA 3.0, for Tracks with none; a host shows
- * that credit beside them. On unless turned off. */
-typedef struct orca_genre_fill {
-    uint8_t musicbrainz;
-    uint8_t reserved[7];
-} orca_genre_fill;
-
-/* `limit` is the most Releases asked about, 1 to 512. `offline` 1 makes no
- * request and uses only answers already cached. */
-typedef struct orca_genre_fill_options {
-    uint32_t limit;
-    uint8_t offline;
-    uint8_t reserved[3];
-} orca_genre_fill_options;
-
-/* Keeps the Library's genre fill setting. INVALID_ARGUMENT for a flag other
- * than 0 or 1. */
-orca_status orca_library_set_genre_fill(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_genre_fill *fill
-);
-
-orca_status orca_library_genre_fill(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_genre_fill *fill
-);
-
-/*
- * Fills genres from MusicBrainz, whatever orca_library_set_genre_fill says,
- * for Releases with a MusicBrainz release ID and a Track with no genre, as an
- * ORCA_JOB_KIND_RELEASE_INFO job that keeps no description; its snapshot's
- * completed_units counts the Releases asked about. INVALID_ARGUMENT for a
- * limit outside 1 to 512, INVALID_STATE without a client identity.
- */
-orca_status orca_library_start_genre_fill(
-    orca_runtime *runtime,
-    orca_handle library,
-    const orca_genre_fill_options *options,
-    orca_handle *job
-);
-
 /* ------------------------------------------------- tag edits and writes */
 
 /* A field Orca can keep its own value for, apart from what the file says. */
@@ -3622,10 +1709,6 @@ typedef enum orca_metadata_field {
     ORCA_METADATA_FIELD_MUSICBRAINZ_RELEASE_GROUP_ID = 10,
     ORCA_METADATA_FIELD_MUSICBRAINZ_RELEASE_TRACK_ID = 11,
     ORCA_METADATA_FIELD_MUSICBRAINZ_ALBUM_ARTIST_ID = 12,
-    /* "1" explicit, "2" clean, "0" neither: the ITUNESADVISORY values. */
-    ORCA_METADATA_FIELD_EXPLICIT = 13,
-    ORCA_METADATA_FIELD_COMPOSER = 14,
-    ORCA_METADATA_FIELD_COMMENT = 15,
 } orca_metadata_field;
 
 /* Where one of Orca's values came from. */
@@ -3651,6 +1734,9 @@ typedef struct orca_track_edit {
     uint8_t reserved[6];
     orca_string_view value;
 } orca_track_edit;
+
+/* `ids` is valid only for the duration of this callback. */
+typedef void (*orca_id_callback)(void *context, const int64_t *ids, size_t count);
 
 /* Sets or clears Orca's own values for the files behind 1 to 512 Tracks
  * (`ids`, `count`) and reprojects them. `edits` holds 1 to 64 changes. Only
@@ -3700,10 +1786,9 @@ orca_status orca_library_query_track_edits(
 #define ORCA_TAG_WRITE_DIGEST_BYTES 32
 
 /* A plan's approval digest: a BLAKE3 hash of the plan id and, for each file,
- * its path, its identity when planned, every field's value before and after,
- * and its genres before and after when the write replaces them. A write
- * starts only with the digest of the plan a person was shown, so it writes
- * exactly what was approved. */
+ * its path, its identity when planned, and every field's value before and
+ * after. A write starts only with the digest of the plan a person was shown,
+ * so it writes exactly what was approved. */
 typedef struct orca_tag_write_digest {
     uint8_t bytes[ORCA_TAG_WRITE_DIGEST_BYTES];
 } orca_tag_write_digest;
@@ -3721,10 +1806,7 @@ typedef struct orca_tag_write_change_view {
     orca_string_view after;
 } orca_tag_write_change_view;
 
-/* A file the plan writes, at `path`, with its `change_count` changes. A
- * change of the file's genres is read separately, with
- * orca_library_query_tag_write_genres, so a file whose only change is its
- * genres has a `change_count` of 0. */
+/* A file the plan writes, at `path`, with its `change_count` changes. */
 typedef struct orca_tag_write_file_view {
     int64_t file_id;
     orca_string_view path;
@@ -3886,37 +1968,6 @@ orca_status orca_library_discard_tag_write(
     orca_handle library,
     uint64_t plan_id
 );
-
-/* The genres a held plan writes into file `file_id`: `before` are the
- * genres the file's tag holds now, in order, and `after` the user's genres
- * the write replaces them with, in order and never empty. */
-typedef struct orca_tag_write_genres_view {
-    int64_t file_id;
-    const orca_string_view *before;
-    size_t before_count;
-    const orca_string_view *after;
-    size_t after_count;
-} orca_tag_write_genres_view;
-
-typedef void (*orca_tag_write_genres_callback)(
-    void *context,
-    const orca_tag_write_genres_view *genres
-);
-
-/* Invokes the callback once with the genres held plan `plan_id` writes into
- * file `file_id`, one of the files its orca_tag_write_plan_view listed. Call
- * it after orca_library_plan_tag_write returns, not from its callback.
- * NOT_FOUND, without a callback, for a plan that is not held, a file the
- * plan does not write, or a file whose genres it leaves alone.
- * INVALID_ARGUMENT for a NULL callback. */
-orca_status orca_library_query_tag_write_genres(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint64_t plan_id,
-    int64_t file_id,
-    void *context,
-    orca_tag_write_genres_callback callback
-);
 /*
  * Restores the files of tag write `group_id`, its plan id, from their
  * backups to their bytes before the write, on the calling thread, deletes
@@ -3956,124 +2007,6 @@ orca_status orca_library_prune_tag_write_backups(
     uint64_t *bytes
 );
 
-/* What became of a tag write, as its journal records it. */
-typedef enum orca_tag_write_group_state {
-    /* Every file was written. */
-    ORCA_TAG_WRITE_GROUP_STATE_APPLIED = 0,
-    /* An undo was interrupted; orca_library_undo_tag_write finishes it. */
-    ORCA_TAG_WRITE_GROUP_STATE_UNDOING = 1,
-    /* orca_library_undo_tag_write restored every file. */
-    ORCA_TAG_WRITE_GROUP_STATE_UNDONE = 2,
-    /* The write or its undo was interrupted and recovery restored every
-     * file. */
-    ORCA_TAG_WRITE_GROUP_STATE_ROLLED_BACK = 3,
-    /* A file could not be written; the files already written were restored. */
-    ORCA_TAG_WRITE_GROUP_STATE_FAILED = 4,
-    /* A file or backup changed outside Orca; see orca_library_undo_tag_write. */
-    ORCA_TAG_WRITE_GROUP_STATE_NEEDS_RECONCILIATION = 5,
-} orca_tag_write_group_state;
-
-/* A tag write in the change history. `group_id` is the group
- * orca_library_undo_tag_write takes; `written_at` is when it was planned to
- * run, in Unix seconds. `title` is the Release title its files share, empty
- * when they span several or none. `can_undo` is 1 when
- * orca_library_undo_tag_write would run it: every file written and every
- * backup kept, or an undo to finish. It is read from the journal alone, so an
- * undo of a file changed since can still return NEEDS_RECONCILIATION.
- * `expired` is 1 when the write's backups were pruned. */
-typedef struct orca_tag_write_group_view {
-    uint64_t group_id;
-    int64_t written_at;
-    uint64_t file_count;
-    uint8_t state; /* orca_tag_write_group_state */
-    uint8_t can_undo;
-    uint8_t expired;
-    uint8_t reserved[5];
-    orca_string_view title;
-} orca_tag_write_group_view;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_tag_write_group_callback)(
-    void *context,
-    const orca_tag_write_group_view *group
-);
-
-/* The finished tag writes of `library`, newest first; writes still running
- * are left out. INVALID_ARGUMENT for a `limit` outside 1...512. */
-orca_status orca_library_query_tag_write_groups(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_tag_write_group_callback callback
-);
-
-typedef enum orca_tag_write_diff_subject {
-    /* `field` names the tag. */
-    ORCA_TAG_WRITE_DIFF_SUBJECT_FIELD = 0,
-    ORCA_TAG_WRITE_DIFF_SUBJECT_GENRES = 1,
-    /* The file or its backup could not be read: the backup was pruned or
-     * consumed by an undo, or the file is gone. `restores` and `current` are
-     * empty. */
-    ORCA_TAG_WRITE_DIFF_SUBJECT_UNKNOWN = 2,
-} orca_tag_write_diff_subject;
-
-/* One tag a write changed in `file`. `restores` is the backup's value, which
- * an undo puts back; `current` is the file's value now. Either is empty when
- * the tag is absent; genres are joined with "; ". */
-typedef struct orca_tag_write_diff_view {
-    uint8_t subject; /* orca_tag_write_diff_subject */
-    uint8_t field;   /* orca_metadata_field, when `subject` is FIELD */
-    uint8_t reserved[6];
-    orca_string_view file;
-    orca_string_view restores;
-    orca_string_view current;
-} orca_tag_write_diff_view;
-
-/* `diffs` holds at most 512 rows, whole files only, in action order;
- * `more_files` counts the changed files left out. `field_count` counts every
- * changed tag of every file, those left out included. */
-typedef struct orca_tag_write_group_detail_view {
-    orca_tag_write_group_view group;
-    const orca_tag_write_diff_view *diffs;
-    size_t diff_count;
-    uint64_t more_files;
-    uint64_t field_count;
-} orca_tag_write_group_detail_view;
-
-/* String views and `diffs` are valid only for the duration of this callback. */
-typedef void (*orca_tag_write_group_detail_callback)(
-    void *context,
-    const orca_tag_write_group_detail_view *detail
-);
-
-/* Reads every file of tag write `group_id` and its backup, on the calling
- * thread, and compares their tags. Nothing is written. NOT_FOUND for a group
- * that is not a finished tag write. */
-orca_status orca_library_query_tag_write_group(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint64_t group_id,
-    void *context,
-    orca_tag_write_group_detail_callback callback
-);
-
-/* Writes every tag write group, newest first, to `path` (`path_length` bytes,
- * not NUL-terminated), one line each in the form of `orca-cli changes`. The
- * file appears complete and synced or not at all. An existing file is
- * INVALID_STATE unless `replace` is 1; `replace` above 1 is INVALID_ARGUMENT.
- * NOT_FOUND when the folder does not exist. `exported` counts the groups
- * written. */
-orca_status orca_library_export_tag_write_history(
-    orca_runtime *runtime,
-    orca_handle library,
-    const char *path,
-    size_t path_length,
-    uint8_t replace,
-    uint64_t *exported
-);
-
 /* Registering a root is an explicit user action: it is the one path allowed to
  * persist a volume identifier at a mount root. */
 orca_status orca_library_add_root(
@@ -4090,22 +2023,6 @@ orca_status orca_library_remove_root(
     orca_handle library,
     int64_t root_id
 );
-/* Moves root `root_id` to `path`, bound to the volume `path` is on now, and
- * keeps the root's id, every File, Track and location under it, and the undo
- * of every tag write there; then starts a whole-root reconcile Job and returns
- * it in `job`. INVALID_ARGUMENT when `path` is not a readable directory, is
- * inside or holds another root or files of another root, or is inside or
- * holds the root's old folder while that still exists; NOT_FOUND for an
- * unknown root; BUSY while a job is running on the library, a tag write holds
- * the library's journal, or one under the root is unfinished;
- * NEEDS_RECONCILIATION when one under the root needs reconciliation. */
-orca_status orca_library_relocate_root(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t root_id,
-    const char *path,
-    orca_handle *job
-);
 /* `limit` must be between 1 and 512. */
 orca_status orca_library_query_roots(
     orca_runtime *runtime,
@@ -4114,39 +2031,6 @@ orca_status orca_library_query_roots(
     uint32_t offset,
     void *context,
     orca_root_callback callback
-);
-/* orca_library_query_roots with each root's availability and Track counts.
- * `limit` must be between 1 and 512. */
-orca_status orca_library_query_roots_v2(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_root_v2_callback callback
-);
-/* How many Tracks have no present or unverified copy of their preferred
- * file, as scans and playback last recorded it; nothing on disk is read. */
-orca_status orca_library_missing_file_count(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint64_t *count
-);
-/* One page of the folder `path` below root `root_id`: subfolders, then files.
- * `path` is relative to the root, `/`-separated, and empty for the root
- * itself; a path with an empty, `.` or `..` component, a leading `/` or a NUL
- * is INVALID_ARGUMENT, and an unknown root NOT_FOUND. Missing files are left
- * out. `limit` must be between 1 and 512. */
-orca_status orca_library_query_folder(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t root_id,
-    const char *path,
-    size_t path_length,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_folder_entry_callback callback
 );
 
 /*
@@ -4179,9 +2063,9 @@ orca_status orca_library_start_projection(
  * and marks missing only the files under what it walked. `directories` may
  * be null when `count` is zero. The strings need not outlive the call.
  *
- * INVALID_ARGUMENT for a directory not in that form. Started while another
- * job holds the library's slot, it is ORCA_JOB_WAITING until that one ends.
- * Its stats are read through orca_library_scan_stats, with a scan's meaning.
+ * INVALID_ARGUMENT for a directory not in that form, BUSY while a scan or
+ * reconcile of the library runs. Its stats are read through
+ * orca_library_scan_stats, with a scan's meaning.
  *
  * No scan or reconcile walks a root whose path now resolves to another
  * volume than the one recorded when it was added, as the empty mount point
@@ -4234,11 +2118,7 @@ typedef enum orca_busy_service {
  * NO_RELEASE_ID: neither a tag nor an accepted match gives the Release a
  * MusicBrainz release ID. REFUSED: the archive's answer was a redirect off
  * the archive, another 4xx, or a body that is not a JPEG or PNG of at most
- * 4 MiB. BUSY: another Orca process holds the archive. FOLDER: a front cover
- * image in the Release's folder is shown before a fetched one, so nothing was
- * fetched. CHOSEN: a person chose the Release's front cover, so nothing was
- * fetched. PARTIAL: a candidates fetch stored the release's own candidates
- * but could not read its release group's index. */
+ * 4 MiB. BUSY: another Orca process holds the archive. */
 typedef enum orca_cover_art_outcome {
     ORCA_COVER_ART_OUTCOME_NOT_REQUESTED = 0,
     ORCA_COVER_ART_OUTCOME_EMBEDDED = 1,
@@ -4251,9 +2131,6 @@ typedef enum orca_cover_art_outcome {
     ORCA_COVER_ART_OUTCOME_UNAVAILABLE = 8,
     ORCA_COVER_ART_OUTCOME_BUSY = 9,
     ORCA_COVER_ART_OUTCOME_CANCELLED = 10,
-    ORCA_COVER_ART_OUTCOME_FOLDER = 11,
-    ORCA_COVER_ART_OUTCOME_CHOSEN = 12,
-    ORCA_COVER_ART_OUTCOME_PARTIAL = 13,
 } orca_cover_art_outcome;
 
 /* How a file's recording ID compared with what AcoustID heard in its
@@ -4307,7 +2184,7 @@ typedef struct orca_match_options {
  * per service. Its counts are read with orca_job_match_stats.
  *
  * While an idle-maintenance unit runs, returns OK with a job that stays
- * ORCA_JOB_WAITING: the unit is cancelled, and the job starts from a later
+ * ORCA_JOB_QUEUED: the unit is cancelled, and the job starts from a later
  * orca_runtime_pump once it has stopped. INVALID_STATE without a
  * client identity (orca_runtime_set_client_identity), and for VERIFY without
  * AcoustID. INVALID_ARGUMENT for an unknown mode, both `track_id` and
@@ -4331,7 +2208,7 @@ orca_status orca_library_start_match(
  * stored in the Library, never in a file, and orca_library_release_artwork
  * returns it. Statuses as orca_library_start_match: INVALID_STATE without a
  * client identity, NOT_FOUND for an unknown Release, BUSY while a matching
- * job runs or is queued, and OK with a waiting job while an idle-maintenance
+ * job runs or is queued, and OK with a queued job while an idle-maintenance
  * unit stops.
  */
 orca_status orca_library_start_cover_art_fetch(
@@ -4387,20 +2264,6 @@ orca_status orca_job_match_stats(
     orca_runtime *runtime,
     orca_handle job,
     orca_match_stats *output
-);
-
-/* The Release that holds most of a finished Match Album's files, with
- * `has_release_id` 1: the files of the album's Tracks when the job started,
- * so a host can follow an album that accepting a release ID moved to a new
- * Release id. The same id when the album kept its key. `has_release_id` 0
- * and `release_id` 0 while the job runs or is queued, for a job that is not
- * a release-scoped search or re-identify, and when no Release holds the
- * files. STALE_HANDLE for an unknown job. */
-orca_status orca_job_match_release(
-    orca_runtime *runtime,
-    orca_handle job,
-    int64_t *release_id,
-    uint8_t *has_release_id
 );
 
 /*
@@ -4562,192 +2425,6 @@ orca_status orca_library_apply_matched_release(
     uint32_t *values_written
 );
 
-/* A value Match Review compares between a Release and a MusicBrainz release.
- * Bit `1u << field` selects it for orca_library_apply_matched_release_fields.
- * RELEASE_ID covers the release, release group, release track and album
- * artist IDs, the track and disc numbers and the recording ID; TRACK_TITLES
- * each Track's title and artist. RELEASE_TYPE, GENRE and ARTWORK are compared
- * but never stored. */
-typedef enum orca_release_field {
-    ORCA_RELEASE_FIELD_ALBUM = 0,
-    ORCA_RELEASE_FIELD_ALBUM_ARTIST = 1,
-    ORCA_RELEASE_FIELD_RELEASE_DATE = 2,
-    ORCA_RELEASE_FIELD_RELEASE_TYPE = 3,
-    ORCA_RELEASE_FIELD_RELEASE_ID = 4,
-    ORCA_RELEASE_FIELD_GENRE = 5,
-    ORCA_RELEASE_FIELD_ARTWORK = 6,
-    ORCA_RELEASE_FIELD_TRACK_TITLES = 7
-} orca_release_field;
-
-/* Stores the fields whose bits are set in `fields` of the Release's best
- * candidate, locked, so they outrank the files' own tags; the other values
- * and their provenance stay. The Tracks' values come from their accepted
- * matches on the release, else their
- * pending proposals enriched for it that are neither corrections nor in an
- * album group; with RELEASE_ID such a proposal is accepted, and without it it
- * stays pending. A user lock wins and no file is written. A bit past
- * TRACK_TITLES is INVALID_ARGUMENT. */
-orca_status orca_library_apply_matched_release_fields(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    uint32_t fields,
-    uint32_t *values_written
-);
-
-/* Where a Release stands against MusicBrainz. CONFIDENT: its best candidate
- * is at least `confident_at` and is not dismissed. NEEDS_REVIEW: a candidate
- * exists below that. UNMATCHED: there is none. */
-typedef enum orca_release_match_bucket {
-    ORCA_RELEASE_MATCH_BUCKET_CONFIDENT = 0,
-    ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW = 1,
-    ORCA_RELEASE_MATCH_BUCKET_UNMATCHED = 2
-} orca_release_match_bucket;
-
-/* A Release beside its best MusicBrainz release candidate: the release its
- * Tracks are named on, by tag, accepted match or proposal, that has the
- * highest mean per-Track confidence. The candidate fields are empty and
- * `has_best` 0 for an unmatched Release. Valid only for the duration of the
- * callback. */
-typedef struct orca_release_match_view {
-    int64_t release_id;
-    uint32_t track_count;
-    uint8_t bucket;
-    uint8_t has_best;
-    uint8_t has_candidate_track_count;
-    uint8_t reserved[1];
-    orca_string_view title;
-    orca_string_view artist;
-    orca_string_view release_mbid;
-    orca_string_view candidate_title;
-    orca_string_view candidate_date;
-    uint32_t candidate_track_count;
-    float confidence;
-} orca_release_match_view;
-
-typedef void (*orca_release_match_callback)(void *context, const orca_release_match_view *item);
-
-/* Invokes the callback for a page of the Releases in `bucket`, an
- * orca_release_match_bucket, by album artist and title. `confident_at` is
- * greater than 0 and at most 1, and `limit` 1 to 512; otherwise
- * INVALID_ARGUMENT. */
-orca_status orca_library_query_release_matches(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t bucket,
-    float confident_at,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_release_match_callback callback
-);
-
-typedef struct orca_release_match_counts {
-    uint64_t confident;
-    uint64_t needs_review;
-    uint64_t unmatched;
-} orca_release_match_counts;
-
-/* How many Releases each bucket of orca_library_query_release_matches holds. */
-orca_status orca_library_release_match_counts(
-    orca_runtime *runtime,
-    orca_handle library,
-    float confident_at,
-    orca_release_match_counts *output
-);
-
-/* Why a Release is, or is not, a MusicBrainz release. `fingerprints_matched`
- * counts Tracks AcoustID heard on it at 0.9 or more; `durations_within_1s`
- * is set when each compared Track is within a second of its recording; the
- * artist and title agree when nearly equal ignoring case and spacing, the
- * date only when the same text. `note` says it in a sentence. Valid only for
- * the duration of the callback. */
-typedef struct orca_match_evidence_view {
-    uint32_t fingerprints_matched;
-    uint32_t tracks;
-    uint8_t durations_within_1s;
-    uint8_t artist_agrees;
-    uint8_t title_agrees;
-    uint8_t date_agrees;
-    uint8_t reserved[4];
-    orca_string_view note;
-} orca_match_evidence_view;
-
-typedef void (*orca_match_evidence_callback)(void *context, const orca_match_evidence_view *evidence);
-
-/* The evidence for the Release against `release_mbid`, a NUL-terminated
- * MusicBrainz release ID, or its best candidate when NULL. NOT_FOUND for an
- * unknown Release or one with no candidate; INVALID_ARGUMENT for an ID that
- * is not a MusicBrainz ID. */
-orca_status orca_library_release_match_evidence(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    const char *release_mbid,
-    void *context,
-    orca_match_evidence_callback callback
-);
-
-/* One orca_release_field beside the candidate's. `differs` is set when the
- * candidate has a value that is not the local one. */
-typedef struct orca_release_field_diff_view {
-    uint8_t field;
-    uint8_t differs;
-    uint8_t reserved[6];
-    orca_string_view local;
-    orca_string_view candidate;
-} orca_release_field_diff_view;
-
-/* A Track beside its track on the candidate: `candidate_title` is empty and
- * `has_delta_ms` 0 when the release does not name it. `delta_ms` is the
- * recording's duration less the Track's. */
-typedef struct orca_release_track_alignment_view {
-    int64_t track_id;
-    int64_t delta_ms;
-    uint32_t position;
-    uint8_t has_delta_ms;
-    uint8_t fingerprint;
-    uint8_t reserved[2];
-    orca_string_view local_title;
-    orca_string_view candidate_title;
-} orca_release_track_alignment_view;
-
-/* Every orca_release_field in order, then every Track; `aligned` counts the
- * Tracks the release names. Valid only for the duration of the callback. */
-typedef struct orca_release_match_diff_view {
-    orca_string_view release_mbid;
-    const orca_release_field_diff_view *fields;
-    size_t field_count;
-    const orca_release_track_alignment_view *tracks;
-    size_t track_count;
-    uint32_t aligned;
-    uint8_t reserved[4];
-} orca_release_match_diff_view;
-
-typedef void (*orca_release_match_diff_callback)(void *context, const orca_release_match_diff_view *diff);
-
-/* The Release's values beside a candidate's, `release_mbid` as
- * orca_library_release_match_evidence. Statuses as it. */
-orca_status orca_library_release_match_diff(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    const char *release_mbid,
-    void *context,
-    orca_release_match_diff_callback callback
-);
-
-/* Marks `release_mbid` as not the Release ("Not This Release"): it is no
- * longer a candidate for it. A Release of more Tracks than one page is never
- * a candidate. NOT_FOUND for an unknown Release; INVALID_ARGUMENT for an ID
- * that is not a MusicBrainz ID. */
-orca_status orca_library_dismiss_release_candidate(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t release_id,
-    const char *release_mbid
-);
-
 /* A recording AcoustID heard in a fingerprint, with its score from 0 to 1. */
 typedef struct orca_heard_recording_view {
     orca_string_view mbid;
@@ -4884,7 +2561,7 @@ typedef enum orca_submission_outcome {
  * through the credential callback. It writes no file.
  *
  * While an idle-maintenance unit runs, returns OK with a job that stays
- * ORCA_JOB_WAITING until the unit has stopped. INVALID_STATE without a client
+ * ORCA_JOB_QUEUED until the unit has stopped. INVALID_STATE without a client
  * identity. BUSY while a matching job or another submission runs or is
  * queued.
  */
@@ -5133,24 +2810,13 @@ orca_status orca_library_maintenance_status(
  * orca_library_scan_stats. In those stats `files_seen` counts rows examined,
  * `changed` rows repaired, `errors` files that opened and would not decode,
  * and `unsupported` files that are not reachable or are not audio - the last
- * of which is not a failure of the pass. It then measures the covers left
- * unmeasured: each counts in `files_seen`, one measured or found unreadable
- * in `changed`, and one whose file is unreachable or changed in
- * `unsupported`.
+ * of which is not a failure of the pass.
  */
 orca_status orca_library_start_property_backfill(
     orca_runtime *runtime,
     orca_handle library,
     const orca_backfill_options *options,
     orca_handle *job
-);
-/* Writes what a property backfill could repair now, checking which roots are
- * offline on the calling thread. A host starts one when either count is
- * nonzero and no scan is running. */
-orca_status orca_library_backfill_pending(
-    orca_runtime *runtime,
-    orca_handle library,
-    orca_backfill_pending *output
 );
 
 /*
@@ -5240,26 +2906,6 @@ orca_status orca_library_scan_stats(
     orca_handle job,
     orca_scan_stats *output
 );
-/* orca_library_scan_stats with the stage, Releases found and current file. */
-orca_status orca_library_scan_stats_v2(
-    orca_runtime *runtime,
-    orca_handle job,
-    orca_scan_stats_v2 *output
-);
-
-/*
- * Counts the audio files under `path`, a folder not yet added to any Library,
- * by each file's first bytes rather than its name, on the calling thread. It
- * stops at `limit` audio files, zero selecting 100000, and then sets
- * `truncated`: the folder holds at least that many. It reads nothing past a
- * file's header and writes nothing.
- */
-orca_status orca_estimate_audio_files(
-    orca_runtime *runtime,
-    const char *path,
-    uint32_t limit,
-    orca_folder_estimate *output
-);
 
 /* Who started a job. WATCHER: a reconcile orca_library_watch started.
  * MAINTENANCE: a unit of idle maintenance (orca_library_set_maintenance). */
@@ -5284,150 +2930,6 @@ orca_status orca_job_reconcile_root(
     orca_handle job,
     int64_t *root_id,
     uint8_t *has_root_id
-);
-
-/* What orca_job_snapshot leaves out. `started_at` is Unix seconds, with
- * `has_started_at` 0 while the job waits. `estimated_remaining_ms` comes from
- * the rate over the last ten seconds of progress, so `has_estimated_
- * remaining_ms` is 0 until ten seconds of it, while paused, and for a job with
- * no total. `current_item` is the path or title being worked on and `detail`
- * a note such as "14 threads"; either may be empty. */
-typedef struct orca_job_details {
-    int64_t started_at;
-    uint64_t estimated_remaining_ms;
-    uint8_t has_started_at;
-    uint8_t paused;
-    uint8_t has_estimated_remaining_ms;
-    uint8_t reserved[5];
-    orca_string_view current_item;
-    orca_string_view detail;
-} orca_job_details;
-
-typedef void (*orca_job_details_callback)(
-    void *context,
-    const orca_job_details *details
-);
-
-/* Calls `callback` once with the job's details. STALE_HANDLE as
- * orca_job_origin_get. */
-orca_status orca_job_details_get(
-    orca_runtime *runtime,
-    orca_handle job,
-    void *context,
-    orca_job_details_callback callback
-);
-
-/* Holds a running job at its next cancellation poll; it keeps its thread and
- * any provider lease, and orca_job_cancel still stops it. A paused job stays
- * paused. INVALID_STATE for a job that is waiting, cancelling or finished, or
- * of a kind that never polls: a tag write, a projection, and the one-item
- * fetches. */
-orca_status orca_job_pause(orca_runtime *runtime, orca_handle job);
-/* A running job stays running. Resuming one job of a paused Library leaves
- * the rest held. INVALID_STATE as orca_job_pause. */
-orca_status orca_job_resume(orca_runtime *runtime, orca_handle job);
-
-/* Pauses every pausable job of the Library, whoever started it, and holds its
- * waiting jobs, watcher reconciles and maintenance until
- * orca_library_resume_jobs. A job started while paused waits. */
-orca_status orca_library_pause_jobs(orca_runtime *runtime, orca_handle library);
-orca_status orca_library_resume_jobs(orca_runtime *runtime, orca_handle library);
-orca_status orca_library_jobs_paused(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t *paused
-);
-
-/* One Library runs one scan, reconcile, backfill, analysis, duplicate scan,
- * tag write, match, cover fetch, submission or genre fill at a time. A host job
- * of those kinds started while the slot is held is created ORCA_JOB_WAITING
- * and starts in order on a later orca_runtime_pump. At most
- * ORCA_MAX_WAITING_JOBS wait across the runtime; one more is BUSY. */
-#define ORCA_MAX_WAITING_JOBS 32
-
-/* `after` is the job this one starts behind, with `has_after` 0 for the job
- * holding the slot. */
-typedef struct orca_queued_job_view {
-    orca_handle job;
-    orca_handle after;
-    uint8_t kind;  /* orca_job_kind */
-    uint8_t has_after;
-    uint8_t reserved[6];
-} orca_queued_job_view;
-
-typedef void (*orca_queued_job_callback)(
-    void *context,
-    const orca_queued_job_view *job
-);
-
-/* The job holding the Library's slot, then the jobs waiting for it in the
- * order they start. */
-orca_status orca_library_query_job_queue(
-    orca_runtime *runtime,
-    orca_handle library,
-    void *context,
-    orca_queued_job_callback callback
-);
-
-typedef enum orca_job_history_filter {
-    ORCA_JOB_HISTORY_ALL = 0,
-    /* Scans, reconciles, projections and backfills. */
-    ORCA_JOB_HISTORY_SCANS = 1,
-    /* Analyses and duplicate scans. */
-    ORCA_JOB_HISTORY_ANALYSIS = 2,
-    /* Tag writes. */
-    ORCA_JOB_HISTORY_FILE_CHANGES = 3,
-    /* Failed and cancelled jobs. */
-    ORCA_JOB_HISTORY_PROBLEMS = 4,
-} orca_job_history_filter;
-
-/* A finished host job of the kinds the queue holds, as its Library recorded
- * it. Times are Unix seconds. `error_text` is empty when it succeeded;
- * `summary` reads as "2,847 files · 3 changed". `undo_group_id` is the group
- * orca_library_undo_tag_write takes, for a tag write that succeeded.
- * `retryable` 1: orca_library_retry_job starts it again. */
-typedef struct orca_job_history_view {
-    int64_t id;
-    int64_t started_at;
-    int64_t finished_at;
-    uint64_t completed_units;
-    uint64_t total_units;
-    uint64_t undo_group_id;
-    uint8_t kind;   /* orca_job_kind */
-    uint8_t state;  /* orca_job_state */
-    uint8_t has_total;
-    uint8_t has_undo_group_id;
-    uint8_t retryable;
-    uint8_t reserved[3];
-    orca_string_view error_text;
-    orca_string_view summary;
-} orca_job_history_view;
-
-typedef void (*orca_job_history_callback)(
-    void *context,
-    const orca_job_history_view *entry
-);
-
-/* Newest first; the newest thousand are kept. INVALID_ARGUMENT for an unknown
- * `filter` or a `limit` outside 1...512. */
-orca_status orca_library_query_job_history(
-    orca_runtime *runtime,
-    orca_handle library,
-    uint8_t filter,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_job_history_callback callback
-);
-
-/* Starts the recorded job's request again, as its start function would, and
- * writes the new job. NOT_FOUND for an unknown `history_id`; INVALID_STATE for
- * an entry whose `retryable` is 0. */
-orca_status orca_library_retry_job(
-    orca_runtime *runtime,
-    orca_handle library,
-    int64_t history_id,
-    orca_handle *job
 );
 
 /* --------------------------------------------------------------- player */
@@ -5487,22 +2989,6 @@ orca_status orca_player_play_playlist(
     int64_t playlist_id,
     uint32_t start
 );
-/* Replaces the queue with every Track whose preferred file lies below the
- * folder `path` (relative to root `root_id`, empty for the root), each once,
- * in path order, at most 10000, from the Library the Player is bound to, and
- * sets shuffle to `shuffle` (0 or 1) before starting at the first. Synchronous,
- * like orca_player_play_tracks. INVALID_STATE for a Player with no Library and
- * for a folder with no Track, which leaves the queue as it was; NOT_FOUND for
- * an unknown root; INVALID_ARGUMENT for a path with an empty, `.` or `..`
- * component, a leading `/` or a NUL. */
-orca_status orca_player_play_folder(
-    orca_runtime *runtime,
-    orca_handle player,
-    int64_t root_id,
-    const char *path,
-    size_t path_length,
-    uint8_t shuffle
-);
 /* A user skip is a hard switch: prepared audio is discarded rather than
  * drained. `moved` receives 0 at the end of a queue that is not repeating. */
 orca_status orca_player_next(orca_runtime *runtime, orca_handle player, uint8_t *moved);
@@ -5520,103 +3006,23 @@ typedef enum orca_replay_gain_mode {
     /* No loudness correction. Every entry plays at the volume set above. */
     ORCA_REPLAY_GAIN_OFF = 0,
     /* Each entry is corrected by its own measured loudness, when the Library
-     * holds a measurement that still describes the file. */
+     * holds a measurement that still describes the file. Album-level
+     * ReplayGain is not offered: it needs a release-scoped measurement Orca
+     * does not compute, and naming it here would apply track gain under an
+     * album label. */
     ORCA_REPLAY_GAIN_TRACK = 1,
-    /* Each entry is corrected by its Release's loudness, so the levels within
-     * an album stay as mastered. The album figure is worked out when the entry
-     * is opened, from the measurements of every Track of the Release: their
-     * integrated loudness averaged in energy, weighted by duration, with the
-     * loudest Track's sample peak as the album peak. An entry whose Release
-     * has an unmeasured Track, a Track with no duration or more than 512
-     * Tracks, or that has no Release, falls back to its own track correction,
-     * and the signal path reports ORCA_GAIN_SOURCE_TRACK_FALLBACK. */
-    ORCA_REPLAY_GAIN_ALBUM = 2,
-    /* ALBUM while the entry before or after it in playback order is filed
-     * under the same Release, TRACK otherwise: an album played through keeps
-     * its levels, a shuffled mix is evened out per track. Decided per entry
-     * as it opens and again whenever the queue is reordered or shuffled. */
-    ORCA_REPLAY_GAIN_SMART = 3,
 } orca_replay_gain_mode;
 
-/* What an entry with no usable measurement plays at while correction is on. */
-typedef enum orca_untagged_fallback {
-    ORCA_UNTAGGED_MINUS_6_DB = 0,
-    ORCA_UNTAGGED_AS_IS = 1,
-} orca_untagged_fallback;
-
-/* Every ReplayGain choice of a Player. */
-typedef struct orca_replay_gain_settings {
-    /* Added to every measured correction before peak protection. */
-    float preamp_db;
-    uint8_t mode;             /* orca_replay_gain_mode */
-    uint8_t fallback;         /* orca_untagged_fallback */
-    uint8_t peak_protection;  /* 1 caps each correction at 1 / peak */
-    uint8_t reserved[1];
-} orca_replay_gain_settings;
-
-/* Which correction orca_signal_path_view.replay_gain_db is. */
-typedef enum orca_gain_source {
-    /* No measured correction applies: ReplayGain is off, or the entry is
-     * unmeasured and plays at the untagged fallback. */
-    ORCA_GAIN_SOURCE_NONE = 0,
-    /* The entry's own, under ORCA_REPLAY_GAIN_TRACK. */
-    ORCA_GAIN_SOURCE_TRACK = 1,
-    /* The entry's Release's, under ORCA_REPLAY_GAIN_ALBUM or SMART. */
-    ORCA_GAIN_SOURCE_ALBUM = 2,
-    /* The entry's own, under ORCA_REPLAY_GAIN_ALBUM or SMART, because its
-     * Release has no album figure. */
-    ORCA_GAIN_SOURCE_TRACK_FALLBACK = 3,
-} orca_gain_source;
-
 /* Takes effect as soon as the audio already decoded ahead of the listener
- * drains -- a fraction of a second, not the rest of the track, in every
- * mode, as do the preamp, fallback and peak protection below. The level steps rather than ramping when it does, which is the answer
- * to an explicit request. Defaults to TRACK. */
+ * drains -- a fraction of a second, not the rest of the track. The level steps
+ * rather than ramping when it does, which is the answer to an explicit
+ * request. Defaults to TRACK. */
 orca_status orca_player_set_replay_gain_mode(
     orca_runtime *runtime,
     orca_handle player,
     uint8_t mode
 );
 orca_status orca_player_replay_gain_mode(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint8_t *output
-);
-/* Clamped to -15..15 dB; NaN is 0. Not applied to the untagged fallback.
- * Defaults to 0. */
-orca_status orca_player_set_replay_gain_preamp(
-    orca_runtime *runtime,
-    orca_handle player,
-    float decibels
-);
-/* An orca_untagged_fallback value. Defaults to ORCA_UNTAGGED_AS_IS. */
-orca_status orca_player_set_replay_gain_fallback(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint8_t fallback
-);
-/* 1 caps every correction at 1 / the measured peak, so a boost never drives
- * the entry past full scale; 0 lets the boost through. Defaults to 1. */
-orca_status orca_player_set_peak_protection(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint8_t enabled
-);
-orca_status orca_player_replay_gain_settings(
-    orca_runtime *runtime,
-    orca_handle player,
-    orca_replay_gain_settings *output
-);
-/* 1 stops the transport when the entry being heard ends, then reads 0 again;
- * the following entry is not started until the next play. Arming it after
- * the engine has begun decoding the following entry re-opens the audible one
- * at the heard position, with a short gap. */
-orca_status orca_player_set_stop_after_current(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint8_t enabled
-);
-orca_status orca_player_stop_after_current(
     orca_runtime *runtime,
     orca_handle player,
     uint8_t *output
@@ -5672,17 +3078,15 @@ orca_status orca_equalizer_preset_get(uint8_t preset, orca_equalizer *output);
 /* Turns the equalizer on with `equalizer`, or off with NULL. INVALID_ARGUMENT,
  * with the previous setting kept, when a gain or the preamp is outside its
  * range or not a finite number. An equalizer with every band and the preamp at
- * 0 is on but transparent: it is not sample processing. Turning it on turns
- * the parametric equalizer off. The engine is paused while the setting is
- * written, and applies it from its next pass. */
+ * 0 is on but transparent: it is not sample processing. The engine is paused
+ * while the setting is written, and applies it from its next pass. */
 orca_status orca_player_set_equalizer(
     orca_runtime *runtime,
     orca_handle player,
     const orca_equalizer *equalizer
 );
 /* `enabled` receives 1 and `output` the setting while the equalizer is on;
- * `enabled` 0 leaves `output` zeroed. It is 0 while the parametric equalizer
- * is on. */
+ * `enabled` 0 leaves `output` zeroed. */
 orca_status orca_player_equalizer(
     orca_runtime *runtime,
     orca_handle player,
@@ -5709,127 +3113,6 @@ orca_status orca_player_crossfeed(
     float *amount
 );
 
-/*
- * The Player's parametric equalizer: up to ORCA_PARAMETRIC_MAX_FILTERS
- * biquads applied in order after a preamp, in the place of the ten-band
- * equalizer. A Player runs one or the other: turning either on turns the
- * other off. A filter at or above 0.45 of the playing audio's sample rate is
- * left out, as the ten-band equalizer leaves out bands at or above Nyquist.
- */
-#define ORCA_PARAMETRIC_MAX_FILTERS 16
-/* Each filter's frequency lies in [ORCA_PARAMETRIC_MIN_FREQUENCY_HZ,
- * ORCA_PARAMETRIC_MAX_FREQUENCY_HZ] Hz. */
-#define ORCA_PARAMETRIC_MIN_FREQUENCY_HZ 20
-#define ORCA_PARAMETRIC_MAX_FREQUENCY_HZ 20000
-/* A peak's or shelf's gain lies in [-ORCA_PARAMETRIC_MAX_GAIN_DB,
- * ORCA_PARAMETRIC_MAX_GAIN_DB] dB; the other kinds ignore it, though it is
- * still checked. */
-#define ORCA_PARAMETRIC_MAX_GAIN_DB 24
-/* Q lies in [ORCA_PARAMETRIC_MIN_Q, ORCA_PARAMETRIC_MAX_Q], and a shelf's in
- * [ORCA_PARAMETRIC_MIN_SHELF_Q, ORCA_PARAMETRIC_MAX_SHELF_Q]. */
-#define ORCA_PARAMETRIC_MIN_Q 0.1f
-#define ORCA_PARAMETRIC_MAX_Q 20.0f
-#define ORCA_PARAMETRIC_MIN_SHELF_Q 0.3f
-#define ORCA_PARAMETRIC_MAX_SHELF_Q 2.0f
-/* The preamp lies in [ORCA_PARAMETRIC_MIN_PREAMP_DB,
- * ORCA_PARAMETRIC_MAX_PREAMP_DB] dB. */
-#define ORCA_PARAMETRIC_MIN_PREAMP_DB (-24)
-#define ORCA_PARAMETRIC_MAX_PREAMP_DB 6
-
-typedef enum orca_parametric_filter_kind {
-    ORCA_PARAMETRIC_FILTER_PEAK = 0,
-    /* Shelves take Q, not slope: Q 0.707 is the plain shelf. */
-    ORCA_PARAMETRIC_FILTER_LOW_SHELF = 1,
-    ORCA_PARAMETRIC_FILTER_HIGH_SHELF = 2,
-    ORCA_PARAMETRIC_FILTER_LOW_PASS = 3,
-    ORCA_PARAMETRIC_FILTER_HIGH_PASS = 4,
-    ORCA_PARAMETRIC_FILTER_NOTCH = 5,
-} orca_parametric_filter_kind;
-
-typedef struct orca_parametric_filter {
-    uint8_t kind;  /* orca_parametric_filter_kind */
-    /* 0 keeps the filter in the list without applying it. */
-    uint8_t enabled;
-    uint8_t reserved[2];
-    float frequency_hz;
-    float gain_db;
-    float q;
-} orca_parametric_filter;
-
-typedef struct orca_parametric_equalizer {
-    /* The first `count` entries apply, in order; the rest are ignored. */
-    orca_parametric_filter filters[ORCA_PARAMETRIC_MAX_FILTERS];
-    uint8_t count;
-    uint8_t reserved[3];
-    /* dB applied before the filters, to leave headroom for a boost. */
-    float preamp_db;
-} orca_parametric_equalizer;
-
-/* Turns the parametric equalizer on with `equalizer`, turning the ten-band
- * equalizer off, or turns it off with NULL. INVALID_ARGUMENT, with the
- * previous setting kept, for an unknown kind, a count above
- * ORCA_PARAMETRIC_MAX_FILTERS, or a value outside its range or not a finite
- * number. One that changes nothing, a zero preamp and every enabled filter a
- * peak or shelf at 0 dB, is on but is not sample processing. The engine is
- * paused while the setting is written, and applies it from its next pass. */
-orca_status orca_player_set_parametric_equalizer(
-    orca_runtime *runtime,
-    orca_handle player,
-    const orca_parametric_equalizer *equalizer
-);
-/* `has` receives 1 and `output` the setting while the parametric equalizer
- * is on; `has` 0 leaves `output` zeroed. */
-orca_status orca_player_parametric_equalizer_get(
-    orca_runtime *runtime,
-    orca_handle player,
-    orca_parametric_equalizer *output,
-    uint8_t *has
-);
-
-/* Writes to `gains_db[i]` the gain in dB, preamp included, that `equalizer`
- * applies at `frequencies_hz[i]` when the audio runs at `sample_rate`, for
- * the `count` entries of each array. Filters at or above 0.45 of
- * `sample_rate` and disabled filters are left out, as on a Player. The
- * equalizer is checked as on orca_player_set_parametric_equalizer, and a
- * `sample_rate` of 0 is INVALID_ARGUMENT. Pure: it takes no runtime, is
- * callable from any thread, and so leaves no last error. */
-orca_status orca_parametric_equalizer_response(
-    const orca_parametric_equalizer *equalizer,
-    uint32_t sample_rate,
-    const float *frequencies_hz,
-    float *gains_db,
-    size_t count
-);
-
-/* Reads EqualizerAPO text (`length` bytes, UTF-8, LF or CRLF) into `output`:
- * `Preamp: N dB` lines, which add up, and `Filter N: ON|OFF TYPE Fc N Hz
- * [Gain N dB] [Q N | BW Oct N]` lines, where TYPE is PK, PEQ, LS, LSC, HS,
- * HSC, LP, HP or NO. A missing Q is 0.707; a bandwidth in octaves converts to
- * Q. Blank lines and lines starting with `#` are skipped. UNSUPPORTED for a
- * filter type Orca does not run; INVALID_ARGUMENT for any other line, more
- * than ORCA_PARAMETRIC_MAX_FILTERS filters, or a value outside its range.
- * `output` is untouched on failure. Pure, as orca_parametric_equalizer_response. */
-orca_status orca_parametric_equalizer_parse_apo(
-    const char *text,
-    size_t length,
-    orca_parametric_equalizer *output
-);
-
-/* Writes `equalizer` as EqualizerAPO text that orca_parametric_equalizer_parse_apo
- * reads back to the same filters: a `Preamp:` line, then one `Filter` line per
- * filter with the shelves as LSC and HSC. `written` receives the text's length
- * in bytes; there is no terminating NUL. When it exceeds `capacity`, nothing
- * is written and the result is INVALID_ARGUMENT, so a call with `capacity` 0
- * learns the length. The equalizer is checked as on
- * orca_player_set_parametric_equalizer. Pure, as
- * orca_parametric_equalizer_response. */
-orca_status orca_parametric_equalizer_write_apo(
-    const orca_parametric_equalizer *equalizer,
-    char *buffer,
-    size_t capacity,
-    size_t *written
-);
-
 typedef enum orca_sample_format {
     ORCA_SAMPLE_FORMAT_UNSIGNED_8 = 0,
     ORCA_SAMPLE_FORMAT_SIGNED_16 = 1,
@@ -5848,28 +3131,9 @@ typedef struct orca_pcm_format {
     uint8_t reserved[1];
 } orca_pcm_format;
 
-/* The sample format an output device node runs at. UNKNOWN when the node is
- * suspended, virtual, has not reported it yet, or the backend is not
- * PipeWire; orca_device_format's other fields are then 0. */
-typedef enum orca_device_sample_format {
-    ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN = 0,
-    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_16 = 1,
-    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_24 = 2,
-    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_24_32 = 3,
-    ORCA_DEVICE_SAMPLE_FORMAT_SIGNED_32 = 4,
-    ORCA_DEVICE_SAMPLE_FORMAT_FLOAT_32 = 5,
-} orca_device_sample_format;
-
-typedef struct orca_device_format {
-    uint32_t sample_rate;
-    uint16_t channels;
-    uint8_t bits_per_sample;
-    uint8_t sample_format;  /* orca_device_sample_format */
-} orca_device_format;
-
 /* Why a signal path is not bit-perfect. */
 typedef enum orca_signal_reason {
-    /* Either equalizer, crossfeed, a volume other than 1 or a ReplayGain
+    /* The equalizer, crossfeed, a volume other than 1 or a ReplayGain
      * correction changes the samples. */
     ORCA_SIGNAL_REASON_SAMPLE_PROCESSING = 0,
     /* The output, or the device behind it, runs at another rate. */
@@ -5877,8 +3141,7 @@ typedef enum orca_signal_reason {
     /* The output has another channel count than the source. */
     ORCA_SIGNAL_REASON_CHANNEL_LAYOUT_CONVERSION = 2,
     /* The output's sample format differs from the source's, other than an
-     * exact widening of 8-, 16- or 24-bit integers to float32, or the device
-     * runs at another sample format than the output. */
+     * exact widening of 8-, 16- or 24-bit integers to float32. */
     ORCA_SIGNAL_REASON_SAMPLE_FORMAT_CONVERSION = 3,
     /* The source's codec discarded audio before Orca decoded it. */
     ORCA_SIGNAL_REASON_LOSSY_SOURCE = 4,
@@ -5898,8 +3161,7 @@ typedef struct orca_signal_path_view {
     orca_pcm_format output;
     /* Valid when `has_equalizer`. */
     orca_equalizer equalizer;
-    /* The correction applied to the audible entry in dB, after peak
-     * protection; `replay_gain_source` says which one it is. Valid when
+    /* The correction applied to the audible entry in dB. Valid when
      * `has_replay_gain`, which is 0 when the correction is exactly 1. */
     float replay_gain_db;
     /* Valid when `has_crossfeed`. */
@@ -5929,16 +3191,7 @@ typedef struct orca_signal_path_view {
     uint8_t bit_perfect_eligible;
     /* The integer source reaches float32 unchanged, which is not a reason. */
     uint8_t widened_exactly;
-    /* An orca_device_kind value for the open output's device. Unknown while
-     * no output is open, when the platform does not say, and for device 0,
-     * the server's default, which names no device. */
-    uint8_t output_kind;
-    uint8_t has_device_quantum;
-    /* An orca_gain_source value. */
-    uint8_t replay_gain_source;
-    /* Frames the output device asks for per period, as the backend last
-     * reported it. Valid when `has_device_quantum`. */
-    uint32_t device_quantum_frames;
+    uint8_t reserved[7];
     /* Canonical codec identifier of the source, such as "flac"; empty when
      * nothing is audible. */
     orca_string_view codec;
@@ -5950,41 +3203,6 @@ typedef void (*orca_signal_path_callback)(
     const orca_signal_path_view *signal_path
 );
 
-/* orca_signal_path_view with the parametric equalizer, the ReplayGain
- * settings and the device's own format. */
-typedef struct orca_signal_path_view_v2 {
-    orca_signal_path_view base;
-    /* Valid when `has_parametric`, which is 0 whenever `base.has_equalizer`
-     * is 1. */
-    orca_parametric_equalizer parametric;
-    uint8_t has_parametric;
-    uint8_t has_replay_gain_track;
-    uint8_t reserved[2];
-    /* The entry's own track correction in dB, which an album correction
-     * replaced. Valid when `has_replay_gain_track`, which is 1 only when
-     * `base.replay_gain_source` is ORCA_GAIN_SOURCE_ALBUM and the entry is
-     * measured. */
-    float replay_gain_track_db;
-    /* The ReplayGain settings the correction was worked out with. */
-    float preamp_db;
-    uint8_t peak_protection;
-    uint8_t fallback;  /* orca_untagged_fallback */
-    /* 1 when peak protection lowered the audible entry's correction. */
-    uint8_t peak_limited;
-    uint8_t reserved2[1];
-    /* The format the output device itself runs at, after the server converts
-     * the float32 stream. A known format that is not float32 at
-     * base.output.sample_rate is a further conversion; an unknown one leaves the
-     * verdict alone. */
-    orca_device_format device_format;
-} orca_signal_path_view_v2;
-
-/* String views are valid only for the duration of this callback. */
-typedef void (*orca_signal_path_v2_callback)(
-    void *context,
-    const orca_signal_path_view_v2 *signal_path
-);
-
 /* Invokes the callback once with the Player's signal path, and whether it
  * could be bit-perfect. The source, codec and ReplayGain figure are the
  * audible entry's. The engine is paused while they are read. */
@@ -5993,13 +3211,6 @@ orca_status orca_player_signal_path(
     orca_handle player,
     void *context,
     orca_signal_path_callback callback
-);
-/* orca_player_signal_path with orca_signal_path_view_v2. */
-orca_status orca_player_signal_path_v2(
-    orca_runtime *runtime,
-    orca_handle player,
-    void *context,
-    orca_signal_path_v2_callback callback
 );
 
 orca_status orca_player_seek(
@@ -6019,16 +3230,6 @@ orca_status orca_player_status_get(
     orca_runtime *runtime,
     orca_handle player,
     orca_player_status *output
-);
-orca_status orca_player_status_get_v2(
-    orca_runtime *runtime,
-    orca_handle player,
-    orca_player_status_v2 *output
-);
-orca_status orca_player_status_get_v3(
-    orca_runtime *runtime,
-    orca_handle player,
-    orca_player_status_v3 *output
 );
 /* The callback runs zero times when nothing is playing. Strings are valid only
  * for its duration. */
@@ -6061,61 +3262,6 @@ orca_status orca_player_query_queue_tracks(
     void *context,
     orca_track_callback callback
 );
-/* The last 100 entries this Player stopped playing, newest first, starting
- * `offset` entries back. `limit` must be between 1 and 512. Stop leaves no
- * entry, since the entry stays current. The history is held in memory only,
- * so a new runtime starts with none, and it never records a listen. An entry
- * whose Library is closed or whose Track has left it is skipped. */
-orca_status orca_player_query_queue_history(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint32_t limit,
-    uint32_t offset,
-    void *context,
-    orca_queue_history_callback callback
-);
-orca_status orca_player_clear_queue_history(orca_runtime *runtime, orca_handle player);
-/* Creates a playlist named as for orca_library_create_playlist, holding the
- * current entry and every entry after it in playback order, in the Library
- * the Player is bound to. ORCA_STATUS_INVALID_STATE when the Player has no
- * Library, the queue has no current entry, or the name is taken. */
-orca_status orca_player_save_queue_as_playlist(
-    orca_runtime *runtime,
-    orca_handle player,
-    const char *name,
-    size_t name_length,
-    int64_t *playlist_id
-);
-/* Saves the queue, its position, repeat and shuffle into the Library the
- * Player is bound to; entries from other Libraries are left out. From then on
- * the runtime saves it again every 30 seconds while it plays (from
- * orca_runtime_pump), when the Player is destroyed, bound to another
- * Library or its Library is closed, and in orca_runtime_destroy before any
- * Player is torn down.
- * ORCA_STATUS_INVALID_STATE when the Player has no Library. */
-orca_status orca_player_save_state(orca_runtime *runtime, orca_handle player);
-/* Replaces the queue with the one last saved into the Player's Library and
- * loads its current entry at the saved position, then pauses or plays it as
- * `mode` (orca_restore_mode) says. A saved entry whose Track is gone resolves
- * to another Track of its Recording, or is skipped and counted. Every field
- * of `outcome` is 0 when nothing was saved or with ORCA_RESTORE_MODE_NONE.
- * Any mode makes the runtime save this Player's state from then on, as
- * orca_player_save_state does. `outcome` may be NULL. */
-orca_status orca_player_restore_state(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint8_t mode,
-    orca_restore_outcome *outcome
-);
-/* With `enabled`, Tracks longer than `threshold_ms` resume where they were
- * last left and forget it once they play to their end; with `enabled` 0 none
- * do. On, at 20 minutes, until set. */
-orca_status orca_player_set_long_track_memory(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint8_t enabled,
-    uint64_t threshold_ms
-);
 /* Plays the entry at playback position `position` now: a hard switch, like a
  * skip. ORCA_STATUS_INVALID_ARGUMENT when `position` is not below the queue
  * length. */
@@ -6145,21 +3291,6 @@ orca_status orca_player_queue_remove(
     orca_handle player,
     uint32_t position
 );
-/* Moves the entry at playback position `from` so that it plays at position
- * `to`, both in playback order. Under shuffle only the shuffled order
- * changes: turning shuffle off afterwards restores list order. `from` equal
- * to `to` does nothing.
- * ORCA_STATUS_INVALID_STATE for the entries orca_player_queue_remove refuses,
- * and for a `to` between the entry playing and the one the engine has
- * already lined up after it.
- * ORCA_STATUS_INVALID_ARGUMENT when either position is not below the queue
- * length. */
-orca_status orca_player_queue_move(
-    orca_runtime *runtime,
-    orca_handle player,
-    uint32_t from,
-    uint32_t to
-);
 /* Reads the engine's counters, stopping the engine while it does: call it
  * after a run or for diagnostics, never in a UI poll loop. All zero before
  * the Player has played anything. */
@@ -6175,18 +3306,6 @@ orca_status orca_enumerate_output_devices(
     orca_runtime *runtime,
     void *context,
     orca_device_callback callback
-);
-/* orca_enumerate_output_devices with each device's kind. */
-orca_status orca_enumerate_output_devices_v2(
-    orca_runtime *runtime,
-    void *context,
-    orca_device_v2_callback callback
-);
-/* orca_enumerate_output_devices_v2 with each device's capabilities and state. */
-orca_status orca_enumerate_output_devices_v3(
-    orca_runtime *runtime,
-    void *context,
-    orca_device_v3_callback callback
 );
 
 orca_status orca_zone_create(orca_runtime *runtime, orca_handle *output);
