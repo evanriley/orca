@@ -133,7 +133,7 @@ every reason to measure a file again is already a reason the selection sees it.
   yields no correction and raises `missing_analysis`. Every result is keyed by
   the content hash of the bytes decoded, taken in a second sequential read of
   the whole file beside the decode, and the same transaction records that hash
-  on the file (see [database.md](database.md#schema-and-migrations)).
+  on the file (see [database.md](database.md#schema)).
 - **Declined.** Not reachable, not audio, or the identity the Library recorded
   is not the file's identity any more: the quick hash differs, the content hash
   read is not the one the file records, or, with none recorded, the inode, size
@@ -416,7 +416,7 @@ decide nothing.
 
 None of the four is a scan. `files_content_hash` serves the same-bytes
 bucket, `files_audio_hash` the same-audio bucket and
-`files_duration ON files(duration_ms, id)` (migration 13) the plausible one.
+`files_duration ON files(duration_ms, id)` the plausible one.
 
 Duration is the bucket key for the plausible half because length is the
 cheapest necessary condition for two files being the same recording and the
@@ -517,8 +517,7 @@ Hashes of different tiers never compare equal.
 
 The audio hash travels in the temporal fingerprint result (`ORFP` version 2,
 which refuses version 1). `fingerprint_algorithm_version` 3 marks the change, so
-every file measured under an earlier version is selected and measured again,
-and migration 57 clears every hash stored without a tier.
+every file measured under an earlier version is selected and measured again.
 
 ### The identical-audio test and decoding
 

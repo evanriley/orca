@@ -224,7 +224,7 @@ track number, which `tracks_position` keeps unique by id, and are then written
 by id, so files that swap or rotate positions never collide. A Release or
 Artist left with nothing referencing it goes with them. Candidates are the
 Tracks whose preferred file the run positions, found through
-`tracks_by_preferred_file` (version 14), and those on a Release the run
+`tracks_by_preferred_file`, and those on a Release the run
 writes. Everything pruned is derived and is rebuilt by the next projection, so
 an id handed out for a pruned row does not come back: a client holding Release
 or Artist ids, or the id of a pruned Track, must look them up again.
@@ -260,8 +260,7 @@ artist" is an indexed relational query, not a scan over the denormalized
 
 `tracks.artist_id` and `releases.album_artist_id` are the relational links, and
 `artists.sort_name` is the key an Artist listing orders by. All three are
-written by `library/projection.zig`, and migration 9 backfills them for a
-library created before version 9.
+written by `library/projection.zig`.
 
 **One primary artist per Track, one album artist per Release, deliberately.**
 The tag data is single-valued on ARTIST and ALBUMARTIST in essentially every
@@ -285,11 +284,11 @@ counts in that order, so each bucket's `first_offset` is exactly the
 key strips a leading "The ", "A " or "An " from `releases.album_artist` in
 SQL unless `ReleaseQuery.name_order` is `as_written`.
 
-Version 39 indexes both orders on `releases`: `releases_artist_order` on the
+Both orders are indexed on `releases`: `releases_artist_order` on the
 artist sort's terms with leading articles ignored and `releases_title_order` on
 the title sort's. SQLite uses an expression index only when the ORDER BY
 repeats its expressions exactly, so changing `ReleaseSort.terms` for either
-sort needs a migration that rebuilds its index; a releases test fails on a
+sort needs a schema step that rebuilds its index; a releases test fails on a
 fresh library when the page plan stops using them. An unfiltered page then walks the index from its offset instead of
 sorting every Release: at 512,000 Releases a 512-row page by artist at offset
 13,806 drops from 22 ms to 6 ms, and by title from 24 ms to 5 ms.
@@ -335,7 +334,7 @@ and Tracks without one, walked by id), so no part is read past the page. The
 indexes those walks use are `recording_play_stats_by_count`,
 `recording_play_stats_by_last_played`, `ratings_by_rating`, `feedback_loved`,
 `releases_by_year` (on the leading four-digit year of `release_date`) and
-`files_by_first_seen`, all version 32, and the version 40 indexes in
+`files_by_first_seen`, and the indexes in
 [Track facts](#track-facts). Past that offset, or with an artist,
 release, genre or loved filter, the ids come from one ordered pass over the
 matching Tracks.
@@ -361,8 +360,7 @@ descending):
 The last five rows are timed at the end of the run, once every file has a
 size, a duration and two locations, two thirds a loudness, and every Track a
 genre. `genre` at offset 0 reads every Track looking for one without a first
-genre. `bitrate` read every Track the same way until version 41; its numbers
-predate that index. `path` descending walks the second
+genre. `path` descending walks the second
 location of every file, never its best one, before the first it keeps.
 
 The value filters (`year_min`, `year_max`, `lossless`, `min_sample_rate`,
@@ -460,17 +458,16 @@ so a filtered page reads every Track of the Releases it passes over;
 `most_played` sums `recording_play_stats` over every Release's Tracks before
 it can sort.
 
-## Schema and migrations
+## Schema
 
-Schema changes are transactional and selected by `PRAGMA user_version`. Version
-1 establishes separate Artist, Release, Recording, Track, File, and Location
-tables; filesystem paths therefore never become musical identity. Version 8
-completes that by removing the path-keyed tables that grew alongside them:
-`observed_files` disappears into `files`, `locations` and `observed_file_tags`,
-and analysis, health, Orca metadata and identification proposals all key on
-`files.id`. Unknown newer schema versions are rejected rather than opened
-destructively, and `PRAGMA foreign_key_check` runs inside the migration
-transaction so a migration that would leave dangling rows rolls back instead.
+`database/migrations.zig` holds the schema, selected by `PRAGMA user_version`.
+Opening a database at version 0 creates the whole schema and sets version 1
+in one transaction; a database at version 1 opens unchanged, and any other
+version is refused with `error.SchemaVersionTooNew` rather than opened
+destructively. A later schema change appends a step that moves version 1 to
+version 2. Artists, Releases, Recordings, Tracks, Files and Locations are
+separate tables, so filesystem paths never become musical identity; analysis,
+health, Orca metadata and identification proposals all key on `files.id`.
 
 `analysis_results` is `WITHOUT ROWID`, keyed on `(file_id, kind, algorithm_id,
 algorithm_version, parameter_hash, source_identity)`. That key is load-bearing
@@ -493,44 +490,13 @@ results stale and the next pass measures it again. The pass records the hash it
 read on the file, in the transaction that writes the results, only while the
 file still records the quick hash it read and either already records that
 content hash or has the location it read still recording the inode, size and
-mtime it read; otherwise it writes nothing for the file. Results stored before
-this were keyed by the quick hash, which hashes the first and last 64 KiB and
-the size rather than the whole file, so short of a contrived file or a BLAKE3
-collision it equals no content hash: those results are stale, and the next
-analysis pass measures their files again. No migration rewrites them, and a
-Library from an earlier release opens unchanged.
+mtime it read; otherwise it writes nothing for the file. A result keyed by
+anything else, such as a quick hash, is stale, and the next analysis pass
+measures its file again.
 
-Migration 8 preserves paths that only ever appeared in `analysis_results` or
-`library_health_issues` — an `orca-cli analyze` of a file no scan ever saw — by
-synthesizing `files` and `locations` rows in the `unverified` state. Their old
-size-and-mtime cache key is preserved as a distinguishable legacy
-`source_identity` rather than being collapsed onto a hash nobody computed.
-`fixtures/database/v7-library.db` is a checked-in version-7 database, generated
-by `fixtures/database/v7-library.sql`, that the migration tests migrate and
-assert row-for-row.
-
-Migration 9 backfills `tracks.artist_id` and `releases.album_artist_id` by
-running the *same two-step cascade* `ArtistRepository.ensureLocked` runs, in the
-same order: a MusicBrainz artist id outranks the name, and only what it cannot
-answer falls back to the folded key. `migrations.zig` registers
-`orca_artist_key` and `orca_artist_sort_key` as SQLite functions over
-`database/text_key.zig`, so the backfill executes the same Zig the projection
-executes rather than a reimplementation in SQL that would be free to drift. A
-Track whose artist tag is empty gets no `artist_id`: an empty name is an absent
-artist rather than an artist named "". Migrating and then reprojecting a library
-produces byte-identical `artist_id`, `album_artist_id` and `sort_name` columns —
-the convergence `library/projection.zig` asserts on a fixture and
-`migrations.artist_backfill` exists as a separate constant to make testable.
-
-`LibraryDatabase.open` applies migrations only as far as
-`migrations.journal_ready_version` (the version at which `mutation_operations`
-exists), runs mutation-journal recovery, applies the remaining migrations, and
-recovers again, for the rows a migration made nonterminal. A nonterminal
-staged file mutation must reach a terminal state before any migration rewrites
-the tables it refers to, and a Library whose journal cannot be converged is not
-opened at all — the same posture as an unknown newer schema version. Recovery
-and the migrations after it run only under the journal lock; see
-[Concurrency](#concurrency).
+`LibraryDatabase.open` applies the schema and then runs mutation-journal
+recovery under the journal lock. When another process holds that lock,
+recovery is deferred to the next holder; see [Concurrency](#concurrency).
 
 `mutation_operations` keeps its paths: the subject of a filesystem operation
 genuinely is a path. It also carries `file_id` and the full journaled
@@ -538,171 +504,108 @@ genuinely is a path. It also carries `file_id` and the full journaled
 recovery compares the same identity an in-process check does: `expected_*` is
 the file the plan approved, and `committed_*` the stage once it is built, then
 the file once the write commits. `expected_content_hash` and
-`committed_content_hash` are BLAKE3-256 over every byte. They are NULL on rows
-journaled before migration 56, which are compared by the other three parts; a
-stored value that is not 32 bytes fails the read rather than weakening the
-check. `backup_path` is NULL once pruning
-has deleted the backup; `prunableBackups` and `clearBackupPath` select and
-record that. See [metadata.md](metadata.md#pruning-backups).
+`committed_content_hash` are BLAKE3-256 over every byte. A NULL content hash
+is compared by the other three parts; a stored value that is not 32 bytes
+fails the read rather than weakening the check. `backup_path` is NULL once
+pruning has deleted the backup; `prunableBackups` and `clearBackupPath` select
+and record that. See [metadata.md](metadata.md#pruning-backups).
+`MutationState` values are stored by number, so new states are appended and
+never reordered.
 
-Migration 18 forgets the files a scan made of tag-write stages and backups that
-earlier versions kept beside the music. A file goes only when every one of its
-locations is a journaled `stage_path`, `backup_path` or
-`stage_path || '.recovery-displaced'`; its Tracks go with it, then the Releases
-and Artists left without Tracks, and journal rows that named it keep their paths
-with `file_id` set to NULL, as `remove-root` leaves them.
+`provider_state.next_request_ms` is the earliest Unix millisecond a service
+may next be sent a request: the minimum interval after the last request, or
+the end of a quota window a response announced with
+`X-RateLimit-Remaining: 0`. It is stored so the next job's Gateway does not
+send inside the window or less than a second after the previous job's last
+request.
 
-Migration 22 sets `modified_ns` to -1 on the present locations of files whose
-`observed_file_tags` row holds artwork and nothing else, with no
-`observed_file_genres` rows. No file has that modification time, so the next
-scan, reconcile or watch pass re-observes them: an ID3v2 tag holding only a
-cover was read in preference to the file's ID3v1 trailer or `LIST`/`INFO`
-chunk, and now the cover is kept on those values. File rows, quick hashes and
-Orca's values are left alone.
-
-Migration 23 sets `files.audio_hash` to NULL unless the file has an
-`orca.temporal-fingerprint` version 2 row in `analysis_results` whose
-`source_identity` equals the file's current `quick_hash`. Before it, a rescan
-of changed bytes kept the hash of the old audio, and the duplicate pass reported
-files as exact duplicates of audio they no longer held. The analysis pass
-measures the cleared files again.
-
-Migration 24 adds `provider_state.next_request_ms`, the earliest Unix
-millisecond a service may next be sent a request: the minimum interval after
-the last request, or the end of a quota window a response announced with
-`X-RateLimit-Remaining: 0`. Before it, both lived only in the Gateway that
-received them, so the next job's Gateway could send inside the window or less
-than a second after the previous job's last request. Existing rows keep their
-block and backoff and start with the column NULL.
-
-Migration 25 sets `modified_ns` to -1 on every present location of a file
-with more than one present location, so the next scan, reconcile or watch pass
-re-observes them, as after migration 22. Before it, a copy whose bytes changed
-rewrote the file it shared with an untouched copy: both paths named a file
-describing the changed bytes, the untouched copy's Track disappeared, later
-scans skipped it, and the duplicate pass still reported the two as exact
-copies. Re-observing applies the divergence rule, so the file keeps the copy
-whose bytes it records and every other copy splits off into a file of its own.
-
-Migration 26 sets a journal operation to `undoing` (6) when it is `committed`
-(2) in a group that also holds a `rolled_back` (3) operation and no `planned`,
-`staged`, `failed` or `needs_reconciliation` one (0, 1, 4, 5). Before it, an
-undo rolled operations back one at a time, so a crash between two files left
-the group half undone in states recovery never selected, and a retried undo
-refused it as not committed. The recovery pass that follows the migrations in
-`LibraryDatabase.open` finishes those undos. `MutationState` values are stored
-by number, so new states are appended and never reordered.
-
-Migration 50 adds `observed_file_tags.comment`, a nullable `TEXT`, and sets
-`modified_ns` to -1 on every present location, so the next scan, reconcile or
-watch pass re-observes every file, as after migration 22. Until then the
-column is null for every file, a tag write is refused for each one as
-`changed_since_scan`, and a file's own comment cannot be replaced unseen.
-`observed_file_tags.composer` was already observed and is unchanged. See
+`observed_file_tags.comment` is a nullable `TEXT`. While it is null for a
+file, a tag write is refused for it as `changed_since_scan`, so a file's own
+comment cannot be replaced unseen. See
 [metadata.md](metadata.md#composer-and-comment).
 
-Migration 51 rebuilds `release_artwork` with the primary key `(release_id,
-kind)` and the columns `kind`, `source`, `width` and `height`, copying every
-row, null images included, as a front cover (`kind` 0) that was fetched
-(`source` 2) with its bytes, release ID, MIME type and `fetched_at` unchanged.
-It adds `cover_art_candidates`, the measurement columns
-`observed_file_tags.artwork_width`, `artwork_height` and `artwork_hash` and
-`folder_images.width`, `height` and `hash`, and three partial indexes over
-the covers left unmeasured: `observed_file_tags_artwork_unmeasured`
-(`artwork_byte_size > 0 AND artwork_hash IS NULL`), `folder_images_unmeasured`
-(`hash IS NULL`) and `release_artwork_unmeasured` (`image IS NOT NULL AND
-width IS NULL`). Every cover in a library opened at version 50 starts
-unmeasured, and an unmeasured cover raises no `undersized` or `conflicting`
-problem. Property backfill measures them, as described under
-[Artwork problems](#artwork-problems). The rewind to version 25 rebuilds
-the version-20 table from the front rows that name a release ID and drops
-the rest.
+`release_artwork` has the primary key `(release_id, kind)` and the columns
+`kind`, `source`, `width` and `height`; `cover_art_candidates`, the
+measurement columns `observed_file_tags.artwork_width`, `artwork_height` and
+`artwork_hash`, and `folder_images.width`, `height` and `hash` sit beside it.
+Three partial indexes cover the covers left unmeasured:
+`observed_file_tags_artwork_unmeasured` (`artwork_byte_size > 0 AND
+artwork_hash IS NULL`), `folder_images_unmeasured` (`hash IS NULL`) and
+`release_artwork_unmeasured` (`image IS NOT NULL AND width IS NULL`). An
+unmeasured cover raises no `undersized` or `conflicting` problem. Property
+backfill measures them, as described under
+[Artwork problems](#artwork-problems).
 
-Migration 52 adds `dismissed_release_candidates(release_id, musicbrainz_release_id,
+`dismissed_release_candidates(release_id, musicbrainz_release_id,
 dismissed_at)`, primary key `(release_id, musicbrainz_release_id)`, without
-rowid: the MusicBrainz releases a Release was marked as not being ("Not This
-Release"). Rows cascade with their Release, and a reprojection that leaves a
-Release without Tracks hands them to the Release that took most of them when
-that one has none, as it does covers and love. Existing libraries start with
-none. It also adds `releases_match_order` on `(album_artist COLLATE NOCASE,
-title COLLATE NOCASE)`, the order Match Review pages Releases in, so a page
-reads Releases in that order from the index instead of sorting every one,
-which took 0.66 s at 429,312 Releases. The rewind to version 25 drops the
-table and the index.
+rowid, holds the MusicBrainz releases a Release was marked as not being ("Not
+This Release"). Rows cascade with their Release, and a reprojection that
+leaves a Release without Tracks hands them to the Release that took most of
+them when that one has none, as it does covers and love.
+`releases_match_order` on `(album_artist COLLATE NOCASE, title COLLATE
+NOCASE)` is the order Match Review pages Releases in, so a page reads
+Releases in that order from the index instead of sorting every one, which
+took 0.66 s at 429,312 Releases.
 
-Migration 53 adds the state a Player resumes from, described under
-[Saved playback](#saved-playback): `player_state`, a single row (`id` 1)
+The state a Player resumes from, described under
+[Saved playback](#saved-playback), is `player_state`, a single row (`id` 1)
 holding the queue's `cursor`, `position_ms`, `repeat` (0 off, 1 all, 2 one),
 `shuffle` and `saved_at` in Unix seconds; `player_queue_entries(position,
 entry, track_id, recording_id)`, one row per entry in playback order,
 `position` the primary key and both `position` and `entry` from 0 to 9999;
 and `track_positions(track_id, position_ms, updated_at)`, where long Tracks
-were left, cascading with their Track. Existing libraries start with none.
-The rewind to version 25 drops all three.
+were left, cascading with their Track.
 
-Migration 54 adds `metadata_proposals`, the issues of the metadata
-consistency pass ([analysis.md](analysis.md#metadata-consistency)). One row
-per issue header (`id = group_id`, `option` and `track_id` null), per option
-(`option` from 0, `proposed` the value, `reason` its support text) and per
-proposal (`track_id`, `current`, `proposed`). Each row carries the issue's
+`metadata_proposals` holds the issues of the metadata consistency pass
+([analysis.md](analysis.md#metadata-consistency)). One row per issue header
+(`id = group_id`, `option` and `track_id` null), per option (`option` from
+0, `proposed` the value, `reason` its support text) and per proposal
+(`track_id`, `current`, `proposed`). Each row carries the issue's
 `release_id`, `category` (0 to 4), `field`, `state` (0 open, 1 skipped, 2
-applied), `fingerprint` and `created_at`. Rows cascade with their Release
-and Track. `id` is `AUTOINCREMENT` so a replaced issue's id never names a
-later one. `metadata_proposals_groups` is a partial index on `(state,
-category, release_id, id) WHERE id = group_id` for the page and count;
-`metadata_proposals_members` on `(group_id, option, id)` reads an issue's
-rows, `metadata_proposals_release` on `(release_id, state)` serves a
-Release's replacement, and `metadata_proposals_track` the Track cascade.
-Existing libraries start with none. The rewind to version 25 drops the
-table.
+applied), `fingerprint` and `created_at`; an option also carries `tracks`,
+its count of Tracks stating its value (at least 0), and a `track_numbering`
+header `gap`, the lowest number it fills below the disc's highest (at least
+1). Rows cascade with their Release and Track. `id` is `AUTOINCREMENT` so a
+replaced issue's id never names a later one. `metadata_proposals_groups` is
+a partial index on `(state, category, release_id, id) WHERE id = group_id`
+for the page and count; `metadata_proposals_members` on `(group_id, option,
+id)` reads an issue's rows, `metadata_proposals_release` on `(release_id,
+state)` serves a Release's replacement, and `metadata_proposals_track` the
+Track cascade.
 
-Migration 55 adds two nullable columns to `metadata_proposals`: `tracks`, an
-option's count of Tracks stating its value (at least 0), and `gap`, on a
-`track_numbering` header, the lowest number it fills below the disc's
-highest (at least 1). Issues stored before it have neither until the pass
-runs again.
+`files.content_hash_algorithm` is 1 for BLAKE3-256 over the whole file and
+NULL when `content_hash` is NULL; the index `files_content_hash` is on
+`files(content_hash)`. The file update that records a different `quick_hash`
+clears `content_hash` and `content_hash_algorithm` together, as it clears
+`audio_hash`. The executor does not write `files.content_hash`; the identity
+cascade records it when it hashes a path (see [Identity](#identity)), and the
+analysis pass records the hash of the bytes it decoded.
 
-Migration 56 adds `mutation_operations.expected_content_hash` and
-`committed_content_hash` (described above), `files.content_hash_algorithm`
-(1 for BLAKE3-256 over the whole file, NULL when `content_hash` is NULL), and
-the index `files_content_hash` on `files(content_hash)`. Existing rows keep NULL
-in all three columns; nothing is backfilled. The file update that records a
-different `quick_hash` clears `content_hash` and `content_hash_algorithm`
-together, as it clears `audio_hash`. The executor does not write
-`files.content_hash`; the identity cascade records it when it hashes a path
-(see [Identity](#identity)), and the analysis pass records the hash of the
-bytes it decoded. Startup recovery reads the journal before this
-migration runs, so `MutationJournalRepository.get` reads NULL content hashes
-from a table that does not have the columns.
+`files.audio_hash_tier INTEGER CHECK (audio_hash_tier IN (1, 2))` is the
+tier of the ORAH hash in `files.audio_hash`; see
+[analysis.md](analysis.md#the-audio-hash).
 
-Migration 57 sets every `files.audio_hash` to NULL and adds
-`files.audio_hash_tier INTEGER CHECK (audio_hash_tier IN (1, 2))`. The hashes
-it clears covered float32 samples without the sample rate, channel count or
-length, so 32-bit integer sources one LSB apart and the same samples at another
-rate hashed alike. Temporal fingerprint version 3 re-selects every file, and
-the analysis pass stores an ORAH version 2 hash with its tier.
-
-Migration 58 adds the MusicBrainz release tracklist snapshots Match Review
-aligns Releases against (see
-[metadata.md](metadata.md#release-alignment)):
+The MusicBrainz release tracklist snapshots Match Review aligns Releases
+against (see [metadata.md](metadata.md#release-alignment)) are
 `musicbrainz_releases` (`musicbrainz_release_id` primary key, `title`,
 `artist_credit`, `release_date`, `release_group_id`, `medium_count`,
-`track_count`, `fetched_at` in Unix seconds) and `musicbrainz_release_tracks`
-(primary key `(musicbrainz_release_id, disc, position)`, `title`,
-`artist_credit`, `length_ms`, `recording_id`, `release_track_id`), both
-`WITHOUT ROWID`, the tracks deleted with their release. They hold release
-metadata only, keyed by MusicBrainz ID, never by Release id.
-`ReleaseTracklistRepository.replace` swaps a release's header and tracks in
-one transaction and refuses one of more than 512 media or 512 tracks
-(`error.ReleaseTracklistTooLarge`); `get` reads at most 512 tracks.
+`track_count`, `fetched_at` in Unix seconds, and `artist_credit_ids`, a JSON
+array of the MusicBrainz artist IDs the release's credit names in credit
+order, at most 64, or NULL when the snapshot records none) and
+`musicbrainz_release_tracks` (primary key `(musicbrainz_release_id, disc,
+position)`, `title`, `artist_credit`, `length_ms`, `recording_id`,
+`release_track_id`), both `WITHOUT ROWID`, the tracks deleted with their
+release. They hold release metadata only, keyed by MusicBrainz ID, never by
+Release id. `ReleaseTracklistRepository.replace` swaps a release's header and
+tracks in one transaction and refuses one of more than 512 media or 512
+tracks (`error.ReleaseTracklistTooLarge`); `get` reads at most 512 tracks.
 
-Migration 59 adds release-track pairings (see
-[metadata.md](metadata.md#pairing-a-track)). `release_track_pairings`
-(primary key `track_id`, so a Track has one pairing,
-`musicbrainz_release_id`, `release_id`,
-`release_track_id`, `recording_id`, `origin` 0 for a confirmed suggestion
-and 1 for by hand, `created_at` in Unix seconds, `WITHOUT ROWID`) is
-deleted with its Track or Release by foreign-key cascade. The trigger
+Release-track pairings (see [metadata.md](metadata.md#pairing-a-track)) are
+`release_track_pairings` (primary key `track_id`, so a Track has one
+pairing, `musicbrainz_release_id`, `release_id`, `release_track_id`,
+`recording_id`, `origin` 0 for a confirmed suggestion and 1 for by hand,
+`created_at` in Unix seconds, `WITHOUT ROWID`), deleted with its Track or
+Release by foreign-key cascade. The trigger
 `release_track_pairings_track_moved` moves it to its Track's new
 `release_id` when that changes, deleting first any pairing of the same
 release track by another Track there, and deletes it when the Track's
@@ -722,29 +625,25 @@ later pairing keeps the first replaced row. `ReleaseTrackPairingRepository.pair`
 earlier pairing, validates, and stores the pairing, the replaced rows and
 the locked user values in one transaction; `unpair` restores them in one.
 
-Migration 60 adds `musicbrainz_releases.artist_credit_ids`, a JSON array of
-the MusicBrainz artist IDs the release's credit names in credit order (at
-most 64), NULL for a snapshot taken before it, which the next lookup of
-the release replaces; and `reviewed_releases` (primary key `release_id`,
-deleted with its Release by foreign-key cascade, `musicbrainz_release_id`,
-`digest`, a 32-byte SHA-256 blob, and `reviewed_at` in Unix seconds), a
-person's review of a Release against a release (see
+`reviewed_releases` (primary key `release_id`, deleted with its Release by
+foreign-key cascade, `musicbrainz_release_id`, `digest`, a 32-byte SHA-256
+blob, and `reviewed_at` in Unix seconds) holds a person's review of a
+Release against a release (see
 [metadata.md](metadata.md#marking-a-release-as-reviewed)), handed over by a
 reprojection as [Album love](#album-love) describes. A review holds
 only while its release is the Release's best candidate and the digest of
 the Release still equals `digest`; nothing deletes a row that stopped
-holding, and the next review replaces it. It also adds the partial index
+holding, and the next review replaces it. The partial index
 `orca_metadata_values_release` on `file_id` where `field` is the release
-ID and `value > ''`, so the release-match walk finds files whose release
+ID and `value > ''` lets the release-match walk find files whose release
 ID is an Orca value without scanning every value.
 
 Track full-text search uses an external-content FTS5 table over
-`title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
-cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the
-virtual table, recreates both, and rebuilds the index. Repository APIs return
-bounded, caller-owned pages and never expose SQLite rows or statements.
+`title, artist, album, album_artist`, maintained by SQLite triggers. Repository
+APIs return bounded, caller-owned pages and never expose SQLite rows or
+statements.
 
-Migration 10 adds one partial index, `files_incomplete_properties`, over
+`files_incomplete_properties` is a partial index over
 `repository.incomplete_properties_predicate` — the rows whose declared audio
 properties are still missing. It is partial rather than full for a reason worth
 stating: the index contains exactly the rows that are broken, so it starts
@@ -755,12 +654,12 @@ would be largest precisely when there is nothing to do. The predicate has a
 single definition shared by the index and the query, because SQLite decides
 whether a partial index applies by comparing expressions rather than meanings.
 
-Migration 13 adds `files_duration ON files(duration_ms, id)`, which is what
-makes duplicate detection an indexed question rather than an O(n²) one. It is
-full rather than partial, and that is the opposite choice to migration 10 for
-the opposite reason: a duplicate scan asks its question of *every* file, and
-the rows it asks about do not shrink as anything gets repaired. It covers both
-columns so the bucket lookup reads the index alone. See `docs/analysis.md`.
+`files_duration ON files(duration_ms, id)` is what makes duplicate detection
+an indexed question rather than an O(n²) one. It is full rather than partial,
+the opposite choice to `files_incomplete_properties` for the opposite reason:
+a duplicate scan asks its question of *every* file, and the rows it asks about
+do not shrink as anything gets repaired. It covers both columns so the bucket
+lookup reads the index alone. See `docs/analysis.md`.
 
 `files.codec` is the **encoding**, not the container. `files.audio_format` is
 the container a file was sniffed as, which decides who opens it; `codec` is a
@@ -771,20 +670,17 @@ wrapper. See `docs/codecs.md`.
 
 ## Listens and the scrobble queue
 
-`listens` (version 15) is the local play history: one row per completed
+`listens` is the local play history: one row per completed
 listen, kept forever. It is keyed on `files.id`, not on a Track. A Track id
 changes when an edit reprojects it, and a play count keyed on the Track would
 reset with it; the file identity survives. `UNIQUE(file_id, started_at)`
 makes recording idempotent: the same file starting at the same second is one
 listen.
 
-`recording_play_stats` (version 32) holds each Recording's play count and
+`recording_play_stats` holds each Recording's play count and
 latest `started_at`, one row per Recording with at least one listen. It is
 keyed on `recordings.id` like `ratings`, so a song's plays count once whichever
-of its files was heard, and survive a Track being reprojected. Migration 32
-fills it from `listens GROUP BY recording_id`, skipping listens with a null
-`recording_id`, after first setting every listen's `recording_id` to its
-file's. Two invariants hold after every write:
+of its files was heard, and survive a Track being reprojected. Two invariants hold after every write:
 
 - the table equals `SELECT recording_id, count(*), max(started_at) FROM
   listens WHERE recording_id IS NOT NULL GROUP BY recording_id`;
@@ -830,7 +726,7 @@ towards their Recording while it exists.
 row in one transaction with `event_key = "listen:<listens.id>"`, so a listen is
 never stored without its delivery or queued twice.
 
-Version 48 adds `listens.syncable`, 1 for every existing row. A listen kept
+`listens.syncable` is 1 for a listen ListenBrainz may be sent. A listen kept
 under a local listen policy that falls short of ListenBrainz's rule is
 stored with 0 and never queued. `ListenRepository.finishSyncable` raises a
 listen's heard time when its entry ends and, if that now meets the rule,
@@ -857,7 +753,7 @@ lease expiry for a worker to sleep until.
 
 ## Feedback
 
-`feedback` (version 16) holds the user's love and hate. It is keyed on
+`feedback` holds the user's love and hate. It is keyed on
 `recordings.id`, so every file and Track of one song shares a row and a
 reprojection that gives a Track a new id keeps it. Star ratings are a
 separate thing (below). Rows are removed with their recording
@@ -882,7 +778,7 @@ files are rescanned or retagged. Removing a root forgets the Recordings only
 its files held, with their feedback; adding and rescanning the same folder
 creates new Recordings without it.
 
-Version 16 also adds the index `files_by_recording ON files(recording_id)`,
+The index `files_by_recording ON files(recording_id)`,
 which finds a Recording's files when looking for its MusicBrainz recording id.
 
 `TrackSummary.feedback` comes from a `LEFT JOIN feedback` on
@@ -894,10 +790,9 @@ without a Recording.
 
 ## Playlists and ratings
 
-Migration 27 (version 27) adds `ratings`, `playlists` and `playlist_entries`,
-and drops `tracks.rating` with its index after copying each Recording's
-highest rating into `ratings`. The column lived on a row whose id changes
-when an edit reprojects a Track, so no rating could have survived there.
+Ratings live in `ratings`, keyed on the Recording rather than the Track: a
+Track's id changes when an edit reprojects it, so no rating could survive
+on the Track row. Playlists live in `playlists` and `playlist_entries`.
 
 - `ratings` is keyed on `recordings.id`, like `feedback`, with `rating`
   between 1 and 100 and no row for unrated.
@@ -916,8 +811,8 @@ See [playlists.md](playlists.md) for the behaviour.
 
 ### Playlist metadata
 
-Version 35 adds six columns to `playlists` and the `playlist_tags` table. Existing playlists
-keep their entries and order, and become manual, user-made and untagged.
+`playlists` carries the columns below, and `playlist_tags` a playlist's tags.
+A playlist starts manual, user-made and untagged.
 
 - `description` (`''` when unset), `pinned_at` and `loved_at` (null when
   not). Pinning and loving leave `updated_at` alone; a description or tag
@@ -933,14 +828,14 @@ keep their entries and order, and become manual, user-made and untagged.
 
 ## Library search
 
-Version 36 adds `search_index`, a plain FTS5 table holding one row per
+`search_index` is a plain FTS5 table holding one row per
 Artist (kind 0), Release (1), Playlist (3) and genre (4): `kind` and
 `entity_id` unindexed, `title` and `subtitle` indexed with
 `unicode61 remove_diacritics 2` and a prefix index on two and three
 characters. The subtitle is a Release's album artist, a Playlist's
-description, and empty for Artists and genres. Versions 36 and 37 also held
-Tracks as kind 2; version 38 removed them, and Tracks are searched in
-`track_search`, the external-content index the Track queries already use.
+description, and empty for Artists and genres. It holds no Tracks: they are
+searched in `track_search`, the external-content index the Track queries
+also use.
 
 Its rowid is `entity_id * 8 + kind`. Triggers keep it current: after an
 insert, after a delete, and after an update of the id or an indexed column
@@ -948,8 +843,7 @@ whose value changed, each a rowid lookup. The same rowid lets a query keep
 one kind with `rowid % 8 = kind` without reading the unindexed columns,
 which is what keeps a short prefix fast.
 
-`track_search`'s update trigger, `tracks_au`, has the same guard since
-version 38: it fires on an update of `id`, `title`, `artist`, `album` or
+`track_search`'s update trigger, `tracks_au`, has the same guard: it fires on an update of `id`, `title`, `artist`, `album` or
 `album_artist` only when one of them changed. The projection rewrites those
 columns on every upsert; an update that changes none of them leaves the
 index alone instead of deleting and reinserting the Track's entry.
@@ -1003,15 +897,15 @@ a three-word search takes 9 ms, and a Release page or count with text 14 ms
 and 1 ms. `the` costs more because the benchmark retitles every Track,
 leaving `track_search` in many unmerged segments that the prefix tiers
 read; after an FTS5 `optimize` its prefix tier takes 2 ms, as `am`'s does.
-Ranking every Track match with bm25 in `search_index`, as versions 36 and
-37 did, took 114 ms for either. The insert phase takes 13.6 s; it took
+Ranking every Track match with bm25 in `search_index` took 114 ms for
+either. The insert phase takes 13.6 s; it took
 22.2 s with Tracks in `search_index`, and takes 6.7 s with no full-text
 triggers on `tracks` at all.
 
 ## Track facts
 
-Version 32 adds `tracks.track_total`, `tracks.disc_total` and
-`tracks.explicit`, which the projection writes from the Track's files.
+`tracks.track_total`, `tracks.disc_total` and `tracks.explicit` are the
+facts the projection writes from the Track's files.
 `track_total` is the total the preferred file's tag states, else any member
 file's, else a counted total: the larger of the number of positions on that
 disc of the Release and the highest track number there, so a disc holding
@@ -1020,12 +914,10 @@ only for a counted total, when no file of the Track states one. `disc_total`
 is the preferred file's stated total, else any member file's, else the
 Release's disc count. `explicit` is
 `metadata.Explicit` by number (0 unknown, 1 none, 2 explicit, 3 clean), from
-`observed_file_tags.explicit` (also version 32) or a user's edit; see
+`observed_file_tags.explicit` or a user's edit; see
 [metadata.md](metadata.md#parental-advisory). `ReleaseSummary.explicit` is
-explicit when any of its Tracks is, else clean, then none. The migration
-backfills the totals from the tags already observed; `explicit` stays unknown
-until a rescan reads the files again. `releases.release_type` is added empty;
-projection fills it with the lowercased primary type the files' tags agree
+explicit when any of its Tracks is, else clean, then none.
+`releases.release_type` starts empty; projection fills it with the lowercased primary type the files' tags agree
 on, and a release-info fetch fills it from the MusicBrainz release group
 only while it is NULL or empty, so a tag always outranks the provider.
 
@@ -1035,8 +927,8 @@ first four digits of the Release date). `TrackSort.date_added` orders by that
 same `files.first_seen_at` of the playing file, not by `tracks.created_at`,
 which an edit that reprojects a Track resets.
 
-Version 40 adds what `TrackSummary.integrated_lufs`, `bitrate_kbps` and `path`
-read, and an index for each new sort:
+These hold what `TrackSummary.integrated_lufs`, `bitrate_kbps` and `path`
+read, with an index for each of their sorts:
 
 - `file_loudness(file_id, source_identity, integrated_lufs)` holds the
   integrated loudness of each file's default `orca.audio-diagnostics` result
@@ -1047,8 +939,7 @@ read, and an index for each new sort:
   loudness was measured. A row counts only while its `source_identity`
   equals the file's `content_hash` with `content_hash_algorithm` 1, so
   changed bytes make the loudness unknown until the file is analysed again.
-  The migration backfilled it from the results then stored, which were keyed
-  by quick hash and so no longer count. `file_loudness_by_lufs` orders it.
+  `file_loudness_by_lufs` orders it.
 - `files_by_bitrate` indexes `(size_bytes * 8 + duration_ms / 2) /
   duration_ms`, the kbps `TrackSummary.bitrate_kbps` reports, for files with
   a positive size and duration.
@@ -1060,20 +951,19 @@ read, and an index for each new sort:
 - `genres_by_name` (`name COLLATE NOCASE`) and `track_genres_first` (the
   ordinal-0 rows by `genre_id`) give `TrackSort.genre` its walk.
 
-Version 41 adds `files_without_bitrate`, the ids of files without a positive
+`files_without_bitrate` holds the ids of files without a positive
 size and duration. `TrackSort.bitrate` walks it for the Tracks that have no
-bitrate, so a page no longer reads every Track to find them.
+bitrate, so a page does not read every Track to find them.
 
-Version 43 adds `locations_held`, `locations(file_id, state)` over the rows
+`locations_held` is `locations(file_id, state)` over the rows
 whose `state` is not `missing`. A test for a file's held location, as in
 `TrackSummary.has_playable_file`, `bestLocation` and `TrackSort.path`, reads
 only this index; `locations_file` holds no `state`, so each probe through it
-also read the row. `TrackSort.path` finds the Tracks whose preferred file has no held
+would also read the row. `TrackSort.path` finds the Tracks whose preferred file has no held
 location by scanning `files` and probing `locations_held`, then joining
 `tracks_by_preferred_file`. Every such Track needs that scan, and it is the
 cost of a whole-library `path` page at offset 0: at 522,432 Tracks with a
-file each, 274 ms before and about 150 ms after, a page and the probe of
-every file; with 64 Tracks to a file, under 10 ms. A has-file flag kept on
+file each, about 150 ms, a page and the probe of every file; with 64 Tracks to a file, under 10 ms. A has-file flag kept on
 `tracks` by the projection would make it an index range.
 
 ## Identification proposals
@@ -1092,13 +982,11 @@ before per-provider confidences existed lends its row's confidence to the one
 provider it names. Every payload field has a default, so payloads written
 before a field existed still parse.
 
-`identification_searches` (version 17) records which provider has answered
+`identification_searches` records which provider has answered
 for which file, empty answers included: `(file_id, provider)` is its primary
 key, `searched_at` is Unix seconds, and rows go with their file
 (`ON DELETE CASCADE`). `recordSearch` writes the proposals and the search rows
 of one search in one transaction, and only for providers that answered.
-Migration 17 counts every file with a MusicBrainz proposal, in any state, as
-searched by MusicBrainz, so no MusicBrainz search from before it is repeated.
 
 `repository.unidentified_tracks` is the one definition of which Tracks the
 matching job still has to search: those whose playing file has no recording
@@ -1107,7 +995,7 @@ AcoustID is in scope. The job's page and its count both use it, and every
 lookup in it is by key: the three recording-id lookups and the two search-row
 checks by primary key.
 
-`acoustid_submissions` (version 17) records each fingerprint AcoustID
+`acoustid_submissions` records each fingerprint AcoustID
 accepted: `(file_id, recording_mbid)` is its primary key, with the
 `submission_id` AcoustID returned and `submitted_at`. Rows go with their file.
 `repository.acoustid_submittable` selects the files a submission sends: an
@@ -1117,7 +1005,7 @@ no row here for that id. A `provider` value also needs its accepted proposal
 on the same file. Editing the id makes the file eligible again under the new
 one.
 
-`identification_proposals.album_group` (version 28) is null, or the integer
+`identification_proposals.album_group` is null, or the integer
 an [album correction](metadata.md#corrections) shares among its proposals,
 one past the highest group in use when a verification forms it. A
 verification unit first takes its files' proposals out of any group, so a
@@ -1126,28 +1014,26 @@ group holds the proposals of one unit. The partial index
 album_group IS NOT NULL` lists and finds groups. The review page and its
 count leave grouped proposals out.
 
-`health_dismissals` (version 29) holds one row per dismissed health issue,
+`health_dismissals` holds one row per dismissed health issue,
 keyed on `(file_id, kind)` and going with its file: the file's `quick_hash`
 when it was dismissed, null for a file never hashed, and `dismissed_at` in
 Unix seconds. The health page and count leave out an issue whose dismissal
-`quick_hash IS files.quick_hash`, through the primary key. Version 29 also
-adds `library_health_issues.related_file_id`, the other file of a duplicate,
+`quick_hash IS files.quick_hash`, through the primary key.
+`library_health_issues.related_file_id` is the other file of a duplicate,
 set to null when that file is deleted, with the partial index
 `library_health_by_related` the delete uses. See
 [analysis.md](analysis.md#dismissals). `library_health_by_kind ON (kind,
 severity, file_id)` serves the per-kind page and summary; see
 [analysis.md](analysis.md#by-kind).
 
-Version 49 adds `library_health_issues.similarity`, a nullable `REAL`: the
-fingerprint score behind a `likely_duplicate`, which before lived only as a
-rounded percentage in `details`. It is null for every other kind and for
-likely duplicates recorded before version 49 until the duplicate pass runs
-again. [Duplicate groups](analysis.md#groups) read it, and
+`library_health_issues.similarity` is a nullable `REAL`: the fingerprint
+score behind a `likely_duplicate`, which `details` holds only as a rounded
+percentage. It is null for every other kind. [Duplicate groups](analysis.md#groups) read it, and
 `DuplicateGroupRepository.mergeMetadata` writes
 `orca_metadata_values`, `track_genres`, `ratings` and `feedback` in one
 transaction; see [analysis.md](analysis.md#resolving-a-group).
 
-`recording_verifications` (version 28) holds each file's latest
+`recording_verifications` holds each file's latest
 [verification](providers.md#verification), keyed on `files.id` and going
 with its file: the `quick_hash` the file had, the `recording_mbid` in effect,
 the `outcome` (0 agrees, 1 disagrees, 2 unconfirmed, 3 no fingerprint), the
@@ -1164,7 +1050,7 @@ its walk agree. A
 correction AcoustID found is never submitted back to it: its accepted
 proposal was not found by MusicBrainz alone.
 
-`orca_metadata_values.written_at` (version 21) is when a tag write last put
+`orca_metadata_values.written_at` is when a tag write last put
 the value into its file, or null. Changing the value clears it; undoing the
 write does not. A tag write marks the file its path resolves to after the
 write is observed, which is a new file when the path was one copy of a shared
@@ -1175,11 +1061,11 @@ user edited is sent again for it.
 
 ## Provider state
 
-`provider_state` (version 19) holds each service's rate-limit block
+`provider_state` holds each service's rate-limit block
 (`blocked_until_ms`), backoff (`backoff_ms`) and next request time
-(`next_request_ms`, version 24), keyed by service name, so
+(`next_request_ms`), keyed by service name, so
 every process that opens the Library obeys one block. `provider_leases`
-(version 19) records which Gateway may send the request in flight to each
+records which Gateway may send the request in flight to each
 service: `owner` is a random id per Gateway and `expires_at` is when the
 claim lapses. A Gateway claims it for each request and deletes it when the
 request ends. Both tables keep Unix milliseconds.
@@ -1192,16 +1078,15 @@ never both hold a service. See
 row whose `status` is not `200` is a refusal, which the provider clients
 answer as refused until it expires and never use as an answer.
 
-Version 19 also adds `identification_proposals.accepted_in_bulk`: 1 for a
-proposal accepted by `acceptConfident`, 0 for one accepted on its own and for
-every proposal accepted before version 19. AcoustID submission leaves out an
+`identification_proposals.accepted_in_bulk` is 1 for a proposal accepted by
+`acceptConfident` and 0 for one accepted on its own. AcoustID submission leaves out an
 ID whose accepted proposal was found by AcoustID or accepted in bulk, and an
 ID a file holds without its accepted proposal, as a copy split off a shared
 file does.
 
 ## Release artwork
 
-`release_artwork` (version 20, rebuilt in version 51) holds the covers the
+`release_artwork` holds the covers the
 Library keeps for a Release, one row per kind: the primary key is
 `(release_id, kind)`, and `release_id` references `releases(id)` with
 `ON DELETE CASCADE`, so a pruned Release loses its rows; one reprojected
@@ -1217,8 +1102,8 @@ under a new id hands them over as [Album love](#album-love) describes.
   for a cover chosen from a file.
 - `image` and `mime` are the cover, and `width` and `height` its pixel size,
   measured from the image header when it is stored, -1 when the header does
-  not read (`unreadable_cover_side`), and null only on a cover stored before
-  version 51 that is not yet measured. A cover of unknown size raises no
+  not read (`unreadable_cover_side`), and null only on a cover not yet
+  measured. A cover of unknown size raises no
   `undersized` problem. A null `image` records that the archive had no front
   cover, which stands for 30 days.
 - `fetched_at` is Unix seconds.
@@ -1227,7 +1112,7 @@ under a new id hands them over as [Album love](#album-love) describes.
 under: the Release's tagged one, else the one most of its accepted proposals
 name. See [providers.md](providers.md#cover-art-archive).
 
-`cover_art_candidates` (version 51), primary key `(release_id, caa_id)`,
+`cover_art_candidates`, primary key `(release_id, caa_id)`,
 holds the images the archive offered the last time a person asked for a
 Release's candidates, at most `max_cover_art_candidates` (8), replaced as a
 whole by the next request: the archive's image ID, the
@@ -1260,9 +1145,9 @@ different hashes, and `undersized` when the front in effect is under
 `minimum_cover_pixels` (500) on either side, with the size in the details.
 An unmeasured cover raises nothing.
 
-Covers stored before version 51 are repaired by `ArtworkBackfill`
+Unmeasured covers are measured by `ArtworkBackfill`
 (`library/artwork_backfill.zig`), which property backfill runs after the
-files missing properties and in the same manner as migration 10's repair: it
+files missing properties and in the same manner as their repair: it
 pages the three partial indexes by id, never walking a filesystem. It reads an embedded
 cover's picture and a folder image's header from their files when their size
 and modification time are those observed, and passes over one that changed
@@ -1274,7 +1159,7 @@ measured in its own commit.
 
 ## Album love
 
-`release_loves` (version 30) records the albums the user loves: one row per
+`release_loves` records the albums the user loves: one row per
 loved Release, `release_id` its primary key referencing `releases(id)` with
 `ON DELETE CASCADE`, and `loved_at` the Unix seconds it was loved. No row
 means not loved. It is kept in the Library only: it is not `feedback`, which
@@ -1311,7 +1196,7 @@ most recent first, with Tracks that are not loved last in either direction.
 
 ## Track lyrics
 
-`track_lyrics` (version 31) keeps what LRCLIB answered for a Track, one row
+`track_lyrics` keeps what LRCLIB answered for a Track, one row
 per Track: `track_id` is its primary key and references `tracks(id)` with
 `ON DELETE CASCADE`. `query_digest` is the BLAKE3 digest of the title,
 artist, album and duration the Track was looked up with, `lrclib_id` the
@@ -1328,7 +1213,7 @@ exists. See [providers.md](providers.md#lrclib).
 
 ## Genres
 
-`genres` (version 33) holds one row per genre: `name` is what it is shown as,
+`genres` holds one row per genre: `name` is what it is shown as,
 and `key` the folded form two spellings of one genre share, uniquely indexed.
 `track_genres` gives a Track its genres in order: `(track_id, ordinal)` is the
 primary key, `genre_id` references `genres(id)`, both with `ON DELETE
@@ -1352,8 +1237,8 @@ that contain a comma (Discogs' `Folk, World, & Country`); one at the start of
 the remaining text, ending there or at a separator, is taken whole. The tag
 readers split only repeated fields and NUL separators, so
 `observed_file_genres` keeps each value as the file stores it, and the split
-happens wherever genres are written to `track_genres`: the projection,
-`setTrackGenres` and migration 33.
+happens wherever genres are written to `track_genres`: the projection and
+`setTrackGenres`.
 
 The projection writes a Track's genres from the genre tags of its preferred
 file, or else of the lowest-numbered file at that position that has any. It
@@ -1373,15 +1258,7 @@ them. `releasesWithoutGenres` lists the Releases with a MusicBrainz release
 ID and a Track with no rows. See
 [providers.md](providers.md#genres-from-musicbrainz).
 
-Migration 33 fills `track_genres` for every Track from the genres of its
-preferred file, or else of the lowest-numbered file of its recording that has
-any, through the same split and folding, registered as the SQL functions
-`orca_genre_part(value, n)` (the `n`th part, or NULL past the last),
-`orca_genre_key` and `orca_genre_name`. A recursive CTE expands each observed
-value into its parts, so a library scanned before version 33 gets split genres
-without a rescan.
-
-`genre_totals` (version 38) holds each carried genre's Track count,
+`genre_totals` holds each carried genre's Track count,
 Release count, artist count and summed duration, so a genre listing, its
 count and `byId` read one row per genre and never aggregate `track_genres`.
 Its artists are the Track artists and the album artists of those Tracks'
@@ -1414,8 +1291,8 @@ genre, which hold each of a Track's genres once.
 
 ## Artist info
 
-Version 34 adds five tables keyed by their owner's id with `ON DELETE
-CASCADE`, and `library_settings`. `artist_info`, `artist_links` and
+Five tables are keyed by their owner's id with `ON DELETE CASCADE`, beside
+`library_settings`. `artist_info`, `artist_links` and
 `artist_related` hold an Artist's fetched info, `artist_loves` the user's
 loves and `release_info` a Release's fetched description.
 
@@ -1482,7 +1359,7 @@ files. Artists are keyed by name, so an Artist the projection renames or
 prunes loses its rows with its id; nothing is handed over. See
 [providers.md](providers.md#artist-info).
 
-Version 37 adds **`related_artist_photos`**, `WITHOUT ROWID`, the photos of
+**`related_artist_photos`**, `WITHOUT ROWID`, holds the photos of
 related artists outside the Library: `musicbrainz_artist_id` the primary
 key, `COLLATE NOCASE`; `photo` and `photo_mime`, both null for a marker
 that the artist has no photo, a `CHECK` keeping them null or set together;
@@ -1498,21 +1375,12 @@ whole; `related` reports `has_photo` from it for an artist with no library
 match, `relatedPhoto` reads the bytes and `relatedPhotoInfo` the attribution
 without them.
 
-Version 38 adds the index `analysis_results_created` on
-`analysis_results(created_at)`, so `last_analysis_at` in the library stats
-is one index probe instead of a read of every measurement and its overflow
-pages. It also moves Track search out of `search_index`: it drops the
-triggers `tracks_search_ai`, `tracks_search_au` and `tracks_search_ad`,
-deletes the kind 2 rows, rebuilds `search_index` so no segment keeps the
-deleted entries, and recreates `tracks_au` with the guard described under
-[Library search](#library-search). `track_search` already holds every
-Track, so nothing is reindexed. At 500,000 Tracks the delete and rebuild
-take 2.9 s. Last, it creates `genre_totals`, `genre_release_tracks` and
-`genre_artist_refs`, fills them from the Tracks with one `GROUP BY` each,
-and then creates their triggers, described under [Genres](#genres).
+The index `analysis_results_created` on `analysis_results(created_at)` makes
+`last_analysis_at` in the library stats one index probe instead of a read of
+every measurement and its overflow pages.
 
-Version 42 adds `artist_info.origin`, the name of MusicBrainz's begin area,
-else its area, and **`artist_release_groups`**, primary key `(artist_id,
+`artist_info.origin` is the name of MusicBrainz's begin area, else its area.
+**`artist_release_groups`**, primary key `(artist_id,
 mbid)`, `ON DELETE CASCADE` from `artists`: the Artist's MusicBrainz release
 groups from the artist-info browse, each with its `title`, `primary_type`,
 `first_release_year`, `credited_with` (the credit's other artists) and
@@ -1528,7 +1396,7 @@ compared without case, and each group whose MBID matches, without case, a `relea
 the Artist or holding one of their Tracks, so the result follows the Library
 without a refetch.
 
-Version 44 adds **`release_group_covers`**, primary key `mbid`: the front
+**`release_group_covers`**, primary key `mbid`, holds the front
 cover the Cover Art Archive gives a release group, as `image` and `mime`, and
 `fetched_at` in Unix seconds, with a `CHECK` that `image` and `mime` are both
 set or both null. A null `image` records that the archive had none, which
@@ -1581,14 +1449,14 @@ uri>? AND uri<?)`. At 500,000 locations in 25,000 artist folders
 about 12 ms, a page two levels down under 1 ms, and the root's page at
 offset 24,000, which seeks past 24,000 folders first, about 50 ms.
 
-Version 45 adds the folder's pictures and its last scan:
+Two tables hold a folder's pictures and its last scan:
 
 - **`folder_images`**, unique on `(volume_id, uri)`, holds each image the
   scanner found beside the music: its `root_id`, `mime` (from the file's
   first 16 bytes; a file with no PNG, JPEG, GIF, WebP or BMP signature is not
   recorded), `role` (0 front for a name stem of `cover`, `front` or
   `folder`, 1 `back`, 2 `booklet`, 3 anything else; compared without case),
-  `size_bytes`, `modified_ns`, `last_seen_generation`, and since version 51
+  `size_bytes`, `modified_ns`, `last_seen_generation`, and
   `width`, `height` and `hash` (see [Artwork problems](#artwork-problems)).
   An image is never
   a `files` row, so it never reaches projection, backfill, analysis or
@@ -1617,9 +1485,9 @@ null otherwise, or when the folder has more than 512 children, so a page of
 a library root never walks every folder in it. A folder holding only images, with no audio location below
 it, is not listed as a subfolder.
 
-Version 46 adds `releases.has_folder_cover`, 1 when the folder holding most
+`releases.has_folder_cover` is 1 when the folder holding most
 of the Release's present preferred files, the lowest path on a tie, holds a
-front image, backfilled by the migration. It is stored because the
+front image. It is stored because the
 `ReleaseQuery.has_artwork` filter, its count and the genre artwork list read
 it for every Release, and computing it there through `locations` and
 `folder_images` cost the 500,000-track count about 65 ms.
@@ -1673,7 +1541,7 @@ times slower at 500,000 files. `last_analysis_at` reads the last entry of
 
 ## Job history
 
-Version 47 adds **`job_history`**, one row per host Job that held its
+**`job_history`** holds one row per host Job that held its
 Library's slot and finished, written by the control lane after the worker is
 joined (see [control-plane.md](control-plane.md#history)): `kind` and `state`
 as their enum tag names, `request` (the start request as JSON, null for a tag
@@ -1742,8 +1610,7 @@ once queue history records the Track as played to its end. See
 - One process at a time owns the mutation journal: the holder of an exclusive
   `flock` on `<database>.orca-journal.lock`, taken without waiting by open's
   recovery and by each tag write, undo and prune, which recover first. An open
-  that cannot take it defers recovery to the next holder, and refuses with
-  `error.MutationInProgress` when a migration is due. See [metadata.md](metadata.md#the-journal-lock).
+  that cannot take it defers recovery to the next holder. See [metadata.md](metadata.md#the-journal-lock).
 - One scan or reconcile at a time walks a Library, across processes: the
   holder of an exclusive `flock` on `<database>.orca-scan.lock`. A walk that
   cannot take it is refused with `error.LibraryScanRunning`. See
@@ -1767,14 +1634,12 @@ once queue history records the Track as played to its end. See
   - macOS has no OFD locks and keeps POSIX locks; see
     [roadmap.md](roadmap.md#known-issues).
 
-Automated coverage verifies that a migrated library files every Track exactly
-where a fresh projection does, that an album returns in disc-then-track order,
+Automated coverage verifies that an album returns in disc-then-track order,
 that paging a sort with ties returns every Track exactly once, that reversing a
 sort reverses the whole listing rather than only its first key, that an
 out-of-range page is refused rather than clamped, and additionally independent
 libraries and indexes, FTS paging, a
 10,000-row transactional update, concurrent read access while four write
 producers serialize, that a rename preserves file identity and everything
-attached to it, and that migrating the checked-in version-7 fixture preserves
-every path-keyed row. The executable benchmark generates 500,000 tracks without
+attached to it. The executable benchmark generates 500,000 tracks without
 involving a scanner and measures insertion, reopen, and search latency.

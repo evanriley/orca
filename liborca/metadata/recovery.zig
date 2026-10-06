@@ -20,7 +20,7 @@ pub const Summary = struct {
 ///
 /// If any record is still nonterminal afterwards, the caller must refuse to make
 /// the Library available: its journal describes filesystem work in an unknown
-/// state, and migrating or serving it would make that unrecoverable.
+/// state, and serving it would make that unrecoverable.
 pub fn recoverPending(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -63,7 +63,6 @@ pub fn recoverPending(
 const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
 const file_mutation = @import("file_mutation.zig");
 const id3v1 = @import("id3v1.zig");
-const migrations = @import("../database/migrations.zig");
 const mutation = @import("mutation.zig");
 const sqlite = @import("../database/sqlite.zig");
 
@@ -599,7 +598,7 @@ test "recovery keeps every file when the backup changed in its middle with its s
     try std.testing.expect(damaged.eql(try file_mutation.identity(std.testing.io, harness.backup)));
 }
 
-test "recovery restores a write journaled before content hashes by the other three parts of its identity" {
+test "recovery restores a write whose journal holds no content hashes by the other three parts of its identity" {
     var harness = try Harness.init();
     defer harness.deinit();
     try harness.lengthenSource();
@@ -607,12 +606,11 @@ test "recovery restores a write journaled before content hashes by the other thr
     {
         const db = try sqlite.Database.open(harness.database_path);
         defer db.close();
-        try rewindToVersion55(db);
+        try db.exec("UPDATE mutation_operations SET expected_content_hash = NULL, committed_content_hash = NULL;");
     }
 
     var reopened = try harness.open();
     defer reopened.close();
-    try std.testing.expectEqual(@as(i64, migrations.current_version), try migrations.userVersion(reopened.database));
     try std.testing.expectEqual(database.MutationState.rolled_back, try reopened.mutation_journal.state(1));
     var operation = try reopened.mutation_journal.get(std.testing.allocator, 1);
     defer operation.deinit();
@@ -882,195 +880,6 @@ test "opening a Library leaves another process's in-flight write alone" {
     try expectTitle(harness.source, "Replaced");
 }
 
-fn rewindToVersion55(db: sqlite.Database) !void {
-    try db.exec(
-        \\DROP INDEX orca_metadata_values_release;
-        \\DROP TABLE reviewed_releases;
-        \\DROP TABLE paired_metadata_values;
-        \\DROP TRIGGER release_track_pairings_track_moved;
-        \\DROP TABLE release_track_pairings;
-        \\DROP TABLE musicbrainz_release_tracks;
-        \\DROP TABLE musicbrainz_releases;
-        \\ALTER TABLE files DROP COLUMN audio_hash_tier;
-        \\DROP INDEX files_content_hash;
-        \\ALTER TABLE files DROP COLUMN content_hash_algorithm;
-        \\ALTER TABLE mutation_operations DROP COLUMN committed_content_hash;
-        \\ALTER TABLE mutation_operations DROP COLUMN expected_content_hash;
-        \\PRAGMA user_version=55;
-    );
-}
-
-fn rewindToVersion25(db: sqlite.Database) !void {
-    try rewindToVersion55(db);
-    try db.exec(
-        \\DROP TABLE metadata_proposals;
-        \\DROP TABLE track_positions;
-        \\DROP TABLE player_queue_entries;
-        \\DROP TABLE player_state;
-        \\DROP TABLE dismissed_release_candidates;
-        \\DROP INDEX releases_match_order;
-        \\DROP INDEX folder_images_unmeasured;
-        \\DROP INDEX observed_file_tags_artwork_unmeasured;
-        \\ALTER TABLE observed_file_tags DROP COLUMN artwork_hash;
-        \\ALTER TABLE observed_file_tags DROP COLUMN artwork_height;
-        \\ALTER TABLE observed_file_tags DROP COLUMN artwork_width;
-        \\DROP TABLE cover_art_candidates;
-        \\CREATE TABLE release_artwork_v20 (
-        \\    release_id INTEGER PRIMARY KEY REFERENCES releases(id) ON DELETE CASCADE,
-        \\    musicbrainz_release_id TEXT NOT NULL,
-        \\    image BLOB,
-        \\    mime TEXT,
-        \\    fetched_at INTEGER NOT NULL
-        \\);
-        \\INSERT INTO release_artwork_v20(release_id, musicbrainz_release_id, image, mime, fetched_at)
-        \\SELECT release_id, musicbrainz_release_id, image, mime, fetched_at FROM release_artwork
-        \\WHERE kind = 0 AND musicbrainz_release_id IS NOT NULL;
-        \\DROP TABLE release_artwork;
-        \\ALTER TABLE release_artwork_v20 RENAME TO release_artwork;
-        \\ALTER TABLE observed_file_tags DROP COLUMN comment;
-        \\ALTER TABLE library_health_issues DROP COLUMN similarity;
-        \\ALTER TABLE listens DROP COLUMN syncable;
-        \\DROP INDEX job_history_finished;
-        \\DROP TABLE job_history;
-        \\ALTER TABLE releases DROP COLUMN has_folder_cover;
-        \\DROP TABLE folder_scans;
-        \\DROP INDEX folder_images_sweep;
-        \\DROP INDEX folder_images_folder;
-        \\DROP TABLE folder_images;
-        \\DROP TABLE release_group_covers;
-        \\DROP INDEX locations_held;
-        \\DROP TABLE artist_release_groups;
-        \\DROP INDEX files_without_bitrate;
-        \\DROP TRIGGER analysis_results_loudness_ai;
-        \\DROP TRIGGER analysis_results_loudness_au;
-        \\DROP TRIGGER analysis_results_loudness_ad;
-        \\DROP TABLE file_loudness;
-        \\DROP INDEX files_by_bitrate;
-        \\DROP INDEX tracks_sort_album_artist;
-        \\DROP INDEX genres_by_name;
-        \\DROP INDEX track_genres_first;
-        \\DROP INDEX releases_artist_order;
-        \\DROP INDEX releases_title_order;
-        \\DROP INDEX analysis_results_created;
-        \\DROP TRIGGER tracks_genre_totals_bd;
-        \\DROP TRIGGER tracks_genre_duration_au;
-        \\DROP TRIGGER tracks_genre_artist_au;
-        \\DROP TRIGGER tracks_genre_release_au;
-        \\DROP TRIGGER releases_genre_artist_au;
-        \\DROP TRIGGER track_genres_totals_ai;
-        \\DROP TRIGGER track_genres_totals_ad;
-        \\DROP TRIGGER track_genres_totals_au;
-        \\DROP TABLE genre_artist_refs;
-        \\DROP TABLE genre_release_tracks;
-        \\DROP TABLE genre_totals;
-        \\DROP TRIGGER tracks_au;
-        \\CREATE TRIGGER tracks_au AFTER UPDATE ON tracks BEGIN
-        \\    INSERT INTO track_search(track_search, rowid, title, artist, album, album_artist)
-        \\    VALUES ('delete', old.id, old.title, old.artist, old.album, old.album_artist);
-        \\    INSERT INTO track_search(rowid, title, artist, album, album_artist)
-        \\    VALUES (new.id, new.title, new.artist, new.album, new.album_artist);
-        \\END;
-        \\DROP TABLE related_artist_photos;
-        \\DROP TRIGGER artists_search_ai;
-        \\DROP TRIGGER artists_search_au;
-        \\DROP TRIGGER artists_search_ad;
-        \\DROP TRIGGER releases_search_ai;
-        \\DROP TRIGGER releases_search_au;
-        \\DROP TRIGGER releases_search_ad;
-        \\DROP TRIGGER playlists_search_ai;
-        \\DROP TRIGGER playlists_search_au;
-        \\DROP TRIGGER playlists_search_ad;
-        \\DROP TRIGGER genres_search_ai;
-        \\DROP TRIGGER genres_search_au;
-        \\DROP TRIGGER genres_search_ad;
-        \\DROP TABLE search_index;
-        \\DROP TABLE library_settings;
-        \\DROP TABLE playlist_tags;
-        \\DROP TABLE release_info;
-        \\DROP TABLE artist_related;
-        \\DROP TABLE artist_links;
-        \\DROP TABLE artist_loves;
-        \\DROP TABLE artist_info;
-        \\DROP TABLE track_genres;
-        \\DROP TABLE genres;
-        \\DROP TRIGGER files_recording_moves_listens;
-        \\DROP INDEX listens_by_recording;
-        \\DROP INDEX files_by_first_seen;
-        \\DROP INDEX releases_by_year;
-        \\DROP INDEX ratings_by_rating;
-        \\DROP INDEX feedback_loved;
-        \\DROP TABLE recording_play_stats;
-        \\ALTER TABLE observed_file_tags DROP COLUMN explicit;
-        \\ALTER TABLE tracks DROP COLUMN track_total;
-        \\ALTER TABLE tracks DROP COLUMN disc_total;
-        \\ALTER TABLE tracks DROP COLUMN explicit;
-        \\ALTER TABLE releases DROP COLUMN release_type;
-        \\DROP TABLE track_lyrics;
-        \\DROP TABLE release_loves;
-        \\DROP TABLE health_dismissals;
-        \\DROP INDEX library_health_by_related;
-        \\ALTER TABLE library_health_issues DROP COLUMN related_file_id;
-        \\DROP TABLE recording_verifications;
-        \\DROP INDEX identification_proposals_album_group;
-        \\ALTER TABLE identification_proposals DROP COLUMN album_group;
-        \\DROP TABLE playlist_entries;
-        \\DROP TABLE playlists;
-        \\DROP TABLE ratings;
-        \\DROP INDEX tracks_by_recording;
-        \\DROP INDEX locations_by_uri;
-        \\ALTER TABLE tracks ADD COLUMN rating INTEGER CHECK (rating BETWEEN 0 AND 100);
-        \\CREATE INDEX tracks_rating ON tracks(rating);
-        \\PRAGMA user_version=25;
-    );
-}
-
-test "rewinding to version 25 drops the folder tables, and reopening creates them again" {
-    var harness = try Harness.init();
-    defer harness.deinit();
-    {
-        const db = try sqlite.Database.open(harness.database_path);
-        defer db.close();
-        try rewindToVersion25(db);
-        var statement = try db.prepare(
-            "SELECT count(*) FROM sqlite_master WHERE name IN ('folder_images', 'folder_images_sweep', 'folder_images_folder', 'folder_scans');",
-        );
-        defer statement.deinit();
-        try std.testing.expectEqual(sqlite.Step.row, try statement.step());
-        try std.testing.expectEqual(@as(i64, 0), statement.columnInt64(0));
-    }
-    var reopened = try harness.open();
-    defer reopened.close();
-    var statement = try reopened.database.prepare(
-        "SELECT count(*) FROM sqlite_master WHERE name IN ('folder_images', 'folder_images_sweep', 'folder_images_folder', 'folder_scans');",
-    );
-    defer statement.deinit();
-    try std.testing.expectEqual(sqlite.Step.row, try statement.step());
-    try std.testing.expectEqual(@as(i64, 4), statement.columnInt64(0));
-}
-
-test "a Library that still needs a migration refuses to open while another process is mutating it" {
-    var harness = try Harness.init();
-    defer harness.deinit();
-    {
-        const db = try sqlite.Database.open(harness.database_path);
-        defer db.close();
-        try rewindToVersion25(db);
-    }
-    var lock = try harness.holdForeignLock();
-
-    try std.testing.expectError(error.MutationInProgress, harness.open());
-    {
-        const db = try sqlite.Database.open(harness.database_path);
-        defer db.close();
-        try std.testing.expectEqual(@as(i64, 25), try migrations.userVersion(db));
-    }
-
-    Harness.releaseForeignLock(&lock);
-    var reopened = try harness.open();
-    defer reopened.close();
-    try std.testing.expectEqual(@as(i64, migrations.current_version), try migrations.userVersion(reopened.database));
-}
-
 test "the mutation lock is released when a write crashes, so the next open recovers it" {
     var harness = try Harness.init();
     defer harness.deinit();
@@ -1255,25 +1064,4 @@ test "a crashed undo of a moved and re-tagged file restores the path before the 
     try std.testing.expect(!try exists(destination));
     try harness.expectOriginal();
     try harness.expectNoResidue();
-}
-
-test "an undo converted by migration 26 finishes in the same open" {
-    var harness = try Harness.init();
-    defer harness.deinit();
-    try harness.writeGroup();
-    try harness.crashUndo(.{ .point = .undo_after_operation, .action_index = 1 });
-    {
-        const db = try sqlite.Database.open(harness.database_path);
-        defer db.close();
-        try db.exec("UPDATE mutation_operations SET state = 2 WHERE state = 6;");
-        try rewindToVersion25(db);
-    }
-
-    var reopened = try harness.open();
-    defer reopened.close();
-    try std.testing.expectEqual(@as(i64, migrations.current_version), try migrations.userVersion(reopened.database));
-    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
-    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
-    try harness.expectBothOriginal();
-    try harness.expectNoGroupResidue();
 }

@@ -13,10 +13,6 @@
 //! split, so `Hip-Hop/Rap` stays one value for the alias table. A real genre
 //! name that contains a comma (`Folk, World, & Country`) is matched whole
 //! before splitting.
-//!
-//! `genres.key` is a stored, uniquely indexed column, so migration 33 splits
-//! and folds through this same code (`orca_genre_part`, `orca_genre_key`,
-//! `orca_genre_name`).
 const std = @import("std");
 const text_key = @import("../database/text_key.zig");
 

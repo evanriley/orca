@@ -29,9 +29,8 @@ pub const VolumeOptions = struct {
 pub const RootBinding = struct {
     volume_id: i64,
     root_id: i64,
-    /// How many locations a migration parked on the fallback volume this call
-    /// claimed for the real one. Nonzero exactly once per migrated root, and
-    /// reported rather than hidden so an upgrade can be audited.
+    /// How many unverified locations under the root this call moved from the
+    /// fallback volume onto the root's volume.
     claimed_locations: u64 = 0,
 };
 
@@ -100,21 +99,12 @@ pub const LibraryDatabase = struct {
     recording_verifications: repository.RecordingVerificationRepository,
     acoustid_submissions: repository.AcoustIdSubmissionRepository,
 
-    /// Open a Library, recovering any interrupted file mutation before the
-    /// caller can see it.
+    /// Open a Library, creating its schema when the file is new and
+    /// recovering any interrupted file mutation before the caller can see it.
     ///
-    /// Recovery runs at `journal_ready_version` — after the journal table
-    /// exists and before any later migration rewrites what a nonterminal
-    /// operation refers to. Migration 8 turns every path-keyed table into
-    /// `files.id` identity, so a staged operation whose `source_path` is about
-    /// to become a `file_id` must reach a terminal state first. If it cannot,
-    /// the Library is not opened at all, matching the existing posture of
-    /// refusing to open an unknown newer schema rather than guessing.
-    ///
-    /// Recovery and migration run only while this open holds the journal lock.
-    /// Without it another holder is mid-mutation, and its rows are not
-    /// abandoned: recovery is deferred to a later open, and a Library that
-    /// still needs a migration returns `error.MutationInProgress`.
+    /// Recovery runs only while this open holds the journal lock. Without it
+    /// another holder is mid-mutation, and its rows are not abandoned:
+    /// recovery is deferred to a later open.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
         errdefer allocator.free(owned_path);
@@ -139,7 +129,7 @@ pub const LibraryDatabase = struct {
         else
             null;
         errdefer if (walk_lock_path) |lock_path| allocator.free(lock_path);
-        try migrations.applyThrough(database, migrations.journal_ready_version);
+        try migrations.apply(database);
         var journal: repository.MutationJournalRepository = .{
             .db = database,
             .write_lane = write_lane,
@@ -150,15 +140,10 @@ pub const LibraryDatabase = struct {
                 var lock = acquired;
                 defer lock.release(io);
                 _ = try mutation_recovery.recoverPending(allocator, io, &journal, backup_directory, &lock, null);
-                try migrations.apply(database);
-                _ = try mutation_recovery.recoverPending(allocator, io, &journal, backup_directory, &lock, null);
             } else {
                 std.log.info("{s}: another process holds the mutation journal; recovery waits for the next open", .{path});
                 recovery_deferred = true;
-                if (try migrations.userVersion(database) < migrations.current_version) return error.MutationInProgress;
             }
-        } else {
-            try migrations.apply(database);
         }
         return .{
             .allocator = allocator,
@@ -492,8 +477,8 @@ pub const LibraryDatabase = struct {
         return self.files.adoptContentHashLocked(binding.file_id, digest, &binding.quick_hash, binding.location_id, read);
     }
 
-    /// The volume every path with no better identity falls back to. It exists
-    /// from migration 8 onward, and pre-identity rows already point at it.
+    /// The volume every path with no better identity falls back to. Every
+    /// Library is created with it.
     pub const null_volume: i64 = 1;
 
     /// The prefix of the key a root takes as its own volume when the platform
@@ -2240,48 +2225,6 @@ test "relocating a root rewrites the journal's paths under it and no others, and
     try std.testing.expectEqual(sqlite.Step.done, try statement.step());
     _ = try library.library_roots.relocate(std.testing.allocator, root.root_id, .{ .stable_key = "uuid:new" }, "/mnt/new");
     for (rows, operation_ids) |row, operation_id| try expectJournalPaths(&library, operation_id, row.after);
-}
-
-test "opening a version-7 library recovers its journal before the schema moves" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const path = try std.fmt.allocPrintSentinel(
-        std.testing.allocator,
-        ".zig-cache/tmp/{s}/v7-library.db",
-        .{temporary.sub_path},
-        0,
-    );
-    defer std.testing.allocator.free(path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "fixtures/database/v7-library.db",
-        std.testing.allocator,
-        .limited(8 * 1024 * 1024),
-    );
-    defer std.testing.allocator.free(bytes);
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = bytes });
-
-    // Recovery runs at the journal-ready version, between migration 5 and the
-    // rest, so a terminal record survives untouched and migration 8 is free to
-    // rewrite the tables underneath it.
-    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, path);
-    defer library.close();
-    try std.testing.expectEqual(
-        repository.MutationState.committed,
-        try library.mutation_journal.state(1),
-    );
-    try std.testing.expectEqual(@as(u64, 5), try library.files.count());
-    var page = try library.tracks.search(std.testing.allocator, "Bryter", .{ .limit = 10 });
-    defer page.deinit();
-    try std.testing.expectEqual(@as(usize, 2), page.items.len);
-
-    const file_id = (try library.files.resolveByUri(
-        LibraryDatabase.null_volume,
-        "/music/drake/northern-sky.flac",
-    )).?;
-    const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
-    defer observed.deinit();
-    try std.testing.expectEqualStrings("Northern Sky", observed.values.title.?);
 }
 
 test "an artist's tracks include the ones on a release they are the album artist of" {

@@ -583,8 +583,7 @@ AcoustID).
   accepted one at a time from MusicBrainz alone is sent, and so is an ID the
   user edited, whatever proposed it. An ID from a match is sent only for the
   file the match was accepted on: a copy split off a shared file inherits the
-  ID without the match and does not send it. Matches accepted before library
-  version 19 count as accepted one at a time. An ID a release-track pairing
+  ID without the match and does not send it. An ID a release-track pairing
   set (see [metadata.md](metadata.md#release-alignment)) is sent only when
   the file also holds a proposal from AcoustID for that recording, in any
   state: a pairing rests on a person's judgment, and is sent only where the

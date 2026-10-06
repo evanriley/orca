@@ -205,7 +205,7 @@ const folder_image_folder = "(cover_image.volume_id, rtrim(cover_image.uri, repl
 
 /// True when the Release's cover folder (`releaseCoverFolderSql`) holds a
 /// front image, so `releases.has_folder_cover` agrees with the image
-/// `releaseFrontImages` returns. Migration 46 holds a frozen copy.
+/// `releaseFrontImages` returns.
 inline fn releaseHasFolderCoverSql(comptime release_id: []const u8) []const u8 {
     return "EXISTS (SELECT 1 FROM folder_images AS cover_image WHERE cover_image.role = " ++ front_role ++
         " AND " ++ folder_image_folder ++ " = " ++ releaseCoverFolderSql(release_id) ++ ")";
@@ -367,16 +367,11 @@ pub const LocationRepository = struct {
         return statement.columnInt64(0);
     }
 
-    /// Move locations a migration left on the fallback volume onto the real
-    /// volume and root a scan just resolved.
-    ///
-    /// A migration cannot know what volume a path lives on — the storage may
-    /// not even be mounted — so it parks every migrated location on the
-    /// `legacy` volume in the `unverified` state. The first scan that resolves
-    /// a real volume for a root claims the ones under it. Without this the
-    /// scanner's `(volume_id, uri)` lookup misses every migrated row and
-    /// re-imports the entire library as new files, silently orphaning every
-    /// preserved lock, analysis result and health issue on the old rows.
+    /// Move the unverified locations under a root from the fallback volume onto
+    /// the real volume and root a scan just resolved. Without this the
+    /// scanner's `(volume_id, uri)` lookup misses those rows and imports their
+    /// files again as new ones, orphaning every lock, analysis result and
+    /// health issue on the old rows.
     ///
     /// `UPDATE OR IGNORE` because a location may already exist at that URI on
     /// the target volume; the live row wins and the legacy row is left for the
@@ -436,10 +431,9 @@ pub const LocationRepository = struct {
     /// with the filesystem facts a scan already recorded. A hit means no
     /// format, tag or hash work is needed for this entry at all.
     ///
-    /// Only a `present` location can be unchanged. An `unverified` one — every
-    /// location a migration produced — has never been confirmed by a scan and
-    /// carries whatever tags the old schema had room for, so it is re-observed
-    /// once and promoted rather than trusted on sight.
+    /// Only a `present` location can be unchanged. An `unverified` one has
+    /// never been confirmed by a scan, so it is re-observed once and promoted
+    /// rather than trusted on sight.
     /// The id of the present Location this identity already describes, or null
     /// when the entry is new or its bytes changed. With `root_id`, a location
     /// a scan of that root did not record, such as one `orca-cli analyze`

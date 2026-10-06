@@ -1,13 +1,4 @@
 //! The folding that turns a display name into the key two spellings share.
-//!
-//! This lives beside the schema rather than beside the projection because
-//! `artists.key` is a stored, uniquely indexed column: a migration that
-//! backfills `tracks.artist_id` has to fold exactly the way the projection
-//! folded when it wrote those keys, or a migrated database and a freshly
-//! scanned one would disagree about who an artist is. `migrations.zig`
-//! registers `orca_artist_key` and `orca_artist_sort_key` as SQLite functions
-//! over these two entry points so the backfill runs the same code the
-//! projection runs.
 const std = @import("std");
 
 pub const key_buffer_size = 512;

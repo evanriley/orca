@@ -1094,7 +1094,7 @@ test "a file whose middle changed under an unchanged quick hash is measured agai
     }
 }
 
-test "a 0.8.1 library's loudness keyed by quick hash opens as stale and is measured again" {
+test "a loudness result keyed by quick hash opens as stale and is measured again" {
     var directory = std.testing.tmpDir(.{});
     defer directory.cleanup();
     const root = try absoluteTestPath(".zig-cache/tmp/{s}", .{directory.sub_path});
@@ -1112,7 +1112,7 @@ test "a 0.8.1 library's loudness keyed by quick hash opens as stale and is measu
     {
         const raw = try database.sqlite.Database.open(database_path);
         defer raw.close();
-        try database.migrations.applyThrough(raw, 30);
+        try database.migrations.apply(raw);
         var file = try raw.prepare("INSERT INTO files(id, audio_format, size_bytes, quick_hash) VALUES (1, 0, ?1, ?2);");
         defer file.deinit();
         try file.bindInt64(1, @intCast(stat.size));

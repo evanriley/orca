@@ -340,11 +340,6 @@ removed.
 
 ### Before the public preview
 
-- The Library schema starts over. The migrations to schema 55 served one
-  Library; once the gates above that change stored data are closed, they are
-  replaced by one baseline schema, and a Library from an earlier release is
-  refused with a message to create it again. Checked by opening a fresh
-  Library and a 0.8.1 one.
 - Publication. The GitHub items: the `required` CI job passing on GitHub and
   made required by branch protection, private vulnerability reporting turned
   on for `SECURITY.md`, Dependabot and pinact for pinned actions, the provider

@@ -143,18 +143,6 @@ low-bit restoration is wrong on every sample (see `docs/codecs.md`). The
 decoder test regenerates the expected samples from the same sequence. It
 contains no third-party media.
 
-`database/v7-library.sql` is the SQL script that generates
-`database/v7-library.db`, a version-7 library database with rows in every
-path-keyed table plus an analysis result and a health issue for paths no scan
-observed (see `docs/database.md`). Regenerate it with:
-
-```sh
-rm -f fixtures/database/v7-library.db
-sqlite3 fixtures/database/v7-library.db < fixtures/database/v7-library.sql
-```
-
-The rows are invented for the tests.
-
 `audio/lyrics-synced.flac` is `audio/generated-reference.flac` retagged with
 synced LRC in a `LYRICS` comment:
 

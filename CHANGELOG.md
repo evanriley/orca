@@ -1192,6 +1192,11 @@
 
 ### Changed
 
+- **The Library schema starts over at version 1.** A new Library is created
+  with the whole schema in one step. A Library made by an earlier release is
+  refused with `SchemaVersionTooNew`, which `orca-cli` and `orca-gtk` explain,
+  and must be created again.
+
 - **`exact_duplicate` means the same bytes.** It is reported for a second
   location of a file or another file with the same full-content hash, and no
   longer for equal lossless audio, which is `identical_audio`. Duplicate scan

@@ -8,8 +8,8 @@ const platform = @import("../platform.zig");
 
 /// True when `path` resolves to `recorded_key`, the stable key of the volume
 /// its root was bound to. A null `recorded_key` means the root has no
-/// recorded volume to compare with, as a migrated root on the legacy volume
-/// has none, and passes. A root bound to its own `root:<id>` key passes only
+/// recorded volume to compare with, as a root on the fallback volume has
+/// none, and passes. A root bound to its own `root:<id>` key passes only
 /// while the platform still names no volume for its path.
 pub fn onRecordedVolume(
     allocator: std.mem.Allocator,

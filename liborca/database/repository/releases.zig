@@ -23,7 +23,7 @@ pub const ReleaseUpsert = struct {
     album_artist: []const u8 = "",
     release_date: ?[]const u8 = null,
     /// The Artist row this release is filed under. One album artist per
-    /// release, deliberately — see the note on migration 9.
+    /// release, deliberately.
     album_artist_id: ?i64 = null,
     is_compilation: bool = false,
     disc_count: ?i64 = null,

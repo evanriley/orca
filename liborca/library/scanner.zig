@@ -1174,15 +1174,15 @@ test "an unpaused checkpoint returns at once" {
     try std.testing.expect(!state.cancelled.load(.acquire));
 }
 
-test "a scan after migration claims the files it inherited instead of re-importing them" {
-    try expectMigratedFilesClaimed(.{});
+test "a scan claims the unverified files on the fallback volume instead of re-importing them" {
+    try expectFallbackFilesClaimed(.{});
 }
 
-test "a migrated root on storage Orca cannot name moves off the legacy volume with its files" {
-    try expectMigratedFilesClaimed(.{ .use_platform_adapter = false });
+test "a root on storage Orca cannot name moves off the fallback volume with its files" {
+    try expectFallbackFilesClaimed(.{ .use_platform_adapter = false });
 }
 
-fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
+fn expectFallbackFilesClaimed(volume_options: database.VolumeOptions) !void {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.dir.writeFile(std.testing.io, .{
@@ -1219,42 +1219,38 @@ fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
     );
     defer std.testing.allocator.free(tracked);
 
-    // A version-7 library: observations keyed by path, with user state hanging
-    // off those paths, and no `library_roots` row.
     {
         const raw = try database.sqlite.Database.open(database_path);
         defer raw.close();
-        try database.migrations.applyThrough(raw, 7);
-        var insert = try raw.prepare(
-            \\INSERT INTO observed_files(path, inode, size_bytes, modified_ns, audio_format)
-            \\VALUES (?1, 1, 19, 5, 1);
+        try database.migrations.apply(raw);
+        var file = try raw.prepare("INSERT INTO files(id, audio_format, size_bytes) VALUES (?1, 1, 19);");
+        defer file.deinit();
+        var location = try raw.prepare(
+            \\INSERT INTO locations(file_id, volume_id, uri, native_inode, size_bytes, modified_ns)
+            \\VALUES (?1, 1, ?2, 1, 19, 5);
         );
-        defer insert.deinit();
-        for ([_][]const u8{ "first.flac", "second.flac", "third.wav" }) |name| {
+        defer location.deinit();
+        for ([_][]const u8{ "first.flac", "second.flac", "third.wav" }, 1..) |name, file_id| {
             const path = try std.fmt.allocPrint(
                 std.testing.allocator,
                 "{s}/{s}",
                 .{ root_path, name },
             );
             defer std.testing.allocator.free(path);
-            try insert.bindText(1, path);
-            try std.testing.expectEqual(database.sqlite.Step.done, try insert.step());
-            try insert.reset();
+            try file.bindInt64(1, @intCast(file_id));
+            try std.testing.expectEqual(database.sqlite.Step.done, try file.step());
+            try file.reset();
+            try location.bindInt64(1, @intCast(file_id));
+            try location.bindText(2, path);
+            try std.testing.expectEqual(database.sqlite.Step.done, try location.step());
+            try location.reset();
         }
-        var metadata = try raw.prepare(
-            \\INSERT INTO orca_metadata_values(path, field, value, provenance, locked)
-            \\VALUES (?1, 0, 'Curated title', 1, 1);
+        try raw.exec(
+            \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked)
+            \\VALUES (1, 0, 'Curated title', 1, 1);
+            \\INSERT INTO library_health_issues(file_id, kind, severity, details)
+            \\VALUES (1, 5, 1, 'clipped');
         );
-        defer metadata.deinit();
-        try metadata.bindText(1, tracked);
-        try std.testing.expectEqual(database.sqlite.Step.done, try metadata.step());
-        var health = try raw.prepare(
-            \\INSERT INTO library_health_issues(path, kind, severity, details)
-            \\VALUES (?1, 5, 1, 'clipped');
-        );
-        defer health.deinit();
-        try health.bindText(1, tracked);
-        try std.testing.expectEqual(database.sqlite.Step.done, try health.step());
     }
 
     var library = try database.LibraryDatabase.open(
@@ -1264,7 +1260,7 @@ fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
     );
     defer library.close();
     try std.testing.expectEqual(@as(u64, 3), try library.files.count());
-    const migrated_file_id = (try library.files.resolveByUri(
+    const claimed_file_id = (try library.files.resolveByUri(
         database.LibraryDatabase.null_volume,
         tracked,
     )).?;
@@ -1296,18 +1292,18 @@ fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
     try std.testing.expectEqual(@as(u64, 3), try library.files.count());
     try std.testing.expectEqual(@as(u64, 3), try library.locations.count());
     try std.testing.expectEqual(
-        @as(?i64, migrated_file_id),
+        @as(?i64, claimed_file_id),
         try library.files.resolveByUri(binding.volume_id, tracked),
     );
     try std.testing.expect(
         (try library.files.resolveByUri(database.LibraryDatabase.null_volume, tracked)) == null,
     );
 
-    // And the user state migrated onto that file is still on the file the user
+    // And the user state on that file is still on the file the user
     // is now browsing, rather than stranded on an orphaned duplicate.
     const curated = (try library.orca_metadata.get(
         std.testing.allocator,
-        migrated_file_id,
+        claimed_file_id,
         .title,
     )).?;
     defer curated.deinit(std.testing.allocator);
@@ -1316,7 +1312,7 @@ fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
     try std.testing.expectEqual(@as(u64, 1), try library.health_issues.count());
     var issues = try library.health_issues.page(std.testing.allocator, 10, 0);
     defer issues.deinit();
-    try std.testing.expectEqual(migrated_file_id, issues.items[0].file_id);
+    try std.testing.expectEqual(claimed_file_id, issues.items[0].file_id);
     try std.testing.expectEqualStrings(tracked, issues.items[0].path);
 
     // Claimed locations are verified by the scan, not left unverified forever.

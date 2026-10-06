@@ -168,9 +168,9 @@ release track's values:
   an album group) is accepted;
 - `track_titles`: the title and artist credit the release track carries.
 
-A snapshot taken before migration 60 does not hold the release's artist
-IDs, so the album-artist ID and compilation flag are left alone; the next
-lookup of the release, which a matching run makes once the 30-day cache
+A snapshot that does not hold the release's artist IDs leaves the
+album-artist ID and compilation flag alone; the next lookup of the release,
+which a matching run makes once the 30-day cache
 expires, replaces the snapshot. `release_type`, `genre` and `artwork` are
 compared by Match Review but never stored. A user's locked value wins,
 including a value a pairing set, and `paired_metadata_values` is left as it
@@ -643,9 +643,8 @@ that compares a file with a journaled identity: staging, the revalidation
 before the rename, undo and recovery. The mutation journal persists the full
 identity, so recovery compares the same `FileIdentity` an in-process check
 does; see [database.md](database.md). `Plan.init` refuses an identity without
-a content hash with `error.InvalidMutationPlan`, so only an operation journaled
-before migration 56 lacks one; it is compared by the other three parts. The
-executor does not write `files.content_hash`.
+a content hash with `error.InvalidMutationPlan`; a journaled operation that
+lacks one is compared by the other three parts. The executor does not write `files.content_hash`.
 
 Every action of a group is journaled before any filesystem work begins, and
 journal writes raise SQLite durability for their own transaction, so a group is
@@ -661,8 +660,7 @@ exits in any way, and a process that is paused, however long, keeps it, which
 a lease in the database could not promise. It is taken without waiting, and
 held only for the duration of one of these:
 
-- `LibraryDatabase.open`, for recovery and the migrations between its two
-  recovery passes.
+- `LibraryDatabase.open`, for recovery.
 - A tag write, from `Runtime.startTagWrite` until the plan has executed; the
   files are re-observed after it is released.
 - `Runtime.undoTagWrite`, until the group is undone; the files are re-observed
@@ -680,9 +678,7 @@ since the Library was opened may have left work unfinished; a write does this
 on its job's thread. If that recovery fails, the operation fails with its error
 and journals nothing of its own. An open that finds the lock held leaves the
 journal alone, because its rows belong to a writer that is still alive: it sets
-`LibraryDatabase.recovery_deferred`, which the next recovery clears, and
-returns `error.MutationInProgress` instead if the Library still needs a
-migration. Each acquisition opens the file anew, so two acquisitions in one
+`LibraryDatabase.recovery_deferred`, which the next recovery clears. Each acquisition opens the file anew, so two acquisitions in one
 process exclude each other as two processes do. A Library with no database
 file has no lock file: tag writes, undo and pruning return
 `error.NoBackupDirectory`, and its open runs no recovery, since nothing it
@@ -771,11 +767,10 @@ the operation stays `undoing`.
 
 ### Recovery
 
-`LibraryDatabase.open` runs journal recovery before the Library is returned to
-the caller — after the journal table exists and before any later migration
-rewrites what a nonterminal operation refers to — and again after the
-migrations, and refuses to open at all if recovery cannot reach a terminal
-state. Both passes run only under the [journal lock](#the-journal-lock).
+`LibraryDatabase.open` applies the schema and runs journal recovery before
+the Library is returned to the caller, and refuses to open at all if recovery
+cannot reach a terminal state. Recovery runs only under the
+[journal lock](#the-journal-lock).
 
 Recovery drives every group with a `planned`, `staged`, `failed` or `undoing`
 operation to terminal states. It first marks the group's `committed`

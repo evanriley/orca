@@ -258,8 +258,13 @@ pub fn openFailed(self: *App, err: anyerror) void {
     const entry = self.libraries.entries.items[index];
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const shown = preferences.homePath(&path_buffer, entry.path);
-    reportProblem(self, "Could not open {s}", .{entry.name}, "{s} is not an Orca library, or it cannot be read", .{shown});
+    if (err == error.SchemaVersionTooNew)
+        reportProblem(self, "Could not open {s}", .{entry.name}, incompatible, .{shown})
+    else
+        reportProblem(self, "Could not open {s}", .{entry.name}, "{s} is not an Orca library, or it cannot be read", .{shown});
 }
+
+const incompatible = "{s} was made by a different version of Orca; create a new library";
 
 /// Switches on idle: the dropdown or button that asked is rebuilt by the switch.
 pub fn requestSwitch(self: *App, index: usize) void {
@@ -275,7 +280,7 @@ fn switchLater(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
-const Failure = enum { missing, unreadable };
+const Failure = enum { missing, unreadable, incompatible };
 
 fn fail(self: *App, index: usize, failure: Failure) void {
     const entry = self.libraries.entries.items[index];
@@ -284,6 +289,7 @@ fn fail(self: *App, index: usize, failure: Failure) void {
     switch (failure) {
         .missing => reportProblem(self, "Could not switch to {s}", .{entry.name}, "No database at {s}", .{shown}),
         .unreadable => reportProblem(self, "Could not switch to {s}", .{entry.name}, "{s} is not an Orca library, or it cannot be read", .{shown}),
+        .incompatible => reportProblem(self, "Could not switch to {s}", .{entry.name}, incompatible, .{shown}),
     }
     preferences.rebuildPage(self);
     refreshDialog(self);
@@ -304,7 +310,7 @@ fn switchTo(self: *App, index: usize, create: bool) bool {
     const library = self.runtime.openLibrary(self.io, path) catch |err| {
         self.allocator.free(path);
         std.log.warn("A library could not be opened ({t})", .{err});
-        fail(self, index, .unreadable);
+        fail(self, index, if (err == error.SchemaVersionTooNew) .incompatible else .unreadable);
         return false;
     };
     closeCurrent(self);

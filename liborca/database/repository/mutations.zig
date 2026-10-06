@@ -396,20 +396,14 @@ pub const MutationJournalRepository = struct {
         allocator: std.mem.Allocator,
         operation_id: i64,
     ) !MutationOperation {
-        const columns_before_content_hash =
+        var statement = try self.db.prepare(
             \\SELECT kind, source_path, destination_path, stage_path, backup_path,
             \\       expected_size, expected_modified_ns,
             \\       committed_size, committed_modified_ns, state,
             \\       file_id, expected_quick_hash, committed_quick_hash,
-            \\       plan_id, action_index,
-        ;
-        const from = " FROM mutation_operations WHERE id=?1;";
-        // Startup recovery reads the journal at `journal_ready_version`,
-        // before the migration that adds the content hash columns.
-        var statement = try self.db.prepare(if (try self.hasContentHashColumns())
-            columns_before_content_hash ++ " expected_content_hash, committed_content_hash" ++ from
-        else
-            columns_before_content_hash ++ " NULL, NULL" ++ from);
+            \\       plan_id, action_index, expected_content_hash, committed_content_hash
+            \\FROM mutation_operations WHERE id=?1;
+        );
         defer statement.deinit();
         try statement.bindInt64(1, operation_id);
         if (try statement.step() != .row) return error.MutationOperationNotFound;
@@ -448,16 +442,6 @@ pub const MutationJournalRepository = struct {
             .committed_content_hash = committed_content_hash,
             .state = state_value,
         };
-    }
-
-    fn hasContentHashColumns(self: *const MutationJournalRepository) !bool {
-        var statement = try self.db.prepare(
-            \\SELECT count(*) FROM pragma_table_info('mutation_operations')
-            \\WHERE name IN ('expected_content_hash', 'committed_content_hash');
-        );
-        defer statement.deinit();
-        if (try statement.step() != .row) return error.SqlFailed;
-        return statement.columnInt64(0) == 2;
     }
 
     /// Groups holding at least one operation that has not reached a terminal
@@ -884,7 +868,7 @@ test "a group's history state tells an undo from a failed write and from a recov
     }
 }
 
-test "the journal keeps content hashes, reads a journal from before them, and refuses a malformed one" {
+test "the journal keeps content hashes, reads an operation without them, and refuses a malformed one" {
     var fixture: JournalFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -902,27 +886,17 @@ test "the journal keeps content hashes, reads a journal from before them, and re
     try fixture.journal.recordResultIdentity(hashed, .planned, 2, 2, @splat(2), @splat(5));
     try fixture.journal.transition(hashed, .planned, .staged, null);
     try fixture.journal.commit(hashed, 2, 2, @splat(2), @splat(4));
-    const legacy = try fixture.prepare(2, 0);
+    const unhashed = try fixture.prepare(2, 0);
 
     var operation = try fixture.journal.get(std.testing.allocator, hashed);
     try std.testing.expectEqualSlices(u8, &@as(content_hash.Digest, @splat(3)), &operation.expected_content_hash.?);
     try std.testing.expectEqualSlices(u8, &@as(content_hash.Digest, @splat(4)), &operation.committed_content_hash.?);
     operation.deinit();
-    operation = try fixture.journal.get(std.testing.allocator, legacy);
+    operation = try fixture.journal.get(std.testing.allocator, unhashed);
     try std.testing.expect(operation.expected_content_hash == null);
     try std.testing.expect(operation.committed_content_hash == null);
     operation.deinit();
 
     try fixture.db.exec("UPDATE mutation_operations SET expected_content_hash = X'0102' WHERE plan_id = 1;");
     try std.testing.expectError(error.InvalidStoredContentHash, fixture.journal.get(std.testing.allocator, hashed));
-
-    try fixture.db.exec(
-        \\ALTER TABLE mutation_operations DROP COLUMN expected_content_hash;
-        \\ALTER TABLE mutation_operations DROP COLUMN committed_content_hash;
-    );
-    operation = try fixture.journal.get(std.testing.allocator, hashed);
-    defer operation.deinit();
-    try std.testing.expect(operation.expected_content_hash == null);
-    try std.testing.expect(operation.committed_content_hash == null);
-    try std.testing.expectEqualSlices(u8, &@as(quick_hash.Digest, @splat(2)), &operation.committed_quick_hash.?);
 }

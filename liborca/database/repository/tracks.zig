@@ -25,8 +25,7 @@ pub const TrackInput = struct {
     recording_id: ?i64 = null,
     release_id: ?i64 = null,
     /// The Artist row this Track is filed under, resolved from the same key
-    /// `ArtistRepository` stores. One primary artist per Track, deliberately —
-    /// see the note on migration 9.
+    /// `ArtistRepository` stores. One primary artist per Track, deliberately.
     artist_id: ?i64 = null,
     title: []const u8,
     artist: []const u8 = "",

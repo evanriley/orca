@@ -272,8 +272,8 @@ lies on now and compares it with the volume the root was bound to
   volume when it was added, passes while the platform still names none for
   its path. Such a root on an unmounted drive whose parent filesystem has no
   UUID either is not caught.
-- A root on the legacy volume (`volumes.id` 1, from migration 8) records no
-  identity and always passes.
+- A root on the fallback volume (`volumes.id` 1) records no identity and
+  always passes.
 
 A root that fails the check is neither walked nor swept: the job counts one
 error, ends `failed`, sets `ScanStats.volume_changed`, and marks nothing
@@ -350,8 +350,8 @@ projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
 
 - **Selection is one indexed search.** `SELECT ... WHERE files.id > ? AND
   (duration_ms IS NULL OR sample_rate IS NULL OR channels IS NULL OR codec =
-  '')` is served by the partial index migration 10 creates over exactly that
-  predicate. The predicate has one definition,
+  '')` is served by the partial index `files_incomplete_properties` over exactly
+  that predicate. The predicate has one definition,
   `repository.incomplete_properties_predicate`, shared by the index and the
   query, because SQLite matches a partial index by expression rather than by
   meaning. The index holds only the broken rows, so it shrinks as the pass
@@ -384,9 +384,8 @@ projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
 A FLAC whose STREAMINFO declares `total_samples = 0` keeps a null duration: the
 length is honestly unknown rather than missing.
 
-Covers have the same hole: a library scanned before version 51 has every
-embedded cover and folder image unmeasured, and the scanner will not read
-their unchanged bytes again. After the files missing properties, the same
+Covers have the same hole: an embedded cover or folder image left unmeasured
+stays so, because the scanner will not read its unchanged bytes again. After the files missing properties, the same
 Job runs `library/artwork_backfill.zig`, which pages the partial indexes over
 the unmeasured covers by id, reads each one whose size and modification time
 are those observed, records its size and hash, and settles the Releases of

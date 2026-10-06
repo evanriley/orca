@@ -40,8 +40,9 @@ pub const FileUpsert = struct {
 
 /// The `files` rows a property backfill still owes a probe.
 ///
-/// This is textually **one** string, shared by migration 10's partial index
-/// and by `FileRepository.incompletePropertiesPage`. SQLite uses a partial
+/// This is textually **one** string, shared by the schema's
+/// `files_incomplete_properties` partial index and by
+/// `FileRepository.incompletePropertiesPage`. SQLite uses a partial
 /// index only when the query's WHERE clause contains the index's own
 /// predicate, and it matches that by expression, not by meaning: a paraphrase
 /// here would silently turn row selection into a full scan of the largest

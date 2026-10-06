@@ -142,6 +142,7 @@ fn describe(err: anyerror) []const u8 {
         error.JobQueueFull => "32 jobs are already waiting; start this one when one has finished",
         error.UnknownJobHistory => "no finished job with that id; list them with jobs DATABASE --history",
         error.JobNotRetryable => "that job succeeded, or its request cannot be repeated",
+        error.SchemaVersionTooNew => "the Library's schema is not one this version of Orca can open; create a new Library",
         else => @errorName(err),
     };
 }
@@ -1070,7 +1071,7 @@ fn bindRoot(
 ) !liborca.RootBinding {
     const binding = try runtime.libraryAddRoot(library, context.io, path);
     if (binding.claimed_locations != 0) try context.stdout.print(
-        "claimed {d} migrated locations for volume {d}\n",
+        "claimed {d} locations for volume {d}\n",
         .{ binding.claimed_locations, binding.volume_id },
     );
     return binding;

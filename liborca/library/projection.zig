@@ -457,7 +457,7 @@ fn statedAdvisory(entries: []const Entry, members: []const usize, preferred: *co
 }
 
 /// The genres a position's files state: the preferred file's, else those of
-/// the lowest-numbered file that states any, as migration 33 chose them.
+/// the lowest-numbered file that states any.
 fn statedGenres(entries: []const Entry, members: []const usize, preferred: *const Entry) []const []const u8 {
     if (preferred.genres.len != 0) return preferred.genres;
     var chosen: ?*const Entry = null;
@@ -1172,13 +1172,8 @@ pub const Projection = struct {
         result.tracks_written += @intCast(writes.len);
     }
 
-    /// Resolve one Artist row and hand back its id.
-    ///
-    /// Both the key and the sort key come from `database/text_key.zig`, which
-    /// is the same code migration 9 registers as a SQLite function to backfill
-    /// an existing library. A fresh scan and a migrated database therefore
-    /// produce identical `artist_id` values, which `projection.zig` asserts
-    /// directly.
+    /// Resolve one Artist row and hand back its id. Both the key and the sort
+    /// key come from `database/text_key.zig`.
     fn ensureArtist(
         self: *Projection,
         allocator: std.mem.Allocator,
@@ -1644,8 +1639,7 @@ const optionalInt64 = database.columns.optionalInt64;
 const text_key = @import("../database/text_key.zig");
 
 /// The artist/release key folding, and the sort key an artist listing orders
-/// by, both live in `database/text_key.zig`: a schema migration backfilling
-/// `tracks.artist_id` has to fold exactly the way this projection folds.
+/// by, both live in `database/text_key.zig`.
 pub const normalizeKey = text_key.normalizeKey;
 const normalizeInto = text_key.normalizeInto;
 
@@ -2727,7 +2721,7 @@ fn observeBrowseLibrary(library: *database.LibraryDatabase) !void {
         .musicbrainz_album_artist_id = "band-mbid",
     });
     // A featured credit carrying the band's own MusicBrainz id: the projection
-    // files it under the band, and so must the migration's backfill.
+    // files it under the band.
     _ = try observe(library, "/m/The Band/d2t1.flac", .flac, .{
         .title = "Shared",
         .artist = "The Band feat. Guest",
@@ -2805,37 +2799,6 @@ test "the artist browse order files a name by its sort key rather than its leadi
     try testing.expectEqualStrings("The Band", names.items[1]);
     try testing.expectEqualStrings("Bob", names.items[2]);
 }
-
-test "a migrated library files every track exactly where a fresh projection does" {
-    var library = try openTestLibrary("file:orca-projection-backfill?mode=memory&cache=shared");
-    defer library.close();
-    try observeBrowseLibrary(&library);
-    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
-    _ = try projection.run(.all);
-
-    const projected = try scalar(library.database, browse_fingerprint);
-    // Exactly the state a version-8 database is in: the columns exist, and
-    // nothing has ever filled them.
-    try library.database.exec(
-        \\UPDATE tracks SET artist_id=NULL;
-        \\UPDATE releases SET album_artist_id=NULL;
-        \\UPDATE artists SET sort_name=NULL;
-    );
-    try testing.expect(projected != try scalar(library.database, browse_fingerprint));
-
-    try database.migrations.registerKeyFunctions(library.database);
-    try library.database.exec(database.migrations.artist_backfill);
-    try testing.expectEqual(projected, try scalar(library.database, browse_fingerprint));
-}
-
-/// One number over every value the browse model added, so "the same rows" is
-/// asserted rather than sampled.
-const browse_fingerprint =
-    \\SELECT
-    \\    (SELECT COALESCE(sum(id * 1000003 + COALESCE(artist_id, -1)), 0) FROM tracks)
-    \\  + (SELECT COALESCE(sum(id * 7919 + COALESCE(album_artist_id, -1)), 0) FROM releases)
-    \\  + (SELECT COALESCE(sum(id * length(COALESCE(sort_name, ''))), 0) FROM artists);
-;
 
 test "an album comes back in disc then track order" {
     var library = try openTestLibrary("file:orca-projection-discorder?mode=memory&cache=shared");
