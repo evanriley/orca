@@ -21,6 +21,14 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
+wireplumber_version=$(wireplumber --version 2>/dev/null | sed -n 's/^Linked with libwireplumber //p')
+case "$wireplumber_version" in
+    "" | 0.[0-4].*)
+        echo "headless-audio: found WirePlumber '${wireplumber_version:-none}'; expected 0.5 or newer, whose configuration format disables the hardware monitors. Run inside nix develop, or on a distribution that ships WirePlumber 0.5." >&2
+        exit 1
+        ;;
+esac
+
 # PipeWire's socket path must fit in sockaddr_un's 108 bytes, and TMPDIR can be long.
 runtime=$(mktemp -d /tmp/orca-audio.XXXXXX)
 chmod 700 "$runtime"
