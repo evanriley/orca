@@ -367,8 +367,6 @@ screenshot for a display-only defect, and removes its entry.
 - A tag write that fails before it reaches a file, such as when its
   backup directory already exists, records no `TagWriteFailure`, so
   `orca-cli` and `orca-gtk` fall back to a message without a reason.
-- `orca-cli` runs every command but `duplicates` and `analyze-library` on an
-  arena, so a cold scan holds memory for every file until it exits.
 - The scanner skips symbolic links to files without counting them.
 - Among duplicate copies of the same format, sample rate, bit depth and
   size, Duplicates suggests keeping the one the scanner found first, which

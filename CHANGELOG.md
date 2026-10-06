@@ -120,6 +120,10 @@
 - `orca-cli` exits with status 2 and prints the usage to standard error when
   given no command, an unknown command or a wrong argument count, instead of
   exiting 0. `orca-cli --help` prints the usage to standard output and exits 0.
+- `orca-cli` runs every command's runtime on the general-purpose allocator
+  instead of the process arena, so a cold scan no longer holds memory for
+  every file until it exits. In a Debug build the allocator reports leaks at
+  exit.
 
 ## 0.1.0 - 2026-10-06
 
