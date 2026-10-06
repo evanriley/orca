@@ -425,7 +425,12 @@ cached, that answer is used.
 
 `GET /ws/2/release/{id}?fmt=json&inc=recordings+artist-credits+release-groups`,
 through the same gateway, cache, counters and refusal rules as the search. The
-ID is checked to be a lowercase UUID first.
+ID is checked to be a lowercase UUID first. A refused or missing release (`404`)
+is cached as refused for 7 days, and until then a library-scope run does not
+select it for
+[the tagged-release step](metadata.md#marking-a-release-as-reviewed).
+Re-identify asks MusicBrainz again for a release whose refusal is cached, and
+caches the new answer.
 
 Before a file's search is recorded, the release of its most confident
 MusicBrainz proposal is looked up, once per run, and every proposal naming that

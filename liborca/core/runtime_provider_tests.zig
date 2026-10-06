@@ -9119,6 +9119,71 @@ test "a library match run looks up the release a Track's release ID in effect na
     try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases;"));
 }
 
+test "a tagged release MusicBrainz does not have is not looked up again until its refusal expires, the tag changes or the Release is re-identified, and a failed lookup is retried" {
+    var fake: FakeMusicBrainz = .{ .release_body = "{\"error\":\"Not Found\"}", .release_status = 404 };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-library-run-tagged-missing?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try taggedNightcallAlbum(library_database);
+    const release_url = "/ws/2/release/" ++ nightcall_mbid;
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), release_url) != null);
+
+    const rerun = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, rerun));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    const rerun_stats = try runtime.jobMatchStats(rerun);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.cache_hits);
+    try std.testing.expectEqual(@as(?u64, 0), (try runtime.jobSnapshotSynced(rerun)).total_units);
+
+    const before_reidentify = fake.requestCount();
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{ .release_id = album, .mode = .reidentify })));
+    try std.testing.expect(fake.requestCount() > before_reidentify);
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), release_url) != null);
+    const after_reidentify = fake.requestCount();
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(after_reidentify, fake.requestCount());
+
+    try library_database.database.exec("UPDATE provider_cache SET expires_at = 0 WHERE request_key LIKE '%/ws/2/release/%';");
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(after_reidentify + 1, fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), release_url) != null);
+
+    try library_database.database.exec("UPDATE provider_cache SET expires_at = 0 WHERE request_key LIKE '%/ws/2/release/%';");
+    fake.release_status = 503;
+    fake.release_body = "";
+    const before_failure = fake.requestCount();
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    const failed_requests = fake.requestCount() - before_failure;
+    try std.testing.expect(failed_requests > 0);
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(before_failure + 2 * failed_requests, fake.requestCount());
+
+    fake.release_status = 404;
+    fake.release_body = "{\"error\":\"Not Found\"}";
+    var tracks: [4]i64 = undefined;
+    {
+        var statement = try library_database.database.prepare("SELECT id FROM tracks WHERE release_id = ?1 ORDER BY id;");
+        defer statement.deinit();
+        try statement.bindInt64(1, album);
+        var count: usize = 0;
+        while (try statement.step() == .row) : (count += 1) tracks[count] = statement.columnInt64(0);
+        try std.testing.expectEqual(@as(usize, 4), count);
+    }
+    const edit = try runtime.libraryEditTracks(library, &tracks, &.{.{ .field = .musicbrainz_release_id, .value = "9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d" }});
+    edit.deinit();
+    const before_retag = fake.requestCount();
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(before_retag + 1, fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d") != null);
+}
+
 fn observeRenamedNightcall(library_database: *database.LibraryDatabase, comptime index: usize, release_mbid: ?[]const u8) !i64 {
     const file_id = try observeFile(library_database, "/music/kavinsky/nightcall/" ++ std.fmt.comptimePrint("{d}", .{index + 1}) ++ ".flac", nightcall_titles[index], "Kavinsky");
     try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{

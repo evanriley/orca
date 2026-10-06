@@ -1283,7 +1283,10 @@ const named_releases_to_snapshot = "(\n" ++
     "          WHERE dismissed.release_id = named.release_id AND dismissed.musicbrainz_release_id = named.release_mbid COLLATE NOCASE)\n" ++
     "    GROUP BY named.release_mbid)\n" ++
     "WHERE NOT EXISTS (SELECT 1 FROM musicbrainz_releases\n" ++
-    "    WHERE musicbrainz_release_id = release_mbid AND fetched_at > ?2)";
+    "    WHERE musicbrainz_release_id = release_mbid AND fetched_at > ?2)\n" ++
+    "  AND NOT EXISTS (SELECT 1 FROM provider_cache\n" ++
+    "    WHERE provider = ?4 AND request_key = ?5 || release_mbid || ?6\n" ++
+    "      AND status <> 200 AND expires_at > ?7)";
 
 /// A release a Track's release ID in effect names, and the first Release
 /// with such a Track.
@@ -1291,6 +1294,23 @@ pub const NamedRelease = struct {
     release_id: i64,
     release_mbid: [36]u8,
 };
+
+/// Where the refusals of release lookups are cached: `provider_cache` rows
+/// of `provider` keyed `key_prefix`, the release ID, then `key_suffix`,
+/// that have not expired at `now_s`.
+pub const ReleaseRefusals = struct {
+    provider: []const u8,
+    key_prefix: []const u8,
+    key_suffix: []const u8,
+    now_s: i64,
+};
+
+fn bindReleaseRefusals(statement: sqlite.Statement, refusals: *const ReleaseRefusals) !void {
+    try statement.bindText(4, refusals.provider);
+    try statement.bindText(5, refusals.key_prefix);
+    try statement.bindText(6, refusals.key_suffix);
+    try statement.bindInt64(7, refusals.now_s);
+}
 
 const Review = enum { none, person, tags };
 
@@ -2318,14 +2338,22 @@ pub const IdentificationProposalRepository = struct {
 
     /// The releases after `cursor`, in ID order and at most `buffer.len`,
     /// that a Track's release ID in effect names, that its Release has not
-    /// dismissed, and with no snapshot fetched after `fetched_after`.
-    pub fn namedReleasesToSnapshot(self: *const IdentificationProposalRepository, cursor: ?[]const u8, fetched_after: i64, buffer: []NamedRelease) ![]NamedRelease {
+    /// dismissed, with no snapshot fetched after `fetched_after`, and whose
+    /// lookup has no cached refusal in `refusals`.
+    pub fn namedReleasesToSnapshot(
+        self: *const IdentificationProposalRepository,
+        cursor: ?[]const u8,
+        fetched_after: i64,
+        refusals: *const ReleaseRefusals,
+        buffer: []NamedRelease,
+    ) ![]NamedRelease {
         var statement = try self.db.prepare(comptime "SELECT release_id, release_mbid FROM " ++ named_releases_to_snapshot ++ "\n" ++
             "ORDER BY release_mbid LIMIT ?3;");
         defer statement.deinit();
         try statement.bindText(1, cursor orelse "");
         try statement.bindInt64(2, fetched_after);
         try statement.bindInt64(3, @intCast(buffer.len));
+        try bindReleaseRefusals(statement, refusals);
         var count: usize = 0;
         while (try statement.step() == .row) : (count += 1) {
             buffer[count] = .{ .release_id = statement.columnInt64(0), .release_mbid = undefined };
@@ -2336,11 +2364,12 @@ pub const IdentificationProposalRepository = struct {
 
     /// How many releases `namedReleasesToSnapshot` would page through from
     /// the start.
-    pub fn namedReleasesToSnapshotCount(self: *const IdentificationProposalRepository, fetched_after: i64) !u64 {
+    pub fn namedReleasesToSnapshotCount(self: *const IdentificationProposalRepository, fetched_after: i64, refusals: *const ReleaseRefusals) !u64 {
         var statement = try self.db.prepare(comptime "SELECT count(*) FROM " ++ named_releases_to_snapshot ++ ";");
         defer statement.deinit();
         try statement.bindText(1, "");
         try statement.bindInt64(2, fetched_after);
+        try bindReleaseRefusals(statement, refusals);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }

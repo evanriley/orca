@@ -634,7 +634,8 @@ pub const LibraryMatching = struct {
     }
 
     /// Snapshots every release a Track's release ID in effect names, unless
-    /// its Release dismissed it or it has a fresh snapshot, so no Release is
+    /// its Release dismissed it, it has a fresh snapshot, or MusicBrainz
+    /// refused its lookup within the refusal expiry, so no Release is
     /// weighed on a release Orca has not read. They are taken in release ID
     /// order a page at a time; each lookup stores a whole snapshot or
     /// nothing.
@@ -642,12 +643,20 @@ pub const LibraryMatching = struct {
         var buffer: [64]database.repository.NamedRelease = undefined;
         var cursor: ?[36]u8 = null;
         var handled: u64 = 0;
+        const key_prefix = try self.musicbrainz.releaseLookupKeyPrefix(self.allocator);
+        defer self.allocator.free(key_prefix);
+        const refusals: database.repository.ReleaseRefusals = .{
+            .provider = providers.musicbrainz.service,
+            .key_prefix = key_prefix,
+            .key_suffix = providers.musicbrainz.release_lookup_query,
+            .now_s = @divFloor(self.musicbrainz.wall_clock.nowMs(), 1000),
+        };
         if (self.progress) |progress| {
-            const total = try self.proposals.namedReleasesToSnapshotCount(self.freshAfter());
+            const total = try self.proposals.namedReleasesToSnapshotCount(self.freshAfter(), &refusals);
             progress.tagged_releases_total.store(total, .release);
         }
         while (true) {
-            const page = try self.proposals.namedReleasesToSnapshot(if (cursor) |*last| last else null, self.freshAfter(), &buffer);
+            const page = try self.proposals.namedReleasesToSnapshot(if (cursor) |*last| last else null, self.freshAfter(), &refusals, &buffer);
             if (page.len == 0) {
                 if (self.progress) |progress| {
                     const total = @max(handled, progress.tagged_releases_total.load(.acquire));
@@ -740,7 +749,8 @@ pub const LibraryMatching = struct {
     }
 
     /// A release, from this run's memory when it asked already. Transient
-    /// failures are waited out and retried as searches are. Each answer
+    /// failures are waited out and retried as searches are; a re-identify
+    /// asks again a release whose refusal is cached. Each answer
     /// replaces the release's tracklist snapshot.
     fn lookUpRelease(self: *LibraryMatching, release_mbid: []const u8) !ReleaseOutcome {
         if (self.last_release) |*last| {
@@ -749,7 +759,11 @@ pub const LibraryMatching = struct {
         if (self.unusable_releases.contains(release_mbid)) return .unusable;
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const lookup = self.musicbrainz.lookUpRelease(self.allocator, release_mbid) catch |err| switch (err) {
+            const asked = if (self.mode == .reidentify)
+                self.musicbrainz.lookUpReleaseAgain(self.allocator, release_mbid)
+            else
+                self.musicbrainz.lookUpRelease(self.allocator, release_mbid);
+            const lookup = asked catch |err| switch (err) {
                 error.ProviderRejectedRequest, error.InvalidProviderResponse, error.InvalidMusicBrainzId => {
                     const key = try self.allocator.dupe(u8, release_mbid);
                     errdefer self.allocator.free(key);

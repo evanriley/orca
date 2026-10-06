@@ -212,6 +212,12 @@
   AcoustID until its bytes change. Re-identify searches and fingerprints both
   again. A file that could not be opened or read is still tried on the next
   run.
+- A library match run no longer selects, counts and looks up from the cache,
+  on every run, a tagged release ID that MusicBrainz does not have. The
+  release is passed over while its refusal is cached for 7 days, and is asked
+  again once the refusal expires, the release ID changes or its Release is
+  re-identified. A lookup that failed with an outage or timeout is still
+  retried on the next run.
 
 ## 0.1.0 - 2026-10-06
 

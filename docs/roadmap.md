@@ -362,8 +362,6 @@ removed.
 Fixed before 1.0. Each fix adds a test that fails without it, or a headless
 screenshot for a display-only defect, and removes its entry.
 
-- A release ID tag that names a release MusicBrainz does not return is
-  looked up again on every match run of the Library.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
 - Matching has no offline setting, and `orca-gtk` has none for scrobbling.

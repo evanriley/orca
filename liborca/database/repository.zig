@@ -167,6 +167,7 @@ pub const ReleaseMatchBucket = identification.ReleaseMatchBucket;
 pub const ReleaseCandidate = identification.ReleaseCandidate;
 pub const ReleaseMatchItem = identification.ReleaseMatchItem;
 pub const NamedRelease = identification.NamedRelease;
+pub const ReleaseRefusals = identification.ReleaseRefusals;
 pub const ReleaseMatchPage = identification.ReleaseMatchPage;
 pub const ReleaseMatchCounts = identification.ReleaseMatchCounts;
 pub const ReleasePlacementCounts = identification.ReleasePlacementCounts;

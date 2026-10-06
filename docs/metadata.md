@@ -231,7 +231,11 @@ Track, Match Again) looks up the releases the tags name once its Track walk
 finishes without stopping. It takes, 64 at a time in release ID order, each
 distinct release a Track's release ID in effect names, from fully, partially
 and mixed tagged Releases alike, unless the Release with that Track dismissed
-it or it has a snapshot younger than the 30-day cache. Each lookup stores a
+it, it has a snapshot younger than the 30-day cache, or MusicBrainz refused its
+lookup (a `404` included) within the 7 days the refusal is cached. A refused
+release is selected again once its refusal expires, under a changed release ID,
+or by re-identifying its Release; an outage or timeout records nothing, so the
+next run asks again. Each lookup stores a
 whole snapshot or none, through the same gateway, cache and back-off as every
 other request. A Release-scope run (Match Album) reads each unread candidate
 before its best one. A cancelled, offline or busy run stops at the release it

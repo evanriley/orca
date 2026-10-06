@@ -10,8 +10,11 @@ const url_encoding = @import("url.zig");
 pub const service = "musicbrainz";
 pub const minimum_interval_ms: u64 = 1000;
 pub const default_server = "https://musicbrainz.org";
+pub const release_lookup_query = "?fmt=json&inc=recordings+artist-credits+release-groups";
 const search_limit = 10;
 const max_credited_artists = 8;
+
+const CachedRefusal = enum { use, ask_again };
 
 pub const MusicBrainz = struct {
     gateway: *network.Gateway,
@@ -59,14 +62,36 @@ pub const MusicBrainz = struct {
         allocator: std.mem.Allocator,
         release_mbid: []const u8,
     ) !ReleaseLookup {
+        return self.fetchRelease(allocator, release_mbid, .use);
+    }
+
+    /// `lookUpRelease`, except that a cached refusal is asked again.
+    pub fn lookUpReleaseAgain(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        release_mbid: []const u8,
+    ) !ReleaseLookup {
+        return self.fetchRelease(allocator, release_mbid, .ask_again);
+    }
+
+    /// What the `provider_cache` key of a release lookup holds before the
+    /// release ID; `release_lookup_query` follows it.
+    pub fn releaseLookupKeyPrefix(self: *const MusicBrainz, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/ws/2/release/", .{std.mem.trimEnd(u8, self.server, "/")});
+    }
+
+    fn fetchRelease(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        release_mbid: []const u8,
+        refusal: CachedRefusal,
+    ) !ReleaseLookup {
         if (!metadata.isMusicBrainzId(release_mbid)) return error.InvalidMusicBrainzId;
-        const request_url = try std.fmt.allocPrint(
-            allocator,
-            "{s}/ws/2/release/{s}?fmt=json&inc=recordings+artist-credits+release-groups",
-            .{ std.mem.trimEnd(u8, self.server, "/"), release_mbid },
-        );
+        const prefix = try self.releaseLookupKeyPrefix(allocator);
+        defer allocator.free(prefix);
+        const request_url = try std.mem.concat(allocator, u8, &.{ prefix, release_mbid, release_lookup_query });
         defer allocator.free(request_url);
-        return self.request(ReleaseLookup, allocator, request_url, ReleaseParser{});
+        return self.requestWith(ReleaseLookup, allocator, request_url, ReleaseParser{}, refusal);
     }
 
     /// `GET {server}/ws/2/artist/{mbid}?fmt=json&inc=url-rels+genres+artist-rels`,
@@ -144,9 +169,21 @@ pub const MusicBrainz = struct {
         request_url: []const u8,
         parser: anytype,
     ) !T {
+        return self.requestWith(T, allocator, request_url, parser, .use);
+    }
+
+    fn requestWith(
+        self: *MusicBrainz,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        request_url: []const u8,
+        parser: anytype,
+        refusal: CachedRefusal,
+    ) !T {
         const now_s = @divFloor(self.wall_clock.nowMs(), 1000);
-        if (try self.cache.get(allocator, service, request_url, now_s, false)) |cached| {
+        if (try self.cache.get(allocator, service, request_url, now_s, false)) |cached| cached: {
             defer cached.deinit();
+            if (cached.status != 200 and refusal == .ask_again) break :cached;
             self.cache_hits += 1;
             if (cached.status != 200) return error.ProviderRejectedRequest;
             return parser.parse(allocator, cached.body);
@@ -1574,7 +1611,7 @@ test "an answer that is not a release is refused as invalid" {
     try testing.expectError(error.InvalidProviderResponse, parseRelease("{\"recordings\":[]}"));
 }
 
-test "a release lookup asks for its recordings, credits and release group, is cached for thirty days, and a missing release is cached as refused" {
+test "a release lookup asks for its recordings, credits and release group, is cached for thirty days, and a missing release is cached as refused until asked again" {
     var rig: Rig = undefined;
     try rig.init("file:orca-musicbrainz-release?mode=memory&cache=shared");
     defer rig.deinit();
@@ -1602,6 +1639,17 @@ test "a release lookup asks for its recordings, credits and release group, is ca
     try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpRelease(testing.allocator, missing));
     try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpRelease(testing.allocator, missing));
     try testing.expectEqual(@as(u32, 2), rig.net.transport.requestCount());
+    const prefix = try rig.adapter.releaseLookupKeyPrefix(testing.allocator);
+    defer testing.allocator.free(prefix);
+    const key = try std.mem.concat(testing.allocator, u8, &.{ prefix, missing, release_lookup_query });
+    defer testing.allocator.free(key);
+    const refusal = (try rig.library.provider_cache.get(testing.allocator, service, key, 0, false)).?;
+    defer refusal.deinit();
+    try testing.expectEqual(@as(u16, 404), refusal.status);
+    const hits = rig.adapter.cache_hits;
+    try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpReleaseAgain(testing.allocator, missing));
+    try testing.expectEqual(@as(u32, 3), rig.net.transport.requestCount());
+    try testing.expectEqual(hits, rig.adapter.cache_hits);
     rig.respond(503, "");
     try testing.expectError(error.ProviderUnavailable, rig.adapter.lookUpRelease(testing.allocator, "bbbbbbbb-0000-4000-8000-000000000000"));
 }
