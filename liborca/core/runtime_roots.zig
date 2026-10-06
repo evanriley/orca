@@ -333,6 +333,7 @@ pub fn libraryEditTracks(
         try files.appendSlice(self.allocator, ids);
     }
     for (files.items) |file_id| for (edits) |edit| {
+        try library_database.release_track_pairings.forgetPairedValue(file_id, edit.field);
         if (edit.value) |value| {
             try library_database.orca_metadata.upsert(.{
                 .file_id = file_id,

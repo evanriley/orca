@@ -176,11 +176,14 @@ Match Review compares a Release with one MusicBrainz release's own
 tracklist, the snapshot every matching lookup of that release stores (see
 [providers.md](providers.md#musicbrainz-release-lookup)), not only with
 what the Tracks' proposals say. `Runtime.libraryReleaseAlignment` and
-`orca-cli release-alignment` compute it on each call; nothing is stored.
+`orca-cli release-alignment` compute it on each call; only a person's
+pairings are stored.
 
 Each release track, in disc and position order, gets at most one Track and
 a status:
 
+- `paired`: a person paired the Track with the release track (see
+  [Pairing a Track](#pairing-a-track)).
 - `automatic`: the release track lists a recording ID the Track holds,
   from the play file's recording ID in effect (tag or user edit), an
   accepted match, or a pending match. `recording_source` says which.
@@ -196,7 +199,8 @@ Tracks placed on no release track are listed as not on the release. Every
 row carries its evidence flags and the length delta, automatic ones
 included.
 
-Automatic placement runs in four passes: recording IDs in effect and
+Pairings place their Tracks first. Automatic placement then runs in four
+passes: recording IDs in effect and
 accepted first, then pending ones; within each, a Track first takes a free
 release track listing its recording at its own disc and track number, then
 the first free one listing it. Tracks go in disc, track number (unset
@@ -212,6 +216,41 @@ last), then Track ID order, so:
 
 The alignment reads only. Apply and the conditions under
 [Applying a release](#applying-a-release) do not use it yet.
+
+#### Pairing a Track
+
+A person pairs a Track of a Release with one release track of one
+MusicBrainz release that has a snapshot, by confirming a suggestion or by
+hand (`Runtime.libraryPairReleaseTrack`, `orca-cli pair-track`). The
+pairing is stored in `release_track_pairings` with the release track's
+recording ID and whether it confirmed the suggestion the alignment showed
+for that Track at that moment (`confirmed_suggestion`) or not (`by_hand`).
+
+- Every file of the Track takes the release track's recording ID and
+  release-track ID as user values, locked, as an edit stores them. No
+  media file is written; a tag write writes them like any edit. The
+  Track's files are reprojected.
+- A Track not on the Release is `error.TrackNotOnRelease`; a release
+  without a snapshot `error.NoReleaseTracklist`; a release-track ID the
+  snapshot does not list `error.UnknownReleaseTrack`; a release track
+  another Track of the Release is paired with
+  `error.ReleaseTrackAlreadyPaired`, until that one is unpaired. Pairing a
+  Track again on the same release replaces its pairing.
+- A pairing outranks automatic placement: a Track that held the release
+  track's recording ID is placed elsewhere, suggested, or listed as not on
+  the release.
+- A pairing whose release track a newer snapshot no longer lists stays
+  stored, is ignored by the alignment, and is listed by
+  `Runtime.libraryReleaseTrackPairings` with `in_snapshot` false.
+- Unpairing (`Runtime.libraryUnpairReleaseTrack`, `orca-cli
+  unpair-track`) removes the pairing and the two values it set, only where
+  a file still holds them as locked user values; a later edit stays. The
+  recording ID in effect then falls back to the file's tag or another
+  value.
+- A pairing goes with its Track or Release, and when its Track moves to
+  another Release; the values it set stay, as an edit's would.
+- An ID a pairing set reaches AcoustID only where the file's fingerprint
+  agreed; see [providers.md](providers.md#acoustid-submission).
 
 #### Corrections
 

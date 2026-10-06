@@ -8,6 +8,8 @@ pub const length_agreement_ms = 2000;
 pub const suggestion_minimum_evidence = 2;
 
 pub const PlacementStatus = enum {
+    /// A person paired the Track with the release track.
+    paired,
     /// The release lists a recording ID the Track holds.
     automatic,
     /// Evidence agrees; a person confirms it.
@@ -25,7 +27,7 @@ pub const RecordingSource = enum {
 };
 
 pub const PlacementEvidence = struct {
-    /// Set for an automatic placement.
+    /// Set for an automatic placement only.
     recording_source: ?RecordingSource = null,
     /// The normalized titles are equal.
     title_equal: bool = false,
@@ -98,7 +100,9 @@ const Holding = struct { mbid: []const u8, source: RecordingSource };
 /// track number (unset last), then Track ID order, as a
 /// `database.ReleaseMatchView` holds them.
 ///
-/// Automatic placement runs over the Track's recording IDs in effect and
+/// Each of `pairings` on the tracklist's release places its Track first,
+/// unless the snapshot no longer lists its release track or the Track is not
+/// among `tracks`. Automatic placement then runs over the Track's recording IDs in effect and
 /// accepted first, then its pending ones; within each, a Track takes a free
 /// release track listing its recording at its own disc and track number
 /// first, then the first free one listing it. The Track earlier in order
@@ -111,6 +115,7 @@ pub fn alignRelease(
     release_id: i64,
     tracks: []const database.ReleaseMatchTrack,
     tracklist: *const database.ReleaseTracklistRecord,
+    pairings: []const database.ReleaseTrackPairing,
 ) !ReleaseAlignment {
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = .init(allocator);
@@ -147,6 +152,22 @@ pub fn alignRelease(
     @memset(placed_row, null);
     const holdings = try scratch.alloc([]const Holding, tracks.len);
     for (tracks, holdings) |*track, *held| held.* = try holdingsOf(scratch, track);
+    const paired = try scratch.alloc(bool, release_tracks.len);
+    @memset(paired, false);
+
+    for (pairings) |pairing| {
+        if (!std.mem.eql(u8, pairing.release_mbid, tracklist.release_mbid)) continue;
+        const track_index = for (tracks, 0..) |track, index| {
+            if (track.track_id == pairing.track_id) break index;
+        } else continue;
+        const row = for (release_tracks, 0..) |release_track, index| {
+            if (std.mem.eql(u8, release_track.release_track_mbid, pairing.release_track_mbid)) break index;
+        } else continue;
+        if (placed_row[track_index] != null or placed_track[row] != null) continue;
+        placed_track[row] = track_index;
+        placed_row[track_index] = row;
+        paired[row] = true;
+    }
 
     for ([_]bool{ true, false }) |strong| {
         for ([_]bool{ true, false }) |at_position| {
@@ -195,7 +216,7 @@ pub fn alignRelease(
             .length_ms = release_track.length_ms,
             .recording_mbid = try owned.dupe(u8, release_track.recording_mbid),
             .release_track_mbid = try owned.dupe(u8, release_track.release_track_mbid),
-            .status = if (placed_track[row] != null) .automatic else if (suggested[row] != null) .suggested else .not_in_files,
+            .status = if (paired[row]) .paired else if (placed_track[row] != null) .automatic else if (suggested[row] != null) .suggested else .not_in_files,
             .track = if (track_index) |index| try alignedTrack(owned, &tracks[index]) else null,
             .evidence = if (track_index) |index| evidence[index * release_tracks.len + row] else .{},
         };
@@ -378,7 +399,7 @@ test "a Track whose title and length agree with an unplaced release track is sug
         localTrack(2, "Nightcall", 7, 258_800, testId(20)),
         localTrack(3, "Outro", 9, 180_000, null),
     };
-    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist);
+    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist, &.{});
     defer alignment.deinit();
 
     try testing.expectEqual(PlacementStatus.automatic, alignment.rows[0].status);
@@ -415,7 +436,7 @@ test "a release track missing from the files and a Track the release does not li
     };
     tracks[0].proposals = &accepted;
     tracks[2].proposals = &pending;
-    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist);
+    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist, &.{});
     defer alignment.deinit();
 
     try testing.expectEqual(@as(?RecordingSource, .accepted_match), alignment.rows[0].evidence.recording_source);
@@ -439,13 +460,13 @@ test "a recording the release lists twice places a Track at its own track number
     const tracklist = tracklistOf(&release_tracks);
 
     const numbered = [_]database.ReleaseMatchTrack{localTrack(1, "Nightcall", 3, 258_000, testId(1))};
-    const at_number = try alignRelease(testing.allocator, 1, &numbered, &tracklist);
+    const at_number = try alignRelease(testing.allocator, 1, &numbered, &tracklist, &.{});
     defer at_number.deinit();
     try testing.expectEqual(PlacementStatus.not_in_files, at_number.rows[0].status);
     try testing.expectEqual(PlacementStatus.automatic, at_number.rows[2].status);
 
     const unnumbered = [_]database.ReleaseMatchTrack{localTrack(1, "Nightcall", null, 258_000, testId(1))};
-    const first = try alignRelease(testing.allocator, 1, &unnumbered, &tracklist);
+    const first = try alignRelease(testing.allocator, 1, &unnumbered, &tracklist, &.{});
     defer first.deinit();
     try testing.expectEqual(PlacementStatus.automatic, first.rows[0].status);
     try testing.expectEqual(PlacementStatus.not_in_files, first.rows[2].status);
@@ -462,7 +483,7 @@ test "of two Tracks holding a recording the release lists once, the one at its t
         localTrack(4, "Nightcall", 1, 258_000, testId(1)),
         localTrack(10, "Nightcall", 2, 258_000, testId(1)),
     };
-    const by_number = try alignRelease(testing.allocator, 1, &at_number, &tracklist);
+    const by_number = try alignRelease(testing.allocator, 1, &at_number, &tracklist, &.{});
     defer by_number.deinit();
     try testing.expectEqual(@as(i64, 10), by_number.rows[1].track.?.track_id);
     try testing.expectEqual(PlacementStatus.not_in_files, by_number.rows[0].status);
@@ -473,7 +494,7 @@ test "of two Tracks holding a recording the release lists once, the one at its t
         localTrack(4, "Nightcall", 5, 258_000, testId(1)),
         localTrack(10, "Nightcall", 6, 258_000, testId(1)),
     };
-    const by_order = try alignRelease(testing.allocator, 1, &elsewhere, &tracklist);
+    const by_order = try alignRelease(testing.allocator, 1, &elsewhere, &tracklist, &.{});
     defer by_order.deinit();
     try testing.expectEqual(@as(i64, 4), by_order.rows[1].track.?.track_id);
     try testing.expectEqual(@as(usize, 1), by_order.not_on_release.len);
@@ -489,7 +510,7 @@ test "a recording ID in effect outranks an earlier Track's pending match for the
         localTrack(2, "Nightcall", 2, 258_000, testId(1)),
     };
     tracks[0].proposals = &pending;
-    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist);
+    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist, &.{});
     defer alignment.deinit();
     try testing.expectEqual(@as(i64, 2), alignment.rows[0].track.?.track_id);
     try testing.expectEqual(@as(?RecordingSource, .in_effect), alignment.rows[0].evidence.recording_source);
@@ -503,9 +524,62 @@ test "a Track that two release tracks fit equally well is suggested on neither" 
     };
     const tracklist = tracklistOf(&release_tracks);
     const tracks = [_]database.ReleaseMatchTrack{localTrack(1, "Nightcall", null, 258_200, null)};
-    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist);
+    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist, &.{});
     defer alignment.deinit();
     try testing.expectEqual(PlacementStatus.not_in_files, alignment.rows[0].status);
     try testing.expectEqual(PlacementStatus.not_in_files, alignment.rows[1].status);
     try testing.expectEqual(@as(usize, 1), alignment.not_on_release.len);
+}
+
+fn testPairing(track_id: i64, release_track_mbid: []const u8) database.ReleaseTrackPairing {
+    return .{
+        .release_id = 1,
+        .track_id = track_id,
+        .release_mbid = testId(255),
+        .release_track_mbid = release_track_mbid,
+        .recording_mbid = testId(1),
+        .origin = .by_hand,
+        .created_at = 0,
+        .in_snapshot = true,
+        .disc = 1,
+        .position = 1,
+    };
+}
+
+test "a pairing places its Track before automatic placement, and the Track it displaces is suggested elsewhere or not on the release" {
+    const release_tracks = [_]database.ReleaseTracklistTrack{
+        releaseTrack(1, testId(1), "Nightcall", 258_000),
+        releaseTrack(2, testId(2), "Flashback", 200_000),
+    };
+    const tracklist = tracklistOf(&release_tracks);
+    const tracks = [_]database.ReleaseMatchTrack{
+        localTrack(1, "Nightcall", 1, 258_000, testId(1)),
+        localTrack(2, "Testarossa", 5, 230_000, null),
+        localTrack(3, "Flashback", 2, 200_000, null),
+    };
+    const pairings = [_]database.ReleaseTrackPairing{testPairing(2, testId(201))};
+    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist, &pairings);
+    defer alignment.deinit();
+
+    try testing.expectEqual(PlacementStatus.paired, alignment.rows[0].status);
+    try testing.expectEqual(@as(i64, 2), alignment.rows[0].track.?.track_id);
+    try testing.expectEqual(@as(?RecordingSource, null), alignment.rows[0].evidence.recording_source);
+    try testing.expect(!alignment.rows[0].evidence.title_equal);
+    try testing.expectEqual(@as(?i64, -28_000), alignment.rows[0].evidence.length_delta_ms);
+    try testing.expectEqual(PlacementStatus.suggested, alignment.rows[1].status);
+    try testing.expectEqual(@as(i64, 3), alignment.rows[1].track.?.track_id);
+    try testing.expectEqual(@as(usize, 1), alignment.not_on_release.len);
+    try testing.expectEqual(@as(i64, 1), alignment.not_on_release[0].track_id);
+}
+
+test "a pairing on a release track the snapshot no longer lists, or on another release, is ignored" {
+    const release_tracks = [_]database.ReleaseTracklistTrack{releaseTrack(1, testId(1), "Nightcall", 258_000)};
+    const tracklist = tracklistOf(&release_tracks);
+    const tracks = [_]database.ReleaseMatchTrack{localTrack(1, "Nightcall", 1, 258_000, testId(1))};
+    var elsewhere = testPairing(1, testId(201));
+    elsewhere.release_mbid = testId(254);
+    const pairings = [_]database.ReleaseTrackPairing{ testPairing(1, testId(209)), elsewhere };
+    const alignment = try alignRelease(testing.allocator, 1, &tracks, &tracklist, &pairings);
+    defer alignment.deinit();
+    try testing.expectEqual(PlacementStatus.automatic, alignment.rows[0].status);
 }

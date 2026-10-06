@@ -7846,3 +7846,315 @@ fn scalarOf(library_database: *database.LibraryDatabase, sql: [:0]const u8) !i64
     try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
     return statement.columnInt64(0);
 }
+
+const ep_release_mbid = "c3d4e5f6-0718-4293-a4b5-c6d7e8f90a1b";
+const ep_recordings = [_][]const u8{ "d4e5f607-1829-43a4-b5c6-d7e8f90a1b2c", "e5f60718-293a-44b5-86d7-e8f90a1b2c3d" };
+const ep_track_mbids = [_][]const u8{ "f6071829-3a4b-45c6-97e8-f90a1b2c3d4e", "0718293a-4b5c-46d7-a8f9-0a1b2c3d4e5f" };
+const ep_heard_mbid = "18293a4b-5c6d-47e8-b90a-1b2c3d4e5f60";
+
+fn snapshotEp(library_database: *database.LibraryDatabase) !void {
+    const tracks = [_]database.ReleaseTracklistTrack{
+        .{ .disc = 1, .position = 1, .title = "Intro", .artist_credit = "Orca Test", .length_ms = 100_000, .recording_mbid = ep_recordings[0], .release_track_mbid = ep_track_mbids[0] },
+        .{ .disc = 1, .position = 2, .title = "Reference Tone", .artist_credit = "Orca Test", .length_ms = 1000, .recording_mbid = ep_recordings[1], .release_track_mbid = ep_track_mbids[1] },
+    };
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = ep_release_mbid,
+        .title = "Fixtures",
+        .artist_credit = "Orca Test",
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &tracks,
+    });
+}
+
+fn snapshotNightcall(library_database: *database.LibraryDatabase, count: usize) !void {
+    var tracks: [4]database.ReleaseTracklistTrack = undefined;
+    for (&tracks, 0..) |*track, index| track.* = .{
+        .disc = 1,
+        .position = @intCast(index + 1),
+        .title = nightcall_titles[index],
+        .artist_credit = "Kavinsky",
+        .length_ms = 258_000,
+        .recording_mbid = nightcall_recordings[index],
+        .release_track_mbid = nightcall_track_mbids[index],
+    };
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = nightcall_mbid,
+        .title = "Nightcall",
+        .artist_credit = "Kavinsky",
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = tracks[0..count],
+    });
+}
+
+fn expectPairedValues(library_database: *database.LibraryDatabase, file_id: i64, recording: ?[]const u8, release_track: ?[]const u8) !void {
+    try expectOrcaValue(library_database, file_id, .musicbrainz_recording_id, recording);
+    try expectOrcaValue(library_database, file_id, .musicbrainz_release_track_id, release_track);
+    var statement = try library_database.database.prepare(
+        "SELECT count(*) FROM orca_metadata_values WHERE file_id = ?1 AND field IN (?2, ?3) AND provenance = ?4 AND locked = 1;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try statement.bindInt64(2, @backingInt(metadata.Field.musicbrainz_recording_id));
+    try statement.bindInt64(3, @backingInt(metadata.Field.musicbrainz_release_track_id));
+    try statement.bindInt64(4, @backingInt(metadata.Provenance.user));
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    const expected: i64 = @as(i64, @intFromBool(recording != null)) + @intFromBool(release_track != null);
+    try std.testing.expectEqual(expected, statement.columnInt64(0));
+}
+
+test "pairing a suggested Track locks the release track's IDs on its file, a scan keeps them, and unpairing suggests it again" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime_tests.scannedTempFolder(&runtime, &temporary, "file:orca-pair-ep?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track_ids = try runtime_tests.allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(track_ids);
+    try std.testing.expectEqual(@as(usize, 1), track_ids.len);
+    const track = track_ids[0];
+    const files = try library_database.tracks.fileIds(std.testing.allocator, track);
+    defer std.testing.allocator.free(files);
+    try std.testing.expectEqual(@as(usize, 1), files.len);
+    const release = try releaseOfFile(library_database, files[0]);
+    const heard = [_]database.ProposalEvidence{.{
+        .recording_mbid = ep_heard_mbid,
+        .found_by = .{ .acoustid = true },
+        .payload = .{ .title = "Reference Tone", .artist = "Orca Test", .acoustid_score = 0.6, .acoustid_confidence = 0.6 },
+    }};
+    _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, files[0], .{ .acoustid = true }, &heard);
+    try snapshotEp(library_database);
+    {
+        const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, release, ep_release_mbid);
+        defer alignment.deinit();
+        try std.testing.expectEqual(runtime_module.PlacementStatus.suggested, alignment.rows[1].status);
+        try std.testing.expectEqual(track, alignment.rows[1].track.?.track_id);
+        try std.testing.expectEqual(@as(?i64, -800), alignment.rows[1].evidence.length_delta_ms);
+    }
+
+    try std.testing.expectEqual(
+        runtime_module.PairingOrigin.confirmed_suggestion,
+        try runtime.libraryPairReleaseTrack(library, release, ep_release_mbid, track, ep_track_mbids[1]),
+    );
+    for (0..2) |_| {
+        const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, release, ep_release_mbid);
+        defer alignment.deinit();
+        try std.testing.expectEqual(runtime_module.PlacementStatus.not_in_files, alignment.rows[0].status);
+        const row = alignment.rows[1];
+        try std.testing.expectEqual(runtime_module.PlacementStatus.paired, row.status);
+        try std.testing.expectEqual(track, row.track.?.track_id);
+        try std.testing.expect(row.evidence.title_equal);
+        try std.testing.expect(row.evidence.length_close);
+        try std.testing.expect(!row.evidence.position_equal);
+        try std.testing.expectEqual(@as(?runtime_module.RecordingSource, null), row.evidence.recording_source);
+        try std.testing.expectEqual(@as(usize, 0), alignment.not_on_release.len);
+        for (files) |file| try expectPairedValues(library_database, file, ep_recordings[1], ep_track_mbids[1]);
+        try std.testing.expectEqual(@as(u64, 0), try library_database.acoustid_submissions.submittableCount());
+        try runtime_tests.rescan(&runtime, library);
+    }
+    var pairings = try runtime.libraryReleaseTrackPairings(library, std.testing.allocator, release);
+    defer pairings.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pairings.items.len);
+    try std.testing.expectEqual(track, pairings.items[0].track_id);
+    try std.testing.expectEqualStrings(ep_recordings[1], pairings.items[0].recording_mbid);
+    try std.testing.expect(pairings.items[0].in_snapshot);
+    try std.testing.expectEqual(@as(?u32, 2), pairings.items[0].position);
+
+    try runtime.libraryUnpairReleaseTrack(library, release, track);
+    for (files) |file| try expectPairedValues(library_database, file, null, null);
+    const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, release, ep_release_mbid);
+    defer alignment.deinit();
+    try std.testing.expectEqual(runtime_module.PlacementStatus.suggested, alignment.rows[1].status);
+    try std.testing.expectEqual(track, alignment.rows[1].track.?.track_id);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM paired_metadata_values;"));
+}
+
+test "a pairing displaces an automatic placement, refuses a paired release track, replaces the Track's own pairing, and outlives a snapshot that drops its release track" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-pair-displace?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [3]i64 = undefined;
+    inline for (0..3) |index| files[index] = try observeNightcall(library_database, index, true);
+    const encoding = try observeFile(library_database, "/music/kavinsky/nightcall/3.m4a", nightcall_titles[2], "Kavinsky");
+    try library_database.observed_tags.upsert(.{ .file_id = encoding, .values = .{
+        .title = nightcall_titles[2],
+        .artist = "Kavinsky",
+        .track_number = 3,
+        .musicbrainz_recording_id = nightcall_recordings[2],
+        .musicbrainz_release_id = nightcall_mbid,
+    } });
+    const elsewhere = try observeAlbumFile(library_database, "/music/nick-drake/bryter-layter/1.flac", "Introduction", 90_000);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    var tracks: [3]i64 = undefined;
+    for (&tracks, files) |*track, file| track.* = try trackOfFile(library_database, file);
+    try std.testing.expectEqual(tracks[2], try trackOfFile(library_database, encoding));
+    try snapshotNightcall(library_database, 4);
+
+    try std.testing.expectEqual(
+        runtime_module.PairingOrigin.by_hand,
+        try runtime.libraryPairReleaseTrack(library, album, null, tracks[2], nightcall_track_mbids[0]),
+    );
+    {
+        const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, album, nightcall_mbid);
+        defer alignment.deinit();
+        try std.testing.expectEqual(runtime_module.PlacementStatus.paired, alignment.rows[0].status);
+        try std.testing.expectEqual(tracks[2], alignment.rows[0].track.?.track_id);
+        try std.testing.expectEqual(runtime_module.PlacementStatus.automatic, alignment.rows[1].status);
+        try std.testing.expectEqual(runtime_module.PlacementStatus.not_in_files, alignment.rows[2].status);
+        try std.testing.expectEqual(@as(usize, 1), alignment.not_on_release.len);
+        try std.testing.expectEqual(tracks[0], alignment.not_on_release[0].track_id);
+    }
+
+    try std.testing.expectError(error.ReleaseTrackAlreadyPaired, runtime.libraryPairReleaseTrack(library, album, nightcall_mbid, tracks[0], nightcall_track_mbids[0]));
+    try std.testing.expectError(error.TrackNotOnRelease, runtime.libraryPairReleaseTrack(library, album, nightcall_mbid, try trackOfFile(library_database, elsewhere), nightcall_track_mbids[1]));
+    try std.testing.expectError(error.NoReleaseTracklist, runtime.libraryPairReleaseTrack(library, album, ep_release_mbid, tracks[0], nightcall_track_mbids[1]));
+    try std.testing.expectError(error.UnknownReleaseTrack, runtime.libraryPairReleaseTrack(library, album, nightcall_mbid, tracks[0], nightcall_recordings[1]));
+    try std.testing.expectError(error.InvalidMusicBrainzId, runtime.libraryPairReleaseTrack(library, album, "nightcall", tracks[0], nightcall_track_mbids[1]));
+    try std.testing.expectError(error.TrackNotPaired, runtime.libraryUnpairReleaseTrack(library, album, tracks[1]));
+    try expectPairedValues(library_database, files[0], null, null);
+
+    _ = try runtime.libraryPairReleaseTrack(library, album, nightcall_mbid, tracks[2], nightcall_track_mbids[3]);
+    for ([_]i64{ files[2], encoding }) |file| try expectPairedValues(library_database, file, nightcall_recordings[3], nightcall_track_mbids[3]);
+    {
+        const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, album, nightcall_mbid);
+        defer alignment.deinit();
+        try std.testing.expectEqual(runtime_module.PlacementStatus.automatic, alignment.rows[0].status);
+        try std.testing.expectEqual(tracks[0], alignment.rows[0].track.?.track_id);
+        try std.testing.expectEqual(runtime_module.PlacementStatus.paired, alignment.rows[3].status);
+        try std.testing.expectEqual(tracks[2], alignment.rows[3].track.?.track_id);
+        try std.testing.expectEqual(@as(usize, 0), alignment.not_on_release.len);
+    }
+
+    try snapshotNightcall(library_database, 3);
+    {
+        const alignment = try runtime.libraryReleaseAlignment(library, std.testing.allocator, album, nightcall_mbid);
+        defer alignment.deinit();
+        try std.testing.expectEqual(@as(usize, 3), alignment.rows.len);
+        for (alignment.rows) |row| try std.testing.expect(row.status != .paired);
+    }
+    var pairings = try runtime.libraryReleaseTrackPairings(library, std.testing.allocator, album);
+    defer pairings.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pairings.items.len);
+    try std.testing.expectEqual(tracks[2], pairings.items[0].track_id);
+    try std.testing.expectEqualStrings(nightcall_track_mbids[3], pairings.items[0].release_track_mbid);
+    try std.testing.expectEqual(runtime_module.PairingOrigin.by_hand, pairings.items[0].origin);
+    try std.testing.expect(!pairings.items[0].in_snapshot);
+    try std.testing.expectEqual(@as(?u32, null), pairings.items[0].position);
+
+    const edit = try runtime.libraryEditTracks(library, &.{tracks[2]}, &.{.{ .field = .musicbrainz_recording_id, .value = ep_heard_mbid }});
+    edit.deinit();
+    try runtime.libraryUnpairReleaseTrack(library, album, tracks[2]);
+    for ([_]i64{ files[2], encoding }) |file| try expectPairedValues(library_database, file, ep_heard_mbid, null);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+}
+
+test "removing the root of a paired Track's files leaves no pairing behind" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime_tests.scannedTempFolder(&runtime, &temporary, "file:orca-pair-root?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track_ids = try runtime_tests.allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(track_ids);
+    const file = (try scalarOf(library_database, "SELECT id FROM files;"));
+    try snapshotEp(library_database);
+    _ = try runtime.libraryPairReleaseTrack(library, try releaseOfFile(library_database, file), ep_release_mbid, track_ids[0], ep_track_mbids[1]);
+    try std.testing.expectEqual(@as(i64, 1), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalarOf(library_database, "SELECT count(*) FROM paired_metadata_values;"));
+
+    var roots = try runtime.libraryRootPage(library, 1, 0);
+    defer roots.deinit();
+    _ = try runtime.libraryRemoveRoot(library, roots.items[0].id);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM files;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM paired_metadata_values;"));
+}
+
+const AcceptedNightcall = struct { library: LibraryHandle, file: i64, track: i64, album: i64 };
+
+fn acceptedNightcall(runtime: *OrcaRuntime, name: [:0]const u8) !AcceptedNightcall {
+    const library = try runtime.openLibrary(std.testing.io, name);
+    const library_database = try libraryDatabase(runtime, library);
+    const file = try observeNightcall(library_database, 0, false);
+    try projectAll(library_database);
+    const accepted: database.ProposalPayload = .{ .title = nightcall_titles[0], .artist = "Kavinsky", .mb_score = 100, .musicbrainz_confidence = 0.95 };
+    _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, file, ep_heard_mbid, accepted));
+    try library_database.orca_metadata.upsert(.{ .file_id = file, .field = .musicbrainz_release_track_id, .value = ep_track_mbids[0], .provenance = .provider });
+    try snapshotNightcall(library_database, 4);
+    try snapshotEp(library_database);
+    return .{ .library = library, .file = file, .track = try trackOfFile(library_database, file), .album = try releaseOfFile(library_database, file) };
+}
+
+fn expectStoredValue(
+    library_database: *database.LibraryDatabase,
+    file_id: i64,
+    field: metadata.Field,
+    text: []const u8,
+    provenance: metadata.Provenance,
+    locked: bool,
+) !void {
+    const stored = (try library_database.orca_metadata.get(std.testing.allocator, file_id, field)) orelse return error.TestExpectedValue;
+    defer stored.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(text, stored.text);
+    try std.testing.expectEqual(provenance, stored.provenance);
+    try std.testing.expectEqual(locked, stored.locked);
+}
+
+test "unpairing puts back the accepted recording ID and the release-track ID the pairing replaced, after a pairing on another release replaced the first" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try acceptedNightcall(&runtime, "file:orca-pair-restore?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, setup.library);
+    const fields = [_]metadata.Field{ .musicbrainz_recording_id, .musicbrainz_release_track_id };
+    var before: [2]database.repository.StoredMetadataValue = undefined;
+    for (&before, fields) |*value, field| value.* = (try library_database.orca_metadata.get(std.testing.allocator, setup.file, field)).?;
+    defer for (before) |value| value.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(ep_heard_mbid, before[0].text);
+    try std.testing.expectEqual(metadata.Provenance.provider, before[0].provenance);
+    try std.testing.expectEqual(metadata.Provenance.provider, before[1].provenance);
+
+    _ = try runtime.libraryPairReleaseTrack(setup.library, setup.album, nightcall_mbid, setup.track, nightcall_track_mbids[1]);
+    try expectPairedValues(library_database, setup.file, nightcall_recordings[1], nightcall_track_mbids[1]);
+    _ = try runtime.libraryPairReleaseTrack(setup.library, setup.album, ep_release_mbid, setup.track, ep_track_mbids[1]);
+    try expectPairedValues(library_database, setup.file, ep_recordings[1], ep_track_mbids[1]);
+    var pairings = try runtime.libraryReleaseTrackPairings(setup.library, std.testing.allocator, setup.album);
+    defer pairings.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pairings.items.len);
+    try std.testing.expectEqualStrings(ep_release_mbid, pairings.items[0].release_mbid);
+    {
+        const alignment = try runtime.libraryReleaseAlignment(setup.library, std.testing.allocator, setup.album, nightcall_mbid);
+        defer alignment.deinit();
+        for (alignment.rows) |row| try std.testing.expect(row.status != .paired);
+    }
+
+    try std.testing.expectError(error.TrackNotPaired, runtime.libraryUnpairReleaseTrack(setup.library, setup.album + 1000, setup.track));
+    try runtime.libraryUnpairReleaseTrack(setup.library, setup.album, setup.track);
+    for (fields, before) |field, value| try expectStoredValue(library_database, setup.file, field, value.text, value.provenance, value.locked);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+}
+
+test "a person's edit of a paired recording ID is their own: AcoustID may send it and unpairing keeps it" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try acceptedNightcall(&runtime, "file:orca-pair-edit?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, setup.library);
+    _ = try runtime.libraryPairReleaseTrack(setup.library, setup.album, nightcall_mbid, setup.track, nightcall_track_mbids[1]);
+    try std.testing.expectEqual(@as(u64, 0), try library_database.acoustid_submissions.submittableCount());
+
+    const edit = try runtime.libraryEditTracks(setup.library, &.{setup.track}, &.{.{ .field = .musicbrainz_recording_id, .value = nightcall_recordings[1] }});
+    edit.deinit();
+    try std.testing.expectEqual(@as(u64, 1), try library_database.acoustid_submissions.submittableCount());
+
+    try runtime.libraryUnpairReleaseTrack(setup.library, setup.album, setup.track);
+    try expectStoredValue(library_database, setup.file, .musicbrainz_recording_id, nightcall_recordings[1], .user, true);
+    try expectStoredValue(library_database, setup.file, .musicbrainz_release_track_id, ep_track_mbids[0], .provider, false);
+    try std.testing.expectEqual(@as(u64, 1), try library_database.acoustid_submissions.submittableCount());
+}

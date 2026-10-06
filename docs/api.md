@@ -899,8 +899,8 @@ defer page.deinit();
   null. It holds the release's title, artist credit, date, release-group
   ID, medium count and `fetched_at`; a `ReleaseTrackPlacement` per release
   track in disc and position order (its title, artist credit, length,
-  recording and release-track IDs, a `PlacementStatus` of `automatic`,
-  `suggested` or `not_in_files`, the placed `AlignedTrack` and its
+  recording and release-track IDs, a `PlacementStatus` of `paired`,
+  `automatic`, `suggested` or `not_in_files`, the placed `AlignedTrack` and its
   `PlacementEvidence`: the `RecordingSource` that placed it automatically,
   `title_equal`, `length_close`, `position_equal` and `length_delta_ms`);
   and `not_on_release`, the Tracks placed nowhere.
@@ -909,6 +909,28 @@ defer page.deinit();
   Release of more than 512 Tracks is `error.ReleaseTooLarge`, and one
   without a candidate `error.NoReleaseCandidate`, and an ID that is not a
   MusicBrainz ID `error.InvalidMusicBrainzId`. It reads only.
+  `libraryPairReleaseTrack(library, release_id, release_mbid, track_id,
+  release_track_mbid)` pairs a Track of the Release with a release track of
+  `release_mbid`'s snapshot, or the best candidate's when null, replacing
+  the Track's pairing on that release, and returns the `PairingOrigin`:
+  `confirmed_suggestion` when the alignment suggested that Track there,
+  else `by_hand`. Every file of the Track takes the release track's
+  recording and release-track IDs as locked user values, and the files are
+  reprojected. Errors: `error.TrackNotOnRelease`,
+  `error.NoReleaseTracklist`, `error.UnknownReleaseTrack`,
+  `error.ReleaseTrackAlreadyPaired`, and those of
+  `libraryReleaseAlignment`.
+  `libraryUnpairReleaseTrack(library, release_id, track_id, release_mbid)`
+  removes the Track's pairings on the Release, on `release_mbid` only when
+  not null, and the values they set that its files still hold;
+  `error.TrackNotPaired` when there is none.
+  `libraryReleaseTrackPairings(library, allocator, release_id)` returns the
+  Release's `ReleaseTrackPairings`, freed with `deinit`, at most 512: each
+  `ReleaseTrackPairing` holds the Track, the release, release-track and
+  recording IDs, the origin, `created_at`, and `in_snapshot` with `disc`
+  and `position`, false and null once the snapshot no longer lists the
+  release track. [metadata.md](metadata.md#pairing-a-track) gives the
+  rules.
   `libraryDismissReleaseCandidate(library, release_id, release_mbid)` marks
   a release as not the Release; it stops being a candidate for it. An ID
   that is not a MusicBrainz ID is `error.InvalidMusicBrainzId`, an unknown

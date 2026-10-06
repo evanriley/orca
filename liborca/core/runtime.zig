@@ -485,6 +485,9 @@ pub const PlacementStatus = library_pass.release_alignment.PlacementStatus;
 pub const PlacementEvidence = library_pass.release_alignment.PlacementEvidence;
 pub const RecordingSource = library_pass.release_alignment.RecordingSource;
 pub const AlignedTrack = library_pass.release_alignment.AlignedTrack;
+pub const ReleaseTrackPairing = database.ReleaseTrackPairing;
+pub const ReleaseTrackPairings = database.ReleaseTrackPairings;
+pub const PairingOrigin = database.PairingOrigin;
 pub const ArtworkSize = database.ArtworkSize;
 pub const MatchAcceptance = database.ProposalAcceptance;
 
@@ -1650,6 +1653,49 @@ pub const OrcaRuntime = struct {
         release_mbid: ?[]const u8,
     ) !ReleaseAlignment {
         return runtime_listens.libraryReleaseAlignment(self, library, allocator, release_id, release_mbid);
+    }
+
+    /// Pairs a Track of the Release with a release track of `release_mbid`,
+    /// or of the best candidate when that is null, replacing the Track's
+    /// pairing there. Every file of the Track takes the release track's
+    /// recording ID and release-track ID as locked user values; no media
+    /// file is written. Reports whether it confirmed the suggestion the
+    /// alignment showed. `error.TrackNotOnRelease`,
+    /// `error.NoReleaseTracklist`, `error.UnknownReleaseTrack`, or
+    /// `error.ReleaseTrackAlreadyPaired` when another Track holds the
+    /// release track.
+    pub fn libraryPairReleaseTrack(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        release_mbid: ?[]const u8,
+        track_id: i64,
+        release_track_mbid: []const u8,
+    ) !PairingOrigin {
+        return runtime_listens.libraryPairReleaseTrack(self, library, release_id, release_mbid, track_id, release_track_mbid);
+    }
+
+    /// Removes the Track's pairing and puts back the values it replaced
+    /// where its files still hold the pairing's values. `error.TrackNotPaired`
+    /// when the Track has no pairing on the Release.
+    pub fn libraryUnpairReleaseTrack(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        track_id: i64,
+    ) !void {
+        return runtime_listens.libraryUnpairReleaseTrack(self, library, release_id, track_id);
+    }
+
+    /// Every pairing of the Release's Tracks, including those whose release
+    /// track a newer snapshot no longer lists.
+    pub fn libraryReleaseTrackPairings(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+    ) !ReleaseTrackPairings {
+        return runtime_listens.libraryReleaseTrackPairings(self, library, allocator, release_id);
     }
 
     /// "Not This Release": `release_mbid` is never the Release's candidate

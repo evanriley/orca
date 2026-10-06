@@ -28,6 +28,8 @@ const ReleaseMatchBucket = runtime.ReleaseMatchBucket;
 const ReleaseMatchCounts = runtime.ReleaseMatchCounts;
 const ReleaseMatchDiff = runtime.ReleaseMatchDiff;
 const ReleaseAlignment = runtime.ReleaseAlignment;
+const ReleaseTrackPairings = runtime.ReleaseTrackPairings;
+const PairingOrigin = runtime.PairingOrigin;
 const ReleaseMatchPage = runtime.ReleaseMatchPage;
 const OrcaRuntime = runtime.OrcaRuntime;
 const PlayStats = runtime.PlayStats;
@@ -349,7 +351,70 @@ pub fn libraryReleaseAlignment(
     const compared = try library_pass.matching.comparedRelease(&view, allocator, release_mbid);
     var tracklist = try library_database.release_tracklists.get(allocator, compared) orelse return error.NoReleaseTracklist;
     defer tracklist.deinit();
-    return library_pass.release_alignment.alignRelease(allocator, release_id, view.tracks, &tracklist.record);
+    var pairings = try library_database.release_track_pairings.list(allocator, release_id, compared);
+    defer pairings.deinit();
+    return library_pass.release_alignment.alignRelease(allocator, release_id, view.tracks, &tracklist.record, pairings.items);
+}
+
+pub fn libraryPairReleaseTrack(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    release_id: i64,
+    release_mbid: ?[]const u8,
+    track_id: i64,
+    release_track_mbid: []const u8,
+) !PairingOrigin {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const view = try library_database.identification_proposals.releaseMatchView(self.allocator, release_id, false);
+    defer view.deinit();
+    if (view.track_count > database.repository.max_page) return error.ReleaseTooLarge;
+    for (view.tracks) |track| {
+        if (track.track_id == track_id) break;
+    } else return error.TrackNotOnRelease;
+    const compared = try library_pass.matching.comparedRelease(&view, self.allocator, release_mbid);
+    var tracklist = try library_database.release_tracklists.get(self.allocator, compared) orelse return error.NoReleaseTracklist;
+    defer tracklist.deinit();
+    var pairings = try library_database.release_track_pairings.list(self.allocator, release_id, compared);
+    defer pairings.deinit();
+    const alignment = try library_pass.release_alignment.alignRelease(self.allocator, release_id, view.tracks, &tracklist.record, pairings.items);
+    defer alignment.deinit();
+    const origin: PairingOrigin = for (alignment.rows) |row| {
+        if (!std.mem.eql(u8, row.release_track_mbid, release_track_mbid)) continue;
+        const shown = row.track orelse break .by_hand;
+        break if (row.status == .suggested and shown.track_id == track_id) .confirmed_suggestion else .by_hand;
+    } else .by_hand;
+
+    const files = try library_database.release_track_pairings.pair(self.allocator, .{
+        .release_id = release_id,
+        .release_mbid = compared,
+        .track_id = track_id,
+        .release_track_mbid = release_track_mbid,
+        .origin = origin,
+    });
+    defer self.allocator.free(files);
+    try reproject(self, library_database, files);
+    return origin;
+}
+
+pub fn libraryUnpairReleaseTrack(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    release_id: i64,
+    track_id: i64,
+) !void {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const files = try library_database.release_track_pairings.unpair(self.allocator, release_id, track_id);
+    defer self.allocator.free(files);
+    try reproject(self, library_database, files);
+}
+
+pub fn libraryReleaseTrackPairings(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    release_id: i64,
+) !ReleaseTrackPairings {
+    return (try runtime.libraryDatabase(self, library)).release_track_pairings.list(allocator, release_id, null);
 }
 
 pub fn libraryDismissReleaseCandidate(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: []const u8) !void {

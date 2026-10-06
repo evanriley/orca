@@ -45,10 +45,14 @@ pub const OrcaMetadataRepository = struct {
     write_lane: *WriteLane,
 
     pub fn upsert(self: *OrcaMetadataRepository, input: OrcaMetadataInput) !void {
-        if (input.file_id == 0 or input.value.len == 0 or input.provenance == .observed_file)
-            return error.InvalidOrcaMetadata;
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.upsertLocked(input);
+    }
+
+    pub fn upsertLocked(self: *OrcaMetadataRepository, input: OrcaMetadataInput) !void {
+        if (input.file_id == 0 or input.value.len == 0 or input.provenance == .observed_file)
+            return error.InvalidOrcaMetadata;
         var statement = try self.db.prepare(
             \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())

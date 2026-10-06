@@ -49,6 +49,10 @@ fn describe(err: anyerror) []const u8 {
         error.NoReleaseCandidate => "no MusicBrainz release is proposed for that release; run match --release=ID first, or name a candidate release ID",
         error.NoReleaseTracklist => "MusicBrainz has not been asked for that release's tracklist yet; run match --release=ID first",
         error.ReleaseTooLarge => "a release of more than 512 tracks has no alignment",
+        error.TrackNotOnRelease => "that track is not on that release",
+        error.UnknownReleaseTrack => "the release's tracklist has no track with that MBID; run release-alignment for its release track MBIDs",
+        error.ReleaseTrackAlreadyPaired => "another track is paired with that release track; run unpair-track on it first",
+        error.TrackNotPaired => "that track is not paired on that release",
         error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
         error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -311,6 +315,8 @@ const commands = [_]Command{
     .{ .name = "accept-matches", .usage = "accept-matches DATABASE --min-score=SCORE", .min_arguments = 2, .max_arguments = 2, .run = acceptConfidentMatches },
     .{ .name = "apply-release", .usage = "apply-release DATABASE RELEASE_ID [--fields=FIELD,...]", .min_arguments = 2, .max_arguments = 3, .run = applyMatchedRelease, .shares_usage_line = true },
     .{ .name = "release-alignment", .usage = "release-alignment DATABASE RELEASE_ID [RELEASE_MBID]", .min_arguments = 2, .max_arguments = 3, .run = printReleaseAlignment, .shares_usage_line = true },
+    .{ .name = "pair-track", .usage = "pair-track DATABASE RELEASE_ID TRACK_ID RELEASE_TRACK_MBID [RELEASE_MBID]", .min_arguments = 4, .max_arguments = 5, .run = pairTrack, .shares_usage_line = true },
+    .{ .name = "unpair-track", .usage = "unpair-track DATABASE RELEASE_ID TRACK_ID", .min_arguments = 3, .max_arguments = 3, .run = unpairTrack, .shares_usage_line = true },
     .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
@@ -2494,6 +2500,35 @@ fn printReleaseAlignment(context: Context) !void {
     for (alignment.not_on_release) |track| {
         try stdout.print("not_on_release\ttrack={d}\tlocal_title={s}\n", .{ track.track_id, track.title });
     }
+    var pairings = try runtime.libraryReleaseTrackPairings(library, context.allocator, release_id);
+    defer pairings.deinit();
+    for (pairings.items) |pairing| {
+        if (pairing.in_snapshot or !std.mem.eql(u8, pairing.release_mbid, alignment.release_mbid)) continue;
+        try stdout.print("unlisted_pairing\ttrack={d}\trelease_track={s}\trecording={s}\n", .{
+            pairing.track_id, pairing.release_track_mbid, pairing.recording_mbid,
+        });
+    }
+}
+
+fn pairTrack(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const track_id = try std.fmt.parseInt(i64, context.arguments[2], 10);
+    const release_mbid: ?[]const u8 = if (context.arguments.len == 5) context.arguments[4] else null;
+    const origin = try runtime.libraryPairReleaseTrack(library, release_id, release_mbid, track_id, context.arguments[3]);
+    try context.stdout.print("paired\ttrack={d}\torigin={s}\n", .{ track_id, @tagName(origin) });
+}
+
+fn unpairTrack(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const track_id = try std.fmt.parseInt(i64, context.arguments[2], 10);
+    try runtime.libraryUnpairReleaseTrack(library, release_id, track_id);
+    try context.stdout.print("unpaired\ttrack={d}\n", .{track_id});
 }
 
 fn parseReleaseFields(argument: []const u8) !liborca.ReleaseFieldSet {

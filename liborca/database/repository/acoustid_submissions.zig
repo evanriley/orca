@@ -68,8 +68,9 @@ pub const AcoustIdSubmissionRepository = struct {
     write_lane: *WriteLane,
 
     /// Files after `cursor`, by id, whose recording ID in effect is Orca's own
-    /// value from an accepted match or an edit, differs from the file's tag or
-    /// was written into it by Orca, and has not been sent for that file.
+    /// value from an accepted match, an edit or a release-track pairing whose
+    /// fingerprint agreed, differs from the file's tag or was written into it
+    /// by Orca, and has not been sent for that file.
     pub fn submittablePage(
         self: *const AcoustIdSubmissionRepository,
         allocator: std.mem.Allocator,
@@ -171,6 +172,9 @@ fn bindAcoustIdSubmittable(statement: sqlite.Statement) !void {
 /// AcoustID already knows what it proposed; without AcoustID a proposal has no
 /// fingerprint score, so a bulk acceptance of it rests on text alone; and a
 /// file split off a shared one inherits the value without the proposal.
+/// A user value a release-track pairing set is sent only when the file also
+/// holds a proposal from AcoustID, in any state, for that recording: a
+/// pairing rests on a person's judgment, not on the file's fingerprint.
 pub const acoustid_submittable =
     "FROM orca_metadata_values AS chosen\n" ++
     "JOIN files ON files.id = chosen.file_id\n" ++
@@ -187,7 +191,12 @@ pub const acoustid_submittable =
     "        AND reviewed.provider NOT IN ('acoustid', 'musicbrainz+acoustid') AND reviewed.accepted_in_bulk = 0))\n" ++
     "  AND NOT (chosen.provenance = ?4 AND EXISTS (SELECT 1 FROM identification_proposals AS accepted\n" ++
     "      WHERE accepted.file_id = files.id AND accepted.provider_id = chosen.value AND accepted.state = ?6\n" ++
-    "        AND (accepted.provider IN ('acoustid', 'musicbrainz+acoustid') OR accepted.accepted_in_bulk = 1)))";
+    "        AND (accepted.provider IN ('acoustid', 'musicbrainz+acoustid') OR accepted.accepted_in_bulk = 1)))\n" ++
+    "  AND NOT (chosen.provenance = ?5 AND EXISTS (SELECT 1 FROM paired_metadata_values AS paired\n" ++
+    "      WHERE paired.file_id = files.id AND paired.field = ?3 AND paired.value = chosen.value)\n" ++
+    "    AND NOT EXISTS (SELECT 1 FROM identification_proposals AS fingerprinted\n" ++
+    "      WHERE fingerprinted.file_id = files.id AND fingerprinted.provider_id = chosen.value\n" ++
+    "        AND fingerprinted.provider IN ('acoustid', 'musicbrainz+acoustid')))";
 
 pub const acoustid_submittable_page_sql =
     "SELECT files.id, tracks.id, chosen.value, tracks.title, tracks.artist, tracks.album, tracks.album_artist,\n" ++

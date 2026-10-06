@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Pairing a Track with a release track.** `Runtime.libraryPairReleaseTrack`
+  places a Track the release alignment could not place, or confirms a
+  suggestion, and `orca-cli pair-track` does the same;
+  `libraryUnpairReleaseTrack` and `unpair-track` undo it, restoring each
+  value the pairing replaced unless it was edited since, and
+  `libraryReleaseTrackPairings` lists them. A recording ID that only a
+  pairing set is sent to AcoustID only when the file's fingerprint agreed.
 - **Release alignment.** Match Album keeps a snapshot of each MusicBrainz
   release's own tracklist it looks up, including a release the tags already
   name. `Runtime.libraryReleaseAlignment` and `orca-cli release-alignment`

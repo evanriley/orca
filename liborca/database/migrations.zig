@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 58;
+pub const current_version = 59;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1617,6 +1617,38 @@ const migration_58 =
     \\
 ;
 
+const migration_59 =
+    \\CREATE TABLE release_track_pairings (
+    \\    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    \\    musicbrainz_release_id TEXT NOT NULL,
+    \\    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    \\    release_track_id TEXT NOT NULL,
+    \\    recording_id TEXT NOT NULL,
+    \\    origin INTEGER NOT NULL CHECK (origin IN (0, 1)),
+    \\    created_at INTEGER NOT NULL,
+    \\    PRIMARY KEY (track_id)
+    \\) WITHOUT ROWID;
+    \\CREATE UNIQUE INDEX release_track_pairings_release_track
+    \\    ON release_track_pairings(release_id, musicbrainz_release_id, release_track_id);
+    \\CREATE TRIGGER release_track_pairings_track_moved AFTER UPDATE OF release_id ON tracks
+    \\WHEN old.release_id IS NOT new.release_id BEGIN
+    \\    DELETE FROM release_track_pairings WHERE track_id = new.id;
+    \\END;
+    \\CREATE TABLE paired_metadata_values (
+    \\    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    \\    field INTEGER NOT NULL,
+    \\    value TEXT NOT NULL,
+    \\    replaced_value TEXT,
+    \\    replaced_provenance INTEGER,
+    \\    replaced_locked INTEGER CHECK (replaced_locked IN (0, 1)),
+    \\    replaced_written_at INTEGER,
+    \\    PRIMARY KEY (file_id, field),
+    \\    CHECK ((replaced_value IS NULL) = (replaced_provenance IS NULL)
+    \\        AND (replaced_value IS NULL) = (replaced_locked IS NULL))
+    \\) WITHOUT ROWID;
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2159,6 +2191,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 56 and target_version >= 56) try db.exec(migration_56);
     if (version < 57 and target_version >= 57) try db.exec(migration_57);
     if (version < 58 and target_version >= 58) try db.exec(migration_58);
+    if (version < 59 and target_version >= 59) try db.exec(migration_59);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(

@@ -884,6 +884,9 @@ test "opening a Library leaves another process's in-flight write alone" {
 
 fn rewindToVersion55(db: sqlite.Database) !void {
     try db.exec(
+        \\DROP TABLE paired_metadata_values;
+        \\DROP TRIGGER release_track_pairings_track_moved;
+        \\DROP TABLE release_track_pairings;
         \\DROP TABLE musicbrainz_release_tracks;
         \\DROP TABLE musicbrainz_releases;
         \\ALTER TABLE files DROP COLUMN audio_hash_tier;

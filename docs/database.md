@@ -696,6 +696,24 @@ metadata only, keyed by MusicBrainz ID, never by Release id.
 one transaction and refuses one of more than 512 media or 512 tracks
 (`error.ReleaseTracklistTooLarge`); `get` reads at most 512 tracks.
 
+Migration 59 adds release-track pairings (see
+[metadata.md](metadata.md#pairing-a-track)). `release_track_pairings`
+(primary key `(track_id, musicbrainz_release_id)`, `release_id`,
+`release_track_id`, `recording_id`, `origin` 0 for a confirmed suggestion
+and 1 for by hand, `created_at` in Unix seconds, `WITHOUT ROWID`) is
+deleted with its Track or Release by foreign-key cascade, and by the
+trigger `release_track_pairings_track_moved` when its Track's `release_id`
+changes. A unique index on `(release_id, musicbrainz_release_id,
+release_track_id)` gives each release track at most one Track. It has no
+foreign key to `musicbrainz_releases`, so a new snapshot, which replaces
+the release's rows, keeps it. `paired_recording_ids` (primary key
+`(file_id, recording_id)`, `WITHOUT ROWID`, deleted with its file) records
+the recording IDs a pairing set on each file, so AcoustID submission can
+hold them back after the pairing itself is gone.
+`ReleaseTrackPairingRepository.pair` validates, stores the pairing, the
+locked user values and the markers in one transaction; `unpair` removes
+them in one.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the

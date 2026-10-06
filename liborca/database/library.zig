@@ -85,6 +85,7 @@ pub const LibraryDatabase = struct {
     artist_info: repository.ArtistInfoRepository,
     release_info: repository.ReleaseInfoRepository,
     release_tracklists: repository.ReleaseTracklistRepository,
+    release_track_pairings: repository.ReleaseTrackPairingRepository,
     settings: repository.LibrarySettingsRepository,
     player_state: repository.PlayerStateRepository,
     job_history: repository.JobHistoryRepository,
@@ -194,6 +195,7 @@ pub const LibraryDatabase = struct {
             .artist_info = .{ .db = database, .write_lane = write_lane },
             .release_info = .{ .db = database, .write_lane = write_lane },
             .release_tracklists = .{ .db = database, .write_lane = write_lane },
+            .release_track_pairings = .{ .db = database, .write_lane = write_lane },
             .settings = .{ .db = database, .write_lane = write_lane },
             .player_state = .{ .db = database, .write_lane = write_lane },
             .job_history = .{ .db = database, .write_lane = write_lane },
@@ -3536,6 +3538,56 @@ test "a recording ID AcoustID proposed or a text-only match accepted in bulk is 
     try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM identification_proposals WHERE accepted_in_bulk = 1;"));
 }
 
+test "a recording ID a pairing set is offered to AcoustID only when the file holds an AcoustID proposal for it, and an accepted match is unaffected" {
+    var library = try openFeedbackLibrary("submittable-paired");
+    defer library.close();
+    const release_mbid = "5a1e7c11-3c41-4d6b-9f0e-2b3c4d5e6f70";
+    const paired_mbid = "6b2f8d22-4d52-4e7c-8a1f-3c4d5e6f7081";
+    const release_tracks = [_]repository.ReleaseTracklistTrack{
+        .{ .disc = 1, .position = 1, .title = "Paired", .artist_credit = "Nick Drake", .length_ms = null, .recording_mbid = paired_mbid, .release_track_mbid = "7c309e33-5e63-4f8d-9b20-4d5e6f708192" },
+        .{ .disc = 1, .position = 2, .title = "Fingerprinted", .artist_credit = "Nick Drake", .length_ms = null, .recording_mbid = rival_mbid, .release_track_mbid = "8d41af44-6f74-4a9e-8c31-5e6f708192a3" },
+    };
+    try library.release_tracklists.replace(&.{
+        .release_mbid = release_mbid,
+        .title = "Bryter Layter",
+        .artist_credit = "Nick Drake",
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &release_tracks,
+    });
+    const release_id = try library.releases.upsert(.{ .release_key = "bryter-layter", .title = "Bryter Layter" });
+    const paired = try addFeedbackTrack(&library, "Paired", try addRecording(&library), null);
+    const fingerprinted = try addFeedbackTrack(&library, "Fingerprinted", try addRecording(&library), null);
+    const accepted = try addFeedbackTrack(&library, "Accepted", try addRecording(&library), null);
+    var sql: [64]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET release_id = {d};", .{release_id}, 0));
+    _ = try putProposalFrom(&library, try playFileOf(&library, paired), "acoustid", rival_mbid, 0.9, "{}");
+    _ = try putProposalFrom(&library, try playFileOf(&library, fingerprinted), "acoustid", rival_mbid, 0.4, "{}");
+    _ = try library.identification_proposals.acceptProposal(std.testing.allocator, try putProposal(&library, try playFileOf(&library, accepted), match_mbid, 0.95, match_payload));
+    for ([_]i64{ paired, fingerprinted }, release_tracks) |track_id, release_track| {
+        const files = try library.release_track_pairings.pair(std.testing.allocator, .{
+            .release_id = release_id,
+            .release_mbid = release_mbid,
+            .track_id = track_id,
+            .release_track_mbid = release_track.release_track_mbid,
+            .origin = .by_hand,
+        });
+        std.testing.allocator.free(files);
+    }
+    const submissions = &library.acoustid_submissions;
+
+    try std.testing.expectEqual(@as(u64, 2), try submissions.submittableCount());
+    const page = try submissions.submittablePage(std.testing.allocator, 0, 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(fingerprinted, page.items[0].track_id);
+    try std.testing.expectEqualStrings(rival_mbid, page.items[0].recording_mbid);
+    try std.testing.expectEqual(accepted, page.items[1].track_id);
+
+    _ = try putProposalFrom(&library, try playFileOf(&library, paired), "musicbrainz+acoustid", paired_mbid, 0.3, "{}");
+    try std.testing.expectEqual(@as(u64, 3), try submissions.submittableCount());
+}
+
 fn queryPlan(library: *LibraryDatabase, comptime sql: []const u8) ![]u8 {
     var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++ sql ++ "");
     defer statement.deinit();
@@ -3589,6 +3641,7 @@ test "a recording id and the matching selection are looked up by key, never by s
     }
     try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN tracks") == null);
     try std.testing.expect(std.mem.indexOf(u8, plans[8], "SCAN tracks") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[5], "SCAN paired_metadata_values") == null);
 }
 
 test "verification selects its files by Release, Track and key, never by scanning metadata, files or verifications" {
