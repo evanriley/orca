@@ -4,6 +4,7 @@ const metadata = @import("../../metadata/model.zig");
 const quick_hash = @import("../../storage/quick_hash.zig");
 const content_hash = @import("../../storage/content_hash.zig");
 const codec_id = @import("../../codec/decoder.zig").codec_id;
+const measurableChannels = @import("analysis.zig").measurableChannels;
 const columns = @import("../columns.zig");
 
 const digestColumn = columns.digestColumn;
@@ -954,7 +955,7 @@ fn bestLocation(comptime column: []const u8, comptime file_id: []const u8) []con
 const play_file_join = "LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n";
 pub const play_file_loudness = "(SELECT file_loudness.integrated_lufs FROM file_loudness " ++
     "WHERE file_loudness.file_id = play_file.id AND file_loudness.source_identity = play_file.content_hash " ++
-    "AND play_file.content_hash_algorithm = 1)";
+    "AND play_file.content_hash_algorithm = 1 AND " ++ measurableChannels("play_file") ++ ")";
 const play_file_path = bestLocation("uri", "play_file.id");
 const first_genre_id = "(SELECT first_track_genre.genre_id FROM track_genres AS first_track_genre " ++
     "WHERE first_track_genre.track_id = tracks.id AND first_track_genre.ordinal = 0)";
@@ -1285,14 +1286,15 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
         ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction),
         .loudness => candidatePart(
             "file_loudness CROSS JOIN files AS play_file ON play_file.id = file_loudness.file_id " ++
-                "AND play_file.content_hash = file_loudness.source_identity AND play_file.content_hash_algorithm = 1\n" ++
+                "AND play_file.content_hash = file_loudness.source_identity AND play_file.content_hash_algorithm = 1 " ++
+                "AND " ++ measurableChannels("play_file") ++ "\n" ++
                 "CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id",
             "file_loudness.integrated_lufs" ++ suffix ++ ", " ++ by_id,
         ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
             "tracks WHERE tracks.preferred_file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM files " ++
                 "CROSS JOIN file_loudness ON file_loudness.file_id = files.id " ++
                 "AND file_loudness.source_identity = files.content_hash AND files.content_hash_algorithm = 1 " ++
-                "WHERE files.id = tracks.preferred_file_id)",
+                "WHERE files.id = tracks.preferred_file_id AND " ++ measurableChannels("files") ++ ")",
             by_id,
         ),
         .bitrate => candidatePart(
@@ -1577,7 +1579,8 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
         \\    album = CASE id % 3 WHEN 0 THEN 'x' ELSE 'Y' END;
         \\UPDATE files SET size_bytes = (id * 7919) % 5 * 1000000,
         \\    duration_ms = CASE WHEN id % 7 = 0 THEN NULL ELSE 200000 + (id % 3) * 1000 END,
-        \\    quick_hash = CAST(id AS BLOB), content_hash = CAST(id AS BLOB), content_hash_algorithm = 1;
+        \\    quick_hash = CAST(id AS BLOB), content_hash = CAST(id AS BLOB), content_hash_algorithm = 1,
+        \\    channels = CASE WHEN id % 11 = 0 THEN NULL WHEN id % 7 = 3 THEN 6 ELSE id % 2 + 1 END;
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
         \\    SELECT id, content_hash, -((id * 13) % 6) - 0.5 FROM files WHERE id % 5 <> 0;
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES (5, x'ff', -1.0);
@@ -1656,9 +1659,9 @@ test "a Track reads loudness, bitrate and path from the file it plays and its fi
         \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'AA', 'AA', 'aa');
         \\INSERT INTO releases(id, title, album_artist_id) VALUES (1, 'X', 1);
         \\INSERT INTO recordings(id, title) VALUES (1, 'r'), (2, 'r'), (3, 'r'), (4, 'r');
-        \\INSERT INTO files(id, recording_id, size_bytes, duration_ms, quick_hash, content_hash, content_hash_algorithm) VALUES
-        \\    (1, 1, 4012500, 200000, x'01', x'01', 1), (2, 2, 0, 200000, x'02', x'02', 1),
-        \\    (4, 4, 1000000, 100000, x'04', x'04', 1);
+        \\INSERT INTO files(id, recording_id, size_bytes, duration_ms, quick_hash, content_hash, content_hash_algorithm, channels) VALUES
+        \\    (1, 1, 4012500, 200000, x'01', x'01', 1, 2), (2, 2, 0, 200000, x'02', x'02', 1, 2),
+        \\    (4, 4, 1000000, 100000, x'04', x'04', 1, 2);
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES
         \\    (1, x'01', -9.5), (2, x'ff', -3.0), (4, x'04', -20.0);
         \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
@@ -1712,6 +1715,54 @@ test "a Track reads loudness, bitrate and path from the file it plays and its fi
         defer page.deinit();
         try std.testing.expectEqual(@as(usize, 4), page.items.len);
         for (case.ids, page.items) |id, item| try std.testing.expectEqual(id, item.id);
+    };
+}
+
+test "paging by loudness lists a file with no channel count or more than two channels with the unmeasured, each Track once" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-loudness-channels?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'r'), (2, 'r'), (3, 'r'), (4, 'r'), (5, 'r'), (6, 'r'), (7, 'r'), (8, 'r');
+        \\INSERT INTO files(id, recording_id, content_hash, content_hash_algorithm, channels) VALUES
+        \\    (1, 1, x'01', 1, 2), (2, 2, x'02', 1, 2), (3, 3, x'03', 1, 2), (4, 4, x'04', 1, 1),
+        \\    (5, 5, x'05', 1, NULL), (6, 6, x'06', 1, 6), (7, 7, x'07', 1, 2);
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES
+        \\    (1, x'01', -10.0), (2, x'02', -5.0), (3, x'03', -20.0), (4, x'04', -15.0),
+        \\    (5, x'05', -1.0), (6, x'06', -30.0);
+        \\INSERT INTO tracks(id, recording_id, title, preferred_file_id) VALUES
+        \\    (1, 1, 't', 1), (2, 2, 't', 2), (3, 3, 't', 3), (4, 4, 't', 4),
+        \\    (5, 5, 't', 5), (6, 6, 't', 6), (7, 7, 't', 7), (8, 8, 't', NULL);
+    );
+
+    const Case = struct { direction: SortDirection, ids: [8]i64 };
+    for ([_]Case{
+        .{ .direction = .ascending, .ids = .{ 3, 4, 1, 2, 5, 6, 7, 8 } },
+        .{ .direction = .descending, .ids = .{ 2, 1, 4, 3, 8, 7, 6, 5 } },
+    }) |case| for ([_]PageForm{ .scan, .candidates, .bounded }) |form| {
+        var listed: [8]i64 = undefined;
+        var count: usize = 0;
+        var offset: u32 = 0;
+        while (true) : (offset += 3) {
+            var page = try library.tracks.pageAs(std.testing.allocator, .{
+                .sort = .loudness,
+                .direction = case.direction,
+                .limit = 3,
+                .offset = offset,
+            }, .none, form);
+            defer page.deinit();
+            if (page.items.len == 0) break;
+            for (page.items) |item| {
+                try std.testing.expect(count < listed.len);
+                listed[count] = item.id;
+                count += 1;
+                try std.testing.expectEqual(item.id <= 4, item.integrated_lufs != null);
+            }
+        }
+        try std.testing.expectEqualSlices(i64, &case.ids, listed[0..count]);
     };
 }
 

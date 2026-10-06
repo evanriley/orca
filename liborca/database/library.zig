@@ -4368,9 +4368,9 @@ test "a playlist's formats count each codec and the entries measured for their f
     try library.database.exec(
         \\INSERT INTO artists(name) SELECT DISTINCT artist FROM tracks;
         \\UPDATE tracks SET artist_id = (SELECT id FROM artists WHERE artists.name = tracks.artist);
-        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = 2
         \\    WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('One', 'Two'));
-        \\UPDATE files SET codec = 'alac', content_hash = x'02', content_hash_algorithm = 1
+        \\UPDATE files SET codec = 'alac', content_hash = x'02', content_hash_algorithm = 1, channels = 2
         \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Three');
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
         \\    SELECT preferred_file_id, x'01', -14.0 FROM tracks WHERE title = 'One';
@@ -4411,6 +4411,32 @@ test "a playlist's formats count each codec and the entries measured for their f
     try std.testing.expectEqual(@as(u64, 1), smart_summary.artist_count);
     try std.testing.expect(!smart_summary.mixed_artists);
 }
+test "a playlist's formats count an entry whose file has no channel count or more than two channels as not analyzed" {
+    var library = try openFeedbackLibrary("playlist-formats-channels");
+    defer library.close();
+    const stereo = try addSmartTrack(&library, "Stereo", "Nick Drake");
+    const unknown = try addSmartTrack(&library, "Unknown", "Nick Drake");
+    const surround = try addSmartTrack(&library, "Surround", "Nick Drake");
+    const unmeasured = try addSmartTrack(&library, "Unmeasured", "Nick Drake");
+    try library.database.exec(
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = 2
+        \\    WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('Stereo', 'Unmeasured'));
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = NULL
+        \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Unknown');
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = 6
+        \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Surround');
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+        \\    SELECT preferred_file_id, x'01', -14.0 FROM tracks WHERE title IN ('Stereo', 'Unknown', 'Surround');
+    );
+    const manual = try library.playlists.create("Manual");
+    _ = try library.playlists.insert(manual, &.{ stereo, unknown, surround, unmeasured }, null);
+
+    const formats = try library.playlists.formats(std.testing.allocator, manual, .{ .now = 0, .seed = 0 });
+    defer formats.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), formats.analyzed);
+    try std.testing.expectEqual(@as(u64, 3), formats.unanalyzed);
+}
+
 test "a smart playlist lists one Track per matching recording in its rules' order up to its limit and refuses entry edits" {
     var library = try openFeedbackLibrary("playlist-smart");
     defer library.close();

@@ -337,7 +337,8 @@ The tables by purpose; keys are those that carry identity or a contract.
   has the read location still recording the identity read.
 - `file_loudness`: integrated loudness of the default `orca.audio-diagnostics`
   result, kept by triggers on `analysis_results` and counted only while its
-  `source_identity` equals the file's content hash.
+  `source_identity` equals the file's content hash and the file records at most
+  two channels.
 - `library_health_issues`: issues keyed by file and kind. `related_file_id` is
   the other file of a duplicate and `similarity` the fingerprint score behind a
   `likely_duplicate`. `health_dismissals` `(file_id, kind)` stores the

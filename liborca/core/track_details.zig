@@ -71,7 +71,8 @@ pub const TrackDetails = struct {
     /// Whether the Track has no location that is not missing.
     file_missing: bool,
     /// Null when the file has not been measured, or was measured under other
-    /// parameters, an older algorithm, or bytes it no longer has.
+    /// parameters, an older algorithm, or bytes it no longer has, or records
+    /// more than two channels or no channel count.
     loudness: ?Loudness,
     has_artwork: bool,
     /// The Track's total on its disc: a total one of its files states, else
@@ -276,6 +277,8 @@ fn storedLoudness(
     file: database.repository.TrackFileFacts,
 ) !?Loudness {
     const identity = file.content_hash orelse return null;
+    const channels = file.channels orelse return null;
+    if (channels > codec.decoder.max_supported_channels) return null;
     var header: [analysis.encoding.header_size]u8 = undefined;
     const stored = (try library.analysis_cache.resultInto(
         analysis.service.diagnosticsKey(file.file_id, identity, .{}),

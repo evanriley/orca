@@ -74,6 +74,12 @@ re-selects the file, and there is no force mode. `analysis_results` is
 `repository.unanalyzed_predicate` is the one definition shared by the page
 query and the count that gives the job its denominator.
 
+A stored loudness counts as a measurement only for a file recorded with at most
+two channels (`measurableChannels` in `database/repository/analysis.zig`). A
+file recorded with more than two channels, or with no channel count, has no
+loudness in Track listings, the loudness sort, Track details or a playlist's
+analyzed count, whatever is stored for it.
+
 ### Outcomes
 
 A batch commits in one bounded transaction.

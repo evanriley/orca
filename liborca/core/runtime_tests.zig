@@ -601,6 +601,64 @@ test "details carry the loudness stored for the file's recorded bytes and no oth
     try std.testing.expect(stale.loudness == null);
 }
 
+test "details and listings show no loudness for a file with no channel count or more than two channels" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scanFixtureLibrary(&runtime, "file:orca-track-details-loudness-channels?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+
+    const scanned = try scannedFixtureDetails(&runtime, library, "covered-reference.flac");
+    defer scanned.deinit();
+    const analysis = @import("../analysis/root.zig");
+    const result: analysis.diagnostics.Result = .{
+        .allocator = std.testing.allocator,
+        .integrated_lufs = -9.1,
+        .replay_gain_db = -8.9,
+        .sample_peak = 0.966,
+        .rms = 0.1,
+        .clipped_runs = 0,
+        .clipped_samples = 0,
+        .silent_frames = 0,
+        .leading_silence_frames = 0,
+        .trailing_silence_frames = 0,
+        .waveform = &.{},
+    };
+    const encoded = try analysis.encoding.encode(std.testing.allocator, result);
+    defer std.testing.allocator.free(encoded);
+    const facts = (try library_database.tracks.fileFacts(std.testing.allocator, scanned.track_id)).?;
+    defer facts.deinit();
+    try library_database.analysis_cache.put(
+        analysis_service.diagnosticsKey(facts.file_id, try recordContentHash(library_database, facts), .{}),
+        encoded,
+    );
+
+    const Case = struct { channels: ?i64, measured: bool };
+    for ([_]Case{
+        .{ .channels = 2, .measured = true },
+        .{ .channels = null, .measured = false },
+        .{ .channels = 6, .measured = false },
+        .{ .channels = 1, .measured = true },
+    }) |case| {
+        var statement = try library_database.database.prepare("UPDATE files SET channels = ?1 WHERE id = ?2;");
+        defer statement.deinit();
+        try statement.bindOptionalInt64(1, case.channels);
+        try statement.bindInt64(2, facts.file_id);
+        if (try statement.step() != .done) return error.TestUnexpectedResult;
+
+        const details = (try runtime.libraryTrackDetails(library, scanned.track_id)).?;
+        defer details.deinit();
+        try std.testing.expectEqual(case.measured, details.loudness != null);
+        var page = try runtime.libraryTrackQuery(library, "", .{ .limit = database.repository.max_page });
+        defer page.deinit();
+        var listed = false;
+        for (page.items) |item| if (item.id == scanned.track_id) {
+            listed = true;
+            try std.testing.expectEqual(case.measured, item.integrated_lufs != null);
+        };
+        try std.testing.expect(listed);
+    }
+}
+
 test "runtime can repeatedly start and stop without leaking" {
     for (0..100) |_| {
         var runtime = OrcaRuntime.init(std.testing.allocator);

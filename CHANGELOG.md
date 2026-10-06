@@ -167,6 +167,11 @@
   Up Next entry whose Track left the Library, and no menu for such an entry
   in History or as the playing row. Play Next, Play Later, Love and the album
   and artist links are gone from it, and Shift+Return and L do nothing on it.
+- A Track whose file is recorded with more than two channels, or with no
+  channel count, shows no loudness even when results are stored for it: the
+  loudness column is empty, the loudness sort places it with the unmeasured
+  Tracks, the Track details carry no loudness, and a playlist's formats count
+  it as not analyzed.
 
 ## 0.1.0 - 2026-10-06
 
