@@ -1,9 +1,8 @@
 const std = @import("std");
-const ulid = @import("volume_id.zig");
 
-/// The portable volume adapter: it knows nothing about mount tables, so it can
-/// only report an identifier a previous run persisted next to the path. A
-/// caller that gets `null` falls back to `root:<library_roots.id>`.
+/// The portable volume adapter: it knows nothing about mount tables, so it
+/// names no volume. A caller that gets `null` falls back to
+/// `root:<library_roots.id>`.
 ///
 /// Platforms grow a real adapter by resolving their own volume identity here —
 /// `DADiskCopyDescription` on macOS, `GetVolumeInformation` on Windows — and
@@ -19,9 +18,7 @@ pub const Resolution = struct {
     }
 };
 
-pub const Options = struct {
-    allow_persist: bool = true,
-};
+pub const Options = struct {};
 
 pub fn stableKey(
     allocator: std.mem.Allocator,
@@ -43,5 +40,4 @@ test "the portable adapter reports no volume identity of its own" {
         "/music",
         .{},
     )) == null);
-    _ = ulid.text_length;
 }

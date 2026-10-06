@@ -124,7 +124,7 @@ pub fn libraryAddRoot(
 ) !database.RootBinding {
     try runtime.requireRunning(self);
     const library_database = try runtime.libraryDatabase(self, library);
-    const binding = try library_database.ensureRoot(io, path, .{ .allow_persist = true });
+    const binding = try library_database.ensureRoot(io, path, .{});
     runtime_watch.rootAdded(self, library, binding, path);
     return binding;
 }
@@ -174,7 +174,7 @@ pub fn libraryRelocateRoot(
     if (runtime_jobs.libraryJobRunning(self, library)) return error.LibraryJobRunning;
     var walk_lock = try runtime_jobs.claimWalk(self, library, library_database, .reconcile);
     errdefer runtime_jobs.releaseWalk(self, &walk_lock);
-    const binding = try library_database.relocateRoot(io, root_id, path, .{ .allow_persist = true });
+    const binding = try library_database.relocateRoot(io, root_id, path, .{});
     runtime_watch.rootRemoved(self, library, root_id);
     runtime_watch.rootAdded(self, library, binding, path);
     return runtime_jobs.startClaimedReconcile(self, library, .{ .root_id = root_id, .scope = .whole_root }, &walk_lock);

@@ -166,9 +166,10 @@ while a missing copy that returns with other bytes splits off.
 ### Volumes, locations and roots
 
 A volume has a `stable_key` the platform adapter resolves
-(`platform/volume_*.zig`): a filesystem UUID, else an identifier persisted at
-the mount root, else `root:<library_roots.id>`. `st_dev` is not stable across
-reboots and is kept only as the hint `locations.native_device`.
+(`platform/volume_*.zig`): a filesystem UUID, else the identifier in an existing
+`.orca-volume-id` at the mount root, else `root:<library_roots.id>`. Orca never
+creates that file. `st_dev` is not stable across reboots and is kept only as the
+hint `locations.native_device`.
 `locations.state` is `present`, `missing` or `unverified`. A completed,
 uncancelled scan marks unreached locations `missing`; nothing deletes a location
 implicitly, because an unmounted drive must not empty a library. A root's path

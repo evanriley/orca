@@ -1,8 +1,10 @@
 const std = @import("std");
-const ulid = @import("volume_id.zig");
 
-/// The file a volume's generated identifier is persisted in, at the mount root.
+/// The file at a mount root that names a volume with no filesystem UUID. Orca
+/// reads it and never writes it.
 pub const marker_name = ".orca-volume-id";
+
+const marker_id_length = 26;
 
 /// Where a volume's stable key came from. A caller that gets `null` back has to
 /// fall back to `root:<library_roots.id>`, which is stable for as long as the
@@ -18,15 +20,15 @@ pub const Resolution = struct {
     }
 };
 
+/// Where the host's mount table and filesystem UUIDs are read from.
 pub const Options = struct {
-    /// Whether a mount root with no filesystem UUID may have an identifier
-    /// written into it. Read-only media, foreign permissions and test runs all
-    /// want this off; an explicit user action adding a library root wants it on.
-    allow_persist: bool = true,
+    mount_table_path: []const u8 = "/proc/self/mountinfo",
+    uuid_directory_path: []const u8 = "/dev/disk/by-uuid",
 };
 
 /// Resolve a volume key for `path`: the filesystem UUID of the mount it lives
-/// on, else an identifier persisted at that mount's root, else null.
+/// on, else the identifier in a marker at that mount's root, else null. It
+/// writes nothing.
 ///
 /// `st_dev` is deliberately not a candidate. It is a kernel-local handle that
 /// changes across reboots and remounts, so a library keyed by it would forget
@@ -37,19 +39,19 @@ pub fn stableKey(
     path: []const u8,
     options: Options,
 ) !?Resolution {
-    const mount = (try mountFor(allocator, io, path)) orelse return null;
+    const mount = (try mountFor(allocator, io, path, options.mount_table_path)) orelse return null;
     defer mount.deinit(allocator);
 
-    if (try uuidForSource(allocator, io, mount.source)) |uuid| {
+    if (try uuidForSource(allocator, io, mount.source, options.uuid_directory_path)) |uuid| {
         errdefer allocator.free(uuid);
         const key = try std.fmt.allocPrint(allocator, "uuid:{s}", .{uuid});
         allocator.free(uuid);
         return .{ .key = key, .source = .filesystem_uuid };
     }
-    const persisted = (try persistedId(allocator, io, mount.point, options)) orelse return null;
-    defer allocator.free(persisted);
+    const marker = (try markerId(allocator, io, mount.point)) orelse return null;
+    defer allocator.free(marker);
     return .{
-        .key = try std.fmt.allocPrint(allocator, "ulid:{s}", .{persisted}),
+        .key = try std.fmt.allocPrint(allocator, "ulid:{s}", .{marker}),
         .source = .persisted_id,
     };
 }
@@ -65,12 +67,17 @@ pub const Mount = struct {
 };
 
 /// The mount whose mount point is the longest prefix of `path`.
-pub fn mountFor(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?Mount {
+pub fn mountFor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    mount_table_path: []const u8,
+) !?Mount {
     const absolute = try absolutePath(allocator, io, path);
     defer allocator.free(absolute);
     const buffer = try allocator.alloc(u8, 256 * 1024);
     defer allocator.free(buffer);
-    const contents = std.Io.Dir.cwd().readFile(io, "/proc/self/mountinfo", buffer) catch
+    const contents = std.Io.Dir.cwd().readFile(io, mount_table_path, buffer) catch
         return null;
     const found = findMount(contents, absolute) orelse return null;
     const point = try allocator.dupe(u8, found.point);
@@ -123,14 +130,19 @@ fn covers(mount_point: []const u8, path: []const u8) bool {
 /// filesystem UUID by way of the `/dev/disk/by-uuid` symlink farm. Comparing
 /// link targets keeps this to string work: no device may be opened just to
 /// identify a volume.
-fn uuidForSource(allocator: std.mem.Allocator, io: std.Io, source: []const u8) !?[]u8 {
+fn uuidForSource(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    source: []const u8,
+    uuid_directory_path: []const u8,
+) !?[]u8 {
     if (!std.mem.startsWith(u8, source, "/dev/")) return null;
     var source_link_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const device = if (std.Io.Dir.cwd().readLink(io, source, &source_link_buffer)) |length|
         std.fs.path.basename(source_link_buffer[0..length])
     else |_|
         std.fs.path.basename(source);
-    var directory = std.Io.Dir.cwd().openDir(io, "/dev/disk/by-uuid", .{ .iterate = true }) catch
+    var directory = std.Io.Dir.cwd().openDir(io, uuid_directory_path, .{ .iterate = true }) catch
         return null;
     defer directory.close(io);
     var iterator = directory.iterate();
@@ -143,24 +155,15 @@ fn uuidForSource(allocator: std.mem.Allocator, io: std.Io, source: []const u8) !
     return null;
 }
 
-/// Read, or with permission create, the identifier file at a mount root.
-pub fn persistedId(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    mount_point: []const u8,
-    options: Options,
-) !?[]u8 {
+/// The identifier in the marker at a mount root, if a well-formed one is there.
+fn markerId(allocator: std.mem.Allocator, io: std.Io, mount_point: []const u8) !?[]u8 {
     var directory = std.Io.Dir.cwd().openDir(io, mount_point, .{}) catch return null;
     defer directory.close(io);
-    var buffer: [ulid.text_length]u8 = undefined;
-    if (directory.readFile(io, marker_name, &buffer)) |contents| {
-        const trimmed = std.mem.trim(u8, contents, " \t\r\n");
-        if (trimmed.len == ulid.text_length) return try allocator.dupe(u8, trimmed);
-    } else |_| {}
-    if (!options.allow_persist) return null;
-    const generated = ulid.generate(io);
-    directory.writeFile(io, .{ .sub_path = marker_name, .data = &generated }) catch return null;
-    return try allocator.dupe(u8, &generated);
+    var buffer: [marker_id_length]u8 = undefined;
+    const contents = directory.readFile(io, marker_name, &buffer) catch return null;
+    const trimmed = std.mem.trim(u8, contents, " \t\r\n");
+    if (trimmed.len != marker_id_length) return null;
+    return try allocator.dupe(u8, trimmed);
 }
 
 fn absolutePath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
@@ -190,37 +193,102 @@ test "the covering mount is the longest matching mount point" {
     try std.testing.expectEqualStrings("/", sibling.point);
 }
 
-test "a persisted volume identifier is created once and read back afterwards" {
+/// A stand-in for the host's mount table and `/dev/disk/by-uuid`, inside a
+/// test's temporary directory: `/` is a filesystem with a UUID, and
+/// `<root>/share` is a mount with none while `setShareMounted` says so.
+pub const TestHost = struct {
+    allocator: std.mem.Allocator,
+    root: []u8,
+    mount_table_path: []u8,
+    uuid_directory_path: []u8,
+
+    pub const parent_uuid = "0000-PARENT";
+
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, directory: std.Io.Dir) !TestHost {
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root = try allocator.dupe(u8, buffer[0..try directory.realPath(io, &buffer)]);
+        errdefer allocator.free(root);
+        const mount_table_path = try std.fs.path.join(allocator, &.{ root, "mountinfo" });
+        errdefer allocator.free(mount_table_path);
+        const uuid_directory_path = try std.fs.path.join(allocator, &.{ root, "by-uuid" });
+        errdefer allocator.free(uuid_directory_path);
+        try directory.createDirPath(io, "share/music");
+        try directory.createDirPath(io, "by-uuid");
+        try directory.symLink(io, "../../orca-test-disk", "by-uuid/" ++ parent_uuid, .{});
+        const host: TestHost = .{
+            .allocator = allocator,
+            .root = root,
+            .mount_table_path = mount_table_path,
+            .uuid_directory_path = uuid_directory_path,
+        };
+        try host.setShareMounted(io, true);
+        return host;
+    }
+
+    pub fn deinit(self: TestHost) void {
+        self.allocator.free(self.root);
+        self.allocator.free(self.mount_table_path);
+        self.allocator.free(self.uuid_directory_path);
+    }
+
+    pub fn options(self: *const TestHost) Options {
+        return .{ .mount_table_path = self.mount_table_path, .uuid_directory_path = self.uuid_directory_path };
+    }
+
+    pub fn setShareMounted(self: *const TestHost, io: std.Io, mounted: bool) !void {
+        const parent = "27 1 259:2 / / rw,relatime - ext4 /dev/orca-test-disk rw\n";
+        const contents = if (mounted)
+            try std.fmt.allocPrint(self.allocator, parent ++ "50 27 0:50 / {s}/share rw - nfs4 server:/export rw\n", .{self.root})
+        else
+            try self.allocator.dupe(u8, parent);
+        defer self.allocator.free(contents);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = self.mount_table_path, .data = contents });
+    }
+
+    pub fn path(self: *const TestHost, relative: []const u8) ![]u8 {
+        return std.fs.path.join(self.allocator, &.{ self.root, relative });
+    }
+};
+
+test "a mount with no filesystem UUID names no volume and is given no marker" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    const root = try std.fmt.allocPrint(
-        std.testing.allocator,
-        ".zig-cache/tmp/{s}",
-        .{temporary.sub_path},
-    );
-    defer std.testing.allocator.free(root);
+    const host = try TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
 
-    const first = (try persistedId(std.testing.allocator, std.testing.io, root, .{})).?;
-    defer std.testing.allocator.free(first);
-    try std.testing.expectEqual(ulid.text_length, first.len);
-    const second = (try persistedId(std.testing.allocator, std.testing.io, root, .{})).?;
-    defer std.testing.allocator.free(second);
-    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect((try stableKey(std.testing.allocator, std.testing.io, music, host.options())) == null);
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access(std.testing.io, "share/" ++ marker_name, .{}));
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access(std.testing.io, "share/music/" ++ marker_name, .{}));
 }
 
-test "a read-only volume yields no identifier rather than a written one" {
+test "a marker already at a mount with no filesystem UUID names its volume" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    const root = try std.fmt.allocPrint(
-        std.testing.allocator,
-        ".zig-cache/tmp/{s}",
-        .{temporary.sub_path},
-    );
-    defer std.testing.allocator.free(root);
-    try std.testing.expect((try persistedId(
-        std.testing.allocator,
-        std.testing.io,
-        root,
-        .{ .allow_persist = false },
-    )) == null);
+    const host = try TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "share/" ++ marker_name, .data = "01K6Z9V0000000000000000000\n" });
+
+    const resolution = (try stableKey(std.testing.allocator, std.testing.io, music, host.options())).?;
+    defer resolution.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("ulid:01K6Z9V0000000000000000000", resolution.key);
+    try std.testing.expectEqual(Source.persisted_id, resolution.source);
+}
+
+test "a path left on the parent filesystem once a share is unmounted resolves to the parent's UUID" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const host = try TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    try host.setShareMounted(std.testing.io, false);
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
+
+    const resolution = (try stableKey(std.testing.allocator, std.testing.io, music, host.options())).?;
+    defer resolution.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("uuid:" ++ TestHost.parent_uuid, resolution.key);
+    try std.testing.expectEqual(Source.filesystem_uuid, resolution.source);
 }

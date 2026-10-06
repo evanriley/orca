@@ -37,7 +37,7 @@ names each `Runtime` method the C ABI does not reach and why.
   are skipped by path and storage identity; commits are bounded and
   cancellable.
 - File and Location identity keyed by stable volume identifiers (filesystem
-  UUID, including device-mapper volumes, or a persisted volume marker).
+  UUID, including device-mapper volumes, or an existing volume marker).
 - Projection into artists, releases, recordings and tracks, with bounded
   browse pages by artist, release, track and genre. Releases filter by
   format, review state, year, artwork and type, and Tracks by year, format,
@@ -362,8 +362,6 @@ removed.
 Fixed before 1.0. Each fix adds a test that fails without it, or a headless
 screenshot for a display-only defect, and removes its entry.
 
-- On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
-  root writes `.orca-volume-id` at the mount point.
 - Matching has no offline setting, and `orca-gtk` has none for scrobbling.
   Without a network, matching uses cached answers and stops at the first
   Track it has none for.

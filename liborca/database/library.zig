@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const content_hash = @import("../storage/content_hash.zig");
 const content_measurements = @import("content_measurements.zig");
 const ContentMeasurements = content_measurements.ContentMeasurements;
@@ -17,9 +18,8 @@ pub const VolumeOptions = struct {
     /// volume use this; nothing else should.
     stable_key: ?[]const u8 = null,
     label: []const u8 = "",
-    /// Whether a volume with no filesystem UUID may have an identifier written
-    /// to its mount root. Off unless a user explicitly added this root.
-    allow_persist: bool = false,
+    /// Where the platform adapter reads the host's volumes from.
+    platform_options: platform.volume.Options = .{},
     /// Whether to consult the platform adapter at all. Off exercises the
     /// root-derived fallback on a host whose storage is perfectly
     /// identifiable.
@@ -243,7 +243,7 @@ pub const LibraryDatabase = struct {
             self.allocator,
             io,
             path,
-            .{ .allow_persist = options.allow_persist },
+            options.platform_options,
         ) catch null;
         if (resolved) |resolution| {
             defer resolution.deinit(self.allocator);
@@ -268,8 +268,8 @@ pub const LibraryDatabase = struct {
 
     /// Register a Library root and the volume it lives on.
     ///
-    /// When the platform can name the volume — a filesystem UUID, or an
-    /// identifier persisted at the mount root — the root is bound to that
+    /// When the platform can name the volume — a filesystem UUID, or the
+    /// identifier in a marker at the mount root — the root is bound to that
     /// volume. When it cannot, the root itself becomes the identity
     /// (`root:<library_roots.id>`): weaker, because it cannot recognize the
     /// same storage arriving under a different path, but stable for as long as
@@ -364,7 +364,7 @@ pub const LibraryDatabase = struct {
             null;
         defer if (lock) |*held| held.release(io);
         const resolved = if (options.stable_key == null and options.use_platform_adapter)
-            platform.volume.stableKey(self.allocator, io, path, .{ .allow_persist = options.allow_persist }) catch null
+            platform.volume.stableKey(self.allocator, io, path, options.platform_options) catch null
         else
             null;
         defer if (resolved) |resolution| resolution.deinit(self.allocator);
@@ -1895,6 +1895,66 @@ test "a root on unidentifiable storage becomes its own volume identity" {
     try std.testing.expectEqual(@as(usize, 2), roots.items.len);
     try std.testing.expectEqualStrings("/music/unidentified", roots.items[0].path);
     try std.testing.expect(roots.items[0].enabled);
+}
+
+fn expectRootKey(library: *LibraryDatabase, binding: RootBinding) !void {
+    const key = (try library.volumes.stableKey(std.testing.allocator, binding.volume_id)).?;
+    defer std.testing.allocator.free(key);
+    var expected: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "root:{d}", .{binding.root_id}), key);
+}
+
+fn expectNoVolumeMarker(directory: std.Io.Dir) !void {
+    for ([_][]const u8{ ".orca-volume-id", "share/.orca-volume-id", "share/music/.orca-volume-id" }) |marker| {
+        try std.testing.expectError(error.FileNotFound, directory.access(std.testing.io, marker, .{}));
+    }
+}
+
+test "adding a root on a mount with no filesystem UUID binds it to the root and writes no marker" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const host = try platform.volume.TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-uuidless-root?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const options: VolumeOptions = .{ .platform_options = host.options() };
+
+    const first = try library.ensureRoot(std.testing.io, music, options);
+    try expectRootKey(&library, first);
+    try expectNoVolumeMarker(temporary.dir);
+    const second = try library.ensureRoot(std.testing.io, music, options);
+    try std.testing.expectEqual(first.root_id, second.root_id);
+    try std.testing.expectEqual(first.volume_id, second.volume_id);
+    try expectNoVolumeMarker(temporary.dir);
+}
+
+test "relocating a root onto a mount with no filesystem UUID binds it to the root and writes no marker" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const host = try platform.volume.TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-relocate-uuidless?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const root = try library.ensureRoot(std.testing.io, "/music/moved-away", .{ .stable_key = "uuid:old-drive" });
+
+    const relocated = try library.relocateRoot(std.testing.io, root.root_id, music, .{ .platform_options = host.options() });
+    try std.testing.expectEqual(root.root_id, relocated.root_id);
+    try expectRootKey(&library, relocated);
+    try expectNoVolumeMarker(temporary.dir);
 }
 
 test "scan runs take a fresh generation per root and record how they ended" {

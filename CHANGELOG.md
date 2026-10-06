@@ -218,6 +218,11 @@
   again once the refusal expires, the release ID changes or its Release is
   re-identified. A lookup that failed with an outage or timeout is still
   retried on the next run.
+- Adding or relocating a root on a mount with no filesystem UUID, such as NFS,
+  SMB or tmpfs, no longer writes `.orca-volume-id` at the mount point. The root
+  binds to its own `root:<id>` volume. A root bound to an existing marker keeps
+  its volume; once the marker is gone, relocating the root to its own path
+  rebinds it to `root:<id>`.
 
 ## 0.1.0 - 2026-10-06
 

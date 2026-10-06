@@ -161,17 +161,32 @@ file has no lock file and coordinates walks only within its runtime.
 An unmounted drive leaves its mount point as an empty directory, so a walk would
 find nothing and its sweep would mark every file `missing`. Before every scan or
 reconcile of a root, host-started or automatic, the Job resolves the volume the
-root's path lies on as `ensureRoot` does (with `allow_persist` off, so nothing
-is written) and compares it with the volume the root is bound to
-(`library/volume_check.zig`).
+root's path lies on as `ensureRoot` does and compares it with the volume the
+root is bound to (`library/volume_check.zig`).
 
-- A root bound to a filesystem UUID (`uuid:`) or a persisted marker (`ulid:`,
-  from `.orca-volume-id` at the mount root) passes only when its path resolves
-  to the same key.
+- A root bound to a filesystem UUID (`uuid:`) or a volume marker (`ulid:`, from
+  an existing `.orca-volume-id` at the mount root) passes only when its path
+  resolves to the same key.
 - A root bound to `root:<id>`, because the platform named no volume, passes
-  while the platform still names none. Such a root on an unmounted drive whose
-  parent filesystem has no UUID either is not caught.
+  while the platform still names none. An unmounted share or tmpfs is caught
+  when its mount point lies on a filesystem with a UUID, since the path then
+  resolves to that filesystem. Such a root on an unmounted drive whose parent
+  filesystem has no UUID either is not caught.
 - A root on the fallback volume (`volumes.id` 1) always passes.
+
+Orca reads `.orca-volume-id` but never writes it. A root on a mount with no
+filesystem UUID and no marker, such as NFS, SMB or tmpfs, binds to `root:<id>`.
+The limits of that binding:
+
+- each such root is a volume of its own, so two roots on one share do not
+  share storage identity, and a file moved between them is recognised only by
+  its content hash;
+- a different share mounted at the root's path passes the volume check;
+- a root bound to a marker (`ulid:`) whose marker is gone fails the volume check
+  until it is relocated to its own path, which rebinds it to `root:<id>`:
+  `orca-cli relocate-root DATABASE ID PATH` with the root's current path, or
+  Locate Folder… on orca-gtk's "Music folder unavailable" banner, choosing the
+  same folder.
 
 A root that fails is neither walked nor swept: the Job counts one error, ends
 `failed`, sets `ScanStats.volume_changed` and marks nothing `missing`; other
@@ -179,7 +194,9 @@ roots of the scan are still walked. `libraryAddRoot` is the one path that
 rebinds an existing root to the volume its path is on, which accepts a
 replacement drive at the same path. `orca-cli scan DATABASE ROOT` scans a
 registered root without adding it and fails when the check fails; `orca-cli
-add-root DATABASE ROOT` rebinds it.
+add-root DATABASE ROOT` rebinds it. When the platform names no volume for the
+path, `libraryAddRoot` keeps the root's binding, so a share unmounted from a
+mount point with no filesystem UUID is not rebound to the empty directory.
 
 ## Unavailable and relocated roots
 
@@ -276,8 +293,9 @@ directory recursively. One that recorded or marked missing a file publishes
 
 1. The watcher thread touches only its own state, its descriptors, the queues to
    the control lane, the host signal, and the directories, mount table and
-   volume markers it reads. It never touches a database, a handle pool or the
-   work registry; the control lane hands it each root's recorded volume key.
+   existing volume markers it reads. It never touches a database, a handle pool
+   or the work registry; the control lane hands it each root's recorded volume
+   key.
 2. Hints are advisory. Only the scanner, run by the reconcile Job, writes files
    and locations.
 3. A Library runs at most one automatic reconcile, never while a scan,
