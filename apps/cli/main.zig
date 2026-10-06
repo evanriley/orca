@@ -125,6 +125,7 @@ fn describe(err: anyerror) []const u8 {
         error.LettersAndTotals => "give either --letters or --totals, not both",
         error.AsyncListingOnly => "--async lists a page and its count; give it no --letters or --totals",
         error.UnknownFile => "no file with that id",
+        error.UnsupportedChannelCount => "the file has more than two channels; Orca plays and analyses mono and stereo only until multichannel support lands",
         error.UnknownJobKind => "--start takes scan, analysis, duplicates, backfill, project or consistency",
         error.UnknownIssueCategory => "--category takes album_artist, dates, track_numbering, genre_variants or musicbrainz_differs",
         error.IssueNotFound => "no metadata issue with that group id; list them with issues DATABASE",

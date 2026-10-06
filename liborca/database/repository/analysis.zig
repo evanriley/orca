@@ -3,6 +3,8 @@ const sqlite = @import("../sqlite.zig");
 const quick_hash = @import("../../storage/quick_hash.zig");
 const content_hash = @import("../../storage/content_hash.zig");
 const digestColumn = @import("../columns.zig").digestColumn;
+const max_supported_channels = @import("../../codec/decoder.zig").max_supported_channels;
+const max_supported_channels_sql = std.fmt.comptimePrint("{d}", .{max_supported_channels});
 
 const StorageIdentityKey = @import("locations.zig").StorageIdentityKey;
 const WriteLane = @import("write_lane.zig").WriteLane;
@@ -51,6 +53,10 @@ pub const AnalysisSelectors = [2]AnalysisSelector;
 /// as a Library before content-hash keying filed them, never equals a content
 /// hash and is selected the same way.
 ///
+/// A file recorded with more than two channels that still holds any result is
+/// selected too, so the pass discards results stored before such files were
+/// refused.
+///
 /// The *playback* lookup is stricter, and deliberately asymmetric: it keys on
 /// the identity of the bytes it just opened, because adopting a correction for
 /// audio a file no longer contains is a wrong answer, while re-selecting a
@@ -72,6 +78,9 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.parameter_hash = ?10
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
+    \\OR (files.channels >
+++ max_supported_channels_sql ++
+    \\ AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id))
 ;
 
 /// One file that still owes an analysis, where to read it, and what the
@@ -224,7 +233,9 @@ pub const AnalysisCacheRepository = struct {
     }
 
     /// A member's result is keyed on `files.content_hash`, the identity the
-    /// Library recorded, as `unanalyzed_predicate` keys it. One statement over
+    /// Library recorded, as `unanalyzed_predicate` keys it. A member recorded
+    /// with more than two channels reads as unmeasured whatever is stored for
+    /// it, because playback and analysis refuse such files. One statement over
     /// `tracks_release` and the primary key of `analysis_results`, at most
     /// `max_release_members` rows, and nothing allocated.
     pub fn visitReleaseMembers(
@@ -249,6 +260,9 @@ pub const AnalysisCacheRepository = struct {
             \\    AND analysis_results.parameter_hash = ?6
             \\    AND analysis_results.source_identity = files.content_hash
             \\    AND files.content_hash_algorithm = 1
+            \\    AND (files.channels IS NULL OR files.channels <=
+        ++ max_supported_channels_sql ++
+            \\)
             \\WHERE entry.id = ?1 AND entry.release_id IS NOT NULL
             \\ORDER BY member.id
             \\LIMIT ?2;
@@ -268,6 +282,13 @@ pub const AnalysisCacheRepository = struct {
             });
         }
         return if (visited == 0) .no_release else .visited;
+    }
+
+    pub fn deleteFileLocked(self: *AnalysisCacheRepository, file_id: i64) !void {
+        var statement = try self.db.prepare("DELETE FROM analysis_results WHERE file_id = ?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 
     pub fn put(self: *AnalysisCacheRepository, key: AnalysisCacheKey, result: []const u8) !void {

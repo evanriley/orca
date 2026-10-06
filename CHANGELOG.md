@@ -32,6 +32,12 @@
   albums, and reads a release ID tag written in uppercase as the lowercase
   MusicBrainz ID. `ReleaseCandidate.confidence` is optional and
   `orca_release_match_view_v2` gains `candidate_unread`.
+- A file with more than two channels is refused for playback with
+  `UnsupportedChannelCount` before any output opens, including as the gapless
+  next entry, and is not measured by analysis, which raises `missing_analysis`
+  naming the channel count instead of storing a loudness from unweighted
+  surround channels. Results a Library already stored for such a file are
+  ignored for album gain and discarded by the next analysis pass.
 
 ## 0.1.0 - 2026-10-06
 

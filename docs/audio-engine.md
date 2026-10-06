@@ -448,6 +448,13 @@ opened, as a `PlaybackFailure`: its Track id and a reason (`file_missing`,
 is gone, so its files are not marked missing; `file_missing` means the root is
 there but the file is not.
 
+Playback takes mono and stereo sources only. `LoadedSource.open` refuses a
+decoder reporting more than two channels with `UnsupportedChannelCount` before
+any output opens, so the check covers every open: a played or loaded file, a
+queue cursor, the gapless next entry, a format switch and a seek. The reason is
+`unsupported_channels`. A refused next entry is an ordinary open failure: the
+entry before it plays to its end and the engine steps past the refused one.
+
 The failure lives in `Player.open_failure`, an `OpenFailureSlot` readable from
 any host thread. Three rules keep it from naming the wrong Track:
 

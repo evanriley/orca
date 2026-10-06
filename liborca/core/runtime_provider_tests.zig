@@ -779,9 +779,13 @@ test "a host reading status while it moves queue entries never pairs a Track wit
 }
 
 pub fn writeSilentWave(dir: std.Io.Dir, name: []const u8, frames: u32) !void {
-    const bytes = try std.testing.allocator.alloc(u8, 44 + frames * 2);
+    try writeSilentWaveChannels(dir, name, 1, frames);
+}
+
+pub fn writeSilentWaveChannels(dir: std.Io.Dir, name: []const u8, channels: u16, frames: u32) !void {
+    const bytes = try std.testing.allocator.alloc(u8, 44 + frames * 2 * channels);
     defer std.testing.allocator.free(bytes);
-    writeWaveHeader(bytes, 11_025, frames);
+    writeWaveHeader(bytes, 11_025, channels, frames);
     @memset(bytes[44..], 0);
     try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 }
@@ -2579,7 +2583,7 @@ pub fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
     const rate = 11_025;
     const frames = 15 * rate;
     var bytes: [44 + frames * 2]u8 = undefined;
-    writeWaveHeader(&bytes, rate, frames);
+    writeWaveHeader(&bytes, rate, 1, frames);
     for (0..frames) |frame| {
         const time = @as(f32, @floatFromInt(frame)) / rate;
         const wobble = frequency * (1 + 0.2 * @sin(2 * std.math.pi * 0.5 * time));
@@ -2589,21 +2593,22 @@ pub fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
     try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = &bytes });
 }
 
-/// A 16-bit mono PCM WAVE header for `frames` frames at `rate`, written over
-/// the first 44 of `bytes`.
-fn writeWaveHeader(bytes: []u8, rate: u32, frames: u32) void {
+/// A 16-bit PCM WAVE header for `frames` frames of `channels` at `rate`,
+/// written over the first 44 of `bytes`.
+fn writeWaveHeader(bytes: []u8, rate: u32, channels: u16, frames: u32) void {
+    const block_align = 2 * @as(u32, channels);
     @memcpy(bytes[0..4], "RIFF");
-    std.mem.writeInt(u32, bytes[4..8], 36 + frames * 2, .little);
+    std.mem.writeInt(u32, bytes[4..8], 36 + frames * block_align, .little);
     @memcpy(bytes[8..16], "WAVEfmt ");
     std.mem.writeInt(u32, bytes[16..20], 16, .little);
     std.mem.writeInt(u16, bytes[20..22], 1, .little);
-    std.mem.writeInt(u16, bytes[22..24], 1, .little);
+    std.mem.writeInt(u16, bytes[22..24], channels, .little);
     std.mem.writeInt(u32, bytes[24..28], rate, .little);
-    std.mem.writeInt(u32, bytes[28..32], rate * 2, .little);
-    std.mem.writeInt(u16, bytes[32..34], 2, .little);
+    std.mem.writeInt(u32, bytes[28..32], rate * block_align, .little);
+    std.mem.writeInt(u16, bytes[32..34], @intCast(block_align), .little);
     std.mem.writeInt(u16, bytes[34..36], 16, .little);
     @memcpy(bytes[36..40], "data");
-    std.mem.writeInt(u32, bytes[40..44], frames * 2, .little);
+    std.mem.writeInt(u32, bytes[40..44], frames * block_align, .little);
 }
 
 fn addAudioTrack(

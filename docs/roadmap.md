@@ -361,9 +361,6 @@ removed.
 - Gapless transitions inside one 256-frame block apply the successor's
   identity and position anchor at its first frame, not the block's. Checked
   by an engine test with a boundary mid-block.
-- More than two channels are refused for playback and loudness analysis with
-  a clear error until [full multichannel support](#later) lands. Checked by
-  playing and analysing a six-channel file.
 - Player lifecycle. `playerNext` and `playerPrevious` move the queue before
   opening the target, so a target that fails to open leaves now-playing on it
   while the previous entry keeps playing. A Zone whose stream stays active but
@@ -547,8 +544,9 @@ are sniffed or not recognized until then:
   default, since only that path can be bit-perfect.
 - Full multichannel support. Canonical PCM carries a channel count but no
   layout, so decode, loudness analysis (BS.1770 channel weights, LFE excluded),
-  DSP and PipeWire channel positions need one. Until then more than two
-  channels are refused (see [Before 1.0](#before-10)).
+  DSP and PipeWire channel positions need one. Until then playback and
+  loudness analysis refuse a file with more than two channels
+  (`UnsupportedChannelCount`).
 - Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files. A
   figure comes only from Orca's own analysis.
 - Exact album loudness from each file's block-energy distribution instead of

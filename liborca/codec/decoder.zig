@@ -61,7 +61,14 @@ pub const Decoder = struct {
         self.vtable.deinit(self.context);
         self.* = undefined;
     }
+
+    pub fn requireSupportedChannels(self: Decoder) error{UnsupportedChannelCount}!void {
+        if (self.format.channels == 0 or self.format.channels > max_supported_channels)
+            return error.UnsupportedChannelCount;
+    }
 };
+
+pub const max_supported_channels: u16 = 2;
 
 /// What a decoder tolerated so playback continues: the frames it yields are
 /// the file's, but the file is not what it declares.

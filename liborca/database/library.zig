@@ -1250,6 +1250,39 @@ test "analysis cache reuses exact identities and invalidates selectively" {
     try std.testing.expectEqualSlices(u8, "\x00cached\xff", version_one);
 }
 
+test "deleting a file's analysis removes every result it has and no other file's" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-analysis-delete-file?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const discarded = try library.files.create(.{ .size_bytes = 4096 });
+    const kept = try library.files.create(.{ .size_bytes = 4096 });
+    const key: repository.AnalysisCacheKey = .{
+        .file_id = discarded,
+        .kind = 1,
+        .algorithm_id = "orca.diagnostics",
+        .algorithm_version = 1,
+        .parameter_hash = @splat(7),
+        .source_identity = @splat(3),
+    };
+    var fingerprint = key;
+    fingerprint.kind = 2;
+    var other = key;
+    other.file_id = kept;
+    try library.analysis_cache.put(key, "diagnostics");
+    try library.analysis_cache.put(fingerprint, "fingerprint");
+    try library.analysis_cache.put(other, "kept");
+
+    try library.analysis_cache.deleteFileLocked(discarded);
+    try std.testing.expect((try library.analysis_cache.get(std.testing.allocator, key)) == null);
+    try std.testing.expect((try library.analysis_cache.get(std.testing.allocator, fingerprint)) == null);
+    const remaining = (try library.analysis_cache.get(std.testing.allocator, other)).?;
+    defer std.testing.allocator.free(remaining);
+    try std.testing.expectEqualStrings("kept", remaining);
+}
+
 test "reopening drives a nonterminal journal record out of staged state" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

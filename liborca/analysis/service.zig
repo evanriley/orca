@@ -147,7 +147,9 @@ pub const Service = struct {
     yield_between_chunks: bool = true,
 
     /// Analyze one file, caching against `file_id` and the content hash of
-    /// the file's bytes, which it reads whole before anything else.
+    /// the file's bytes, which it reads whole after opening the decoder.
+    /// The decoder opens first so a file with more than two channels is
+    /// refused even when a stored result for its bytes exists.
     ///
     /// Passing no `file_id` analyzes without touching the cache — the honest
     /// answer for a source the Library has no identity for yet. A stored
@@ -163,6 +165,9 @@ pub const Service = struct {
         var local = try storage.LocalFileSource.open(self.io, path);
         defer local.close();
         const initial_identity = local.readable().identity();
+        var decoder = try self.codecs.openDetected(self.allocator, local.readable());
+        defer decoder.deinit();
+        try decoder.requireSupportedChannels();
         const source_identity = content_hash.fromFileCancellable(self.io, local.file, local.stat.size, self) catch |err|
             return switch (err) {
                 error.UnexpectedEndOfFile => error.SourceChangedDuringAnalysis,
@@ -195,8 +200,6 @@ pub const Service = struct {
             if (cached_fingerprint) |result| result.deinit();
         }
 
-        var decoder = try self.codecs.openDetected(self.allocator, local.readable());
-        defer decoder.deinit();
         var analyzer = try diagnostics.Analyzer.init(
             self.allocator,
             decoder.format.sample_rate,

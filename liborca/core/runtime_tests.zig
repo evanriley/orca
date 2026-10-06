@@ -1997,6 +1997,104 @@ test "a Player reports the Track whose file has gone, until another entry opens"
     try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
 }
 
+test "playing a six-channel Track is refused before any output opens, and a mono Track then plays" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "six.wav", 6, 11_025);
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "mono.wav", 1, 11_025);
+    const six_path = try absoluteTestPath(".zig-cache/tmp/{s}/six.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(six_path);
+    const mono_path = try absoluteTestPath(".zig-cache/tmp/{s}/mono.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(mono_path);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-six-channels?mode=memory&cache=shared",
+        &.{ six_path, mono_path },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+
+    try std.testing.expectError(
+        error.UnsupportedChannelCount,
+        runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 0),
+    );
+    const failure = (try runtime.playerStatus(player)).last_failure.?;
+    try std.testing.expectEqual(fixtures.ids[0], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.unsupported_channels, failure.reason);
+    try std.testing.expectError(
+        error.UnsupportedChannelCount,
+        runtime.playerLoadFile(player, std.testing.io, six_path),
+    );
+    try std.testing.expectEqual(@as(usize, 0), backend.opens);
+
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 1);
+    try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerSnapshot(player)).position_frames > 0) break;
+    }
+    try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
+    try std.testing.expectEqual(@as(u16, 1), backend.liveStream().?.request.format.channels);
+}
+
+test "a six-channel Track next in the queue is refused at the gapless prime, and the stereo Track before it plays to its end" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const frames = 5_512;
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "stereo.wav", 2, frames);
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "six.wav", 6, frames);
+    const stereo_path = try absoluteTestPath(".zig-cache/tmp/{s}/stereo.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(stereo_path);
+    const six_path = try absoluteTestPath(".zig-cache/tmp/{s}/six.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(six_path);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-six-channels-next?mode=memory&cache=shared",
+        &.{ stereo_path, six_path },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 0);
+
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if (try runtime.playerDrained(player)) break;
+    }
+    try std.testing.expect(try runtime.playerDrained(player));
+    const stats = try runtime.playerQueueStats(player);
+    try std.testing.expectEqual(@as(u64, 0), stats.entries_started);
+    try std.testing.expectEqual(@as(u64, 0), stats.gapless_transitions);
+    try std.testing.expectEqual(@as(u64, 1), stats.open_failures);
+    try std.testing.expectEqual(@as(u64, 0), stats.decode_errors);
+    try std.testing.expectEqual(@as(u64, frames), (try runtime.playerSnapshot(player)).position_frames);
+    try std.testing.expectEqual(fixtures.ids[0], (try runtime.playerNowPlaying(player)).?.track_id);
+    const failure = (try runtime.playerStatus(player)).last_failure.?;
+    try std.testing.expectEqual(fixtures.ids[1], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.unsupported_channels, failure.reason);
+    try std.testing.expectEqual(@as(usize, 1), backend.opens);
+    try std.testing.expectEqual(@as(u16, 2), backend.liveStream().?.request.format.channels);
+}
+
 test "a Track under a root that has moved is reported as folder unavailable until the root is relocated" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();

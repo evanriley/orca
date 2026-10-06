@@ -78,6 +78,14 @@ pub fn missingAnalysis(integrated_lufs: ?f32) ?database.HealthIssueInput {
     };
 }
 
+pub fn unsupportedChannels() database.HealthIssueInput {
+    return .{
+        .kind = .missing_analysis,
+        .severity = .information,
+        .details = "more than two channels; multichannel loudness analysis is not supported yet",
+    };
+}
+
 fn missing(value: ?[]const u8) bool {
     return value == null or std.mem.trim(u8, value.?, " \t\r\n").len == 0;
 }
