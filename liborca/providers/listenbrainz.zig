@@ -686,6 +686,10 @@ fn writeListen(
     try json.write(identity.name);
     try json.objectField("submission_client_version");
     try json.write(identity.version);
+    try json.objectField("media_player");
+    try json.write(identity.name);
+    try json.objectField("media_player_version");
+    try json.write(identity.version);
     if (full) {
         if (event.duration_ms > 0) {
             try json.objectField("duration_ms");
@@ -1002,7 +1006,6 @@ test "one ready listen is sent as single with its identifiers and the host's cli
     try std.testing.expectEqualStrings("Token secret-token", fixture.transport.lastAuthorization());
     const body = fixture.transport.history.items[0].body;
     try std.testing.expect(std.mem.indexOf(u8, body, "listened_ms") == null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "media_player") == null);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -1018,6 +1021,8 @@ test "one ready listen is sent as single with its identifiers and the host's cli
     const info = metadata.get("additional_info").?.object;
     try std.testing.expectEqualStrings("Player", info.get("submission_client").?.string);
     try std.testing.expectEqualStrings("1.2.3", info.get("submission_client_version").?.string);
+    try std.testing.expectEqualStrings("Player", info.get("media_player").?.string);
+    try std.testing.expectEqualStrings("1.2.3", info.get("media_player_version").?.string);
     try std.testing.expectEqual(@as(i64, 180_000), info.get("duration_ms").?.integer);
     try std.testing.expectEqualStrings("rec-mbid", info.get("recording_mbid").?.string);
     try std.testing.expectEqualStrings("rel-mbid", info.get("release_mbid").?.string);
@@ -1782,6 +1787,7 @@ test "now playing is sent as playing_now with one track and no listened_at" {
     const info = metadata.get("additional_info").?.object;
     try std.testing.expectEqualStrings("rec-mbid", info.get("recording_mbid").?.string);
     try std.testing.expectEqualStrings("Orca", info.get("submission_client").?.string);
+    try std.testing.expectEqualStrings("Orca", info.get("media_player").?.string);
 }
 
 test "a 429 on now playing blocks every request and the update is not sent again" {

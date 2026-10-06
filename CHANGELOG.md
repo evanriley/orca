@@ -185,6 +185,9 @@
   resumes at the position already heard. It previously skipped the audio
   decoded ahead, which could drop the end of a track and its gapless
   transition.
+- Listens and now-playing updates sent to ListenBrainz name the media player
+  and its version (`media_player`, `media_player_version`), taken from the
+  client identity, as well as the submission client.
 
 ## 0.1.0 - 2026-10-06
 
