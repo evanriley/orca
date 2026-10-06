@@ -258,10 +258,14 @@ pub fn playerQueueJump(self: *OrcaRuntime, player: PlayerHandle, position: u32) 
     const engine = object_value.engine;
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
+    const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
+    const session = openQueueEntry(object_value, opener, position) catch |err| {
+        countOpenFailure(object_value);
+        return err;
+    };
     if (engine) |value| value.discardPending();
     endAudibleEntry(self, object_value, .skipped);
-    object_value.queue.seekTo(position);
-    try loadCursor(self, object_value);
+    loadOpenedEntry(self, object_value, session, position);
     object_value.player.play();
 }
 
@@ -355,13 +359,7 @@ pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
     const engine = object_value.engine;
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
-    if (engine) |value| value.discardPending();
-    const target = object_value.queue.nextPosition() orelse return false;
-    endAudibleEntry(self, object_value, .skipped);
-    object_value.queue.seekTo(target);
-    try loadCursor(self, object_value);
-    object_value.player.play();
-    return true;
+    return skipObject(self, object_value, .next);
 }
 
 pub fn playerPrevious(self: *OrcaRuntime, player: PlayerHandle) !bool {
@@ -389,14 +387,46 @@ fn previousObject(self: *OrcaRuntime, object_value: *PlayerObject) !bool {
             }
         }
     }
-    const target = object_value.queue.previousPosition() orelse {
+    if (object_value.queue.previousPosition() == null) {
         if (object_value.player.sources != null) _ = try object_value.player.seek(0);
         return false;
+    }
+    return skipObject(self, object_value, .previous);
+}
+
+const SkipDirection = enum { next, previous };
+
+fn stepPosition(queue: *const audio.playback_queue.PlaybackQueue, position: u32, direction: SkipDirection) ?u32 {
+    return switch (direction) {
+        .next => queue.nextPositionAfter(position),
+        .previous => queue.previousPositionBefore(position),
     };
-    if (engine) |value| value.discardPending();
+}
+
+/// The caller must have quiesced the engine. Nothing moves until an entry has
+/// opened, so a skip whose every candidate fails leaves the old entry playing.
+fn skipObject(self: *OrcaRuntime, object_value: *PlayerObject, direction: SkipDirection) !bool {
+    const queue = object_value.queue;
+    const cursor = queue.cursorPosition();
+    var candidate = stepPosition(queue, cursor, direction) orelse return false;
+    const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
+    var attempts: u32 = 0;
+    var stepped_over: ?struct { track_id: i64, err: anyerror } = null;
+    const session = while (true) {
+        if (openQueueEntry(object_value, opener, candidate)) |opened| break opened else |err| {
+            countOpenFailure(object_value);
+            attempts += 1;
+            if (attempts >= audio.engine.max_consecutive_open_failures) return err;
+            const following = stepPosition(queue, candidate, direction) orelse return err;
+            if (following == cursor) return err;
+            stepped_over = .{ .track_id = queue.refAt(candidate).?.track_id, .err = err };
+            candidate = following;
+        }
+    };
+    if (object_value.engine) |engine| engine.discardPending();
     endAudibleEntry(self, object_value, .skipped);
-    object_value.queue.seekTo(target);
-    try loadCursor(self, object_value);
+    loadOpenedEntry(self, object_value, session, candidate);
+    if (stepped_over) |failure| object_value.player.open_failure.record(failure.track_id, failure.err);
     object_value.player.play();
     return true;
 }
@@ -632,10 +662,20 @@ fn trackRefs(
 pub fn loadCursor(self: *OrcaRuntime, object_value: *PlayerObject) !void {
     const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
     const cursor = object_value.queue.cursorPosition();
-    const ref = object_value.queue.current() orelse {
+    if (object_value.queue.current() == null) {
         object_value.player.releaseSources();
         return;
-    };
+    }
+    const session = try openQueueEntry(object_value, opener, cursor);
+    loadOpenedEntry(self, object_value, session, cursor);
+}
+
+fn openQueueEntry(
+    object_value: *PlayerObject,
+    opener: *track_source.TrackSourceOpener,
+    position: u32,
+) !audio.source_session.SourceSession {
+    const ref = object_value.queue.refAt(position) orelse return error.PositionOutOfRange;
     var session = opener.openTrack(ref) catch |err| {
         object_value.player.open_failure.record(ref.track_id, err);
         return err;
@@ -646,9 +686,23 @@ pub fn loadCursor(self: *OrcaRuntime, object_value: *PlayerObject) !void {
         object_value.player.open_failure.record(ref.track_id, error.UnsupportedChannelCount);
         return error.UnsupportedChannelCount;
     }
-    session.replay_gain.shares_release = object_value.queue.sharesRelease(cursor, opener.opener());
-    audio.engine.loadQueueEntry(object_value.player, object_value.queue, session, cursor);
+    session.replay_gain.shares_release = object_value.queue.sharesRelease(position, opener.opener());
+    return session;
+}
+
+fn loadOpenedEntry(
+    self: *OrcaRuntime,
+    object_value: *PlayerObject,
+    session: audio.source_session.SourceSession,
+    position: u32,
+) void {
+    const ref = object_value.queue.refAt(position).?;
+    audio.engine.loadQueueEntry(object_value.player, object_value.queue, session, position);
     runtime_resume.resumeRemembered(self, object_value, ref);
+}
+
+fn countOpenFailure(object_value: *PlayerObject) void {
+    if (object_value.engine) |engine| engine.open_failures += 1;
 }
 
 /// Spawns the Player's single decode producer. Registered with

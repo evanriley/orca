@@ -2095,6 +2095,273 @@ test "a six-channel Track next in the queue is refused at the gapless prime, and
     try std.testing.expectEqual(@as(u16, 2), backend.liveStream().?.request.format.channels);
 }
 
+const skip_wave_frames = 4 * 11_025;
+
+const SkipQueue = struct {
+    library: LibraryHandle,
+    ids: [4]i64,
+    player: runtime_module.PlayerHandle,
+};
+
+fn startSkipQueue(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+    temporary: *std.testing.TmpDir,
+    uri: [:0]const u8,
+    channels: []const u16,
+    queue: []const usize,
+    start: u32,
+) !SkipQueue {
+    var paths: [4][]const u8 = undefined;
+    var written: usize = 0;
+    defer for (paths[0..written]) |path| std.testing.allocator.free(path);
+    for (channels, 0..) |count, index| {
+        const name = try skipWaveName(index);
+        try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, name.slice(), count, skip_wave_frames);
+        paths[index] = try absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name.slice() });
+        written += 1;
+    }
+    const fixtures = try openFixtureLibrary(runtime, uri, paths[0..written]);
+    var track_ids: [16]i64 = undefined;
+    for (queue, track_ids[0..queue.len]) |index, *id| id.* = fixtures.ids[index];
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, track_ids[0..queue.len], start);
+    try pumpUntilHeardPast(runtime, backend, player, 0);
+    return .{ .library = fixtures.library, .ids = fixtures.ids, .player = player };
+}
+
+const SkipWaveName = struct {
+    buffer: [16]u8,
+    len: usize,
+
+    fn slice(self: *const SkipWaveName) []const u8 {
+        return self.buffer[0..self.len];
+    }
+};
+
+fn skipWaveName(index: usize) !SkipWaveName {
+    var name: SkipWaveName = .{ .buffer = undefined, .len = 0 };
+    name.len = (try std.fmt.bufPrint(&name.buffer, "skip-{d}.wav", .{index})).len;
+    return name;
+}
+
+fn deleteSkipWave(temporary: *std.testing.TmpDir, index: usize) !void {
+    const name = try skipWaveName(index);
+    try temporary.dir.deleteFile(std.testing.io, name.slice());
+}
+
+fn pumpUntilHeardPast(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+    player: runtime_module.PlayerHandle,
+    frame: u64,
+) !void {
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerSnapshot(player)).position_frames > frame) return;
+    }
+    return error.PlayerNeverAdvanced;
+}
+
+fn expectSkipLeftPlaying(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+    player: runtime_module.PlayerHandle,
+    cursor: u32,
+    track_id: i64,
+    before: audio.player.Snapshot,
+) !void {
+    try std.testing.expectEqual(cursor, (try runtime.playerQueueSnapshot(player)).cursor);
+    try std.testing.expectEqual(track_id, (try runtime.playerNowPlaying(player)).?.track_id);
+    const after = try runtime.playerSnapshot(player);
+    try std.testing.expectEqual(before.epoch, after.epoch);
+    try std.testing.expectEqual(audio.player.TransportState.playing, after.state);
+    var entries: [4]QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try runtime.playerQueueHistory(player, 0, &entries));
+    try pumpUntilHeardPast(runtime, backend, player, after.position_frames);
+    try std.testing.expectEqual(track_id, (try runtime.playerNowPlaying(player)).?.track_id);
+}
+
+fn expectSkippedOnly(runtime: *OrcaRuntime, player: runtime_module.PlayerHandle, track_id: i64) !void {
+    var entries: [4]QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try runtime.playerQueueHistory(player, 0, &entries));
+    try std.testing.expectEqual(track_id, entries[0].track.track_id);
+    try std.testing.expectEqual(QueueHistoryReason.skipped, entries[0].reason);
+}
+
+test "next steps over an entry whose file has gone and plays the one after it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-next-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 1);
+    const epoch_before = (try runtime.playerSnapshot(fixture.player)).epoch;
+
+    try std.testing.expect(try runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u32, 2), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    const failure = (try runtime.playerStatus(fixture.player)).last_failure.?;
+    try std.testing.expectEqual(fixture.ids[1], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.file_missing, failure.reason);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[0]);
+    try std.testing.expect((try runtime.playerSnapshot(fixture.player)).epoch != epoch_before);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+    try pumpUntilHeardPast(&runtime, &backend, fixture.player, 0);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+}
+
+test "next with every later entry unopenable returns the open error and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-next-all-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 1);
+    try deleteSkipWave(&temporary, 2);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expectError(error.TrackFileMissing, runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 0, fixture.ids[0], before);
+}
+
+test "previous steps back over an entry whose file has gone and plays the one before it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-previous-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 2);
+    try deleteSkipWave(&temporary, 1);
+
+    try std.testing.expect(try runtime.playerPrevious(fixture.player));
+    try std.testing.expectEqual(@as(u32, 0), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try std.testing.expectEqual(fixture.ids[1], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[2]);
+    try std.testing.expectEqual(fixture.ids[0], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+    try pumpUntilHeardPast(&runtime, &backend, fixture.player, 0);
+    try std.testing.expectEqual(fixture.ids[0], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+}
+
+test "previous with every earlier entry unopenable returns the open error and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-previous-all-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 2);
+    try deleteSkipWave(&temporary, 0);
+    try deleteSkipWave(&temporary, 1);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expectError(error.TrackFileMissing, runtime.playerPrevious(fixture.player));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try std.testing.expectEqual(fixture.ids[0], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 2, fixture.ids[2], before);
+}
+
+test "next under repeat_all wraps over an unopenable entry and stops before reaching the playing one" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-repeat-all?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 2);
+    try runtime.playerSetRepeat(fixture.player, .all);
+    try deleteSkipWave(&temporary, 0);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expect(try runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u32, 1), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expect((try runtime.playerSnapshot(fixture.player)).epoch != before.epoch);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[2]);
+
+    try runtime.playerClearQueueHistory(fixture.player);
+    try deleteSkipWave(&temporary, 2);
+    const playing = try runtime.playerSnapshot(fixture.player);
+    if (runtime.playerNext(fixture.player)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqual(@as(u64, 3), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 1, fixture.ids[1], playing);
+}
+
+test "a queue jump to an entry whose file has gone returns the open error and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-jump-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 2);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expectError(error.TrackFileMissing, runtime.playerQueueJump(fixture.player, 2));
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 0, fixture.ids[0], before);
+}
+
+test "next steps over a six-channel entry like a missing file" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-six-channels?mode=memory&cache=shared", &.{ 2, 6, 2 }, &.{ 0, 1, 2 }, 0);
+
+    try std.testing.expect(try runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u32, 2), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    const failure = (try runtime.playerStatus(fixture.player)).last_failure.?;
+    try std.testing.expectEqual(fixture.ids[1], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.unsupported_channels, failure.reason);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[0]);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+    try pumpUntilHeardPast(&runtime, &backend, fixture.player, 0);
+}
+
+test "next gives up after eight consecutive unopenable entries and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-bounded?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 1);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    if (runtime.playerNext(fixture.player)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqual(
+        @as(u64, audio.engine.max_consecutive_open_failures),
+        (try runtime.playerQueueStats(fixture.player)).open_failures,
+    );
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 0, fixture.ids[0], before);
+}
 test "a Track under a root that has moved is reported as folder unavailable until the root is relocated" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();

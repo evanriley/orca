@@ -405,6 +405,16 @@ serial record to its entry's new position, and removing an entry forgets its
 record. `repeat_one` re-opens a fresh session for the same entry rather than
 seeking the one still draining into the pipe.
 
+`next`, `previous` and a queue jump open their target on the control lane,
+under the quiesce, before anything moves. Only an opened entry ends the audible
+one as `skipped` and is hard-loaded. `next` and `previous` step over an entry
+that fails to open, recording it as an open failure, for at most
+`max_consecutive_open_failures` (8) entries and never back onto the playing
+one. The last entry stepped over is recorded again after the hard load, whose
+own clear would otherwise erase it. When every candidate fails, the last open
+error is returned and the cursor, the loaded sources, the epoch and the history
+are untouched, so the playing entry keeps playing. A queue jump does not step.
+
 ### Moving entries
 
 Moving an entry happens under one `quiesce`, and everything keyed by position

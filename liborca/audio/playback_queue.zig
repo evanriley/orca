@@ -441,17 +441,23 @@ pub const PlaybackQueue = struct {
     /// does not apply: an explicit skip means "a different track", and only
     /// auto-advance repeats one.
     pub fn nextPosition(self: *const PlaybackQueue) ?u32 {
+        return self.nextPositionAfter(self.cursorPosition());
+    }
+
+    pub fn nextPositionAfter(self: *const PlaybackQueue, position: u32) ?u32 {
         if (self.entries.items.len == 0) return null;
-        const cursor = self.cursorPosition();
         const last: u32 = @intCast(self.entries.items.len - 1);
-        if (cursor < last) return cursor + 1;
+        if (position < last) return position + 1;
         return if (self.repeat == .all) 0 else null;
     }
 
     pub fn previousPosition(self: *const PlaybackQueue) ?u32 {
+        return self.previousPositionBefore(self.cursorPosition());
+    }
+
+    pub fn previousPositionBefore(self: *const PlaybackQueue, position: u32) ?u32 {
         if (self.entries.items.len == 0) return null;
-        const cursor = self.cursorPosition();
-        if (cursor > 0) return cursor - 1;
+        if (position > 0) return position - 1;
         return if (self.repeat == .all)
             @as(u32, @intCast(self.entries.items.len - 1))
         else

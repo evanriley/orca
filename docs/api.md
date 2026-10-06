@@ -504,6 +504,15 @@ in [cli.md](cli.md#playlists-and-ratings).
   opened after it is heard. A Track whose root is unavailable fails with
   `error.TrackFolderUnavailable` and marks nothing missing. See
   [audio-engine.md](audio-engine.md#playback-failures).
+- `playerNext` and `playerPrevious` open the target entry before moving the
+  queue. An entry that fails to open is counted in `QueueStats.open_failures`
+  and stepped over in the same direction, at most 8 entries and never onto the
+  playing one; repeat and shuffle order apply. The last entry stepped over
+  stays in `last_failure` after the skip lands. They
+  return false only at the end of a queue that does not repeat. When every
+  candidate fails they return the last open error, and the cursor, audio,
+  epoch, transport and queue history are unchanged. `playerQueueJump` does not
+  step: a target that fails to open returns its error and changes nothing.
 - Queue edits: `playerQueueJump`, `playerQueueInsertNext`, `playerQueueRemove`
   and `playerQueueMove(player, from, to)`. The entry playing, and one already
   lined up after it, are refused with `error.QueueEntryInUse`, as is a move

@@ -46,6 +46,11 @@
   `releases_to_review` (`orca_job_match_stats_v2`), and
   `libraryReleaseMatchBucket` (`orca_library_release_match_bucket`) gives one
   Release's bucket.
+- Next and previous open the target entry before moving the queue. An entry
+  that fails to open is stepped over, at most 8 in a row; when none opens, the
+  open error is returned and the playing entry keeps playing with now-playing
+  and the queue history unchanged. A queue jump to an entry that fails to open
+  changes nothing.
 
 ## 0.1.0 - 2026-10-06
 
