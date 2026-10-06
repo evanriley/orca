@@ -196,29 +196,118 @@ fn markReviewedLocked(
     try library.reviewed_releases.markLocked(release_id, compared, digest);
 }
 
-/// How many of the Release's Tracks the alignment with `release_mbid`'s
-/// snapshot places; null without a snapshot or for a Release of more than
-/// `max_page` Tracks. One view read, one snapshot read, one pairings read.
-pub fn placementCounts(
+/// Replaces what `diff` says of its release with what an Apply of the
+/// release's snapshot would store, when the release has one: the album,
+/// album artist, date and release ID come from the snapshot, each Track
+/// placed on it takes its release track's position, title and length, and
+/// a stored field differs exactly when an Apply of that field alone would
+/// change a value in effect. Without a snapshot, or for a Release of more
+/// than `max_page` Tracks, `diff` is left as it is.
+pub fn applySnapshotToDiff(
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,
     release_id: i64,
-    release_mbid: []const u8,
-) !?database.ReleasePlacementCounts {
-    const view = try library.identification_proposals.releaseMatchView(allocator, release_id, false);
-    defer view.deinit();
-    if (view.track_count > database.repository.max_page) return null;
-    var tracklist = try library.release_tracklists.get(allocator, release_mbid) orelse return null;
+    diff: *matching.ReleaseMatchDiff,
+) !void {
+    var planned = plan(allocator, library, release_id, diff.release_mbid) catch |err| switch (err) {
+        error.NoReleaseTracklist, error.ReleaseTooLarge => return,
+        else => |other| return other,
+    };
+    defer planned.deinit();
+    const owned = diff.arena.allocator();
+    const record = &planned.tracklist.record;
+
+    var placed: u32 = 0;
+    var titles_differ: u32 = 0;
+    for (diff.tracks, 0..) |*row, index| {
+        const track = planned.viewTrack(row.track_id) orelse continue;
+        const apply_track = planned.applyTrack(row.track_id);
+        const release_track = if (apply_track) |entry| entry.placed else null;
+        row.position = fallbackPosition(track, index);
+        row.candidate_title = "";
+        row.delta_ms = null;
+        const on_release = release_track orelse continue;
+        placed += 1;
+        row.position = on_release.position;
+        row.candidate_title = try owned.dupe(u8, on_release.title);
+        row.delta_ms = lengthDelta(track.duration_ms, on_release.length_ms);
+        if (try differingValues(allocator, library, &planned, &.{apply_track.?}, .initOne(.track_titles)) != 0) titles_differ += 1;
+    }
+    diff.aligned = placed;
+
+    for (diff.fields) |*field_diff| {
+        const candidate: []const u8 = switch (field_diff.field) {
+            .album => record.title,
+            .album_artist => record.artist_credit,
+            .release_date => record.release_date orelse "",
+            .release_id => record.release_mbid,
+            .track_titles => {
+                field_diff.local = try std.fmt.allocPrint(owned, "{d} of {d} differ", .{ titles_differ, diff.tracks.len });
+                field_diff.candidate = try std.fmt.allocPrint(owned, "{d} of {d} on the release", .{ placed, diff.tracks.len });
+                field_diff.differs = titles_differ != 0;
+                continue;
+            },
+            .release_type, .genre, .artwork => continue,
+        };
+        field_diff.candidate = try owned.dupe(u8, candidate);
+        field_diff.differs = try differingValues(allocator, library, &planned, planned.apply_tracks.items, .initOne(field_diff.field)) != 0;
+    }
+}
+
+fn differingValues(
+    allocator: std.mem.Allocator,
+    library: *database.LibraryDatabase,
+    planned: *const Plan,
+    tracks: []const database.ReleaseApplyTrack,
+    fields: database.ReleaseFieldSet,
+) !u32 {
+    return library.identification_proposals.applyReleasePlanLocked(allocator, &.{
+        .tracklist = &planned.tracklist.record,
+        .tracks = tracks,
+    }, fields, true, null);
+}
+
+fn fallbackPosition(track: *const database.ReleaseMatchTrack, index: usize) u32 {
+    return track.track_number orelse std.math.cast(u32, index + 1) orelse std.math.maxInt(u32);
+}
+
+fn lengthDelta(local_ms: ?i64, release_ms: ?u64) ?i64 {
+    const local = local_ms orelse return null;
+    const release = std.math.cast(i64, release_ms orelse return null) orelse return null;
+    if (local <= 0 or release <= 0) return null;
+    return release - local;
+}
+
+/// Gives the item's best candidate the title and date of that release's
+/// snapshot, allocated with `owned`, and fills its placement counts: how
+/// many of the Release's Tracks the alignment with the snapshot places.
+/// Left as it is without a snapshot; no counts for a Release of more than
+/// `max_page` Tracks. One snapshot read, then one view read and one
+/// pairings read.
+pub fn describeBest(
+    allocator: std.mem.Allocator,
+    owned: std.mem.Allocator,
+    library: *database.LibraryDatabase,
+    item: *database.ReleaseMatchItem,
+) !void {
+    const best = if (item.best) |*candidate| candidate else return;
+    var tracklist = try library.release_tracklists.get(allocator, best.release_mbid) orelse return;
     defer tracklist.deinit();
-    var pairings = try library.release_track_pairings.list(allocator, release_id, release_mbid);
+    best.title = try owned.dupe(u8, tracklist.record.title);
+    best.date = if (tracklist.record.release_date) |date| try owned.dupe(u8, date) else null;
+
+    const view = try library.identification_proposals.releaseMatchView(allocator, item.release_id, false);
+    defer view.deinit();
+    if (view.track_count > database.repository.max_page) return;
+    var pairings = try library.release_track_pairings.list(allocator, item.release_id, best.release_mbid);
     defer pairings.deinit();
-    const alignment = try release_alignment.alignRelease(allocator, release_id, view.tracks, &tracklist.record, pairings.items);
+    const alignment = try release_alignment.alignRelease(allocator, item.release_id, view.tracks, &tracklist.record, pairings.items);
     defer alignment.deinit();
     var placed: u32 = 0;
     for (alignment.rows) |row| {
         if (row.track != null and isPlacing(row.status)) placed += 1;
     }
-    return .{ .placed = placed, .needs_pairing = @intCast(view.tracks.len - placed) };
+    item.placement = .{ .placed = placed, .needs_pairing = @intCast(view.tracks.len - placed) };
 }
 
 fn isPlacing(status: release_alignment.PlacementStatus) bool {
@@ -240,10 +329,22 @@ const Plan = struct {
     }
 
     fn isPlaced(self: *const Plan, track_id: i64) bool {
+        const track = self.applyTrack(track_id) orelse return false;
+        return track.placed != null;
+    }
+
+    fn applyTrack(self: *const Plan, track_id: i64) ?database.ReleaseApplyTrack {
         for (self.apply_tracks.items) |track| {
-            if (track.track_id == track_id) return track.placed != null;
+            if (track.track_id == track_id) return track;
         }
-        return false;
+        return null;
+    }
+
+    fn viewTrack(self: *const Plan, track_id: i64) ?*const database.ReleaseMatchTrack {
+        for (self.view.tracks) |*track| {
+            if (track.track_id == track_id) return track;
+        }
+        return null;
     }
 };
 

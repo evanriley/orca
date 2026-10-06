@@ -102,8 +102,10 @@ is written.
 
 `Runtime.libraryAcceptMatch` and `libraryAcceptConfidentMatches` then
 reproject the files given values before they return, as edits do, so a Track
-can move to a Release with a new id. A frontend holding a Release id
-reloads it after an accept.
+can move to another Release. A Release all of whose Tracks move together to
+a key no Release holds keeps its id (see
+[Release identity](#release-identity)); otherwise the Tracks land on another
+id. A frontend holding a Release id reloads it after an accept.
 
 #### Release consensus
 
@@ -126,19 +128,22 @@ end.
 
 #### Applying a release
 
-`Runtime.libraryApplyMatchedRelease(library, release_id, fields)` and
-`orca-cli apply-release` take one of two paths.
+`Runtime.libraryApplyRelease(library, allocator, release_id, fields)`,
+`orca-cli apply-release --fields=` and
+`orca_library_apply_matched_release_fields` store the `ReleaseFieldSet` a
+person chose of the Release's best candidate (see [api.md](api.md)) after
+reviewing it, locked under the `.release` write, and return a
+`ReleaseApplyOutcome`. `Runtime.libraryApplyMatchedRelease(library,
+release_id, fields)` does the same with a non-null `fields` and returns only
+the number of values stored.
 
-With `fields` null (`apply-release` without `--fields`, or
-`orca_library_apply_matched_release`), it stores every value of the
-release that every Track names by tag or accepted match, as unlocked
-provider values under the `.match` write, and accepts no proposal. A
-Release whose Tracks do not all name one release stores nothing.
+`libraryApplyMatchedRelease` with `fields` null (`apply-release` without
+`--fields`, or `orca_library_apply_matched_release`) instead stores every
+value of the release that every Track names by tag or accepted match, as
+unlocked provider values under the `.match` write, and accepts no proposal.
+A Release whose Tracks do not all name one release stores nothing.
 
-With a `ReleaseFieldSet` (`Runtime.libraryApplyRelease`, `--fields=`, or
-`orca_library_apply_matched_release_fields`), a person chose those fields
-of the Release's best candidate (see [api.md](api.md)) after reviewing it,
-so they are stored locked under the `.release` write. Values come from the
+An Apply with fields works as follows. Values come from the
 candidate's tracklist snapshot laid against the Release as
 [Release alignment](#release-alignment) describes, not from proposals.
 Without a snapshot it is `error.NoReleaseTracklist`, without a candidate
@@ -185,8 +190,9 @@ release-track values, with the reason `not_placed` or `no_play_file`, and
 reprojected Release as reviewed against the release, as
 [below](#marking-a-release-as-reviewed), so a finished Release leaves the
 Confident and Needs Review lists; `reviewed_release_id` is its ID after the
-reprojection, or null when marking was refused or the written files lie on
-several Releases. An Apply that left a Track alone keeps the Release listed
+reprojection, the Release's own ID when all its Tracks moved together, or
+null when marking was refused or the written files lie on several
+Releases. An Apply that left a Track alone keeps the Release listed
 with its `needs_pairing` count. The release ID an Apply stores keeps the
 release a candidate of the Release, since candidates come from each play
 file's release ID in effect.
@@ -219,11 +225,40 @@ changes no value; `error.ReleaseNotReviewed` when there is no review.
 
 `libraryDismissReleaseCandidate` removes a release from the candidates.
 
+#### Release identity
+
 The projection resolves a Release's MusicBrainz release ID from the Orca
 value and the tag under `prefer_file`, so an accepted release ID keys the
-Release. When a reprojection leaves a Release without Tracks, its fetched
-cover moves to the Release that took most of them, unless that one has a
-cover of its own.
+Release. An Apply, accept or edit that changes the album, album artist or
+release ID of every Track of a Release, when no Release holds the new key,
+re-keys that Release row in place: it keeps its id, and with it its
+pairings, review, love, dismissed candidates and covers, so a frontend
+holding the id follows it. Its release info and stored release-level
+proposals are deleted, as a new row would not have them. When the Tracks
+instead join a Release that exists, split, or share the Release with files
+outside the reprojected folder, they move to another row; a Release left
+without Tracks hands its fetched cover, cover candidates, love, dismissed
+candidates and review to the Release that took most of them, each unless
+that one has its own.
+
+#### Match Review diff
+
+`Runtime.libraryReleaseMatchDiff` compares the Release with a candidate
+release. When the candidate has a tracklist snapshot, the candidate side is
+what an Apply of it would store: album, album artist, date and release ID
+from the snapshot, and for each Track the alignment places, its release
+track's position, title and length; Tracks it does not place show no
+candidate title. A field among `album`, `album_artist`, `release_date`,
+`release_id` and `track_titles` differs exactly when an Apply of that field
+alone would change a value in effect, computed by the same dry run the
+Apply uses, so a Release with every Track placed and no such field
+differing is one `libraryMarkReleaseReviewed` accepts. `track_titles`
+reads "N of M differ" against "P of M on the release", N counting the
+placed Tracks an Apply would retitle. Without a snapshot, the candidate
+side comes from the Tracks' proposals. `release_type`, `genre` and
+`artwork` come from proposals and stored covers either way. The release
+match page names a best candidate that has a snapshot by the snapshot's
+title and date.
 
 #### Release alignment
 
@@ -306,8 +341,10 @@ for that Track at that moment (`confirmed_suggestion`) or not (`by_hand`).
   tag applies again.
 - Editing either field in the metadata editor makes the value the
   person's own: unpairing leaves it, and AcoustID treats it as an edit.
-- A pairing goes with its Track or Release, and when its Track moves to
-  another Release; the values it set stay, as an edit's would.
+- A pairing is deleted with its Track or Release. When its Track moves to
+  another Release, the pairing moves with it; a pairing of the same release
+  track by another Track of that Release is then deleted, and the values it
+  set on that Track's files stay, as an edit's would.
 - An ID a pairing set reaches AcoustID only where the file's fingerprint
   agreed; see [providers.md](providers.md#acoustid-submission).
 

@@ -1632,7 +1632,13 @@ const migration_59 =
     \\    ON release_track_pairings(release_id, musicbrainz_release_id, release_track_id);
     \\CREATE TRIGGER release_track_pairings_track_moved AFTER UPDATE OF release_id ON tracks
     \\WHEN old.release_id IS NOT new.release_id BEGIN
-    \\    DELETE FROM release_track_pairings WHERE track_id = new.id;
+    \\    DELETE FROM release_track_pairings WHERE track_id = new.id AND new.release_id IS NULL;
+    \\    DELETE FROM release_track_pairings
+    \\    WHERE release_id = new.release_id AND track_id <> new.id
+    \\        AND EXISTS (SELECT 1 FROM release_track_pairings AS moved WHERE moved.track_id = new.id
+    \\            AND moved.musicbrainz_release_id = release_track_pairings.musicbrainz_release_id
+    \\            AND moved.release_track_id = release_track_pairings.release_track_id);
+    \\    UPDATE release_track_pairings SET release_id = new.release_id WHERE track_id = new.id;
     \\END;
     \\CREATE TABLE paired_metadata_values (
     \\    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,

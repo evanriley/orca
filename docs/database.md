@@ -702,9 +702,11 @@ Migration 59 adds release-track pairings (see
 `musicbrainz_release_id`, `release_id`,
 `release_track_id`, `recording_id`, `origin` 0 for a confirmed suggestion
 and 1 for by hand, `created_at` in Unix seconds, `WITHOUT ROWID`) is
-deleted with its Track or Release by foreign-key cascade, and by the
-trigger `release_track_pairings_track_moved` when its Track's `release_id`
-changes. A unique index on `(release_id, musicbrainz_release_id,
+deleted with its Track or Release by foreign-key cascade. The trigger
+`release_track_pairings_track_moved` moves it to its Track's new
+`release_id` when that changes, deleting first any pairing of the same
+release track by another Track there, and deletes it when the Track's
+`release_id` becomes NULL. A unique index on `(release_id, musicbrainz_release_id,
 release_track_id)` gives each release track at most one Track. It has no
 foreign key to `musicbrainz_releases`, so a new snapshot, which replaces
 the release's rows, keeps it. `paired_metadata_values` (primary key
@@ -714,9 +716,9 @@ set and the `orca_metadata_values` row it replaced (`replaced_value`,
 `replaced_provenance`, `replaced_locked`, `replaced_written_at`, all NULL
 when there was none). Unpairing restores that row where the file still
 holds `value`; AcoustID submission holds back a recording ID listed there;
-an edit of the field deletes the row. A row outlives a pairing its Track's
-move to another Release deleted, so a later pairing keeps the first
-replaced row. `ReleaseTrackPairingRepository.pair` undoes the Track's
+an edit of the field deletes the row. A row outlives a pairing the
+trigger deleted, so the values that pairing set stay on the files and a
+later pairing keeps the first replaced row. `ReleaseTrackPairingRepository.pair` undoes the Track's
 earlier pairing, validates, and stores the pairing, the replaced rows and
 the locked user values in one transaction; `unpair` restores them in one.
 
@@ -727,7 +729,8 @@ the release replaces; and `reviewed_releases` (primary key `release_id`,
 deleted with its Release by foreign-key cascade, `musicbrainz_release_id`,
 `digest`, a 32-byte SHA-256 blob, and `reviewed_at` in Unix seconds), a
 person's review of a Release against a release (see
-[metadata.md](metadata.md#marking-a-release-as-reviewed)). A review holds
+[metadata.md](metadata.md#marking-a-release-as-reviewed)), handed over by a
+reprojection as [Album love](#album-love) describes. A review holds
 only while its release is the Release's best candidate and the digest of
 the Release still equals `digest`; nothing deletes a row that stopped
 holding, and the next review replaces it. It also adds the partial index
@@ -1279,9 +1282,12 @@ belongs to a Recording and is sent to ListenBrainz, so loving an album
 changes no song's feedback and is never sent.
 
 A Release's id is not stable. An edit, an accepted match or a retag that
-changes the album, album artist or release ID reprojects its Tracks under a
-new Release and prunes the old one, which would cascade the love away. So,
-like `release_artwork`, the projection hands the row over before pruning
+changes the album, album artist or release ID of all of a Release's Tracks
+re-keys the row in place when no Release holds the new key (see
+[metadata.md](metadata.md#release-identity)), and the id and its love stay.
+Otherwise its Tracks move to another Release and the old one is pruned,
+which would cascade the love away. So, like `release_artwork`, the
+projection hands the row over before pruning
 (`carryReleaseState` in `library/projection.zig`): when a Release is no longer
 used, its row goes to the Release that now holds most of its moved Tracks, a
 tie going to the lower id, and only when that Release has no row of its own.

@@ -349,10 +349,7 @@ pub fn libraryReleaseMatchPage(
     const library_database = try runtime.libraryDatabase(self, library);
     const page = try library_database.identification_proposals.releaseMatchPage(allocator, bucket, confident_at, filter, limit, offset);
     errdefer page.deinit();
-    for (page.items) |*item| {
-        const best = item.best orelse continue;
-        item.placement = try library_pass.release_apply.placementCounts(self.allocator, library_database, item.release_id, best.release_mbid);
-    }
+    for (page.items) |*item| try library_pass.release_apply.describeBest(self.allocator, page.arena.allocator(), library_database, item);
     return page;
 }
 
@@ -374,10 +371,14 @@ pub fn libraryReleaseMatchDiff(
     release_id: i64,
     release_mbid: ?[]const u8,
 ) !ReleaseMatchDiff {
-    const view = try (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchView(allocator, release_id, true);
+    const library_database = try runtime.libraryDatabase(self, library);
+    const view = try library_database.identification_proposals.releaseMatchView(allocator, release_id, true);
     defer view.deinit();
     const compared = try library_pass.matching.comparedRelease(&view, allocator, release_mbid);
-    return library_pass.matching.releaseMatchDiff(allocator, &view, compared);
+    var diff = try library_pass.matching.releaseMatchDiff(allocator, &view, compared);
+    errdefer diff.deinit();
+    try library_pass.release_apply.applySnapshotToDiff(self.allocator, library_database, release_id, &diff);
+    return diff;
 }
 
 pub fn libraryReleaseAlignment(

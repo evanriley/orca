@@ -3145,7 +3145,7 @@ fn expectOrcaValue(library_database: *database.LibraryDatabase, file_id: i64, fi
     } else try std.testing.expectEqual(@as(?[]u8, null), stored);
 }
 
-test "Match Album points every file at the release most of them list, accepts, and the cover follows the album to its new Release id" {
+test "Match Album points every file at the release most of them list, accepts, and the cover follows the album, which keeps its Release id" {
     var fake: FakeMusicBrainz = .{};
     var cover: FakeCoverArt = .{ .locations = &.{
         "https://archive.org/download/mbid-x/front.jpg",
@@ -3213,9 +3213,8 @@ test "Match Album points every file at the release most of them list, accepts, a
     try expectOrcaValue(library_database, northern_sky, .track_number, "3");
 
     const regrouped = try releaseOfFile(library_database, northern_sky);
-    try std.testing.expect(regrouped != album);
+    try std.testing.expectEqual(album, regrouped);
     try std.testing.expectEqual(regrouped, try releaseOfFile(library_database, pink_moon));
-    try std.testing.expect((try runtime.libraryRelease(library, album)) == null);
     const release = (try runtime.libraryRelease(library, regrouped)).?;
     defer release.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("Bryter Layter", release.title);
@@ -3286,7 +3285,7 @@ test "Match Album breaks a tie between editions for the Official one with the al
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
 }
 
-test "a Match Album whose accept adds a release ID reports the Release its files moved to, and the old Release no longer resolves" {
+test "a Match Album whose accept adds a release ID reports the Release its files are on, which keeps its id" {
     var fake: FakeMusicBrainz = .{};
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -3323,9 +3322,8 @@ test "a Match Album whose accept adds a release ID reports the Release its files
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
     try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(job_handle)).accepted);
     const moved_to = try releaseOfFile(library_database, northern_sky);
-    try std.testing.expect(moved_to != album);
+    try std.testing.expectEqual(album, moved_to);
     try std.testing.expectEqual(@as(?i64, moved_to), try runtime.jobMatchRelease(job_handle));
-    try std.testing.expect((try runtime.libraryRelease(library, album)) == null);
     const release = (try runtime.libraryRelease(library, moved_to)).?;
     defer release.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("Bryter Layter", release.title);
@@ -3421,7 +3419,7 @@ test "accepting one file of a two-file Release stores its title and artist only,
     defer releases.deinit();
     try std.testing.expectEqual(@as(usize, 1), releases.items.len);
     try std.testing.expectEqualStrings("Bryter Layter", releases.items[0].title);
-    try std.testing.expect(releases.items[0].id != untitled);
+    try std.testing.expectEqual(untitled, releases.items[0].id);
     const details = (try runtime.libraryTrackDetails(library, try trackOfFile(library_database, northern_sky))).?;
     defer details.deinit();
     try std.testing.expectEqualStrings(bryter_layter_mbid, details.musicbrainz_release_id.?);
@@ -3487,8 +3485,8 @@ test "a stray file accepted on another release blocks the album's values until a
     try expectOrcaValue(library_database, northern_sky, .album, "Bryter Layter");
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
     try expectOrcaValue(library_database, stray, .musicbrainz_release_id, null);
-    try std.testing.expect(try releaseOfFile(library_database, northern_sky) != album);
-    try std.testing.expectError(error.UnknownRelease, runtime.libraryApplyMatchedRelease(library, album, null));
+    try std.testing.expectEqual(album, try releaseOfFile(library_database, northern_sky));
+    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, album, null));
 }
 
 test "library matching looks the best release up before storing a search, asks nothing again within thirty days, stops on an unreachable lookup and stores a missing release unlooked" {
@@ -8541,6 +8539,263 @@ test "a reviewed Release is listed in the reviewed bucket while its review holds
     try std.testing.expect(!try reviewedListed(&runtime, library, album, null));
     try runtime.libraryUnmarkReleaseReviewed(library, album);
     try std.testing.expectError(error.ReleaseNotReviewed, runtime.libraryUnmarkReleaseReviewed(library, album));
+}
+
+fn countOn(library_database: *database.LibraryDatabase, sql: [:0]const u8, id: i64) !i64 {
+    var statement = try library_database.database.prepare(sql);
+    defer statement.deinit();
+    try statement.bindInt64(1, id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+test "an Apply that regroups a Release keeps its ID and the pairing under it, and unpairing then restores the Track" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try nightcallWithAcoustIdMatch(&runtime, "file:orca-apply-regroup-paired?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, setup.library);
+    const remix = try trackOfFile(library_database, setup.files[1]);
+    _ = try runtime.libraryPairReleaseTrack(setup.library, setup.album, null, remix, nightcall_track_mbids[1]);
+
+    const outcome = try runtime.libraryApplyRelease(setup.library, std.testing.allocator, setup.album, .initMany(&.{ .album, .release_id }));
+    defer outcome.deinit();
+    try expectStoredValue(library_database, setup.files[1], .album, "Nightcall", .provider, true);
+    try expectOrcaValue(library_database, setup.files[1], .musicbrainz_release_id, nightcall_mbid);
+    try std.testing.expectEqual(setup.album, try releaseOfFile(library_database, setup.files[1]));
+    try std.testing.expectEqual(remix, try trackOfFile(library_database, setup.files[1]));
+    {
+        var pairings = try runtime.libraryReleaseTrackPairings(setup.library, std.testing.allocator, setup.album);
+        defer pairings.deinit();
+        try std.testing.expectEqual(@as(usize, 1), pairings.items.len);
+        try std.testing.expectEqual(remix, pairings.items[0].track_id);
+        try std.testing.expectEqualStrings(nightcall_track_mbids[1], pairings.items[0].release_track_mbid);
+    }
+    try expectPairedValues(library_database, setup.files[1], nightcall_recordings[1], nightcall_track_mbids[1]);
+
+    try runtime.libraryUnpairReleaseTrack(setup.library, setup.album, remix);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM paired_metadata_values;"));
+    try expectOrcaValue(library_database, setup.files[1], .musicbrainz_release_track_id, null);
+    try std.testing.expectEqual(setup.album, try releaseOfFile(library_database, setup.files[1]));
+}
+
+test "a pairing follows its Track to another Release and replaces a pairing of the same release track there" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-pairing-follows-track?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const first = try observeFullNightcall(library_database, 0);
+    const second = try observeFile(library_database, "/music/kavinsky/other/1.flac", nightcall_titles[0], "Kavinsky");
+    try tagFullNightcall(library_database, second, 0, "Nightcall (Other Copy)");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, first);
+    const other = try releaseOfFile(library_database, second);
+    try std.testing.expect(album != other);
+    try snapshotNightcall(library_database, 4);
+    const moving = try trackOfFile(library_database, second);
+    const staying = try trackOfFile(library_database, first);
+    _ = try runtime.libraryPairReleaseTrack(library, album, nightcall_mbid, staying, nightcall_track_mbids[0]);
+    _ = try runtime.libraryPairReleaseTrack(library, other, nightcall_mbid, moving, nightcall_track_mbids[0]);
+
+    {
+        var move = try library_database.database.prepare("UPDATE tracks SET release_id = ?1, track_number = 9 WHERE id = ?2;");
+        defer move.deinit();
+        try move.bindInt64(1, album);
+        try move.bindInt64(2, moving);
+        try std.testing.expectEqual(database.sqlite.Step.done, try move.step());
+    }
+    try std.testing.expectEqual(@as(i64, 1), try scalarOf(library_database, "SELECT count(*) FROM release_track_pairings;"));
+    try std.testing.expectEqual(album, try countOn(library_database, "SELECT release_id FROM release_track_pairings WHERE track_id = ?1;", moving));
+    try std.testing.expectEqual(@as(i64, 0), try countOn(library_database, "SELECT count(*) FROM release_track_pairings WHERE track_id = ?1;", staying));
+}
+
+test "a complete Apply that regroups a Release keeps its ID, and the review it makes holds in the reviewed bucket" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try nightcallWithAcoustIdMatch(&runtime, "file:orca-apply-regroup-reviewed?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, setup.library);
+
+    const outcome = try runtime.libraryApplyRelease(setup.library, std.testing.allocator, setup.album, all_release_fields);
+    defer outcome.deinit();
+    try std.testing.expectEqual(@as(?i64, setup.album), outcome.reviewed_release_id);
+    for (setup.files) |file| try std.testing.expectEqual(setup.album, try releaseOfFile(library_database, file));
+    try std.testing.expect(try reviewedListed(&runtime, setup.library, setup.album, null));
+    try std.testing.expect(!try matchListed(&runtime, setup.library, setup.album));
+    try std.testing.expectEqual(@as(i64, 1), try countOn(library_database, "SELECT count(*) FROM releases WHERE id = ?1 AND title = 'Nightcall';", setup.album));
+}
+
+test "a reviewed Release whose Tracks join another Release hands it its review" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-review-carried?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeFullNightcall(library_database, index);
+    const elsewhere = try observeFile(library_database, "/music/kavinsky/ep/1.flac", nightcall_titles[0], "Kavinsky");
+    try tagFullNightcall(library_database, elsewhere, 0, "Nightcall EP");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    const heir = try releaseOfFile(library_database, elsewhere);
+    try std.testing.expect(album != heir);
+    try snapshotNightcall(library_database, 4);
+    try runtime.libraryMarkReleaseReviewed(library, album, null);
+
+    inline for (0..4) |index| try tagFullNightcall(library_database, files[index], index, "Nightcall EP");
+    try projectAll(library_database);
+    try std.testing.expectEqual(heir, try releaseOfFile(library_database, files[0]));
+    try std.testing.expectEqual(@as(i64, 0), try countOn(library_database, "SELECT count(*) FROM releases WHERE id = ?1;", album));
+    try std.testing.expectEqual(@as(i64, 1), try countOn(library_database, "SELECT count(*) FROM reviewed_releases WHERE release_id = ?1;", heir));
+}
+
+test "a dismissed candidate stays dismissed and a loved Release stays loved after an Apply regroups it" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try nightcallWithAcoustIdMatch(&runtime, "file:orca-apply-regroup-dismissed?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, setup.library);
+    const other_edition = "0f1e2d3c-4b5a-4968-8776-655443322110";
+    try runtime.libraryDismissReleaseCandidate(setup.library, setup.album, other_edition);
+    _ = try runtime.librarySetReleaseLove(setup.library, &.{setup.album}, true);
+
+    const outcome = try runtime.libraryApplyRelease(setup.library, std.testing.allocator, setup.album, .initMany(&.{ .album, .album_artist, .release_id }));
+    defer outcome.deinit();
+    try expectNightcallReleaseValues(library_database, setup.files[0]);
+    try std.testing.expectEqual(setup.album, try releaseOfFile(library_database, setup.files[0]));
+    try std.testing.expectEqual(@as(i64, 1), try countOn(
+        library_database,
+        "SELECT count(*) FROM dismissed_release_candidates WHERE release_id = ?1 AND musicbrainz_release_id = '" ++ other_edition ++ "';",
+        setup.album,
+    ));
+    try std.testing.expect(try library_database.release_loves.isLoved(setup.album));
+}
+
+fn snapshotDatedNightcall(library_database: *database.LibraryDatabase, release_date: []const u8) !void {
+    var tracks: [4]database.ReleaseTracklistTrack = undefined;
+    for (&tracks, 0..) |*track, index| track.* = .{
+        .disc = 1,
+        .position = @intCast(index + 1),
+        .title = nightcall_titles[index],
+        .artist_credit = "Kavinsky",
+        .length_ms = 258_000,
+        .recording_mbid = nightcall_recordings[index],
+        .release_track_mbid = nightcall_track_mbids[index],
+    };
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = nightcall_mbid,
+        .title = "Nightcall",
+        .artist_credit = "Kavinsky",
+        .release_date = release_date,
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &tracks,
+    });
+}
+
+fn storedFieldDiffers(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64) !bool {
+    const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, release_id, null);
+    defer diff.deinit();
+    var differs = false;
+    for (diff.fields) |field| {
+        if (library_pass.release_apply.stored_fields.contains(field.field) and field.differs) differs = true;
+    }
+    return differs;
+}
+
+fn expectMarkingAgrees(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64, differs: bool) !void {
+    try std.testing.expectEqual(differs, try storedFieldDiffers(runtime, library, release_id));
+    if (differs) {
+        try std.testing.expectError(error.ReleaseDiffers, runtime.libraryMarkReleaseReviewed(library, release_id, null));
+    } else {
+        try runtime.libraryMarkReleaseReviewed(library, release_id, null);
+        try runtime.libraryUnmarkReleaseReviewed(library, release_id);
+    }
+}
+
+test "the diff shows the snapshot's values, and a field differs exactly when an Apply of it would change a value, as Mark as Reviewed decides" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-diff-snapshot?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| {
+        files[index] = try observeFullNightcall(library_database, index);
+        try library_database.observed_tags.upsert(.{ .file_id = files[index], .values = .{
+            .title = nightcall_titles[index],
+            .artist = "Kavinsky",
+            .album = "Nightcall",
+            .album_artist = "Kavinsky",
+            .date = "2013",
+            .track_number = index + 1,
+            .disc_number = if (index == 3) null else 1,
+            .musicbrainz_recording_id = nightcall_recordings[index],
+            .musicbrainz_release_id = nightcall_mbid,
+            .musicbrainz_release_track_id = nightcall_track_mbids[index],
+        } });
+    }
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    try snapshotDatedNightcall(library_database, "2013-01-28");
+
+    {
+        const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, null);
+        defer diff.deinit();
+        const date = diff.fields[@backingInt(ReleaseField.release_date)];
+        try std.testing.expectEqualStrings("2013", date.local);
+        try std.testing.expectEqualStrings("2013-01-28", date.candidate);
+        try std.testing.expect(date.differs);
+        const album_field = diff.fields[@backingInt(ReleaseField.album)];
+        try std.testing.expectEqualStrings("Nightcall", album_field.candidate);
+        try std.testing.expect(!album_field.differs);
+        const release = diff.fields[@backingInt(ReleaseField.release_id)];
+        try std.testing.expectEqualStrings(nightcall_mbid, release.candidate);
+        try std.testing.expect(release.differs);
+        const titles = diff.fields[@backingInt(ReleaseField.track_titles)];
+        try std.testing.expectEqualStrings("0 of 4 differ", titles.local);
+        try std.testing.expectEqualStrings("4 of 4 on the release", titles.candidate);
+        try std.testing.expect(!titles.differs);
+        try std.testing.expectEqual(@as(u32, 4), diff.aligned);
+        try std.testing.expectEqualStrings(nightcall_titles[2], diff.tracks[2].candidate_title);
+    }
+    try expectMarkingAgrees(&runtime, library, album, true);
+
+    const dated = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_date));
+    dated.deinit();
+    try expectMarkingAgrees(&runtime, library, album, true);
+    const numbered = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_id));
+    numbered.deinit();
+    try expectMarkingAgrees(&runtime, library, album, false);
+
+    const edit = try runtime.libraryEditTracks(library, &.{try trackOfFile(library_database, files[1])}, &.{.{ .field = .title, .value = "Nightcall (Remix)" }});
+    edit.deinit();
+    {
+        const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, null);
+        defer diff.deinit();
+        const titles = diff.fields[@backingInt(ReleaseField.track_titles)];
+        try std.testing.expectEqualStrings("0 of 4 differ", titles.local);
+        try std.testing.expect(!titles.differs);
+    }
+    try expectMarkingAgrees(&runtime, library, album, false);
+}
+
+test "the release-match list names the best candidate by its snapshot's title and date" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-page-snapshot?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeFullNightcall(library_database, index);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    try snapshotDatedNightcall(library_database, "2013-01-28");
+    for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched }) |bucket| {
+        var page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, null, 512, 0);
+        defer page.deinit();
+        for (page.items) |item| if (item.release_id == album) {
+            try std.testing.expectEqualStrings("Nightcall", item.best.?.title);
+            try std.testing.expectEqualStrings("2013-01-28", item.best.?.date.?);
+            return;
+        };
+    }
+    return error.TestExpectedRelease;
 }
 
 const VariousArtists = struct { library_database: *database.LibraryDatabase, files: [4]i64 };

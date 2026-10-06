@@ -371,7 +371,7 @@ The boundary covers the whole engine, not a fragment of it:
   kind of job, and `orca_job_match_stats` reads either job's
   `orca_match_stats`. `orca_job_match_release` names the Release a finished
   release-scoped match left the album's files on, which is a new id when an
-  accept changed the album's key. A second match while one runs is `ORCA_STATUS_BUSY`.
+  accept moved them onto a Release that already existed or split them. A second match while one runs is `ORCA_STATUS_BUSY`.
   `orca_library_query_match_review` pages the Tracks with proposals, best
   first, and `orca_library_query_match_proposals` lists one Track's;
   `orca_library_accept_match` and `orca_library_dismiss_match` act on one,

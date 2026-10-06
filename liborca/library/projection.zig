@@ -77,10 +77,11 @@ const CarriedTable = struct {
 };
 
 /// A Release left without Tracks hands its stored covers, its cover art
-/// candidates, its love and its dismissed MusicBrainz releases to the Release that took most of them, each only
-/// when that one has none of its own, so a cover fetched or chosen or an
-/// album loved before a regrouping survives it. The tables cascade on the
-/// Release row, so whatever is not handed over goes with it.
+/// candidates, its love, its dismissed MusicBrainz releases and its review
+/// to the Release that took most of them, each only when that one has none
+/// of its own, so a cover fetched or chosen or an album loved or reviewed
+/// before a regrouping survives it. The tables cascade on the Release row,
+/// so whatever is not handed over goes with it.
 fn carryReleaseState(db: database.sqlite.Database, allocator: std.mem.Allocator, moved: []const MovedTrack) !void {
     if (moved.len == 0) return;
     var artwork = try CarriedTable.prepare(db, "release_artwork");
@@ -91,7 +92,9 @@ fn carryReleaseState(db: database.sqlite.Database, allocator: std.mem.Allocator,
     defer loves.deinit();
     var dismissals = try CarriedTable.prepare(db, "dismissed_release_candidates");
     defer dismissals.deinit();
-    const carried = [_]*CarriedTable{ &artwork, &candidates, &loves, &dismissals };
+    var reviews = try CarriedTable.prepare(db, "reviewed_releases");
+    defer reviews.deinit();
+    const carried = [_]*CarriedTable{ &artwork, &candidates, &loves, &dismissals, &reviews };
     var in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
     defer in_use.deinit();
     var now_on = try db.prepare(
@@ -141,6 +144,56 @@ fn carryReleaseState(db: database.sqlite.Database, allocator: std.mem.Allocator,
             if (try table.hand_over.step() != .done) return error.SqlFailed;
             try table.hand_over.reset();
         }
+    }
+}
+
+/// Moves `key` onto the one Release whose every Track `group` backs, when no
+/// Release holds it, so the group keeps that Release's ID and the state keyed
+/// on it. Clears what a new row would not have had.
+fn rekeyWholeRelease(
+    db: database.sqlite.Database,
+    allocator: std.mem.Allocator,
+    group: []const Entry,
+    key: []const u8,
+    vacated: *Vacated,
+) !void {
+    var files: std.ArrayList(u8) = .empty;
+    try files.append(allocator, '[');
+    for (group, 0..) |entry, index| try files.print(allocator, "{s}{d}", .{ if (index == 0) "" else ",", entry.file_id });
+    try files.append(allocator, ']');
+
+    var whole = try db.prepare(
+        \\SELECT r.id, r.album_artist_id FROM releases AS r
+        \\WHERE r.id = (SELECT min(release_id) FROM tracks
+        \\        WHERE release_id IS NOT NULL AND preferred_file_id IN (SELECT value FROM json_each(?1)))
+        \\    AND r.release_key <> ?2
+        \\    AND NOT EXISTS (SELECT 1 FROM releases WHERE release_key = ?2)
+        \\    AND (SELECT count(DISTINCT release_id) FROM tracks
+        \\        WHERE release_id IS NOT NULL AND preferred_file_id IN (SELECT value FROM json_each(?1))) = 1
+        \\    AND NOT EXISTS (SELECT 1 FROM tracks WHERE release_id = r.id AND (preferred_file_id IS NULL
+        \\        OR preferred_file_id NOT IN (SELECT value FROM json_each(?1))));
+    );
+    defer whole.deinit();
+    try whole.bindText(1, files.items);
+    try whole.bindText(2, key);
+    if (try whole.step() != .row) return;
+    const release_id = whole.columnInt64(0);
+    try vacated.record(allocator, null, release_id, optionalInt64(whole, 1));
+
+    var rekey = try db.prepare(
+        \\UPDATE releases SET release_key = ?2, release_date = NULL, disc_count = NULL,
+        \\    musicbrainz_release_id = NULL, release_type = NULL
+        \\WHERE id = ?1;
+    );
+    defer rekey.deinit();
+    try rekey.bindInt64(1, release_id);
+    try rekey.bindText(2, key);
+    if (try rekey.step() != .done) return error.SqlFailed;
+    inline for (.{ "release_info", "metadata_proposals" }) |table| {
+        var forget = try db.prepare("DELETE FROM " ++ table ++ " WHERE release_id = ?1;");
+        defer forget.deinit();
+        try forget.bindInt64(1, release_id);
+        if (try forget.step() != .done) return error.SqlFailed;
     }
 }
 
@@ -686,13 +739,14 @@ pub const Projection = struct {
         // recording or writes: a file can leave one group's Release for
         // another's in one edit, and the group handled first would otherwise
         // take or evict the Track that file still presents.
+        var vacated: Vacated = .{};
         var plans: std.ArrayList(GroupPlan) = .empty;
         var start: usize = 0;
         while (start < projected.len) {
             var end = start + 1;
             while (end < projected.len and
                 std.mem.eql(u8, projected[end].album_key, projected[start].album_key)) end += 1;
-            try plans.append(allocator, try self.planGroup(allocator, folder, projected[start..end], entries, &claims, result));
+            try plans.append(allocator, try self.planGroup(allocator, folder, projected[start..end], entries, &claims, &vacated, result));
             result.groups_projected += 1;
             start = end;
         }
@@ -700,7 +754,6 @@ pub const Projection = struct {
         var writes: std.ArrayList(database.TrackSeat) = .empty;
         var foreign: std.ArrayList(Entry) = .empty;
         for (plans.items) |plan| try self.resolveGroup(allocator, plan, &claims, &seats, &writes, &foreign, result);
-        var vacated: Vacated = .{};
         try self.writeTracks(allocator, seats.items, writes.items, &claims, &vacated, &genres, result);
         for (entries) |entry| if (entry.unreadable) try self.clearProjectionIssues(entry.file_id);
         const backing = try std.mem.concat(allocator, Entry, &.{ entries, foreign.items });
@@ -901,9 +954,11 @@ pub const Projection = struct {
         local: []Entry,
         folder_files: []const Entry,
         claims: *TrackClaims,
+        vacated: *Vacated,
         result: *Result,
     ) !GroupPlan {
         const identity = try self.resolveRelease(allocator, folder, local);
+        try rekeyWholeRelease(self.library.database, allocator, local, identity.key, vacated);
         // The album artist is resolved *before* the release, because the
         // release now carries the Artist row it is filed under rather than
         // only the name it was tagged with.
@@ -1095,7 +1150,10 @@ pub const Projection = struct {
         }
         for (seats, writes) |seat, write| {
             const claim = seat.claim orelse continue;
-            if (!claim.moves(seat)) continue;
+            if (!claim.moves(seat)) {
+                if (claim.artist_id != write.track.artist_id) try vacated.record(allocator, null, null, claim.artist_id);
+                continue;
+            }
             try vacated.record(allocator, write.track.preferred_file_id, claim.release_id, claim.artist_id);
             result.tracks_moved += 1;
         }
@@ -2934,7 +2992,7 @@ test "an out-of-range page is refused rather than clamped" {
     );
 }
 
-test "a retagged file keeps its Track while its old release and artist are pruned" {
+test "a retagged file keeps its Track and its Release while its old artist is pruned" {
     var library = try openTestLibrary("file:orca-projection-prune?mode=memory&cache=shared");
     defer library.close();
     const file_id = try observe(&library, "/m/Old/a.flac", .flac, .{
@@ -2947,6 +3005,7 @@ test "a retagged file keeps its Track while its old release and artist are prune
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.{ .files = &.{file_id} });
     const track = try trackOf(&library, file_id);
+    const release = try releaseOf(&library, file_id);
 
     try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
         .title = "Song",
@@ -2957,9 +3016,10 @@ test "a retagged file keeps its Track while its old release and artist are prune
     } });
     const result = try projection.run(.{ .files = &.{file_id} });
     try testing.expectEqual(track, try trackOf(&library, file_id));
-    try testing.expectEqual(@as(u64, 1), result.tracks_moved);
+    try testing.expectEqual(release, try releaseOf(&library, file_id));
+    try testing.expectEqual(@as(u64, 0), result.tracks_moved);
     try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
-    try testing.expectEqual(@as(u64, 1), result.releases_pruned);
+    try testing.expectEqual(@as(u64, 0), result.releases_pruned);
     try testing.expectEqual(@as(u64, 1), result.artists_pruned);
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
@@ -2979,11 +3039,18 @@ test "albums found counts only the releases a run wrote that still exist" {
         .album_artist = "Artist",
         .track_number = 1,
     });
+    const joined = try observe(&library, "/m/New/b.flac", .flac, .{
+        .title = "Other Song",
+        .artist = "Artist",
+        .album = "New Album",
+        .album_artist = "Artist",
+        .track_number = 2,
+    });
     var found: FoundReleases = .{};
     defer found.freeIds(testing.allocator);
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library, .found_releases = &found };
-    _ = try projection.run(.{ .files = &.{file_id} });
-    try testing.expectEqual(@as(u64, 1), found.count.load(.acquire));
+    _ = try projection.run(.{ .files = &.{ file_id, joined } });
+    try testing.expectEqual(@as(u64, 2), found.count.load(.acquire));
 
     try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
         .title = "Song",
@@ -3173,7 +3240,7 @@ test "a file leaving its album keeps its Track while a sibling takes its old pos
     try expectNoForeignKeyViolations(&library);
 }
 
-test "a Track whose preferred file goes missing follows its other encoding to a new Release" {
+test "a Track whose preferred file goes missing follows its other encoding when its album is renamed" {
     var library = try openTestLibrary("file:orca-projection-preferred-flip?mode=memory&cache=shared");
     defer library.close();
     var tags = albumTags("Album", 1);
@@ -3197,9 +3264,9 @@ test "a Track whose preferred file goes missing follows its other encoding to a 
     const result = try projection.run(.all);
 
     try testing.expectEqual(track, try trackOf(&library, mp3));
-    try testing.expect(try releaseOf(&library, mp3) != old);
+    try testing.expectEqual(old, try releaseOf(&library, mp3));
     try testing.expectEqual(recording, try scalar(library.database, "SELECT recording_id FROM tracks;"));
-    try testing.expectEqual(@as(u64, 1), result.tracks_moved);
+    try testing.expectEqual(@as(u64, 0), result.tracks_moved);
     try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
     try expectNoForeignKeyViolations(&library);
@@ -3246,7 +3313,7 @@ test "a Track's rating, love and playlist entries stay with its song when the so
 test "a Track's lyrics survive its file moving it to another Release" {
     var library = try openTestLibrary("file:orca-projection-move-lyrics?mode=memory&cache=shared");
     defer library.close();
-    var files: [1]i64 = undefined;
+    var files: [2]i64 = undefined;
     try observeAlbum(&library, &files, "Old Title");
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
@@ -3254,7 +3321,7 @@ test "a Track's lyrics survive its file moving it to another Release" {
     const digest: [32]u8 = @splat(1);
     try testing.expect(try library.track_lyrics.put(track, &digest, .{ .plain = "words" }, 100));
 
-    try retag(&library, &files, "New Title");
+    try retag(&library, files[0..1], "New Title");
     const result = try projection.run(.all);
 
     try testing.expectEqual(@as(u64, 1), result.tracks_moved);
@@ -3347,7 +3414,7 @@ fn releaseOf(library: *database.LibraryDatabase, file_id: i64) !i64 {
     ));
 }
 
-test "a loved album stays loved when a regrouping gives its Release a new id" {
+test "a loved album stays loved when a retag renames its Release" {
     var library = try openTestLibrary("file:orca-projection-love-regroup?mode=memory&cache=shared");
     defer library.close();
     var files: [2]i64 = undefined;
@@ -3362,7 +3429,7 @@ test "a loved album stays loved when a regrouping gives its Release a new id" {
     _ = try projection.run(.all);
 
     const regrouped = try releaseOf(&library, files[0]);
-    try testing.expect(regrouped != old);
+    try testing.expectEqual(old, regrouped);
     try testing.expect(try library.release_loves.isLoved(regrouped));
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM release_loves;"));
     try testing.expectEqual(@as(i64, 100), try scalar(library.database, "SELECT loved_at FROM release_loves;"));

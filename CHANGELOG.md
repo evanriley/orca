@@ -1581,6 +1581,18 @@
 
 ### Fixed
 
+- **Match Review compares what Apply would store.** The release diff reads
+  the release's tracklist snapshot, as Apply and Mark as Reviewed do, and a
+  field differs only when applying it would change a value, so Mark as
+  Reviewed is offered exactly when it is accepted. Matches names the best
+  candidate by the snapshot's title and date.
+- **An album keeps its id when all its Tracks move together.** Applying a
+  release, accepting a match or editing an album no longer gives the album a
+  new id, so its pairings, review, love, dismissed candidates and covers stay
+  with it. A pairing follows its Track to another album, and a review is
+  handed on like a love when an album's Tracks join another one. An artist
+  left without Tracks after a Track changed artist within its album is
+  removed.
 - **Match Album places a Track matched by AcoustID alone.** A match that
   names no release is enriched with the release Match Album chose when that
   release lists its recording, so an EP whose title track was matched by

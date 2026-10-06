@@ -84,7 +84,7 @@ pub fn pruneOrphanedReleasesAndArtists(
     deleted_releases: ?*std.ArrayList(i64),
 ) !OrphanPruneCounts {
     var counts: OrphanPruneCounts = .{};
-    if (release_candidates.len == 0) return counts;
+    if (release_candidates.len == 0 and artist_candidates.len == 0) return counts;
 
     var artists: std.ArrayList(i64) = .empty;
     defer artists.deinit(allocator);

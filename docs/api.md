@@ -845,14 +845,11 @@ defer page.deinit();
   `libraryAcceptConfidentMatches(library, minimum)` accepts each file's best
   pending proposal at least that confident, chosen as
   [metadata.md](metadata.md#musicbrainz-recording-ids) describes, and
-  returns a `ConfidentMatchAcceptance`. `libraryApplyMatchedRelease(library,
-  release_id, fields)` returns how many values it stored. With `fields` null
-  it stores, unlocked, every value of the release all the Release's Tracks
-  name; with a `ReleaseFieldSet` it stores those fields of the best
-  candidate's tracklist snapshot locked, so they outrank file tags, and
-  returns 0 without a candidate or snapshot or past 512 Tracks.
-  `libraryApplyRelease(library, allocator, release_id, fields)` does the
-  same and returns a `ReleaseApplyOutcome`, freed with `deinit`: the
+  returns a `ConfidentMatchAcceptance`.
+  `libraryApplyRelease(library, allocator, release_id, fields)` stores the
+  `ReleaseFieldSet` of the best candidate's tracklist snapshot locked, so
+  they outrank file tags, and returns a `ReleaseApplyOutcome`, freed with
+  `deinit`: the
   release ID, `values_written`, `track_values` and `release_values_only`
   (Tracks given release-track values, and those given only the release's),
   `artist_ids_unknown` (a snapshot from before the release's artist IDs
@@ -861,9 +858,14 @@ defer page.deinit();
   `not_placed` or `no_play_file`) per Track given no release-track values,
   and `reviewed_release_id`: with nothing left alone, the Apply marks the
   reprojected Release as reviewed, as `libraryMarkReleaseReviewed` would,
-  and this is its new ID, else null.
+  and this is its ID after the reprojection, the same ID when all its
+  Tracks moved together, else null.
   It fails with `error.NoReleaseCandidate`, `error.NoReleaseTracklist` or
-  `error.ReleaseTooLarge`.
+  `error.ReleaseTooLarge`. `libraryApplyMatchedRelease(library, release_id,
+  fields)` is the count-returning variant: with a `ReleaseFieldSet` it
+  stores the same values and returns how many, and 0 without a candidate or
+  snapshot or past 512 Tracks; with `fields` null it stores, unlocked,
+  every value of the release all the Release's Tracks name.
   `libraryMarkReleaseReviewed(library, release_id, release_mbid)` marks the
   Release reviewed against `release_mbid`, or the best candidate when null;
   `error.ReleaseNotPlaced` unless every Track has a file and is placed,
@@ -880,7 +882,8 @@ defer page.deinit();
   filter, limit, offset)` returns a `ReleaseMatchPage` of at most 512 `ReleaseMatchItem`s in
   one `ReleaseMatchBucket`, by album artist and title: each Release's title,
   artist, Track count, `best` `ReleaseCandidate` (release ID, title, date,
-  track count, confidence) and `placement`, a `ReleasePlacementCounts`
+  track count, confidence; the title and date are its tracklist
+  snapshot's when it has one) and `placement`, a `ReleasePlacementCounts`
   (`placed`, the Tracks the alignment with the best candidate's snapshot
   places `automatic` or `paired`, and `needs_pairing`, the rest), null
   without a snapshot or past 512 Tracks. Each item with a candidate costs
@@ -919,8 +922,14 @@ defer page.deinit();
   `libraryReleaseMatchDiff(library, allocator, release_id, release_mbid)`
   returns a `ReleaseMatchDiff`: a `ReleaseFieldDiff` per `ReleaseField` in
   order, local beside candidate, and a `ReleaseTrackAlignment` per Track
-  (position, local and candidate title, duration delta, fingerprint). The
-  candidate's release type is its release group's secondary types, each up
+  (position, local and candidate title, duration delta, fingerprint). When
+  the candidate has a tracklist snapshot, the candidate side of the album,
+  album artist, date, release ID and track titles, and each Track's
+  position, title and delta, are what `libraryApplyRelease` would store,
+  and those fields differ exactly when an Apply of the field would change
+  a value; without one they come from proposals
+  ([metadata.md](metadata.md#match-review-diff)). The candidate's release
+  type is its release group's secondary types, each up
   to its first "/", else its primary type ("Mixtape", "Album"), and is
   compared ignoring case. The artwork field names each side's cover with
   its size, "embedded · 1200 × 1200" and "Cover Art Archive · 1200 × 1200",
@@ -976,7 +985,8 @@ defer page.deinit();
   `MatchRequest.release_id` that searches or re-identifies has finished,
   `jobMatchRelease(job)` returns the Release that holds most of the files
   the album's Tracks had when it started, so a host can follow the album to
-  its new id; it is the same id when the album kept its key, and null while
+  its new id; it is the same id when the album kept its key or all its
+  Tracks moved to a key no other Release held, and null while
   the job runs, for any other job, and when no Release holds the files.
   `setMusicBrainzServer` and `setAcoustIdServer` select other servers under
   the same rules as `setListenBrainzServer`, from the next job.
