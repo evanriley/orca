@@ -241,11 +241,13 @@ not hold the default sink.
 headless sway session, drives it and saves screenshots; it never opens a window
 on the desktop.
 
-Host-dependent checks excluded from the normal test run:
+Host-dependent checks excluded from the normal test run. `ID` is the device id
+printed by `scripts/silent-sink.sh`; the smoke also reads `ORCA_TEST_DEVICE`, and
+refuses a missing, unknown or non-virtual device:
 
 ```sh
 zig build dependency-smoke      # Linux foreign-library linking pattern
-zig build pipewire-live-smoke   # opens a short silent stream on the user's PipeWire server
+zig build pipewire-live-smoke -- ID   # opens a short stream on the silent sink ID
 ```
 
 Unit and integration tests need no audio server. The C ABI smoke test

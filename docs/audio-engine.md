@@ -303,8 +303,10 @@ Stream creation and destruction stay on the control side. Output requests
 translate robust, interactive, custom or explicit latency targets into PipeWire
 node latency. Timing snapshots report sample time, monotonic host time,
 callback quantum, queued and converted frames, and non-negative graph and
-device delay. `zig build pipewire-live-smoke` verifies a short silent stream
-against the current user's server; normal tests need no live audio service.
+device delay. `zig build pipewire-live-smoke -- ID` verifies a short silent stream
+on the silent sink whose device id `scripts/silent-sink.sh` printed (or
+`ORCA_TEST_DEVICE`); it refuses a missing, unknown or non-virtual device.
+Normal tests need no live audio service.
 
 ### Stream rate
 

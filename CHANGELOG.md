@@ -177,6 +177,10 @@
   nothing, the search is asked once more for a recording credited to any of
   the first eight names; an artist whose name holds commas, such as "Earth,
   Wind & Fire", still matches on the whole name in one request.
+- `zig build pipewire-live-smoke` opens only the silent sink whose device id
+  is given (`-- ID` or `ORCA_TEST_DEVICE`, from `scripts/silent-sink.sh`) and
+  refuses a missing, unknown or non-virtual device instead of opening the
+  first device on the PipeWire server.
 
 ## 0.1.0 - 2026-10-06
 

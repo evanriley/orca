@@ -452,9 +452,10 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_pipewire_live_smoke = b.addRunArtifact(pipewire_live_smoke);
+        run_pipewire_live_smoke.addPassthruArgs();
         const pipewire_live_step = b.step(
             "pipewire-live-smoke",
-            "Open a short silent stream against the current PipeWire server",
+            "Open a short stream on a silent sink: zig build pipewire-live-smoke -- ID, ID from scripts/silent-sink.sh",
         );
         pipewire_live_step.dependOn(&run_pipewire_live_smoke.step);
     }
