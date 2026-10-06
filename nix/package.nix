@@ -25,17 +25,15 @@ stdenv.mkDerivation (finalAttrs: {
 
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.difference ../. (
-      lib.fileset.unions (
-        map lib.fileset.maybeMissing [
-          ../.zig-cache
-          ../zig-out
-          ../zig-pkg
-          ../.direnv
-          ../result
-        ]
-      )
-    );
+    fileset = lib.fileset.unions [
+      ../build.zig
+      ../build.zig.zon
+      ../build
+      ../liborca
+      ../apps
+      ../LICENSE
+      ../fixtures/eq/hd650.txt
+    ];
   };
 
   deps = zig_0_17.fetchDeps {
