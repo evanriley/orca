@@ -388,7 +388,33 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_release_match_counts` counts the buckets,
   `orca_library_release_match_evidence` and `orca_library_release_match_diff`
   compare a Release with a release, and `orca_library_dismiss_release_candidate`
-  marks one as not the Release. `orca_library_track_verification` hands
+  marks one as not the Release. `orca_library_query_release_matches_v2` pages
+  the same with an `orca_release_match_view_v2`, which adds the placement
+  counts (`placed`, `needs_pairing`, `has_placement`), so a Matches page is one
+  call; `orca_library_release_match_counts_v2` adds `reviewed`.
+  `ORCA_RELEASE_MATCH_BUCKET_REVIEWED` lists the Releases whose review still
+  holds, which no other bucket lists, and
+  `orca_library_unmark_release_reviewed` forgets a review so the Release
+  returns to its own bucket (`ORCA_STATUS_ALREADY_DONE` without one).
+  `orca_library_release_alignment` calls back once with an
+  `orca_release_alignment_view`: the release's tracklist snapshot, a row per
+  release track with its `orca_placement_status`, placed Track and evidence,
+  and the Tracks placed nowhere. `orca_library_pair_release_track` pairs a
+  Track with a release track and returns its `orca_pairing_origin`,
+  `orca_library_unpair_release_track` removes the pairing, and
+  `orca_library_query_release_track_pairings` lists a Release's pairings.
+  `orca_library_apply_release` applies the `orca_release_field` bits and calls
+  back with an `orca_release_apply_view` naming each Track left alone and the
+  reviewed Release's id when the Apply marked it reviewed.
+  `orca_library_mark_release_reviewed` records a review. Without a tracklist
+  snapshot these return `ORCA_STATUS_INVALID_STATE`, as does a release track
+  already paired or a Release not wholly placed; a Release past 512 Tracks is
+  `ORCA_STATUS_UNSUPPORTED`; an unknown Release, candidate, release track or a
+  Track not on the Release is `ORCA_STATUS_NOT_FOUND`; unpairing a Track with
+  no pairing is `ORCA_STATUS_ALREADY_DONE`; and marking a Release whose values
+  differ from the release is `ORCA_STATUS_NEEDS_RECONCILIATION`. Pairing and
+  Apply reproject, so Track and Release ids may change; query again after
+  either. `orca_library_track_verification` hands
   a Track's last verification with the recordings AcoustID heard, and
   `orca_library_query_correction_groups` pages album groups of corrections
   with their members, accepted or dismissed only whole. Acceptance writes the

@@ -869,6 +869,10 @@ defer page.deinit();
   `error.ReleaseNotPlaced` unless every Track has a file and is placed,
   `error.ReleaseDiffers` when an Apply of every field would change a value,
   and the errors of `libraryReleaseAlignment`.
+  `libraryUnmarkReleaseReviewed(library, release_id)` forgets the
+  Release's review, whether or not it still held, so the Release returns to
+  its own bucket; `error.UnknownRelease` for an unknown Release and
+  `error.ReleaseNotReviewed` when it has no review.
   [metadata.md](metadata.md#applying-a-release) says when each applies and
   [how a review holds](metadata.md#marking-a-release-as-reviewed).
   Release matches serve the Matches and Match Review screens.
@@ -893,8 +897,9 @@ defer page.deinit();
   - `confident`: the best candidate is at least `confident_at`, the
     caller's auto-accept score, and is not dismissed;
   - `needs_review`: a candidate exists below that score;
-  - `unmatched`: there is no candidate.
-  A Release whose review still holds is in no bucket.
+  - `unmatched`: there is no candidate;
+  - `reviewed`: a review of the best candidate still holds. Such a Release
+    is in no other bucket.
   `confident_at` is in (0, 1], else `error.InvalidMinimumConfidence`. Only
   Releases with a Track whose play file has a release ID or an undismissed
   proposal are weighed, 256 at a time; the rest are unmatched. A non-null
@@ -902,8 +907,9 @@ defer page.deinit();
   starting with each of its words, through the search index; one with no
   word filters nothing, and one over `max_search_text` bytes is
   `error.SearchTextTooLong`. `libraryReleaseMatchCounts(library,
-  confident_at, filter)` counts each bucket under the same filter, and in
-  `reviewed` the Releases whose review holds. `libraryReleaseMatchEvidence(library,
+  confident_at, filter)` counts the `confident`, `needs_review` and
+  `unmatched` buckets under the same filter, and in `reviewed` the
+  Releases whose review holds. `libraryReleaseMatchEvidence(library,
   release_id, release_mbid)` returns a `MatchEvidence` against
   `release_mbid`, or the best candidate when null
   (`error.NoReleaseCandidate` when there is none): Tracks AcoustID heard on

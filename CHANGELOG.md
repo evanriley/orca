@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Release alignment, pairing and review in the C ABI.**
+  `orca_library_release_alignment`, `orca_library_pair_release_track`,
+  `orca_library_unpair_release_track`,
+  `orca_library_query_release_track_pairings`, `orca_library_apply_release`,
+  `orca_library_mark_release_reviewed` and
+  `orca_library_unmark_release_reviewed` are added, and
+  `orca_library_query_release_matches_v2` and
+  `orca_library_release_match_counts_v2` add placement counts and a reviewed
+  bucket. `Runtime.libraryUnmarkReleaseReviewed` and
+  `orca-cli unmark-release-reviewed` put a reviewed Release back in Matches.
 - **Applying a release that not every Track is on.**
   `Runtime.libraryApplyRelease` and `orca-cli apply-release --fields` write
   the chosen fields from the release's tracklist snapshot: release values to

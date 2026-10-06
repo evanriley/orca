@@ -329,6 +329,13 @@ pub fn libraryMarkReleaseReviewed(self: *OrcaRuntime, library: LibraryHandle, re
     try library_pass.release_apply.markReviewed(self.allocator, try runtime.libraryDatabase(self, library), release_id, release_mbid);
 }
 
+pub fn libraryUnmarkReleaseReviewed(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !void {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const release = try library_database.releases.byId(self.allocator, release_id) orelse return error.UnknownRelease;
+    release.deinit(self.allocator);
+    if (!try library_database.reviewed_releases.unmark(release_id)) return error.ReleaseNotReviewed;
+}
+
 pub fn libraryReleaseMatchPage(
     self: *OrcaRuntime,
     library: LibraryHandle,

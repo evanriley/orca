@@ -13,20 +13,24 @@
  * ORCA_OUTPUT_ACTIVE.
  */
 
-/* pipe, poll and clock_gettime under -std=c11 */
+/* pipe, poll, clock_gettime, sockets and threads under -std=c11 */
 #define _POSIX_C_SOURCE 200809L
 
 #include "orca.h"
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -3587,6 +3591,452 @@ static int coverless_release_smoke(orca_runtime *runtime) {
     return 0;
 }
 
+#define REVIEW_RELEASE_MBID "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e01"
+#define REVIEW_FIRST_TRACK_MBID "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e11"
+#define REVIEW_SECOND_TRACK_MBID "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e12"
+
+static const char review_release_json[] =
+    "{\"id\":\"" REVIEW_RELEASE_MBID "\",\"title\":\"Fixtures\",\"date\":\"2026\","
+    "\"artist-credit\":[{\"name\":\"Orca Test\",\"joinphrase\":\"\","
+    "\"artist\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e02\"}}],"
+    "\"release-group\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e03\",\"primary-type\":\"Album\"},"
+    "\"media\":[{\"position\":1,\"tracks\":["
+    "{\"id\":\"" REVIEW_FIRST_TRACK_MBID "\",\"position\":1,\"title\":\"Reference Tone\",\"length\":200,"
+    "\"recording\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e21\"}},"
+    "{\"id\":\"" REVIEW_SECOND_TRACK_MBID "\",\"position\":2,\"title\":\"Second Song\",\"length\":999000,"
+    "\"recording\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e22\"}},"
+    "{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e13\",\"position\":3,\"title\":\"Third Song\",\"length\":999000,"
+    "\"recording\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e23\"}}]}]}";
+
+struct mock_musicbrainz {
+    int listener;
+    uint16_t port;
+    pthread_t thread;
+    atomic_int stop;
+    atomic_uint release_lookups;
+};
+
+static void mock_musicbrainz_answer(struct mock_musicbrainz *mock, int connection) {
+    char request[4096];
+    size_t length = 0;
+    while (length < sizeof request - 1) {
+        struct pollfd readable = {.fd = connection, .events = POLLIN, .revents = 0};
+        if (poll(&readable, 1, 2000) <= 0) return;
+        ssize_t received = read(connection, request + length, sizeof request - 1 - length);
+        if (received <= 0) return;
+        length += (size_t)received;
+        request[length] = 0;
+        if (strstr(request, "\r\n\r\n") != 0) break;
+    }
+    const char *body = "{\"recordings\":[]}";
+    if (strncmp(request, "GET /ws/2/release/" REVIEW_RELEASE_MBID "?", strlen("GET /ws/2/release/" REVIEW_RELEASE_MBID "?")) == 0) {
+        body = review_release_json;
+        atomic_fetch_add(&mock->release_lookups, 1);
+    }
+    char header[256];
+    int header_length = snprintf(header, sizeof header,
+                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                 "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                                 strlen(body));
+    if (header_length <= 0 || (size_t)header_length >= sizeof header) return;
+    if (write(connection, header, (size_t)header_length) != header_length) return;
+    if (write(connection, body, strlen(body)) != (ssize_t)strlen(body)) return;
+}
+
+static void *mock_musicbrainz_serve(void *context) {
+    struct mock_musicbrainz *mock = context;
+    while (!atomic_load(&mock->stop)) {
+        struct pollfd pending = {.fd = mock->listener, .events = POLLIN, .revents = 0};
+        if (poll(&pending, 1, 50) <= 0) continue;
+        int connection = accept(mock->listener, 0, 0);
+        if (connection < 0) continue;
+        mock_musicbrainz_answer(mock, connection);
+        close(connection);
+    }
+    return 0;
+}
+
+static int mock_musicbrainz_start(struct mock_musicbrainz *mock) {
+    memset(mock, 0, sizeof *mock);
+    atomic_init(&mock->stop, 0);
+    atomic_init(&mock->release_lookups, 0);
+    mock->listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (mock->listener < 0) return -1;
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    socklen_t address_length = sizeof address;
+    if (bind(mock->listener, (struct sockaddr *)&address, sizeof address) != 0 ||
+        listen(mock->listener, 8) != 0 ||
+        getsockname(mock->listener, (struct sockaddr *)&address, &address_length) != 0 ||
+        pthread_create(&mock->thread, 0, mock_musicbrainz_serve, mock) != 0) {
+        close(mock->listener);
+        return -1;
+    }
+    mock->port = ntohs(address.sin_port);
+    return 0;
+}
+
+static void mock_musicbrainz_stop(struct mock_musicbrainz *mock) {
+    atomic_store(&mock->stop, 1);
+    pthread_join(mock->thread, 0);
+    close(mock->listener);
+}
+
+struct alignment_capture {
+    uint32_t calls;
+    orca_release_alignment_view view;
+    uint8_t first_status;
+    int64_t first_track_id;
+    char first_track_title[64];
+    uint8_t second_status;
+    int64_t second_track_id;
+    size_t not_on_release_count;
+    int64_t first_not_on_release;
+    char release_date[16];
+};
+
+static void capture_alignment(void *context, const orca_release_alignment_view *alignment) {
+    struct alignment_capture *capture = context;
+    capture->calls += 1;
+    capture->view = *alignment;
+    copy_view(capture->release_date, sizeof capture->release_date, alignment->release_date);
+    if (alignment->row_count >= 2) {
+        capture->first_status = alignment->rows[0].status;
+        capture->first_track_id = alignment->rows[0].has_track ? alignment->rows[0].track.track_id : 0;
+        copy_view(capture->first_track_title, sizeof capture->first_track_title,
+                  alignment->rows[0].track.title);
+        capture->second_status = alignment->rows[1].status;
+        capture->second_track_id = alignment->rows[1].has_track ? alignment->rows[1].track.track_id : 0;
+    }
+    capture->not_on_release_count = alignment->not_on_release_count;
+    capture->first_not_on_release =
+        alignment->not_on_release_count != 0 ? alignment->not_on_release[0].track_id : 0;
+}
+
+static int read_alignment(orca_runtime *runtime, orca_handle library, int64_t release_id,
+                          struct alignment_capture *capture) {
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_library_release_alignment(runtime, library, release_id, 0, capture,
+                                               capture_alignment) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->calls == 1 && capture->view.row_count == 3);
+    return 0;
+}
+
+struct pairing_capture {
+    uint32_t calls;
+    orca_release_track_pairing_view first;
+};
+
+static void capture_pairing(void *context, const orca_release_track_pairing_view *pairing) {
+    struct pairing_capture *capture = context;
+    if (capture->calls == 0) capture->first = *pairing;
+    capture->calls += 1;
+}
+
+struct apply_capture {
+    uint32_t calls;
+    orca_release_apply_view view;
+    int64_t left_alone_id;
+    uint8_t left_alone_reason;
+    char left_alone_title[64];
+};
+
+static void capture_apply(void *context, const orca_release_apply_view *outcome) {
+    struct apply_capture *capture = context;
+    capture->calls += 1;
+    capture->view = *outcome;
+    if (outcome->left_alone_count != 0) {
+        capture->left_alone_id = outcome->left_alone[0].track_id;
+        capture->left_alone_reason = outcome->left_alone[0].reason;
+        copy_view(capture->left_alone_title, sizeof capture->left_alone_title,
+                  outcome->left_alone[0].title);
+    }
+}
+
+struct release_match_v2_capture {
+    uint32_t calls;
+    orca_release_match_view_v2 first;
+};
+
+static void capture_release_match_v2(void *context, const orca_release_match_view_v2 *item) {
+    struct release_match_v2_capture *capture = context;
+    if (capture->calls == 0) capture->first = *item;
+    capture->calls += 1;
+}
+
+static void capture_release_match_v1(void *context, const orca_release_match_view *item) {
+    (void)item;
+    *(uint32_t *)context += 1;
+}
+
+struct review_tracks {
+    int64_t first;
+    int64_t second;
+    int64_t release_id;
+};
+
+static int review_tracks(orca_runtime *runtime, orca_handle library, const char *second_title,
+                         struct review_tracks *ids) {
+    static struct titled_tracks tracks;
+    memset(&tracks, 0, sizeof tracks);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &tracks,
+                                          collect_titled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(tracks.count == 2);
+    ids->first = titled_track(&tracks, "Reference Tone");
+    ids->second = titled_track(&tracks, second_title);
+    SMOKE_CHECK(ids->first > 0 && ids->second > 0);
+    int64_t second_release = -1;
+    ids->release_id = -1;
+    SMOKE_CHECK(orca_library_track_get(runtime, library, ids->first, &ids->release_id,
+                                       capture_release_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_track_get(runtime, library, ids->second, &second_release,
+                                       capture_release_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(ids->release_id > 0 && ids->release_id == second_release);
+    return 0;
+}
+
+static orca_track_edit text_edit(uint8_t field, const char *value) {
+    orca_track_edit edit;
+    memset(&edit, 0, sizeof edit);
+    edit.field = field;
+    edit.has_value = 1;
+    edit.value.pointer = value;
+    edit.value.length = strlen(value);
+    return edit;
+}
+
+static int review_library_steps(orca_runtime *runtime, orca_handle library, const char *music) {
+    int64_t root_id = 0;
+    SMOKE_CHECK(orca_library_add_root(runtime, library, music, &root_id) == ORCA_STATUS_OK);
+    orca_handle job;
+    SMOKE_CHECK(orca_library_start_scan(runtime, library, root_id, 0, &job) == ORCA_STATUS_OK);
+    uint8_t state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, job, &state, EXPECT_WALK_TOTAL, 60000) == 1);
+    SMOKE_CHECK(state == ORCA_JOB_SUCCEEDED);
+
+    static struct titled_tracks tracks;
+    memset(&tracks, 0, sizeof tracks);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &tracks,
+                                          collect_titled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(tracks.count == 2);
+    int64_t synced = titled_track(&tracks, "Synced FLAC");
+    SMOKE_CHECK(synced > 0);
+    orca_track_edit onto_release[4] = {
+        text_edit(ORCA_METADATA_FIELD_ALBUM, "Fixtures"),
+        text_edit(ORCA_METADATA_FIELD_ALBUM_ARTIST, "Orca Test"),
+        text_edit(ORCA_METADATA_FIELD_TRACK_NUMBER, "2"),
+        text_edit(ORCA_METADATA_FIELD_DATE, "2026"),
+    };
+    struct edited_ids_capture edited;
+    memset(&edited, 0, sizeof edited);
+    SMOKE_CHECK(orca_library_edit_tracks(runtime, library, &synced, 1, onto_release, 4, &edited,
+                                         capture_edited_ids) == ORCA_STATUS_OK);
+    struct review_tracks ids;
+    if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+    int64_t both[2] = {ids.first, ids.second};
+    orca_track_edit release_id = text_edit(ORCA_METADATA_FIELD_MUSICBRAINZ_RELEASE_ID, REVIEW_RELEASE_MBID);
+    SMOKE_CHECK(orca_library_edit_tracks(runtime, library, both, 2, &release_id, 1, &edited,
+                                         capture_edited_ids) == ORCA_STATUS_OK);
+    if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+
+    struct alignment_capture alignment;
+    memset(&alignment, 0, sizeof alignment);
+    SMOKE_CHECK(orca_library_release_alignment(runtime, library, ids.release_id, 0, &alignment,
+                                               capture_alignment) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_library_release_alignment(runtime, library, ids.release_id, "not-an-mbid",
+                                               &alignment, capture_alignment) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_release_alignment(runtime, library, 999999999, 0, &alignment,
+                                               capture_alignment) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_release_alignment(runtime, library, ids.release_id, 0, &alignment, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(alignment.calls == 0);
+
+    struct mock_musicbrainz mock;
+    SMOKE_CHECK(mock_musicbrainz_start(&mock) == 0);
+    char server[64];
+    snprintf(server, sizeof server, "http://127.0.0.1:%u", (unsigned)mock.port);
+    int matched = orca_runtime_set_client_identity(runtime, "Orca C Smoke", "1.0", "https://orca.invalid") ==
+                      ORCA_STATUS_OK &&
+                  orca_runtime_set_provider_server(runtime, ORCA_PROVIDER_SERVICE_MUSICBRAINZ, server) ==
+                      ORCA_STATUS_OK;
+    orca_match_options options;
+    memset(&options, 0, sizeof options);
+    options.has_release_id = 1;
+    options.release_id = ids.release_id;
+    state = ORCA_JOB_RUNNING;
+    if (matched) matched = orca_library_start_match(runtime, library, &options, &job) == ORCA_STATUS_OK;
+    if (matched) matched = await_job(runtime, job, &state, 1, 60000) == 1 && state == ORCA_JOB_SUCCEEDED;
+    mock_musicbrainz_stop(&mock);
+    SMOKE_CHECK(orca_runtime_set_provider_server(runtime, ORCA_PROVIDER_SERVICE_MUSICBRAINZ, 0) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(matched);
+    SMOKE_CHECK(atomic_load(&mock.release_lookups) >= 1);
+
+    if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+    if (read_alignment(runtime, library, ids.release_id, &alignment) != 0) return 1;
+    SMOKE_CHECK(alignment.view.release_id == ids.release_id && alignment.view.medium_count == 1);
+    SMOKE_CHECK(alignment.view.fetched_at > 0 && strcmp(alignment.release_date, "2026") == 0);
+    SMOKE_CHECK(alignment.view.suggested == 1 && alignment.view.not_in_files == 2);
+    SMOKE_CHECK(alignment.view.paired == 0 && alignment.view.automatic == 0);
+    SMOKE_CHECK(alignment.first_status == ORCA_PLACEMENT_STATUS_SUGGESTED);
+    SMOKE_CHECK(alignment.first_track_id == ids.first);
+    SMOKE_CHECK(alignment.second_status == ORCA_PLACEMENT_STATUS_NOT_IN_FILES);
+    SMOKE_CHECK(alignment.not_on_release_count == 1 && alignment.first_not_on_release == ids.second);
+
+    uint8_t origin = 0xff;
+    SMOKE_CHECK(orca_library_pair_release_track(runtime, library, ids.release_id, 0, ids.first, 0, &origin) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_pair_release_track(runtime, library, ids.release_id, 0, ids.first,
+                                                "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4eff", &origin) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_pair_release_track(runtime, library, ids.release_id, 0, ids.first,
+                                                REVIEW_FIRST_TRACK_MBID, &origin) == ORCA_STATUS_OK);
+    SMOKE_CHECK(origin == ORCA_PAIRING_ORIGIN_CONFIRMED_SUGGESTION);
+    if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+    SMOKE_CHECK(orca_library_pair_release_track(runtime, library, ids.release_id, 0, ids.second,
+                                                REVIEW_FIRST_TRACK_MBID, &origin) == ORCA_STATUS_INVALID_STATE);
+    if (read_alignment(runtime, library, ids.release_id, &alignment) != 0) return 1;
+    SMOKE_CHECK(alignment.first_status == ORCA_PLACEMENT_STATUS_PAIRED && alignment.view.paired == 1);
+    SMOKE_CHECK(alignment.first_track_id == ids.first && strcmp(alignment.first_track_title, "Reference Tone") == 0);
+
+    struct pairing_capture pairings;
+    memset(&pairings, 0, sizeof pairings);
+    SMOKE_CHECK(orca_library_query_release_track_pairings(runtime, library, ids.release_id, &pairings,
+                                                          capture_pairing) == ORCA_STATUS_OK);
+    SMOKE_CHECK(pairings.calls == 1 && pairings.first.track_id == ids.first);
+    SMOKE_CHECK(pairings.first.in_snapshot == 1 && pairings.first.has_position == 1);
+    SMOKE_CHECK(pairings.first.disc == 1 && pairings.first.position == 1);
+    SMOKE_CHECK(pairings.first.origin == ORCA_PAIRING_ORIGIN_CONFIRMED_SUGGESTION);
+
+    const uint32_t every_field = (1u << (ORCA_RELEASE_FIELD_TRACK_TITLES + 1)) - 1;
+    struct apply_capture applied;
+    memset(&applied, 0, sizeof applied);
+    SMOKE_CHECK(orca_library_apply_release(runtime, library, ids.release_id, every_field << 1, &applied,
+                                           capture_apply) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_apply_release(runtime, library, ids.release_id, every_field, &applied,
+                                           capture_apply) == ORCA_STATUS_OK);
+    SMOKE_CHECK(applied.calls == 1 && applied.view.track_values == 1 && applied.view.release_values_only == 1);
+    SMOKE_CHECK(applied.view.left_alone_count == 1 && applied.left_alone_id == ids.second);
+    SMOKE_CHECK(applied.left_alone_reason == ORCA_LEFT_ALONE_REASON_NOT_PLACED);
+    SMOKE_CHECK(strcmp(applied.left_alone_title, "Synced FLAC") == 0);
+    SMOKE_CHECK(applied.view.has_reviewed_release_id == 0 && applied.view.artist_ids_unknown == 0);
+    if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+    SMOKE_CHECK(orca_library_mark_release_reviewed(runtime, library, ids.release_id, 0) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_library_mark_release_reviewed: ReleaseNotPlaced") == 0);
+
+    SMOKE_CHECK(orca_library_pair_release_track(runtime, library, ids.release_id, REVIEW_RELEASE_MBID, ids.second,
+                                                REVIEW_SECOND_TRACK_MBID, &origin) == ORCA_STATUS_OK);
+    SMOKE_CHECK(origin == ORCA_PAIRING_ORIGIN_BY_HAND);
+    if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+    memset(&applied, 0, sizeof applied);
+    SMOKE_CHECK(orca_library_apply_release(runtime, library, ids.release_id, every_field, &applied,
+                                           capture_apply) == ORCA_STATUS_OK);
+    SMOKE_CHECK(applied.view.left_alone_count == 0 && applied.view.track_values == 2);
+    SMOKE_CHECK(applied.view.has_reviewed_release_id == 1);
+    if (review_tracks(runtime, library, "Second Song", &ids) != 0) return 1;
+    SMOKE_CHECK(applied.view.reviewed_release_id == ids.release_id);
+
+    struct release_match_v2_capture listed;
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, ORCA_RELEASE_MATCH_BUCKET_REVIEWED, 0.9f,
+                                                      "fixt", 512, 0, &listed,
+                                                      capture_release_match_v2) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.calls == 1 && listed.first.base.release_id == ids.release_id);
+    SMOKE_CHECK(listed.first.base.bucket == ORCA_RELEASE_MATCH_BUCKET_REVIEWED);
+    SMOKE_CHECK(listed.first.has_placement == 1 && listed.first.placed == 2 && listed.first.needs_pairing == 0);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, ORCA_RELEASE_MATCH_BUCKET_REVIEWED, 0.9f,
+                                                      "nothing", 512, 0, &listed,
+                                                      capture_release_match_v2) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.calls == 0);
+    SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, 4, 0.9f, 0, 512, 0, &listed,
+                                                      capture_release_match_v2) == ORCA_STATUS_INVALID_ARGUMENT);
+    uint32_t v1_calls = 0;
+    SMOKE_CHECK(orca_library_query_release_matches(runtime, library, ORCA_RELEASE_MATCH_BUCKET_REVIEWED, 0.9f, 512, 0,
+                                                   &v1_calls, capture_release_match_v1) == ORCA_STATUS_OK);
+    SMOKE_CHECK(v1_calls == 1);
+    orca_release_match_counts_v2 counts;
+    memset(&counts, 0, sizeof counts);
+    SMOKE_CHECK(orca_library_release_match_counts_v2(runtime, library, 0.9f, 0, &counts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(counts.reviewed == 1);
+    SMOKE_CHECK(counts.base.confident + counts.base.needs_review + counts.base.unmatched == 0);
+    SMOKE_CHECK(orca_library_release_match_counts_v2(runtime, library, 0.9f, 0, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_library_mark_release_reviewed(runtime, library, ids.release_id, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_unmark_release_reviewed(runtime, library, ids.release_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_unmark_release_reviewed(runtime, library, ids.release_id) == ORCA_STATUS_ALREADY_DONE);
+    SMOKE_CHECK(orca_library_unmark_release_reviewed(runtime, library, 999999999) == ORCA_STATUS_NOT_FOUND);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, ORCA_RELEASE_MATCH_BUCKET_REVIEWED, 0.9f, 0,
+                                                      512, 0, &listed, capture_release_match_v2) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.calls == 0);
+    SMOKE_CHECK(orca_library_release_match_counts_v2(runtime, library, 0.9f, 0, &counts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(counts.reviewed == 0 && counts.base.confident + counts.base.needs_review == 1);
+    SMOKE_CHECK(orca_library_mark_release_reviewed(runtime, library, ids.release_id, REVIEW_RELEASE_MBID) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_release_match_counts_v2(runtime, library, 0.9f, 0, &counts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(counts.reviewed == 1);
+
+    SMOKE_CHECK(orca_library_unpair_release_track(runtime, library, ids.release_id, ids.first) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_unpair_release_track(runtime, library, ids.release_id, ids.first) ==
+                ORCA_STATUS_ALREADY_DONE);
+    if (review_tracks(runtime, library, "Second Song", &ids) != 0) return 1;
+    memset(&pairings, 0, sizeof pairings);
+    SMOKE_CHECK(orca_library_query_release_track_pairings(runtime, library, ids.release_id, &pairings,
+                                                          capture_pairing) == ORCA_STATUS_OK);
+    SMOKE_CHECK(pairings.calls == 1 && pairings.first.track_id == ids.second);
+    SMOKE_CHECK(pairings.first.origin == ORCA_PAIRING_ORIGIN_BY_HAND && pairings.first.position == 2);
+    return 0;
+}
+
+static int release_review_steps(orca_runtime *runtime) {
+    char relative[] = ".zig-cache/tmp/orca-c-smoke-review-XXXXXX";
+    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(mkdtemp(relative) != 0);
+    char root[1024];
+    char music[1024];
+    char first[1024];
+    char second[1024];
+    int failed = getcwd(root, sizeof root - sizeof relative - 1) == 0;
+    if (!failed) {
+        strcat(root, "/");
+        strcat(root, relative);
+        failed = snprintf(music, sizeof music, "%s/music", root) >= (int)sizeof music ||
+                 snprintf(first, sizeof first, "%s/a.flac", music) >= (int)sizeof first ||
+                 snprintf(second, sizeof second, "%s/b.flac", music) >= (int)sizeof second ||
+                 mkdir(music, 0700) != 0 ||
+                 copy_file("fixtures/audio/tagged-reference.flac", first) != 0 ||
+                 copy_file("fixtures/audio/lyrics-synced.flac", second) != 0;
+    }
+    orca_handle library;
+    int library_open = 0;
+    if (!failed) {
+        library_open = orca_library_open(runtime, "file:orca-c-smoke-review?mode=memory&cache=shared", &library) ==
+                       ORCA_STATUS_OK;
+        failed = !library_open;
+    }
+    if (!failed && review_library_steps(runtime, library, music) != 0) failed = 1;
+    if (library_open && orca_library_close(runtime, library) != ORCA_STATUS_OK) failed = 1;
+    if (drain_events(runtime) != 0) failed = 1;
+    if (remove_tree(relative) != 0) failed = 1;
+    SMOKE_CHECK(failed == 0);
+    return 0;
+}
+
+static int release_review_smoke(void) {
+    orca_runtime *fresh = orca_runtime_create();
+    SMOKE_CHECK(fresh != 0);
+    int failed = orca_runtime_set_wake_callback(fresh, on_wake, 0) != ORCA_STATUS_OK ||
+                 release_review_steps(fresh) != 0;
+    orca_runtime_destroy(fresh);
+    drain_wake_pipe();
+    SMOKE_CHECK(failed == 0);
+    return 0;
+}
+
 static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle *library,
                            int *library_open) {
     char music[1024];
@@ -4044,7 +4494,7 @@ static int matching_smoke(orca_runtime *runtime, orca_handle library, int64_t tr
     SMOKE_CHECK(orca_library_query_release_matches(runtime, library, ORCA_RELEASE_MATCH_BUCKET_UNMATCHED, 0.9f, 512, 0, &releases, count_release_match) ==
                 ORCA_STATUS_OK);
     SMOKE_CHECK(releases.calls >= 1);
-    SMOKE_CHECK(orca_library_query_release_matches(runtime, library, 3, 0.9f, 512, 0, &releases, count_release_match) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_release_matches(runtime, library, 4, 0.9f, 512, 0, &releases, count_release_match) == ORCA_STATUS_INVALID_ARGUMENT);
     orca_release_match_counts release_counts = {0};
     SMOKE_CHECK(orca_library_release_match_counts(runtime, library, 0.9f, &release_counts) == ORCA_STATUS_OK);
     SMOKE_CHECK(release_counts.unmatched == (uint64_t)releases.calls);
@@ -5341,6 +5791,7 @@ int main(int argc, char **argv) {
     if (tag_write_smoke(runtime, library) != 0) return 1;
     if (provider_smoke(runtime, library) != 0) return 1;
     if (matching_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0) return 1;
+    if (release_review_smoke() != 0) return 1;
     if (acoustid_submission_smoke(runtime, library) != 0) return 1;
     if (scrobbling_smoke(runtime, library) != 0) return 1;
     if (maintenance_smoke(runtime, library, root_id) != 0) return 1;

@@ -135,6 +135,14 @@ const struct_pairs = .{
     .{ c_api.MatchReviewView, c.orca_match_review_view },
     .{ c_api.ReleaseMatchView, c.orca_release_match_view },
     .{ c_api.ReleaseMatchCountsView, c.orca_release_match_counts },
+    .{ c_api.ReleaseMatchViewV2, c.orca_release_match_view_v2 },
+    .{ c_api.ReleaseMatchCountsViewV2, c.orca_release_match_counts_v2 },
+    .{ c_api.AlignedTrackView, c.orca_aligned_track_view },
+    .{ c_api.ReleaseTrackPlacementView, c.orca_release_track_placement_view },
+    .{ c_api.ReleaseAlignmentView, c.orca_release_alignment_view },
+    .{ c_api.ReleaseTrackPairingView, c.orca_release_track_pairing_view },
+    .{ c_api.LeftAloneTrackView, c.orca_left_alone_track_view },
+    .{ c_api.ReleaseApplyView, c.orca_release_apply_view },
     .{ c_api.MatchEvidenceView, c.orca_match_evidence_view },
     .{ c_api.ReleaseFieldDiffView, c.orca_release_field_diff_view },
     .{ c_api.ReleaseTrackAlignmentView, c.orca_release_track_alignment_view },
@@ -388,6 +396,34 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_RELEASE_FIELD_";
         pub const Tag = core.runtime.ReleaseField;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PLACEMENT_STATUS_";
+        pub const Tag = core.runtime.PlacementStatus;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RECORDING_SOURCE_";
+        pub const Tag = c_api.RecordingSource;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PAIRING_ORIGIN_";
+        pub const Tag = core.runtime.PairingOrigin;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_LEFT_ALONE_REASON_";
+        pub const Tag = core.runtime.LeftAloneReason;
         pub fn produce(tag: Tag) ?i64 {
             return @backingInt(tag);
         }

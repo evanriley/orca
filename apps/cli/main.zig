@@ -55,6 +55,7 @@ fn describe(err: anyerror) []const u8 {
         error.TrackNotPaired => "that track is not paired on that release",
         error.ReleaseNotPlaced => "every track must have a file and be placed on the release first; run release-alignment, then pair-track",
         error.ReleaseDiffers => "applying the release would change a value; run matches --release=ID --diff, then apply-release",
+        error.ReleaseNotReviewed => "that release is not marked as reviewed; run matches --releases --bucket=reviewed for those that are",
         error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
         error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -291,7 +292,7 @@ const commands = [_]Command{
     },
     .{
         .name = "matches",
-        .usage = "matches DATABASE (TRACK_ID | --releases [--bucket=confident|needs_review|unmatched]\n" ++ usage_indent ++
+        .usage = "matches DATABASE (TRACK_ID | --releases [--bucket=confident|needs_review|unmatched|reviewed]\n" ++ usage_indent ++
             "  [--min-score=SCORE] [--filter=TEXT] [--limit=N] [--offset=N] | --release=ID [--candidate=MBID]\n" ++ usage_indent ++
             "  (--evidence | --diff | --dismiss=MBID))",
         .min_arguments = 2,
@@ -320,6 +321,7 @@ const commands = [_]Command{
     .{ .name = "pair-track", .usage = "pair-track DATABASE RELEASE_ID TRACK_ID RELEASE_TRACK_MBID [RELEASE_MBID]", .min_arguments = 4, .max_arguments = 5, .run = pairTrack, .shares_usage_line = true },
     .{ .name = "unpair-track", .usage = "unpair-track DATABASE RELEASE_ID TRACK_ID", .min_arguments = 3, .max_arguments = 3, .run = unpairTrack, .shares_usage_line = true },
     .{ .name = "mark-release-reviewed", .usage = "mark-release-reviewed DATABASE RELEASE_ID [RELEASE_MBID]", .min_arguments = 2, .max_arguments = 3, .run = markReleaseReviewed, .shares_usage_line = true },
+    .{ .name = "unmark-release-reviewed", .usage = "unmark-release-reviewed DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = unmarkReleaseReviewed, .shares_usage_line = true },
     .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
@@ -794,11 +796,14 @@ const help_details =
     \\release-track values, with reason not_placed or no_play_file. An Apply
     \\that leaves no Track alone and nothing differing marks the Release as
     \\reviewed and prints its ID after reprojection as reviewed=, else -.
-    \\mark-release-reviewed takes a Release off matches --releases while its
+    \\mark-release-reviewed moves a Release to the reviewed bucket while its
     \\best candidate, tracklist, Tracks and their values stay as they are;
     \\every Track must be placed and apply-release must have nothing left to
-    \\change. matches --releases prints placed= and needs_pairing= for each
-    \\Release with a tracklist, and reviewed= in its totals.
+    \\change. matches --releases --bucket=reviewed lists the Releases whose
+    \\review still holds, and unmark-release-reviewed forgets a review so the
+    \\Release returns to its bucket. matches --releases prints placed= and
+    \\needs_pairing= for each Release with a tracklist, and reviewed= in its
+    \\totals.
     \\accept-matches accepts each file's best match at least as confident as
     \\--min-score. A match AcoustID found with a fingerprint score of at least
     \\0.9 comes first; among those, the higher percent, then the Track's own
@@ -2513,6 +2518,15 @@ fn markReleaseReviewed(context: Context) !void {
     const release_mbid: ?[]const u8 = if (context.arguments.len == 3) context.arguments[2] else null;
     try runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid);
     try context.stdout.print("reviewed\trelease={d}\n", .{release_id});
+}
+
+fn unmarkReleaseReviewed(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    try runtime.libraryUnmarkReleaseReviewed(library, release_id);
+    try context.stdout.print("unreviewed\trelease={d}\n", .{release_id});
 }
 
 fn printReleaseAlignment(context: Context) !void {

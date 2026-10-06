@@ -80,7 +80,9 @@ typedef enum orca_status {
     ORCA_STATUS_ALREADY_DONE = 10,
     /* A file changed after Orca wrote it, or its backup is missing or no
      * longer the original. Orca kept every file as it found it and needs a
-     * person to decide; it never claims a rollback it could not do. */
+     * person to decide; it never claims a rollback it could not do. Also a
+     * Release whose values differ from the release a person would mark it
+     * reviewed against. */
     ORCA_STATUS_NEEDS_RECONCILIATION = 11,
     /* What the call needs was deliberately deleted, such as the backups of a
      * tag write that was pruned and can no longer be undone. */
@@ -4616,11 +4618,14 @@ orca_status orca_library_apply_matched_release_fields(
 
 /* Where a Release stands against MusicBrainz. CONFIDENT: its best candidate
  * is at least `confident_at` and is not dismissed. NEEDS_REVIEW: a candidate
- * exists below that. UNMATCHED: there is none. */
+ * exists below that. UNMATCHED: there is none. REVIEWED: a person's review of
+ * its best candidate still holds, as orca_library_mark_release_reviewed
+ * describes; such a Release is in no other bucket. */
 typedef enum orca_release_match_bucket {
     ORCA_RELEASE_MATCH_BUCKET_CONFIDENT = 0,
     ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW = 1,
-    ORCA_RELEASE_MATCH_BUCKET_UNMATCHED = 2
+    ORCA_RELEASE_MATCH_BUCKET_UNMATCHED = 2,
+    ORCA_RELEASE_MATCH_BUCKET_REVIEWED = 3
 } orca_release_match_bucket;
 
 /* A Release beside its best MusicBrainz release candidate: the release its
@@ -4649,7 +4654,8 @@ typedef void (*orca_release_match_callback)(void *context, const orca_release_ma
 /* Invokes the callback for a page of the Releases in `bucket`, an
  * orca_release_match_bucket, by album artist and title. `confident_at` is
  * greater than 0 and at most 1, and `limit` 1 to 512; otherwise
- * INVALID_ARGUMENT. */
+ * INVALID_ARGUMENT. Weighing every Release, a page costs a walk of the
+ * Library. */
 orca_status orca_library_query_release_matches(
     orca_runtime *runtime,
     orca_handle library,
@@ -4667,7 +4673,8 @@ typedef struct orca_release_match_counts {
     uint64_t unmatched;
 } orca_release_match_counts;
 
-/* How many Releases each bucket of orca_library_query_release_matches holds. */
+/* How many Releases each bucket of orca_library_query_release_matches holds.
+ * A reviewed Release is counted in none of them. */
 orca_status orca_library_release_match_counts(
     orca_runtime *runtime,
     orca_handle library,
@@ -4765,6 +4772,321 @@ orca_status orca_library_dismiss_release_candidate(
     orca_handle library,
     int64_t release_id,
     const char *release_mbid
+);
+
+/* orca_release_match_view with how many of the Release's Tracks the
+ * alignment with its best candidate's tracklist snapshot places:
+ * `placed` by recording ID or by a pairing, `needs_pairing` only suggested
+ * or on no release track. `has_placement` is 0, and both counts 0, without a
+ * candidate, before a lookup snapshotted its tracklist, or for a Release of
+ * more than 512 Tracks. Valid only for the duration of the callback. */
+typedef struct orca_release_match_view_v2 {
+    orca_release_match_view base;
+    uint32_t placed;
+    uint32_t needs_pairing;
+    uint8_t has_placement;
+    uint8_t reserved[7];
+} orca_release_match_view_v2;
+
+typedef void (*orca_release_match_v2_callback)(void *context, const orca_release_match_view_v2 *item);
+
+/* orca_library_query_release_matches with each Release's placement counts,
+ * so a Matches page takes one call. `filter`, NUL-terminated or NULL for
+ * every Release, keeps the Releases whose title or album artist has a word
+ * starting with each of its words; at most 256 bytes, else INVALID_ARGUMENT.
+ * Weighing every Release, a page costs a walk of the Library; each item with
+ * a candidate then costs one Release read, snapshot read and pairings read
+ * and an alignment. */
+orca_status orca_library_query_release_matches_v2(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t bucket,
+    float confident_at,
+    const char *filter,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_release_match_v2_callback callback
+);
+
+/* orca_release_match_counts with how many Releases are in the REVIEWED
+ * bucket. */
+typedef struct orca_release_match_counts_v2 {
+    orca_release_match_counts base;
+    uint64_t reviewed;
+} orca_release_match_counts_v2;
+
+/* How many Releases each bucket of orca_library_query_release_matches_v2
+ * holds under `filter`, as it takes it. */
+orca_status orca_library_release_match_counts_v2(
+    orca_runtime *runtime,
+    orca_handle library,
+    float confident_at,
+    const char *filter,
+    orca_release_match_counts_v2 *output
+);
+
+/* How a release track of an alignment has its Track. PAIRED: a person paired
+ * them. AUTOMATIC: the release track lists a recording ID the Track holds.
+ * SUGGESTED: at least two of the title, length and position agree and the
+ * pair is the best for both; a person confirms it by pairing. NOT_IN_FILES:
+ * no Track is on it. */
+typedef enum orca_placement_status {
+    ORCA_PLACEMENT_STATUS_PAIRED = 0,
+    ORCA_PLACEMENT_STATUS_AUTOMATIC = 1,
+    ORCA_PLACEMENT_STATUS_SUGGESTED = 2,
+    ORCA_PLACEMENT_STATUS_NOT_IN_FILES = 3
+} orca_placement_status;
+
+/* Where the recording ID that placed an AUTOMATIC Track came from: the
+ * file's recording ID in effect (its tag or a value a person set), an
+ * accepted match, or a pending one. NONE for every other status. */
+typedef enum orca_recording_source {
+    ORCA_RECORDING_SOURCE_NONE = 0,
+    ORCA_RECORDING_SOURCE_IN_EFFECT = 1,
+    ORCA_RECORDING_SOURCE_ACCEPTED_MATCH = 2,
+    ORCA_RECORDING_SOURCE_PENDING_MATCH = 3
+} orca_recording_source;
+
+/* A Track of the Release as an alignment shows it. A number or duration is 0
+ * when its `has_` flag is 0. */
+typedef struct orca_aligned_track_view {
+    int64_t track_id;
+    int64_t duration_ms;
+    uint32_t track_number;
+    uint32_t disc_number;
+    uint8_t has_duration_ms;
+    uint8_t has_track_number;
+    uint8_t has_disc_number;
+    uint8_t reserved[5];
+    orca_string_view title;
+} orca_aligned_track_view;
+
+/* One release track and the Track on it. `status` is an
+ * orca_placement_status and `recording_source` an orca_recording_source.
+ * `track` is zero and `has_track` 0 for NOT_IN_FILES. The evidence flags say
+ * what agrees between the Track and the release track: the normalized
+ * titles, the lengths within two seconds, and the disc (1 when unset) and
+ * track number. `length_delta_ms` is the Track's length less the release
+ * track's when both are known. */
+typedef struct orca_release_track_placement_view {
+    uint32_t disc;
+    uint32_t position;
+    uint64_t length_ms;
+    int64_t length_delta_ms;
+    uint8_t has_length_ms;
+    uint8_t status;
+    uint8_t recording_source;
+    uint8_t has_track;
+    uint8_t title_equal;
+    uint8_t length_close;
+    uint8_t position_equal;
+    uint8_t has_length_delta_ms;
+    orca_string_view title;
+    orca_string_view artist_credit;
+    orca_string_view recording_mbid;
+    orca_string_view release_track_mbid;
+    orca_aligned_track_view track;
+} orca_release_track_placement_view;
+
+/* A Release laid against one MusicBrainz release's tracklist snapshot.
+ * `rows` holds one view per release track in disc then position order;
+ * `not_on_release` the Tracks placed on no release track and suggested for
+ * none, in disc, track number, then Track ID order. The status counts sum to
+ * `row_count`. `release_date` and `release_group_mbid` are empty when the
+ * release has none; `fetched_at` is when the snapshot was taken, in Unix
+ * seconds. Everything is valid only for the duration of the callback. */
+typedef struct orca_release_alignment_view {
+    int64_t release_id;
+    int64_t fetched_at;
+    uint32_t medium_count;
+    uint32_t paired;
+    uint32_t automatic;
+    uint32_t suggested;
+    uint32_t not_in_files;
+    uint8_t reserved[4];
+    orca_string_view release_mbid;
+    orca_string_view title;
+    orca_string_view artist_credit;
+    orca_string_view release_date;
+    orca_string_view release_group_mbid;
+    const orca_release_track_placement_view *rows;
+    size_t row_count;
+    const orca_aligned_track_view *not_on_release;
+    size_t not_on_release_count;
+} orca_release_alignment_view;
+
+typedef void (*orca_release_alignment_callback)(void *context, const orca_release_alignment_view *alignment);
+
+/* Invokes the callback once with the Release laid against `release_mbid`, a
+ * NUL-terminated MusicBrainz release ID, or its best candidate when NULL.
+ * NOT_FOUND for an unknown Release or one with no candidate;
+ * INVALID_ARGUMENT for an ID that is not a MusicBrainz ID; INVALID_STATE
+ * before a lookup snapshotted the release's tracklist, which a release-scoped
+ * orca_library_start_match does; UNSUPPORTED for a Release of more than 512
+ * Tracks. */
+orca_status orca_library_release_alignment(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    const char *release_mbid,
+    void *context,
+    orca_release_alignment_callback callback
+);
+
+/* How a pairing was made: a person confirmed the suggestion the alignment
+ * showed, or chose the release track by hand. */
+typedef enum orca_pairing_origin {
+    ORCA_PAIRING_ORIGIN_CONFIRMED_SUGGESTION = 0,
+    ORCA_PAIRING_ORIGIN_BY_HAND = 1
+} orca_pairing_origin;
+
+/* Pairs a Track of the Release with the release track `release_track_mbid`
+ * of `release_mbid`, or of the best candidate when NULL, both NUL-terminated,
+ * replacing the Track's pairing on that release. Every file of the Track
+ * takes the release track's recording ID and release-track ID as locked
+ * values in the Library; no media file is written, and the Track may get a
+ * new id. `origin` receives an orca_pairing_origin. NOT_FOUND for an unknown
+ * Release, one with no candidate, a Track not on the Release or a release
+ * track the snapshot does not list; INVALID_ARGUMENT for an ID that is not a
+ * MusicBrainz ID; INVALID_STATE before a lookup snapshotted the tracklist or
+ * when another Track holds the release track; UNSUPPORTED for a Release of
+ * more than 512 Tracks. */
+orca_status orca_library_pair_release_track(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    const char *release_mbid,
+    int64_t track_id,
+    const char *release_track_mbid,
+    uint8_t *origin
+);
+
+/* Removes the Track's pairing on the Release and puts back the values it
+ * replaced where its files still hold the pairing's values. ALREADY_DONE
+ * when the Track has no pairing there. */
+orca_status orca_library_unpair_release_track(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    int64_t track_id
+);
+
+/* A pairing of one of a Release's Tracks. `origin` is an
+ * orca_pairing_origin and `created_at` Unix seconds. `in_snapshot` is 0 when
+ * the release's snapshot no longer lists the release track; an alignment
+ * then ignores the pairing, and `disc` and `position` are 0 with
+ * `has_position` 0. Valid only for the duration of the callback. */
+typedef struct orca_release_track_pairing_view {
+    int64_t release_id;
+    int64_t track_id;
+    int64_t created_at;
+    uint32_t disc;
+    uint32_t position;
+    uint8_t origin;
+    uint8_t in_snapshot;
+    uint8_t has_position;
+    uint8_t reserved[5];
+    orca_string_view release_mbid;
+    orca_string_view release_track_mbid;
+    orca_string_view recording_mbid;
+} orca_release_track_pairing_view;
+
+typedef void (*orca_release_track_pairing_callback)(void *context, const orca_release_track_pairing_view *pairing);
+
+/* Invokes the callback for every pairing of the Release's Tracks, on any
+ * release, by release MBID, then disc and position, unlisted release tracks
+ * last; at most 512. An unknown Release has none. */
+orca_status orca_library_query_release_track_pairings(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    void *context,
+    orca_release_track_pairing_callback callback
+);
+
+/* Why an Apply gave a Track none of its release track's values: the
+ * alignment places it on no release track or only suggests one, or it has no
+ * file to store values on. */
+typedef enum orca_left_alone_reason {
+    ORCA_LEFT_ALONE_REASON_NOT_PLACED = 0,
+    ORCA_LEFT_ALONE_REASON_NO_PLAY_FILE = 1
+} orca_left_alone_reason;
+
+/* A Track an Apply left alone. `reason` is an orca_left_alone_reason. */
+typedef struct orca_left_alone_track_view {
+    int64_t track_id;
+    uint8_t reason;
+    uint8_t reserved[7];
+    orca_string_view title;
+} orca_left_alone_track_view;
+
+/* What an Apply stored. `values_written` counts values; `track_values` the
+ * Tracks with a file the alignment placed, which took their release track's
+ * values; `release_values_only` the other Tracks with a file, which took the
+ * release's own values only. `left_alone` lists every Track given no release
+ * track values, in the alignment's Track order. `artist_ids_unknown` is set
+ * when the snapshot predates Orca keeping the release's artist IDs, so the
+ * album artist ID and compilation flag were left alone until a lookup
+ * replaces it. An Apply that left no Track alone and no value differing
+ * marks the Release as reviewed: `reviewed_release_id` is its id after
+ * reprojection, with `has_reviewed_release_id` set. Everything is valid only
+ * for the duration of the callback. */
+typedef struct orca_release_apply_view {
+    int64_t reviewed_release_id;
+    uint32_t values_written;
+    uint32_t track_values;
+    uint32_t release_values_only;
+    uint8_t artist_ids_unknown;
+    uint8_t has_reviewed_release_id;
+    uint8_t reserved[2];
+    orca_string_view release_mbid;
+    const orca_left_alone_track_view *left_alone;
+    size_t left_alone_count;
+} orca_release_apply_view;
+
+typedef void (*orca_release_apply_callback)(void *context, const orca_release_apply_view *outcome);
+
+/* A person's Apply in Match Review: stores the fields whose bits are set in
+ * `fields`, as orca_library_apply_matched_release_fields does, and invokes
+ * the callback once with what it stored. Unplaced Tracks never refuse an
+ * Apply. A bit past TRACK_TITLES or an ID that is not a MusicBrainz ID is
+ * INVALID_ARGUMENT; NOT_FOUND for an unknown Release or one with no
+ * candidate; INVALID_STATE before a lookup snapshotted the tracklist;
+ * UNSUPPORTED for a Release of more than 512 Tracks. Reprojecting can give
+ * the Release and its Tracks new ids. */
+orca_status orca_library_apply_release(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    uint32_t fields,
+    void *context,
+    orca_release_apply_callback callback
+);
+
+/* Marks the Release as reviewed against `release_mbid`, NUL-terminated, or
+ * its best candidate when NULL: it moves to the REVIEWED bucket while that
+ * release stays its best candidate and its Tracks, their values and the
+ * snapshot stay as they were. INVALID_STATE unless every Track has a file
+ * and is placed, or before a lookup snapshotted the tracklist;
+ * NEEDS_RECONCILIATION when an Apply of the album, album artist, release
+ * date, release ID and track titles would change a value in effect, which a
+ * person settles by an Apply or an edit first. NOT_FOUND,
+ * INVALID_ARGUMENT and UNSUPPORTED as orca_library_release_alignment. */
+orca_status orca_library_mark_release_reviewed(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    const char *release_mbid
+);
+
+/* Forgets the Release's review, holding or not, so it returns to the bucket
+ * its best candidate puts it in. NOT_FOUND for an unknown Release;
+ * ALREADY_DONE when it has no review. */
+orca_status orca_library_unmark_release_reviewed(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id
 );
 
 /* A recording AcoustID heard in a fingerprint, with its score from 0 to 1. */

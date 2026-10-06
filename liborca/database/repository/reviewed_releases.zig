@@ -60,6 +60,18 @@ pub const ReviewedReleaseRepository = struct {
         try statement.bindBlob(3, &digest);
         if (try statement.step() != .done) return error.SqlFailed;
     }
+
+    /// Forgets the Release's review, whether or not it still held. False
+    /// when it had none.
+    pub fn unmark(self: *ReviewedReleaseRepository, release_id: i64) !bool {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare("DELETE FROM reviewed_releases WHERE release_id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes() != 0;
+    }
 };
 
 /// Whether the Release's review of `best_mbid` still holds: one keyed read,

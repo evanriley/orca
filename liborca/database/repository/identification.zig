@@ -871,6 +871,8 @@ pub const ReleaseMatchBucket = enum(u8) {
     needs_review,
     /// None of its Tracks names a MusicBrainz release it was not told is wrong.
     unmatched,
+    /// A person's review of its best candidate still holds.
+    reviewed,
 };
 
 /// A MusicBrainz release some of a Release's Tracks are named on: by a tag,
@@ -1830,8 +1832,8 @@ pub const IdentificationProposalRepository = struct {
     /// `bucket` against `confident_at`. Only Releases a release ID or a
     /// proposal could name a release for are weighed; every other one is
     /// unmatched.
-    /// A Release whose review of its best candidate still holds is in no
-    /// bucket. A `filter` keeps only Releases whose title or album artist
+    /// A Release whose review of its best candidate still holds is in the
+    /// reviewed bucket only. A `filter` keeps only Releases whose title or album artist
     /// has a word starting with each of its words.
     pub fn releaseMatchPage(
         self: *const IdentificationProposalRepository,
@@ -1853,14 +1855,17 @@ pub const IdentificationProposalRepository = struct {
         const owned = arena.allocator();
         var items: std.ArrayList(ReleaseMatchItem) = .empty;
         var skipped: u32 = 0;
-        var releases = try self.db.prepare(if (bucket == .unmatched)
-            "SELECT id, id IN (" ++ releases_with_candidate_sources ++ ") FROM releases\n" ++
+        var releases = try self.db.prepare(switch (bucket) {
+            .unmatched => "SELECT id, id IN (" ++ releases_with_candidate_sources ++ ") FROM releases\n" ++
                 "WHERE " ++ release_match_filter ++ "\n" ++
-                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;"
-        else
-            "SELECT id, 1 FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ")\n" ++
+                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
+            .reviewed => "SELECT id, 1 FROM releases WHERE id IN (SELECT release_id FROM reviewed_releases)\n" ++
                 "AND " ++ release_match_filter ++ "\n" ++
-                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;");
+                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
+            .confident, .needs_review => "SELECT id, 1 FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ")\n" ++
+                "AND " ++ release_match_filter ++ "\n" ++
+                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
+        });
         defer releases.deinit();
         try releases.bindInt64(1, @backingInt(ProposalState.dismissed));
         try releases.bindOptionalText(2, expression);
@@ -1900,8 +1905,11 @@ pub const IdentificationProposalRepository = struct {
                     if (!exists) continue;
                     best = try view.best(chunk);
                 }
-                if (best) |candidate| if (try reviewed_releases.stillReviewed(self.db, id, candidate.release_mbid)) continue;
-                if (releaseMatchBucket(best, confident_at) != bucket) continue;
+                const in_bucket: ReleaseMatchBucket = if (best) |candidate|
+                    (if (try reviewed_releases.stillReviewed(self.db, id, candidate.release_mbid)) .reviewed else releaseMatchBucket(best, confident_at))
+                else
+                    .unmatched;
+                if (in_bucket != bucket) continue;
                 if (skipped < offset) {
                     skipped += 1;
                     continue;
@@ -1988,7 +1996,7 @@ pub const IdentificationProposalRepository = struct {
                 switch (releaseMatchBucket(best, confident_at)) {
                     .confident => counts.confident += 1,
                     .needs_review => counts.needs_review += 1,
-                    .unmatched => {},
+                    .unmatched, .reviewed => {},
                 }
             }
         }

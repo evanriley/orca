@@ -609,6 +609,7 @@ fn reviewClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         .confident => counts.confident,
         .needs_review => counts.needs_review,
         .unmatched => counts.unmatched,
+        .reviewed => counts.reviewed,
     } else entries.items.len;
     match_review.open(self, .{ .bucket = bucket, .confident_at = thresholdFraction(self), .filter = self.matches.filter }, entries.items, total, at);
 }
@@ -788,6 +789,7 @@ fn bucketName(bucket: Bucket) [*:0]const u8 {
         .confident => "Confident",
         .needs_review => "Needs Review",
         .unmatched => "Unmatched",
+        .reviewed => "Reviewed",
     };
 }
 
@@ -870,7 +872,7 @@ pub fn build(self: *App) *gtk.Widget {
     const tabs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(tabs, "match-tabs");
     var first: ?*gtk.Widget = null;
-    for (std.enums.values(Bucket)) |bucket| {
+    for ([_]Bucket{ .confident, .needs_review, .unmatched }) |bucket| {
         const button = tabButton(self, bucket, first);
         if (first == null) first = button;
         gtk.gtk_box_append(gtk.cast(gtk.Box, tabs), button);
@@ -936,6 +938,7 @@ fn showCounts(self: *App) void {
             .confident => counts.confident,
             .needs_review => counts.needs_review,
             .unmatched => counts.unmatched,
+            .reviewed => counts.reviewed,
         };
         gtk.gtk_label_set_text(count_label, strings.format(&buffer, "{f}", .{strings.grouped(count)}).ptr);
     }
@@ -966,6 +969,7 @@ fn emptyText(bucket: Bucket, filtered: bool) [*:0]const u8 {
         .confident => "No album matches a MusicBrainz release with confidence yet.",
         .needs_review => "No album needs review.",
         .unmatched => "Every album has a MusicBrainz candidate.",
+        .reviewed => "No album is marked as reviewed.",
     };
 }
 

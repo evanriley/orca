@@ -68,6 +68,7 @@ const Loader = struct {
             .confident => counts.confident,
             .needs_review => counts.needs_review,
             .unmatched => counts.unmatched,
+            .reviewed => counts.reviewed,
         };
         if (self.total == 0) return;
         self.index = @min(self.index, self.total - 1);

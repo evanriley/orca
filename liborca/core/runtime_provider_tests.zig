@@ -8496,6 +8496,53 @@ test "a Release equal to its snapshot can be marked reviewed and leaves the list
     try std.testing.expect(try matchListed(&runtime, library, album));
 }
 
+fn reviewedListed(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64, filter: ?[]const u8) !bool {
+    var page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .reviewed, 0.9, filter, 512, 0);
+    defer page.deinit();
+    for (page.items) |item| if (item.release_id == release_id) {
+        try std.testing.expectEqual(ReleaseMatchBucket.reviewed, item.bucket);
+        return true;
+    };
+    return false;
+}
+
+test "a reviewed Release is listed in the reviewed bucket while its review holds, and unmarking returns it to its own bucket" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-unmark-reviewed?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeFullNightcall(library_database, index);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    try snapshotNightcall(library_database, 4);
+    try std.testing.expect(!try reviewedListed(&runtime, library, album, null));
+    try std.testing.expectError(error.ReleaseNotReviewed, runtime.libraryUnmarkReleaseReviewed(library, album));
+    try std.testing.expectError(error.UnknownRelease, runtime.libraryUnmarkReleaseReviewed(library, 999_999));
+
+    try runtime.libraryMarkReleaseReviewed(library, album, null);
+    try std.testing.expect(try reviewedListed(&runtime, library, album, null));
+    try std.testing.expect(try reviewedListed(&runtime, library, album, "nightc"));
+    try std.testing.expect(!try reviewedListed(&runtime, library, album, "Testarossa"));
+    try std.testing.expectError(error.PageOutOfRange, runtime.libraryReleaseMatchPage(library, std.testing.allocator, .reviewed, 0.9, null, 0, 0));
+    var skipped = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .reviewed, 0.9, null, 512, 1);
+    defer skipped.deinit();
+    try std.testing.expectEqual(@as(usize, 0), skipped.items.len);
+
+    try runtime.libraryUnmarkReleaseReviewed(library, album);
+    try std.testing.expect(!try reviewedListed(&runtime, library, album, null));
+    try std.testing.expect(try matchListed(&runtime, library, album));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.libraryReleaseMatchCounts(library, 0.9, null)).reviewed);
+    try std.testing.expectError(error.ReleaseNotReviewed, runtime.libraryUnmarkReleaseReviewed(library, album));
+
+    try runtime.libraryMarkReleaseReviewed(library, album, null);
+    const edit = try runtime.libraryEditTracks(library, &.{try trackOfFile(library_database, files[1])}, &.{.{ .field = .title, .value = "Nightcall (Remix)" }});
+    edit.deinit();
+    try std.testing.expect(!try reviewedListed(&runtime, library, album, null));
+    try runtime.libraryUnmarkReleaseReviewed(library, album);
+    try std.testing.expectError(error.ReleaseNotReviewed, runtime.libraryUnmarkReleaseReviewed(library, album));
+}
+
 const VariousArtists = struct { library_database: *database.LibraryDatabase, files: [4]i64 };
 
 fn applyVariousArtists(runtime: *OrcaRuntime, name: [:0]const u8, artist_ids: ?[]const []const u8) !VariousArtists {

@@ -1632,11 +1632,18 @@ pub const OrcaRuntime = struct {
         return runtime_listens.libraryMarkReleaseReviewed(self, library, release_id, release_mbid);
     }
 
+    /// Forgets the Release's review, holding or not, so it returns to the
+    /// bucket its best candidate puts it in. `error.ReleaseNotReviewed` when
+    /// it has no review to forget.
+    pub fn libraryUnmarkReleaseReviewed(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !void {
+        return runtime_listens.libraryUnmarkReleaseReviewed(self, library, release_id);
+    }
+
     /// Releases in `bucket`, by album artist and title, at most `max_page`.
-    /// A Release is `confident` when its best candidate's confidence is at
-    /// least `confident_at`, `needs_review` when it is lower, and
-    /// `unmatched` with no candidate. A Release whose review still holds is
-    /// in no bucket. Weighing every Release, a page costs a walk of the
+    /// A Release whose review of its best candidate still holds is
+    /// `reviewed`; otherwise it is `confident` when its best candidate's
+    /// confidence is at least `confident_at`, `needs_review` when it is
+    /// lower, and `unmatched` with no candidate. Weighing every Release, a page costs a walk of the
     /// library; each item with a candidate then costs one Release view,
     /// snapshot and pairings read and an alignment for its placement
     /// counts. A `filter` keeps the Releases whose title or album artist has

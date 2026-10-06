@@ -204,10 +204,18 @@ stored in `reviewed_releases` with a SHA-256 digest of the snapshot's
 header and tracks, the Release's Track IDs, and each of their files'
 observed tags and Orca values of the fields an Apply stores. It holds
 while that release is the best candidate and the digest is unchanged; a
-Release whose review holds is in no bucket of the release-match page and
-counts, and `ReleaseMatchCounts.reviewed` counts it. A change to the
-Tracks, a value, the best candidate or the snapshot brings the Release
-back; the stale row is left in place and replaced by the next review.
+Release whose review holds is listed only in the `reviewed` bucket of the
+release-match page, and `ReleaseMatchCounts.reviewed` counts it. A change
+to the Tracks, a value, the best candidate or the snapshot brings the
+Release back; the stale row is left in place and replaced by the next
+review.
+
+Since a complete Apply marks a Release reviewed on its own, the `reviewed`
+bucket is where a person finds what a review hid.
+`Runtime.libraryUnmarkReleaseReviewed(library, release_id)` and
+`orca-cli unmark-release-reviewed` delete the Release's review, held or
+stale, and the Release returns to the bucket its candidates put it in. It
+changes no value; `error.ReleaseNotReviewed` when there is no review.
 
 `libraryDismissReleaseCandidate` removes a release from the candidates.
 

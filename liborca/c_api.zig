@@ -1579,6 +1579,121 @@ pub const ReleaseMatchCountsView = extern struct {
     unmatched: u64,
 };
 
+pub const ReleaseMatchViewV2 = extern struct {
+    base: ReleaseMatchView,
+    placed: u32,
+    needs_pairing: u32,
+    has_placement: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const ReleaseMatchV2Callback = *const fn (?*anyopaque, *const ReleaseMatchViewV2) callconv(.c) void;
+
+pub const ReleaseMatchCountsViewV2 = extern struct {
+    base: ReleaseMatchCountsView,
+    reviewed: u64,
+};
+
+pub const RecordingSource = enum(u8) {
+    none = 0,
+    in_effect = 1,
+    accepted_match = 2,
+    pending_match = 3,
+};
+
+pub const AlignedTrackView = extern struct {
+    track_id: i64,
+    duration_ms: i64,
+    track_number: u32,
+    disc_number: u32,
+    has_duration_ms: u8,
+    has_track_number: u8,
+    has_disc_number: u8,
+    _reserved: [5]u8 = @splat(0),
+    title: StringView,
+};
+
+pub const ReleaseTrackPlacementView = extern struct {
+    disc: u32,
+    position: u32,
+    length_ms: u64,
+    length_delta_ms: i64,
+    has_length_ms: u8,
+    status: u8,
+    recording_source: u8,
+    has_track: u8,
+    title_equal: u8,
+    length_close: u8,
+    position_equal: u8,
+    has_length_delta_ms: u8,
+    title: StringView,
+    artist_credit: StringView,
+    recording_mbid: StringView,
+    release_track_mbid: StringView,
+    track: AlignedTrackView,
+};
+
+pub const ReleaseAlignmentView = extern struct {
+    release_id: i64,
+    fetched_at: i64,
+    medium_count: u32,
+    paired: u32,
+    automatic: u32,
+    suggested: u32,
+    not_in_files: u32,
+    _reserved: [4]u8 = @splat(0),
+    release_mbid: StringView,
+    title: StringView,
+    artist_credit: StringView,
+    release_date: StringView,
+    release_group_mbid: StringView,
+    rows: [*]const ReleaseTrackPlacementView,
+    row_count: usize,
+    not_on_release: [*]const AlignedTrackView,
+    not_on_release_count: usize,
+};
+
+pub const ReleaseAlignmentCallback = *const fn (?*anyopaque, *const ReleaseAlignmentView) callconv(.c) void;
+
+pub const ReleaseTrackPairingView = extern struct {
+    release_id: i64,
+    track_id: i64,
+    created_at: i64,
+    disc: u32,
+    position: u32,
+    origin: u8,
+    in_snapshot: u8,
+    has_position: u8,
+    _reserved: [5]u8 = @splat(0),
+    release_mbid: StringView,
+    release_track_mbid: StringView,
+    recording_mbid: StringView,
+};
+
+pub const ReleaseTrackPairingCallback = *const fn (?*anyopaque, *const ReleaseTrackPairingView) callconv(.c) void;
+
+pub const LeftAloneTrackView = extern struct {
+    track_id: i64,
+    reason: u8,
+    _reserved: [7]u8 = @splat(0),
+    title: StringView,
+};
+
+pub const ReleaseApplyView = extern struct {
+    reviewed_release_id: i64,
+    values_written: u32,
+    track_values: u32,
+    release_values_only: u32,
+    artist_ids_unknown: u8,
+    has_reviewed_release_id: u8,
+    _reserved: [2]u8 = @splat(0),
+    release_mbid: StringView,
+    left_alone: [*]const LeftAloneTrackView,
+    left_alone_count: usize,
+};
+
+pub const ReleaseApplyCallback = *const fn (?*anyopaque, *const ReleaseApplyView) callconv(.c) void;
+
 pub const MatchEvidenceView = extern struct {
     fingerprints_matched: u32,
     tracks: u32,
@@ -5056,20 +5171,56 @@ pub export fn orca_library_query_release_matches(
         return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const best = item.best;
-        const view: ReleaseMatchView = .{
-            .release_id = item.release_id,
-            .track_count = item.track_count,
-            .bucket = @backingInt(item.bucket),
-            .has_best = @intFromBool(best != null),
-            .has_candidate_track_count = @intFromBool(best != null and best.?.track_count != null),
-            .title = stringView(item.title),
-            .artist = stringView(item.artist),
-            .release_mbid = stringView(if (best) |candidate| candidate.release_mbid else ""),
-            .candidate_title = stringView(if (best) |candidate| candidate.title else ""),
-            .candidate_date = stringView(if (best) |candidate| candidate.date orelse "" else ""),
-            .candidate_track_count = if (best) |candidate| candidate.track_count orelse 0 else 0,
-            .confidence = if (best) |candidate| candidate.confidence else 0,
+        const view = releaseMatchView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+fn releaseMatchView(item: database.ReleaseMatchItem) ReleaseMatchView {
+    const best = item.best;
+    return .{
+        .release_id = item.release_id,
+        .track_count = item.track_count,
+        .bucket = @backingInt(item.bucket),
+        .has_best = @intFromBool(best != null),
+        .has_candidate_track_count = @intFromBool(best != null and best.?.track_count != null),
+        .title = stringView(item.title),
+        .artist = stringView(item.artist),
+        .release_mbid = stringView(if (best) |candidate| candidate.release_mbid else ""),
+        .candidate_title = stringView(if (best) |candidate| candidate.title else ""),
+        .candidate_date = stringView(if (best) |candidate| candidate.date orelse "" else ""),
+        .candidate_track_count = if (best) |candidate| candidate.track_count orelse 0 else 0,
+        .confidence = if (best) |candidate| candidate.confidence else 0,
+    };
+}
+
+pub export fn orca_library_query_release_matches_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    bucket: u8,
+    confident_at: f32,
+    filter: ?[*:0]const u8,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?ReleaseMatchV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const which = importReleaseMatchBucket(bucket) orelse
+        return box.reject(@src(), .invalid_argument, "bucket is not an orca_release_match_bucket");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const text: ?[]const u8 = if (filter) |value| std.mem.span(value) else null;
+    const page = box.runtime.libraryReleaseMatchPage(importLibrary(library), box.runtime.allocator, which, confident_at, text, limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: ReleaseMatchViewV2 = .{
+            .base = releaseMatchView(item),
+            .placed = if (item.placement) |placement| placement.placed else 0,
+            .needs_pairing = if (item.placement) |placement| placement.needs_pairing else 0,
+            .has_placement = @intFromBool(item.placement != null),
         };
         visit(context, &view);
     }
@@ -5087,6 +5238,25 @@ pub export fn orca_library_release_match_counts(
     const counts = box.runtime.libraryReleaseMatchCounts(importLibrary(library), confident_at, null) catch |err|
         return box.fail(@src(), err);
     destination.* = .{ .confident = counts.confident, .needs_review = counts.needs_review, .unmatched = counts.unmatched };
+    return .ok;
+}
+
+pub export fn orca_library_release_match_counts_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    confident_at: f32,
+    filter: ?[*:0]const u8,
+    output: ?*ReleaseMatchCountsViewV2,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const text: ?[]const u8 = if (filter) |value| std.mem.span(value) else null;
+    const counts = box.runtime.libraryReleaseMatchCounts(importLibrary(library), confident_at, text) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .base = .{ .confident = counts.confident, .needs_review = counts.needs_review, .unmatched = counts.unmatched },
+        .reviewed = counts.reviewed,
+    };
     return .ok;
 }
 
@@ -5169,6 +5339,224 @@ pub export fn orca_library_dismiss_release_candidate(
     const box = enter(runtime) orelse return refusal(runtime);
     const mbid = release_mbid orelse return box.reject(@src(), .invalid_argument, "release_mbid is null");
     box.runtime.libraryDismissReleaseCandidate(importLibrary(library), release_id, std.mem.span(mbid)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_release_alignment(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    release_mbid: ?[*:0]const u8,
+    context: ?*anyopaque,
+    callback: ?ReleaseAlignmentCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const allocator = box.runtime.allocator;
+    const alignment = box.runtime.libraryReleaseAlignment(importLibrary(library), allocator, release_id, optionalMbid(release_mbid)) catch |err|
+        return box.fail(@src(), err);
+    defer alignment.deinit();
+    const rows = allocator.alloc(ReleaseTrackPlacementView, alignment.rows.len) catch |err| return box.fail(@src(), err);
+    defer allocator.free(rows);
+    var counts: [4]u32 = @splat(0);
+    for (rows, alignment.rows) |*view, row| {
+        counts[@backingInt(row.status)] += 1;
+        const evidence = row.evidence;
+        view.* = .{
+            .disc = row.disc,
+            .position = row.position,
+            .length_ms = row.length_ms orelse 0,
+            .length_delta_ms = evidence.length_delta_ms orelse 0,
+            .has_length_ms = @intFromBool(row.length_ms != null),
+            .status = @backingInt(row.status),
+            .recording_source = @backingInt(exportRecordingSource(evidence.recording_source)),
+            .has_track = @intFromBool(row.track != null),
+            .title_equal = @intFromBool(evidence.title_equal),
+            .length_close = @intFromBool(evidence.length_close),
+            .position_equal = @intFromBool(evidence.position_equal),
+            .has_length_delta_ms = @intFromBool(evidence.length_delta_ms != null),
+            .title = stringView(row.title),
+            .artist_credit = stringView(row.artist_credit),
+            .recording_mbid = stringView(row.recording_mbid),
+            .release_track_mbid = stringView(row.release_track_mbid),
+            .track = alignedTrackView(row.track),
+        };
+    }
+    const not_on_release = allocator.alloc(AlignedTrackView, alignment.not_on_release.len) catch |err| return box.fail(@src(), err);
+    defer allocator.free(not_on_release);
+    for (not_on_release, alignment.not_on_release) |*view, track| view.* = alignedTrackView(track);
+    const view: ReleaseAlignmentView = .{
+        .release_id = alignment.release_id,
+        .fetched_at = alignment.fetched_at,
+        .medium_count = alignment.medium_count,
+        .paired = counts[@backingInt(core.runtime.PlacementStatus.paired)],
+        .automatic = counts[@backingInt(core.runtime.PlacementStatus.automatic)],
+        .suggested = counts[@backingInt(core.runtime.PlacementStatus.suggested)],
+        .not_in_files = counts[@backingInt(core.runtime.PlacementStatus.not_in_files)],
+        .release_mbid = stringView(alignment.release_mbid),
+        .title = stringView(alignment.title),
+        .artist_credit = stringView(alignment.artist_credit),
+        .release_date = stringView(alignment.release_date orelse ""),
+        .release_group_mbid = stringView(alignment.release_group_mbid orelse ""),
+        .rows = rows.ptr,
+        .row_count = rows.len,
+        .not_on_release = not_on_release.ptr,
+        .not_on_release_count = not_on_release.len,
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+fn alignedTrackView(aligned: ?core.runtime.AlignedTrack) AlignedTrackView {
+    const track = aligned orelse return .{
+        .track_id = 0,
+        .duration_ms = 0,
+        .track_number = 0,
+        .disc_number = 0,
+        .has_duration_ms = 0,
+        .has_track_number = 0,
+        .has_disc_number = 0,
+        .title = stringView(""),
+    };
+    return .{
+        .track_id = track.track_id,
+        .duration_ms = track.duration_ms orelse 0,
+        .track_number = track.track_number orelse 0,
+        .disc_number = track.disc_number orelse 0,
+        .has_duration_ms = @intFromBool(track.duration_ms != null),
+        .has_track_number = @intFromBool(track.track_number != null),
+        .has_disc_number = @intFromBool(track.disc_number != null),
+        .title = stringView(track.title),
+    };
+}
+
+pub fn exportRecordingSource(source: ?core.runtime.RecordingSource) RecordingSource {
+    const known = source orelse return .none;
+    return switch (known) {
+        .in_effect => .in_effect,
+        .accepted_match => .accepted_match,
+        .pending_match => .pending_match,
+    };
+}
+
+pub export fn orca_library_pair_release_track(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    release_mbid: ?[*:0]const u8,
+    track_id: i64,
+    release_track_mbid: ?[*:0]const u8,
+    origin: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const release_track = release_track_mbid orelse return box.reject(@src(), .invalid_argument, "release_track_mbid is null");
+    const destination = origin orelse return box.reject(@src(), .invalid_argument, "origin is null");
+    const paired = box.runtime.libraryPairReleaseTrack(importLibrary(library), release_id, optionalMbid(release_mbid), track_id, std.mem.span(release_track)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = @backingInt(paired);
+    return .ok;
+}
+
+pub export fn orca_library_unpair_release_track(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    track_id: i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryUnpairReleaseTrack(importLibrary(library), release_id, track_id) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_query_release_track_pairings(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    context: ?*anyopaque,
+    callback: ?ReleaseTrackPairingCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var pairings = box.runtime.libraryReleaseTrackPairings(importLibrary(library), box.runtime.allocator, release_id) catch |err|
+        return box.fail(@src(), err);
+    defer pairings.deinit();
+    for (pairings.items) |pairing| {
+        const view: ReleaseTrackPairingView = .{
+            .release_id = pairing.release_id,
+            .track_id = pairing.track_id,
+            .created_at = pairing.created_at,
+            .disc = pairing.disc orelse 0,
+            .position = pairing.position orelse 0,
+            .origin = @backingInt(pairing.origin),
+            .in_snapshot = @intFromBool(pairing.in_snapshot),
+            .has_position = @intFromBool(pairing.disc != null and pairing.position != null),
+            .release_mbid = stringView(pairing.release_mbid),
+            .release_track_mbid = stringView(pairing.release_track_mbid),
+            .recording_mbid = stringView(pairing.recording_mbid),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_apply_release(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    fields: u32,
+    context: ?*anyopaque,
+    callback: ?ReleaseApplyCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const field_set = releaseFieldSet(fields) orelse return box.reject(@src(), .invalid_argument, "fields has a bit past ORCA_RELEASE_FIELD_TRACK_TITLES");
+    const allocator = box.runtime.allocator;
+    const outcome = box.runtime.libraryApplyRelease(importLibrary(library), allocator, release_id, field_set) catch |err|
+        return box.fail(@src(), err);
+    defer outcome.deinit();
+    const left_alone = allocator.alloc(LeftAloneTrackView, outcome.left_alone.len) catch |err| return box.fail(@src(), err);
+    defer allocator.free(left_alone);
+    for (left_alone, outcome.left_alone) |*view, track| view.* = .{
+        .track_id = track.track_id,
+        .reason = @backingInt(track.reason),
+        .title = stringView(track.title),
+    };
+    const view: ReleaseApplyView = .{
+        .reviewed_release_id = outcome.reviewed_release_id orelse 0,
+        .values_written = outcome.values_written,
+        .track_values = outcome.track_values,
+        .release_values_only = outcome.release_values_only,
+        .artist_ids_unknown = @intFromBool(outcome.artist_ids_unknown),
+        .has_reviewed_release_id = @intFromBool(outcome.reviewed_release_id != null),
+        .release_mbid = stringView(outcome.release_mbid),
+        .left_alone = left_alone.ptr,
+        .left_alone_count = left_alone.len,
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_mark_release_reviewed(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    release_mbid: ?[*:0]const u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryMarkReleaseReviewed(importLibrary(library), release_id, optionalMbid(release_mbid)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_unmark_release_reviewed(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryUnmarkReleaseReviewed(importLibrary(library), release_id) catch |err|
         return box.fail(@src(), err);
     return .ok;
 }
@@ -8061,6 +8449,7 @@ pub fn importReleaseMatchBucket(value: u8) ?database.ReleaseMatchBucket {
         0 => .confident,
         1 => .needs_review,
         2 => .unmatched,
+        3 => .reviewed,
         else => null,
     };
 }
@@ -8220,8 +8609,11 @@ fn mapError(err: anyerror) Status {
         error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
         error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
         error.UnknownDuplicateGroup, error.NoReleaseCandidate => .not_found,
-        error.MutationGroupAlreadyUndone => .already_done,
-        error.MutationNeedsReconciliation => .needs_reconciliation,
+        error.TrackNotOnRelease, error.UnknownReleaseTrack => .not_found,
+        error.NoReleaseTracklist, error.ReleaseTrackAlreadyPaired, error.ReleaseNotPlaced => .invalid_state,
+        error.ReleaseTooLarge => .unsupported,
+        error.MutationGroupAlreadyUndone, error.TrackNotPaired, error.ReleaseNotReviewed => .already_done,
+        error.MutationNeedsReconciliation, error.ReleaseDiffers => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
