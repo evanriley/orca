@@ -499,6 +499,14 @@ in [cli.md](cli.md#playlists-and-ratings).
 
 ### Playback
 
+- `playerDrained` turns true once the Player has decoded its queue and every
+  Zone taking part in the drain has played what it held. When every requested
+  output has failed with its recovery attempts used, the engine pauses the
+  Player at its position and wakes the host instead: `PlayerSnapshot.state` is
+  `paused`, `playerDrained` stays false and `zoneStats` reports `failed`. A host
+  waiting for a drain also stops on that state. `zoneCloseOutput`, then
+  `zoneRequestOutput` once the Zone reports `closed`, then `playPlayer` resumes
+  from that position. See [audio-engine.md](audio-engine.md#zones).
 - `PlayerStatus.last_failure` is the last queue entry that could not be opened,
   a `PlaybackFailure` with `track_id` and a `Reason`, cleared once an entry
   opened after it is heard. A Track whose root is unavailable fails with

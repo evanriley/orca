@@ -363,10 +363,6 @@ removed.
 - Gapless transitions inside one 256-frame block apply the successor's
   identity and position anchor at its first frame, not the block's. Checked
   by an engine test with a boundary mid-block.
-- Player lifecycle. Once every Zone has failed with its recovery attempts
-  used, the engine stops pumping and the Player never drains, so a host that
-  waits for the drain waits for ever; `orca-cli` checks the Zone instead.
-  Each must have a defined result, checked by a test of each.
 - `orca-gtk` shows a Library that fails to open. `libraries.openFailed`
   logs a warning, leaves no Library active and records a problem ("Could not
   open NAME", with "was made by a different version of Orca; create a new

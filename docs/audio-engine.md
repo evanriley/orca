@@ -99,6 +99,15 @@ recovery is exhausted does not take part, so it cannot stall the others. An
 output that stops consuming while its Player plays is lost and recovered (see
 [Recovery](#recovery)), so it cannot hold a drain open either.
 
+A Player whose every requested output has failed cannot drain, because nothing
+consumes its audio. Once the Player is playing with its queue not finished, at
+least one attached Zone has its output requested and every such Zone reports
+`failed` with its recovery attempts exhausted, the engine pauses the Player at
+its current position and wakes the host. The Player then reports `paused` and
+not drained. A host waiting for a drain also stops on this state: the Player
+paused while its Zones report `failed`. Closing a Zone's output, requesting it
+again once the Zone reports `closed`, and playing resumes from that position.
+
 ## Engine thread
 
 One `PlayerEngine` thread per Player is the single decode producer, as the SPSC
@@ -125,11 +134,12 @@ only after observing the acknowledgement.
 A busy engine parks for 2 ms. An idle engine parks with no timeout and costs no
 wakeups. It is idle when its next pass would do nothing: no seek or
 format-switch successor is pending; the Player is not playing, or has its queue
-decoded with every draining Zone drained and no entry left to open; the clock
-Zone's position has been sent as a hint; and every attached Zone is settled
-(output active in the decoded format and silenced or empty, or no output and
-nothing to open one for). A Zone that is opening, lost or waiting out its
-recovery backoff keeps the engine busy, as does a suspended engine.
+decoded with every draining Zone drained and no entry left to open (a Player
+whose requested outputs have all failed is paused, see [Zones](#zones)); the
+clock Zone's position has been sent as a hint; and every attached Zone is
+settled (output active in the decoded format and silenced or empty, or no
+output and nothing to open one for). A Zone that is opening, lost or waiting
+out its recovery backoff keeps the engine busy, as does a suspended engine.
 
 Everything that can end idleness wakes the engine after the write it must act
 on: `wakeUp` (play, pause and output requests), zone publication, `quiesce`,
@@ -307,7 +317,9 @@ reports `failed` and returns every prepared block to its pool. A device that
 reopens but never plays, such as device 0 following a default sink that does
 not consume, therefore fails after its fourth loss. The Zone stays failed until
 the host closes its output and, once the Zone reports `closed`, requests it
-again, which starts a new set of attempts.
+again, which starts a new set of attempts. When every requested output of a
+playing Player has failed this way, the engine pauses the Player (see
+[Zones](#zones)), and the host plays it again after requesting the outputs.
 
 An output that stops consuming is handled in two stages. A pass counts as
 stalled for a Zone when its Player is playing, the Zone holds prepared blocks

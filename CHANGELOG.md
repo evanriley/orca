@@ -66,6 +66,10 @@
   always reopens on the default sink, now ends `failed` after its fourth loss
   without a stable interval instead of retrying without end, so its Player
   drains.
+- A playing Player whose every requested output has failed with its recovery
+  attempts used is paused at its position and wakes the host, instead of
+  never draining while its engine woke every 2 ms. It reports `paused` and not
+  drained; closing and requesting the output again, then playing, resumes it.
 
 ## 0.1.0 - 2026-10-06
 
