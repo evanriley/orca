@@ -181,6 +181,10 @@
   is given (`-- ID` or `ORCA_TEST_DEVICE`, from `scripts/silent-sink.sh`) and
   refuses a missing, unknown or non-virtual device instead of opening the
   first device on the PipeWire server.
+- When the clock Zone's output is lost and another Zone takes over, playback
+  resumes at the position already heard. It previously skipped the audio
+  decoded ahead, which could drop the end of a track and its gapless
+  transition.
 
 ## 0.1.0 - 2026-10-06
 

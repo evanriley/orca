@@ -77,8 +77,9 @@ disagrees with the published serial, or an anchor ahead of the frame count,
 marks a torn read and the sample is dropped. Nothing is locked.
 
 The clock Zone is the first attached Zone with an active output. Promoting a
-replacement stamps a new epoch. Position hints reach hosts through the
-telemetry channel at roughly 10 Hz.
+replacement re-seeks the Player to the position already heard, which stamps a
+new epoch without skipping the audio decoded ahead. Position hints reach hosts
+through the telemetry channel at roughly 10 Hz.
 
 ## Zones
 

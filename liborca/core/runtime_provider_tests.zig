@@ -2835,6 +2835,81 @@ test "a matching job keeps the credential store's application key from its start
     try expectKeyKeptThroughJob(&runtime, library, &acoustid, .{ .runtime = "other-host-key" }, "client=stored-second&");
 }
 
+const CountedAcoustIdKeys = struct {
+    client_keys: []const []const u8,
+    client_key_reads: std.atomic.Value(u32) = .init(0),
+
+    fn store(self: *CountedAcoustIdKeys) CredentialStore {
+        return .{ .context = self, .get_fn = get };
+    }
+
+    fn get(context: *anyopaque, allocator: std.mem.Allocator, service: []const u8, account: []const u8) anyerror!?[]u8 {
+        const self: *CountedAcoustIdKeys = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, service, providers.acoustid.credential_service)) return null;
+        if (std.mem.eql(u8, account, providers.acoustid.user_key_account)) return try allocator.dupe(u8, "user key");
+        if (!std.mem.eql(u8, account, providers.acoustid.client_key_account)) return null;
+        const read = self.client_key_reads.fetchAdd(1, .acq_rel);
+        return try allocator.dupe(u8, self.client_keys[@min(read, self.client_keys.len - 1)]);
+    }
+};
+
+fn acceptChosenRecording(
+    runtime: *OrcaRuntime,
+    library: LibraryHandle,
+    temporary: *std.testing.TmpDir,
+    name: []const u8,
+    title: []const u8,
+    mbid: []const u8,
+) !void {
+    const library_database = try libraryDatabase(runtime, library);
+    try writeToneWave(temporary.dir, name, 440);
+    const chosen = try addAudioTrack(library_database, temporary, name, title, "Nick Drake");
+    try proposeMatch(library_database, chosen, mbid, 0.95, "{\"duration_ms\":15000}");
+    const page = try runtime.libraryMatchProposals(library, chosen, 1);
+    defer page.deinit();
+    _ = try runtime.libraryAcceptMatch(library, page.items[0].id);
+}
+
+test "a submission job reads the stored application key once for every request it sends and the next job reads it again" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var musicbrainz: FakeMusicBrainz = .{};
+    var acoustid: FakeAcoustId = .{
+        .submit_outages = &.{ 503, 503 },
+        .submit_body = "{\"status\":\"ok\",\"submissions\":[{\"id\":71,\"status\":\"pending\",\"index\":\"0\"}]}",
+    };
+    acoustid.http.keep_history = true;
+    defer acoustid.http.deinit();
+    var keys: CountedAcoustIdKeys = .{ .client_keys = &.{ "stored-first", "stored-later" } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    acoustid.http.clock = &musicbrainz.clock;
+    try runtime.setAcoustIdClientKey("host-key");
+    try runtime.setCredentialStore(keys.store());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-acoustid-submit-key-once?mode=memory&cache=shared");
+    try acceptChosenRecording(&runtime, library, &temporary, "first.wav", "Northern Sky", northern_sky_mbid);
+
+    const first = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, first));
+    try std.testing.expectEqual(@as(u64, 3), (try runtime.jobSubmissionStats(first)).requests);
+    try std.testing.expectEqual(@as(u32, 1), keys.client_key_reads.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), acoustid.http.history.items.len);
+    for (acoustid.http.history.items) |request|
+        try std.testing.expect(std.mem.startsWith(u8, request.body, "client=stored-first&"));
+
+    runtime.reapFinishedJobs();
+    try acceptChosenRecording(&runtime, library, &temporary, "second.wav", "Pink Moon", pink_moon_mbid);
+    const second = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, second));
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobSubmissionStats(second)).requests);
+    try std.testing.expectEqual(@as(u32, 2), keys.client_key_reads.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 4), acoustid.http.history.items.len);
+    try std.testing.expect(std.mem.startsWith(u8, acoustid.http.history.items[3].body, "client=stored-later&"));
+}
+
 test "a submission fails as busy when another process holds AcoustID past its wait and marks nothing sent" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

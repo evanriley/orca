@@ -402,9 +402,6 @@ screenshot for a display-only defect, and removes its entry.
   lookups take it as no key (they fall back to the application key) and a
   submission as no user key (`needs_user_key`). Whether AcoustID should fail
   instead is undecided.
-- Untested: the AcoustID key read once per job on the submission path, and
-  gapless identity at the successor's first frame after a re-seek other than
-  a user seek, such as an output reopen.
 - Not checked on screen: the Player paused after every output failed, the
   match result toasts and the read-only tag write dialogs in `orca-gtk`.
 - A pause resets an output's stall count, so a stuck output can cost the
