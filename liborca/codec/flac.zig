@@ -382,6 +382,48 @@ test "mid-side stereo decodes bit-exactly rather than one LSB low" {
     try std.testing.expectEqual(@as(u32, @intCast(total)), frame_index);
 }
 
+fn hiresProbeSample(index: u32) [2]i32 {
+    return .{
+        @as(i32, @intCast((index *% 40961) % (1 << 24))) - (1 << 23),
+        (1 << 23) - 1 - @as(i32, @intCast((index *% 2654435761) >> 8)),
+    };
+}
+
+test "24-bit 192 kHz FLAC decodes to every sample exactly" {
+    var local = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/hires-reference.flac",
+    );
+    defer local.close();
+    var codec = try openDecoder(std.testing.allocator, local.readable());
+    defer codec.deinit();
+
+    const source_format = codec.source_format.?;
+    try std.testing.expectEqual(@import("../audio/pcm.zig").SampleFormat.signed_24, source_format.sample_format);
+    try std.testing.expectEqual(@as(u16, 24), source_format.bits_per_sample);
+    try std.testing.expectEqual(@as(u32, 192_000), codec.format.sample_rate);
+    try std.testing.expectEqual(@as(u16, 2), codec.format.channels);
+    try std.testing.expectEqual(@as(?u64, 4096), codec.frame_count);
+
+    var scratch: [2048]f32 = undefined;
+    var frame_index: u32 = 0;
+    while (true) {
+        const frames = try codec.readFrames(&scratch);
+        if (frames == 0) break;
+        for (0..frames) |offset| {
+            const expected = hiresProbeSample(frame_index + @as(u32, @intCast(offset)));
+            for (expected, 0..) |value, channel| {
+                try std.testing.expectEqual(
+                    @as(f32, @floatFromInt(value)) / (1 << 23),
+                    scratch[offset * 2 + channel],
+                );
+            }
+        }
+        frame_index += @intCast(frames);
+    }
+    try std.testing.expectEqual(@as(u32, 4096), frame_index);
+}
+
 test "reading to the end after a seek reports end of input rather than failing" {
     // After a seek a stream ends having decoded fewer frames than STREAMINFO
     // declares; that must read as end of input, or the engine sees a decode

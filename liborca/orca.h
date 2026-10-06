@@ -6275,18 +6275,25 @@ typedef struct orca_device_format {
 /* Why a signal path is not bit-perfect. */
 typedef enum orca_signal_reason {
     /* Either equalizer, crossfeed, a volume other than 1 or a ReplayGain
-     * correction changes the samples. */
+     * correction changes the samples, or audio one of them changed is still
+     * queued for the output after the setting was turned off. */
     ORCA_SIGNAL_REASON_SAMPLE_PROCESSING = 0,
     /* The output, or the device behind it, runs at another rate. */
     ORCA_SIGNAL_REASON_SAMPLE_RATE_CONVERSION = 1,
-    /* The output has another channel count than the source. */
+    /* The output, or the device behind it, has another channel count than
+     * the source. */
     ORCA_SIGNAL_REASON_CHANNEL_LAYOUT_CONVERSION = 2,
     /* The output's sample format differs from the source's, other than an
-     * exact widening of 8-, 16- or 24-bit integers to float32, or the device
-     * runs at another sample format than the output. */
+     * exact widening of 8-, 16- or 24-bit integers to float32, or the
+     * device's format cannot hold every source value: fewer bits than an
+     * integer source, or an integer format for a float or 32-bit source. */
     ORCA_SIGNAL_REASON_SAMPLE_FORMAT_CONVERSION = 3,
     /* The source's codec discarded audio before Orca decoded it. */
     ORCA_SIGNAL_REASON_LOSSY_SOURCE = 4,
+    /* The path cannot be confirmed: nothing is audible, the source declares
+     * no sample format, no output is open, or the device has not reported
+     * its rate or its format. */
+    ORCA_SIGNAL_REASON_PATH_UNKNOWN = 5,
 } orca_signal_reason;
 
 /* The capacity of orca_signal_path_view.reasons; more than the reasons that
@@ -6328,9 +6335,9 @@ typedef struct orca_signal_path_view {
     uint8_t has_equalizer;
     uint8_t has_crossfeed;
     uint8_t has_device_rate;
-    /* 0 as soon as any reason applies. With no source or no output the
-     * format conversions cannot be judged, so only sample processing
-     * counts. */
+    /* 1 only when no reason applies, which needs a declared source format,
+     * an open output, and a device that reported its rate and its format;
+     * without any of those ORCA_SIGNAL_REASON_PATH_UNKNOWN applies. */
     uint8_t bit_perfect_eligible;
     /* The integer source reaches float32 unchanged, which is not a reason. */
     uint8_t widened_exactly;
@@ -6378,9 +6385,10 @@ typedef struct orca_signal_path_view_v2 {
     uint8_t peak_limited;
     uint8_t reserved2[1];
     /* The format the output device itself runs at, after the server converts
-     * the float32 stream. A known format that is not float32 at
-     * base.output.sample_rate is a further conversion; an unknown one leaves the
-     * verdict alone. */
+     * the float32 stream; all zero while unknown. A rate other than
+     * base.output.sample_rate, another channel count, or a format that cannot
+     * hold every source value is a further conversion; an unknown format
+     * makes the path unknown. */
     orca_device_format device_format;
 } orca_signal_path_view_v2;
 

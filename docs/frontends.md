@@ -333,7 +333,13 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_player_set_replay_gain_preamp`, `orca_player_set_replay_gain_fallback`,
   `orca_player_replay_gain_settings`, `orca_player_set_peak_protection`,
   `orca_player_set_stop_after_current`, `orca_player_signal_path_v2`. The
-  parametric equalizer and the ten-band one exclude each other. The
+  parametric equalizer and the ten-band one exclude each other. A signal path
+  is `bit_perfect_eligible` only when it is confirmed;
+  `ORCA_SIGNAL_REASON_PATH_UNKNOWN` marks one with no declared source format,
+  no open output, or a device that has not reported its rate or format, and a
+  frontend presents it as unconfirmed, never as bit-perfect.
+  `ORCA_SIGNAL_REASON_SAMPLE_PROCESSING` can stand while every setting reads
+  neutral, until audio processed under earlier settings has played. The
   `orca_parametric_equalizer_response`, `orca_parametric_equalizer_parse_apo`
   and `orca_parametric_equalizer_write_apo` calls take no runtime and work from
   any thread; the `ORCA_PARAMETRIC_*` defines state the ranges.
@@ -392,6 +398,14 @@ GTK main thread, from a signal handler or the tick, which pumps the runtime when
 liborca's waker writes the app's eventfd or the `nextPumpTimeoutMs` timeout
 expires. The application id is `org.orca_music.Orca`. The appearance is dark
 only, forced through libadwaita's style manager over `apps/linux/style.css`.
+
+The signal path views word liborca's verdict and never make their own. A path
+whose only reason is `path_unknown` reads Unconfirmed, not Bit-perfect.
+Processing that stands after every setting returned to neutral reads as
+processed audio still playing. While a view is on screen and playback runs, it
+re-reads the path every 250 ms until that processing clears. It also re-reads
+it up to eight times after an output starts or the popover opens while the
+device has not reported its rate or format.
 
 Run it from the tree:
 

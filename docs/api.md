@@ -579,7 +579,11 @@ in [cli.md](cli.md#playlists-and-ratings).
   once it fired.
 - `playerSignalPath` returns a `SignalPath`: the stages from source to output
   stream, `output_kind`, `device_format` (null when unknown) and why the path is
-  or is not bit-perfect. `enumerateOutputDevices` fills `Device` snapshots with
+  or is not bit-perfect. `bit_perfect_eligible` needs a declared source format,
+  an open output and a device that reported its rate and format; otherwise the
+  reasons include `path_unknown`. The settings fields are the current
+  settings, while `sample_processing` also stands until audio processed under
+  earlier settings has played. `enumerateOutputDevices` fills `Device` snapshots with
   `capabilities`, null when the audio server did not report them within 500 ms;
   its `detail` parameter sets the cost: `.identity` asks no device for its
   formats, `.capabilities` waits up to 500 ms and belongs where they are shown.

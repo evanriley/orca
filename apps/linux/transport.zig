@@ -994,6 +994,31 @@ pub fn refreshSignalPath(self: *App) void {
     showSignalSummary(path);
     details.showSignalPath(self, path);
     preferences.showAudioInformation(self, path);
+    if (path) |value| settleSignalPath(self, value);
+}
+
+const signal_path_settle_ms: c_uint = 250;
+const signal_path_device_reads_max = 8;
+
+fn settleSignalPath(self: *App, path: liborca.SignalPath) void {
+    self.signal_path_draining = signal_path.processingDraining(path);
+    if (self.signal_path_settle_timer != 0) return;
+    if (signal_path.deviceUnreported(path) and self.signal_path_device_reads < signal_path_device_reads_max) {
+        self.signal_path_device_reads += 1;
+        armSignalPathSettle(self);
+    } else if (self.signal_path_draining and self.shown_transport == .playing) armSignalPathSettle(self);
+}
+
+fn armSignalPathSettle(self: *App) void {
+    if (self.signal_path_settle_timer != 0) return;
+    self.signal_path_settle_timer = gtk.g_timeout_add(signal_path_settle_ms, signalPathSettled, self);
+}
+
+fn signalPathSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    self.signal_path_settle_timer = 0;
+    if (signalPathVisible(self)) refreshSignalPath(self);
+    return gtk.SOURCE_REMOVE;
 }
 
 fn outputReady(self: *App) bool {
@@ -1022,11 +1047,14 @@ fn refreshSignalPathWhenOutputStarts(self: *App) void {
         return;
     }
     if (self.signal_path_has_output or !signalPathVisible(self)) return;
+    self.signal_path_device_reads = 0;
     refreshSignalPath(self);
 }
 
 fn signalPathShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    refreshSignalPath(state(data));
+    const self = state(data);
+    self.signal_path_device_reads = 0;
+    refreshSignalPath(self);
 }
 
 /// Devices come and go while the app runs, so the list is re-read each time
@@ -1237,6 +1265,8 @@ pub fn tick(self: *App) void {
     refreshSignalPathWhenOutputStarts(self);
     if (track_changed or transport_changed) {
         self.shown_transport = status.transport;
+        if (transport_changed and status.transport == .playing and self.signal_path_draining)
+            armSignalPathSettle(self);
         self.mpris.notify();
     }
 }

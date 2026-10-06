@@ -17,6 +17,7 @@ pub const Reason = enum {
     channel_layout_conversion,
     sample_format_conversion,
     lossy_source,
+    path_unknown,
 };
 
 pub const max_reasons = @typeInfo(Reason).@"enum".field_names.len;

@@ -242,19 +242,44 @@ conversions, direct-RT eligibility and total algorithmic latency. They
 distinguish source PCM from canonical float32 working PCM and conservatively
 explain why a path is not bit-perfect. The reasons are:
 
-- `sample_format_conversion`: a 32-bit integer or 64-bit float source, or the
-  float32 stream reaching an integer device;
+- `sample_processing`: any ReplayGain, either equalizer, crossfeed, a volume
+  that is not exactly 1, or audio processed under earlier settings that has
+  not played yet;
+- `sample_rate_conversion`: a stream rate that is not the source's, or a
+  device rate that is not the stream's;
+- `channel_layout_conversion`: a stream channel count that is not the
+  source's, or a device channel count that is not the stream's;
+- `sample_format_conversion`: a 32-bit integer or 64-bit float source, which
+  float32 cannot hold exactly, or a device sample format that cannot hold the
+  source's values: an integer device for a float or 32-bit integer source, or
+  an integer device with fewer bits than an integer source;
 - `lossy_source`: a lossy codec;
-- `sample_processing`: any ReplayGain, either equalizer, crossfeed, or a volume
-  that is not exactly 1;
-- `sample_rate_conversion` and `channel_layout_conversion`: a rate or channel
-  layout that changes.
+- `path_unknown`: the path cannot be confirmed because nothing is audible, the
+  source declares no sample format, no output is open, or the device has not
+  reported its rate or its format.
 
 Widening an 8-, 16- or 24-bit integer source to float32 is exact, so it is not
-a reason; the report marks it `widened_exactly`. Eligibility covers the stream
-Orca hands the backend and the device's rate and format as PipeWire reports
-them (see [Device format](#device-format)); it does not assert a bit-perfect
-native path.
+a reason; the report marks it `widened_exactly`. For the same reason the
+float32 stream reaching an integer device is not a reason by itself: a device
+with at least the source's bits can carry every value float32 holds for it. A
+path is eligible only when no reason applies, so only with a declared source
+format, an open output, and a device that reported its rate, sample format and
+channels (see [Device format](#device-format)). Eligibility covers the stream
+Orca hands the backend and the device's format as PipeWire reports it; it does
+not assert a bit-perfect native path.
+
+The report describes the audio being heard, not only the settings that apply
+to the next block. A setting takes effect a render-ahead later, so
+`sample_processing` stays while any of the Player's Zones still holds audio a
+gain or DSP stage changed: queued, being rendered, or rendered and not yet
+reclaimed by the engine. Each Zone's block pool marks a block processed when
+the engine fans it out and clears the mark when the engine reclaims the block;
+the render callback never reads or writes the mark. The settings fields
+(`replay_gain_db`, the equalizers, `crossfeed` and `volume`) always describe
+the current settings, so the reason can stand while all of them read neutral.
+The check is conservative: a processed block a seek made stale counts until
+the engine reclaims it, and a setting that changes the samples is reported at
+once, before the audio it changed is audible.
 
 `Runtime.playerSignalPath` reports the live path of one Player: the audible
 entry's source format, codec and applied ReplayGain (the track's, the album's
@@ -286,8 +311,9 @@ against the current user's server; normal tests need no live audio service.
 Each stream requests `node.rate` at the entry's source rate. PipeWire honours
 it only when the graph's `clock.allowed-rates` permits it and no other stream
 holds the device at another rate; otherwise it resamples. The device rate read
-from the stream's timing is reported as `device_rate` and adds
-`sample_rate_conversion` when it differs from the stream's rate.
+from the stream's timing is reported as `device_rate`. It adds
+`sample_rate_conversion` when it differs from the stream's rate, and
+`path_unknown` until it is known.
 
 ### Device format
 
@@ -300,9 +326,11 @@ into one atomic that the timing read loads; the render callback never touches
 it. The Zone refreshes it on activation and every 16 engine passes, and the
 signal path reports it as `device_format`.
 
-A known format adds `sample_format_conversion` when it is an integer format and
-`sample_rate_conversion` when its rate is not the stream's. Unknown is
-explicit, never guessed, and leaves the verdict as it is. The format is unknown
+A known format adds `sample_rate_conversion` when its rate is not the stream's,
+`channel_layout_conversion` when its channel count is not the stream's, and
+`sample_format_conversion` when it cannot hold the source's values (see
+[Signal path](#signal-path)). Unknown is explicit, never guessed, and adds
+`path_unknown`, so the path is never eligible while it lasts. The format is unknown
 while the node is suspended, before PipeWire has answered, for a virtual sink
 such as `support.null-audio-sink`, for any other sample format, and on a
 backend other than PipeWire. A sink that is itself processing, such as a filter

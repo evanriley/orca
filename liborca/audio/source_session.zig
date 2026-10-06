@@ -98,6 +98,10 @@ pub const SourceSession = struct {
         return frames;
     }
 
+    pub fn scales(self: *const SourceSession, settings: processing.ReplayGainSettings) bool {
+        return self.replay_gain.applied(settings).multiplier != 1;
+    }
+
     /// Reclaim callback-consumed blocks and prepare as many future blocks as
     /// bounded pool/queue capacity permits. This is the only file-I/O lane.
     pub fn prime(
@@ -126,6 +130,7 @@ pub const SourceSession = struct {
                 pool.release(index);
                 break;
             }
+            if (self.scales(settings)) pool.markProcessed(index);
             if (!pipe.submit(.{
                 .index = index,
                 .frames = @intCast(frames),
@@ -209,6 +214,7 @@ pub const SourceQueue = struct {
         /// The entry of the block's first frame, not the entry decoding last.
         entry_serial: u32,
         successor: render.Successor = .{},
+        scaled: bool = false,
     };
 
     /// Decode canonical PCM without assigning it to an output. The control
@@ -221,7 +227,9 @@ pub const SourceQueue = struct {
         var block: DecodedBlock = .{ .frames = 0, .entry_serial = self.current_entry_serial };
         while (block.frames < capacity) {
             const offset = block.frames * channels;
-            block.frames += try self.current.readFrames(samples[offset..], settings);
+            const frames = try self.current.readFrames(samples[offset..], settings);
+            if (frames > 0 and self.current.scales(settings)) block.scaled = true;
+            block.frames += frames;
             if (!self.current.eof) break;
             if (!self.advance()) break;
             if (block.frames == 0) {
@@ -581,4 +589,27 @@ test "album mode scales an entry by its album correction, or by its own when it 
     var samples: [4]f32 = @splat(0);
     try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .{ .mode = .album }));
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5, 2, 2 }, &samples);
+}
+
+test "a decoded block is scaled when a loudness correction changed any of its frames" {
+    var first_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
+    var second_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
+    var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
+    defer sources.deinit();
+    sources.current.replay_gain = .{ .track = .{ .gain = 0.25 } };
+    try sources.primeNext(SourceSession.init(second_decoder.decoder()));
+
+    var samples: [3]f32 = @splat(0);
+    const straddling = try sources.readBlock(&samples, .{ .mode = .track });
+    try std.testing.expectEqual(@as(usize, 3), straddling.frames);
+    try std.testing.expect(straddling.scaled);
+    const unmeasured = try sources.readBlock(&samples, .{ .mode = .track });
+    try std.testing.expectEqual(@as(usize, 1), unmeasured.frames);
+    try std.testing.expect(!unmeasured.scaled);
+
+    var off_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
+    var off = SourceQueue.init(SourceSession.init(off_decoder.decoder()));
+    defer off.deinit();
+    off.current.replay_gain = .{ .track = .{ .gain = 0.25 } };
+    try std.testing.expect(!(try off.readBlock(&samples, .{ .mode = .off })).scaled);
 }

@@ -1145,6 +1145,7 @@ test "a Player's signal path names the device's own format while its output is o
     var backend: audio.output.TestBackend = .{
         .allocator = std.testing.allocator,
         .device_format = device_format,
+        .graph_rate_hz = 48_000,
     };
     defer backend.deinit();
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -1162,6 +1163,8 @@ test "a Player's signal path names the device's own format while its output is o
 
     var path = try runtime.playerSignalPath(player);
     try std.testing.expectEqual(@as(?audio.backend.DeviceFormat, null), path.device_format);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(audio.signal_path.Reason, &.{.path_unknown}, path.reasonList());
 
     try runtime.zoneRequestOutput(zone, 1);
     try runtime.playPlayer(player);
@@ -1173,9 +1176,10 @@ test "a Player's signal path names the device's own format while its output is o
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expectEqual(device_format, path.device_format.?);
-    try std.testing.expect(!path.bit_perfect_eligible);
-    try std.testing.expect(hasReason(path, .sample_format_conversion));
-    try std.testing.expect(!hasReason(path, .sample_rate_conversion));
+    try std.testing.expectEqual(@as(?u32, 48_000), path.device_rate);
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
 
     try runtime.zoneCloseOutput(zone);
     deadline = .init(5_000);
@@ -1184,14 +1188,127 @@ test "a Player's signal path names the device's own format while its output is o
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expectEqual(@as(?audio.backend.DeviceFormat, null), path.device_format);
-    try std.testing.expect(!hasReason(path, .sample_format_conversion));
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(audio.signal_path.Reason, &.{.path_unknown}, path.reasonList());
 
     try runtime.destroyZone(zone);
     try runtime.destroyPlayer(player);
 }
 
-test "a Player's signal path reports sample processing only while DSP or volume is in effect" {
-    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+fn hiresReferenceFrame(index: u32) [2]i32 {
+    return .{
+        @as(i32, @intCast((index *% 40961) % (1 << 24))) - (1 << 23),
+        (1 << 23) - 1 - @as(i32, @intCast((index *% 2654435761) >> 8)),
+    };
+}
+
+const hires_reference_frames = 4096;
+
+fn openHiresOutput(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+) !struct { player: runtime_module.PlayerHandle, zone: ZoneHandle, stream: *audio.output.TestBackend.Stream } {
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/hires-reference.flac");
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+    var deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+    return .{ .player = player, .zone = zone, .stream = stream };
+}
+
+test "a 24-bit 192 kHz FLAC plays at 192 kHz sample for sample, and a 24-bit device keeps it bit-perfect" {
+    const device_format: audio.backend.DeviceFormat = .{
+        .sample_format = .signed_24,
+        .sample_rate = 192_000,
+        .channels = 2,
+    };
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = device_format,
+        .graph_rate_hz = 192_000,
+    };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const opened = try openHiresOutput(&runtime, &backend);
+    try std.testing.expectEqual(audio.pcm.SampleFormat.float_32, opened.stream.request.format.sample_format);
+    try std.testing.expectEqual(@as(u32, 192_000), opened.stream.request.format.sample_rate);
+    try std.testing.expectEqual(@as(u16, 2), opened.stream.request.format.channels);
+
+    const path = try runtime.playerSignalPath(opened.player);
+    const source = path.source orelse return error.SourceMissing;
+    try std.testing.expectEqual(audio.pcm.SampleFormat.signed_24, source.sample_format);
+    try std.testing.expectEqual(@as(u16, 24), source.bits_per_sample);
+    try std.testing.expectEqual(@as(u32, 192_000), source.sample_rate);
+    try std.testing.expectEqual(@as(u32, 192_000), path.output.?.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 192_000), path.device_rate);
+    try std.testing.expectEqual(device_format, path.device_format.?);
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+
+    const runtime_zone = (try runtime.zones.get(opened.zone)).zone;
+    var samples: [256 * 2]f32 = undefined;
+    var frame: u32 = 0;
+    while (frame < hires_reference_frames) {
+        const frames: u32 = @min(256, hires_reference_frames - frame);
+        var deadline: TestDeadline = .init(5_000);
+        while (queuedFrames(&runtime_zone.pipe) < frames and deadline.tick()) {}
+        opened.stream.pump(samples[0 .. frames * 2], frames);
+        for (0..frames) |offset| {
+            const expected = hiresReferenceFrame(frame + @as(u32, @intCast(offset)));
+            for (expected, 0..) |value, channel| {
+                try std.testing.expectEqual(
+                    @as(f32, @floatFromInt(value)) / (1 << 23),
+                    samples[offset * 2 + channel],
+                );
+            }
+        }
+        frame += frames;
+    }
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.zoneStats(opened.zone)).underruns);
+
+    try runtime.destroyZone(opened.zone);
+    try runtime.destroyPlayer(opened.player);
+}
+
+test "a 24-bit source on a 16-bit device is a sample format conversion" {
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = .{ .sample_format = .signed_16, .sample_rate = 192_000, .channels = 2 },
+        .graph_rate_hz = 192_000,
+    };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const opened = try openHiresOutput(&runtime, &backend);
+    const path = try runtime.playerSignalPath(opened.player);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqualSlices(
+        audio.signal_path.Reason,
+        &.{.sample_format_conversion},
+        path.reasonList(),
+    );
+
+    try runtime.destroyZone(opened.zone);
+    try runtime.destroyPlayer(opened.player);
+}
+
+test "a Player's signal path reports sample processing until the audio DSP or volume changed has played" {
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = .{ .sample_format = .float_32, .sample_rate = 48_000, .channels = 2 },
+        .graph_rate_hz = 48_000,
+    };
     defer backend.deinit();
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -1235,16 +1352,35 @@ test "a Player's signal path reports sample processing only while DSP or volume 
     try std.testing.expectEqual(@as(?audio.dsp.Equalizer, audio.dsp.Equalizer.preset(.bass)), path.equalizer);
     try std.testing.expect(path.output != null);
 
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+    const runtime_zone = (try runtime.zones.get(zone)).zone;
+    const queued = queuedFrames(&runtime_zone.pipe);
+    stream.pump(&samples, 256);
+    deadline = .init(5_000);
+    while (queuedFrames(&runtime_zone.pipe) < queued and deadline.tick()) {}
+    try std.testing.expect(queuedFrames(&runtime_zone.pipe) >= queued);
+
     try runtime.playerSetEqualizer(player, null);
     path = try runtime.playerSignalPath(player);
-    try std.testing.expect(!hasReason(path, .sample_processing));
+    try std.testing.expectEqual(@as(?audio.dsp.Equalizer, null), path.equalizer);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(audio.signal_path.Reason, &.{.sample_processing}, path.reasonList());
+
+    deadline = .init(5_000);
+    while (hasReason(path, .sample_processing) and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
+        stream.pump(&samples, 256);
+        path = try runtime.playerSignalPath(player);
+    }
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
 
     try runtime.playerSetVolume(player, 0.5);
     path = try runtime.playerSignalPath(player);
     deadline = .init(5_000);
     while (path.volume != 0.5 and deadline.tick()) {
         if (deadline.remaining_ms % 5 != 0) continue;
-        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        stream.pump(&samples, 256);
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expect(hasReason(path, .sample_processing));
@@ -1253,9 +1389,9 @@ test "a Player's signal path reports sample processing only while DSP or volume 
     try runtime.playerSetVolume(player, 1);
     path = try runtime.playerSignalPath(player);
     deadline = .init(5_000);
-    while (path.volume != 1 and deadline.tick()) {
+    while ((path.volume != 1 or hasReason(path, .sample_processing)) and deadline.tick()) {
         if (deadline.remaining_ms % 5 != 0) continue;
-        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        stream.pump(&samples, 256);
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expectEqual(@as(f32, 1), path.volume);

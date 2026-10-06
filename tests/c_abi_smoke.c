@@ -1365,6 +1365,9 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
                       !has_reason(&path.view.base, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING);
     }
     SMOKE_CHECK(unprocessed);
+    SMOKE_CHECK(path.view.device_format.sample_format == ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN);
+    SMOKE_CHECK(path.view.base.bit_perfect_eligible == 0);
+    SMOKE_CHECK(has_reason(&path.view.base, ORCA_SIGNAL_REASON_PATH_UNKNOWN));
     SMOKE_CHECK(path.view.base.has_equalizer == 0 && path.view.base.has_crossfeed == 0);
     SMOKE_CHECK(path.view.base.has_replay_gain == 0 && path.view.base.volume == 1.0f);
     SMOKE_CHECK(path.view.base.replay_gain_source == ORCA_GAIN_SOURCE_NONE);

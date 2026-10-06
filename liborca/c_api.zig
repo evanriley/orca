@@ -8230,6 +8230,7 @@ pub fn exportSignalReason(reason: audio.signal_path.Reason) u8 {
         .channel_layout_conversion => 2,
         .sample_format_conversion => 3,
         .lossy_source => 4,
+        .path_unknown => 5,
     };
 }
 
@@ -9851,7 +9852,7 @@ fn captureSignalPathV2(context: ?*anyopaque, view: *const SignalPathViewV2) call
     destination.* = view.*;
 }
 
-test "a Player with no output reports a signal path with no source, no output and only the processing it applies" {
+test "a Player with no output reports a signal path with no source, no output and an unknown path" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
     var player: Handle = undefined;
@@ -9863,8 +9864,10 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(@as(u8, 0), path.has_source);
     try std.testing.expectEqual(@as(u8, 0), path.has_output);
     try std.testing.expectEqual(@as(u8, 0), path.has_equalizer);
-    try std.testing.expectEqual(@as(u32, 0), path.reason_count);
-    try std.testing.expectEqual(@as(u8, 1), path.bit_perfect_eligible);
+    try std.testing.expectEqual(@as(u32, 1), path.reason_count);
+    try std.testing.expectEqual(exportSignalReason(.path_unknown), path.reasons[0]);
+    try std.testing.expectEqual(@as(u8, 5), path.reasons[0]);
+    try std.testing.expectEqual(@as(u8, 0), path.bit_perfect_eligible);
     try std.testing.expectEqual(@as(usize, 0), path.codec.length);
     try std.testing.expectEqual(exportDeviceKind(.unknown), path.output_kind);
     try std.testing.expectEqual(@as(u8, 0), path.has_device_quantum);
@@ -9883,8 +9886,9 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
     try std.testing.expectEqual(@as(u8, 1), path.has_crossfeed);
     try std.testing.expectEqual(@as(f32, 0.5), path.crossfeed);
-    try std.testing.expectEqual(@as(u32, 1), path.reason_count);
+    try std.testing.expectEqual(@as(u32, 2), path.reason_count);
     try std.testing.expectEqual(exportSignalReason(.sample_processing), path.reasons[0]);
+    try std.testing.expectEqual(exportSignalReason(.path_unknown), path.reasons[1]);
     try std.testing.expectEqual(@as(u8, 0), path.bit_perfect_eligible);
 
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));

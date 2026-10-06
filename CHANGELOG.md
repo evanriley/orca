@@ -96,6 +96,17 @@
   block holding the predecessor's last frame was reported as the successor's,
   so identity changed and the successor's position started counting up to one
   block early.
+- The signal path reports the audio being heard. A path is bit-perfect
+  eligible only when the source declares its sample format, an output is open
+  and the device has reported its rate and format; otherwise it carries the
+  new reason `path_unknown` (`ORCA_SIGNAL_REASON_PATH_UNKNOWN`), and
+  `orca-gtk` calls it unconfirmed instead of bit-perfect. A device with a
+  different channel count adds `channel_layout_conversion`. The float32 stream
+  on an integer device adds `sample_format_conversion` only when the device
+  cannot hold the source's values, so a 16- or 24-bit source on a 24-bit
+  device stays eligible. `sample_processing` stays until audio processed under
+  earlier settings has played, instead of clearing while that audio is still
+  queued.
 
 ## 0.1.0 - 2026-10-06
 

@@ -481,8 +481,11 @@ pub const Player = struct {
         const channels = sources.format().channels;
         const block = try sources.readBlock(scratch, self.replayGainSettings());
         const samples = scratch[0 .. block.frames * channels];
-        if (player_processor) |processor|
+        var processed = block.scaled;
+        if (player_processor) |processor| {
             processor.process(samples, @intCast(block.frames), channels);
+            processed = processed or processor.changedSamples();
+        }
         return .{
             .frames = block.frames,
             .zones_accepted = if (block.frames == 0)
@@ -496,6 +499,7 @@ pub const Player = struct {
                     epoch,
                     block.entry_serial,
                     block.successor,
+                    processed,
                 ),
         };
     }

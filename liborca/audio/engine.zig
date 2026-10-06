@@ -279,6 +279,14 @@ pub const PlayerEngine = struct {
         return zone_value.open_device_kind;
     }
 
+    /// Control lane, under `quiesce`.
+    pub fn holdsProcessedAudio(self: *const PlayerEngine) bool {
+        for (self.adopted) |runtime_zone| {
+            if (runtime_zone.pool.holdsProcessed()) return true;
+        }
+        return false;
+    }
+
     pub fn isDrained(self: *const PlayerEngine) bool {
         return self.player.drained.load(.acquire);
     }
@@ -2110,6 +2118,61 @@ test "a seek discards stale-epoch blocks without touching the queue" {
         @as(u64, 50_000 + frames_per_block),
         harness.player.snapshot().position_frames,
     );
+}
+
+fn anyFractional(samples: []const f32) bool {
+    for (samples) |sample| {
+        if (sample != @round(sample)) return true;
+    }
+    return false;
+}
+
+test "audio processed under earlier settings is held until its Zone has played it and handed it back" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var gain: processing.Gain = .{};
+    var player_dsp = dsp_api.PlayerDsp.init(&gain);
+    harness.engine.dsp = &player_dsp;
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    const stream = liveStreamFor(&harness.backend, runtime_zone).?;
+    try std.testing.expect(runtime_zone.pipe.ready.len() > 1);
+    try std.testing.expect(!harness.engine.holdsProcessedAudio());
+
+    var samples: [frames_per_block]f32 = undefined;
+    try player_dsp.setEqualizer(.{ .preamp_db = -6 });
+    while (runtime_zone.pipe.ready.len() > 0) stream.pump(&samples, frames_per_block);
+    try std.testing.expect(!anyFractional(&samples));
+    harness.engine.pass();
+    const processed_blocks = runtime_zone.pipe.ready.len();
+    try std.testing.expect(processed_blocks > 1);
+    try std.testing.expect(harness.engine.holdsProcessedAudio());
+
+    try player_dsp.setEqualizer(null);
+    harness.engine.pass();
+    try std.testing.expect(harness.engine.holdsProcessedAudio());
+
+    stream.pump(&samples, frames_per_block);
+    try std.testing.expect(anyFractional(&samples));
+    harness.engine.pass();
+    try std.testing.expect(harness.engine.holdsProcessedAudio());
+
+    for (1..processed_blocks) |_| stream.pump(&samples, frames_per_block);
+    try std.testing.expect(anyFractional(&samples));
+    try std.testing.expect(harness.engine.holdsProcessedAudio());
+    harness.engine.pass();
+    try std.testing.expect(!harness.engine.holdsProcessedAudio());
+
+    stream.pump(&samples, frames_per_block);
+    try std.testing.expect(!anyFractional(&samples));
+    try std.testing.expect(samples[1] != 0);
 }
 
 test "an engine thread delays shutdown until it has actually stopped" {

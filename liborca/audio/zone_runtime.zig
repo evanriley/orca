@@ -409,11 +409,13 @@ test "closing an output lets a Zone reclaim every prepared block" {
 
     const sink = runtime_zone.sink(1);
     var samples: [frames_per_block]f32 = @splat(0.5);
-    try std.testing.expect(sink.submitCopy(&samples, frames_per_block, 3, 1, .{}));
+    try std.testing.expect(sink.submitCopy(&samples, frames_per_block, 3, 1, .{}, true));
     try std.testing.expect(!runtime_zone.quiescent());
+    try std.testing.expect(runtime_zone.pool.holdsProcessed());
 
     runtime_zone.resetPipe();
     try std.testing.expect(runtime_zone.quiescent());
+    try std.testing.expect(!runtime_zone.pool.holdsProcessed());
 }
 
 test "Zone render-ahead follows policy but never falls under the device quantum" {

@@ -351,15 +351,6 @@ removed.
 
 ### Before 1.0
 
-- Signal path truth. Unknown device details must not produce an unqualified
-  bit-perfect verdict: zero known reasons currently means eligible, and a
-  channel mismatch is not checked. A float32-to-integer device path is not by
-  itself sample loss. The report must describe the audio actually playing,
-  not settings applied to future blocks: `playerSignalPath` describes the
-  current DSP settings while audio processed under earlier settings is still
-  queued, so it can report bit-perfect output for up to a pipe's worth of
-  processed audio. Checked by signal path tests with unknown device details,
-  and by a settings change under playback.
 - Compatibility promises for 1.0 are written separately for the Zig API, the
   C ABI and the Library schema. Schema upgrades from 0.1.0 are
   tested. A GTK launch, open, play and close smoke test runs on a private

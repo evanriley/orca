@@ -595,6 +595,9 @@ pub const App = struct {
     format_label: ?*gtk.Label = null,
     signal_path_popover: ?*gtk.Popover = null,
     signal_path_has_output: bool = false,
+    signal_path_settle_timer: c_uint = 0,
+    signal_path_device_reads: u8 = 0,
+    signal_path_draining: bool = false,
     volume_settle_timer: c_uint = 0,
     device_ids: std.ArrayList(u64) = .empty,
     device_checks: std.ArrayList(*gtk.Widget) = .empty,
@@ -1007,6 +1010,7 @@ pub const App = struct {
         parametric.deinit(self);
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
         if (self.volume_settle_timer != 0) _ = gtk.g_source_remove(self.volume_settle_timer);
+        if (self.signal_path_settle_timer != 0) _ = gtk.g_source_remove(self.signal_path_settle_timer);
         self.tracks.deinit();
         self.track_filters_ui.deinit(self.allocator);
         self.album_filters_ui.deinit(self.allocator);
