@@ -393,9 +393,6 @@ To release:
 Each fix adds a test that fails without it, or a headless screenshot for a
 display-only defect, and removes its entry.
 
-- Matching has no offline setting, and `orca-gtk` has none for scrobbling.
-  Without a network, matching uses cached answers and stops at the first
-  Track it has none for.
 - An AcoustID candidate without a title is scored on length and fingerprint
   alone, so for a tagged Track it can rank level with a candidate whose title
   and artist match. Several recording IDs sharing one AcoustID fingerprint

@@ -24,6 +24,7 @@ pub const MusicBrainz = struct {
     server: []const u8 = default_server,
     cache_ttl_seconds: i64 = 30 * 24 * 60 * 60,
     refusal_ttl_seconds: i64 = 7 * 24 * 60 * 60,
+    offline: bool = false,
     requests_answered: u64 = 0,
     cache_hits: u64 = 0,
 
@@ -188,13 +189,7 @@ pub const MusicBrainz = struct {
             if (cached.status != 200) return error.ProviderRejectedRequest;
             return parser.parse(allocator, cached.body);
         }
-        const response = self.gateway.execute(
-            allocator,
-            .get,
-            request_url,
-            null,
-            &.{.{ .name = "accept", .value = "application/json" }},
-        ) catch |err| switch (err) {
+        const response = self.send(allocator, request_url) catch |err| switch (err) {
             error.RateLimited, error.NetworkUnavailable, error.Timeout, error.Offline => {
                 if (try self.stale(T, allocator, request_url, now_s, parser)) |value| return value;
                 return err;
@@ -216,6 +211,17 @@ pub const MusicBrainz = struct {
         errdefer value.deinit();
         try self.cache.put(service, request_url, response.status, response.body, now_s + self.cache_ttl_seconds);
         return value;
+    }
+
+    fn send(self: *MusicBrainz, allocator: std.mem.Allocator, request_url: []const u8) !network.client.Response {
+        if (self.offline) return error.Offline;
+        return self.gateway.execute(
+            allocator,
+            .get,
+            request_url,
+            null,
+            &.{.{ .name = "accept", .value = "application/json" }},
+        );
     }
 
     fn stale(

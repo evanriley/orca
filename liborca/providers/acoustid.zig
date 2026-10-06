@@ -115,6 +115,7 @@ pub const AcoustId = struct {
     client_key: []const u8,
     cache_ttl_seconds: i64 = 90 * 24 * 60 * 60,
     refusal_ttl_seconds: i64 = 7 * 24 * 60 * 60,
+    offline: bool = false,
     requests_answered: u64 = 0,
     cache_hits: u64 = 0,
 
@@ -238,6 +239,7 @@ pub const AcoustId = struct {
     }
 
     fn post(self: *AcoustId, allocator: std.mem.Allocator, path: []const u8, form: []const u8) !network.client.Response {
+        if (self.offline) return error.Offline;
         const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ std.mem.trimEnd(u8, self.server, "/"), path });
         defer allocator.free(url);
         const compressed = try gzip(allocator, form);

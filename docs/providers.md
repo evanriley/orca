@@ -325,10 +325,22 @@ above either alone. Candidates below 0.5 are dropped.
 A rate limit waits out the longer of the service's block and a backoff of 60 s
 doubling per attempt, cancellably, then asks again. An outage or timeout is
 asked again after about 5 s, then about 30 s. After three attempts of either
-kind, or at once when the network cannot be reached or another process holds the
-service, the job stops `failed`. Cached answers are still used without a
-network. A query answered with something that is not a search result is counted
-and skipped.
+kind, or at once when another process holds the service, the job stops `failed`.
+A query answered with something that is not a search result is counted and
+skipped.
+
+When the network cannot be reached, the job sends no further request to either
+service and goes on through every Track from cache alone. A Track whose answers
+are all cached is matched; a Track that needs an answer the cache lacks is
+skipped, is not counted in `tracks_examined`, and stays eligible for the next
+run. A verify job does the same for each file. Match Album's release vote and
+the release snapshots use cached releases and skip the others. The job then
+ends `failed` with `unavailable` set, its statistics counting what the cache
+answered. The gateway's offline flag is left unchanged.
+
+Matching has no offline setting of its own: it always asks the network first.
+`orca-gtk` has no setting for scrobbling offline; `librarySetScrobbling` takes
+`offline` for hosts that offer one.
 
 A query a service refuses with a `4xx` other than `401`, `403`, `408` and `429`
 is counted as refused and skipped, and the refusal is cached in `provider_cache`

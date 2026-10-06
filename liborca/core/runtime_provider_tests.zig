@@ -1911,6 +1911,102 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     try std.testing.expectEqual(@as(u64, 1), retried_stats.requests);
 }
 
+const river_man_mbid = "2f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c";
+const river_man_answer = recordingAnswer(river_man_mbid, "River Man");
+
+fn cacheMatchAnswers(runtime: *OrcaRuntime, library: LibraryHandle, library_database: *database.LibraryDatabase, track_ids: []const i64) !void {
+    for (track_ids) |track_id| {
+        try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, try runtime.startLibraryMatching(library, .{ .track_id = track_id })));
+        runtime.reapFinishedJobs();
+    }
+    try library_database.database.exec("DELETE FROM identification_proposals; DELETE FROM identification_searches;");
+}
+
+fn proposalCount(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64) !usize {
+    const proposals = try runtime.libraryMatchProposals(library, track_id, 10);
+    defer proposals.deinit();
+    return proposals.items.len;
+}
+
+test "a matching job without a network matches the Tracks its cache answers, leaves the rest unmarked and asks nothing after the first failure" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "River%20Man", .body = river_man_answer },
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-offline?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const river_man = try addMatchTrack(library_database, "River Man", "Nick Drake", null);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    const pink_moon = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    try cacheMatchAnswers(&runtime, library, library_database, &.{ northern_sky, pink_moon });
+    const seeded = fake.requestCount();
+
+    fake.failure = error.ConnectionRefused;
+    const offline = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, offline));
+
+    const stats = try runtime.jobMatchStats(offline);
+    try std.testing.expect(!stats.cancelled);
+    try std.testing.expectEqual(BusyService.none, stats.busy);
+    try std.testing.expectEqual(@as(u64, 2), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 2), stats.matched);
+    try std.testing.expectEqual(@as(u64, 0), stats.requests);
+    try std.testing.expectEqual(@as(u64, 3), stats.cache_hits);
+    try std.testing.expectEqual(seeded + 1, fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "River%20Man") != null);
+    try std.testing.expectEqual(@as(usize, 1), try proposalCount(&runtime, library, northern_sky));
+    try std.testing.expectEqual(@as(usize, 1), try proposalCount(&runtime, library, pink_moon));
+    try std.testing.expectEqual(@as(usize, 0), try proposalCount(&runtime, library, river_man));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, null, null));
+
+    fake.failure = null;
+    runtime.reapFinishedJobs();
+    const online = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, online));
+    const online_stats = try runtime.jobMatchStats(online);
+    try std.testing.expectEqual(@as(u64, 1), online_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), online_stats.matched);
+    try std.testing.expectEqual(@as(u64, 1), online_stats.requests);
+    try std.testing.expectEqual(seeded + 2, fake.requestCount());
+    try std.testing.expectEqual(@as(usize, 1), try proposalCount(&runtime, library, river_man));
+}
+
+test "an outage that gives up on the first Track stops the job before the Tracks its cache answers" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-outage-stops?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const river_man = try addMatchTrack(library_database, "River Man", "Nick Drake", null);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    const pink_moon = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    try cacheMatchAnswers(&runtime, library, library_database, &.{ northern_sky, pink_moon });
+
+    var outage: FakeMusicBrainz = .{ .refusals = &.{ 503, 503, 503 } };
+    runtime.matching_hooks = outage.hooks();
+    const stopped = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, stopped));
+
+    const stats = try runtime.jobMatchStats(stopped);
+    try std.testing.expectEqual(@as(u64, 0), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 0), stats.matched);
+    try std.testing.expectEqual(@as(u32, 3), outage.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, outage.transport.lastUrl(), "River%20Man") != null);
+    try std.testing.expectEqual(@as(usize, 0), try proposalCount(&runtime, library, river_man));
+    try std.testing.expectEqual(@as(usize, 0), try proposalCount(&runtime, library, northern_sky));
+    try std.testing.expectEqual(@as(u64, 3), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, null, null));
+}
+
 /// That request `index` followed the one before it by a jittered `nominal_ms`.
 fn expectWaited(transport: *const network.testing.ScriptedTransport, index: usize, nominal_ms: i64) !void {
     try expectJittered(transport.request_times_ms[index] - transport.request_times_ms[index - 1], nominal_ms);
@@ -2545,6 +2641,7 @@ pub const FakeAcoustId = struct {
     submit_body: []const u8 = "{\"status\":\"ok\",\"submissions\":[]}",
     /// Statuses the first submissions are answered with, in order.
     submit_outages: []const u16 = &.{},
+    lookup_failure: ?anyerror = null,
     lookups: std.atomic.Value(u32) = .init(0),
     submissions: std.atomic.Value(u32) = .init(0),
 
@@ -2562,6 +2659,7 @@ pub const FakeAcoustId = struct {
         if (std.mem.endsWith(u8, exchange.request.url, "/v2/lookup")) {
             const index = self.lookups.fetchAdd(1, .acq_rel);
             if (self.hang_lookups_from) |first| if (index >= first) return .hang;
+            if (self.lookup_failure) |err| return .{ .fail = err };
             var deadline: runtime_tests.TestDeadline = .init(10_000);
             while (self.held.load(.acquire) and deadline.tick()) {}
             return .{ .respond = .{ .status = self.lookup_status, .body = self.lookup_body } };
@@ -2722,6 +2820,53 @@ test "a matching job fingerprints each file, asks AcoustID about them in one req
     const details = (try runtime.libraryTrackDetails(library, reprojected[0])).?;
     defer details.deinit();
     try std.testing.expectEqualStrings(pink_moon_mbid, details.musicbrainz_recording_id.?);
+}
+
+test "a matching job without a network answers each fingerprint its cache holds and skips the Track AcoustID was never asked about" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "northern.wav", 440);
+    try writeToneWave(temporary.dir, "untagged.wav", 620);
+    var musicbrainz: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
+    var acoustid: FakeAcoustId = .{ .lookup_body = two_fingerprint_answer };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("test-client");
+    try runtime.setAcoustIdServer("http://127.0.0.1:5002");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-acoustid-offline?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try addAudioTrack(library_database, &temporary, "northern.wav", "Northern Sky", "Nick Drake");
+    const untagged = try addAudioTrack(library_database, &temporary, "untagged.wav", "", "");
+    try cacheMatchAnswers(&runtime, library, library_database, &.{northern_sky});
+    const seeded_lookups = acoustid.lookups.load(.acquire);
+    const seeded_searches = musicbrainz.requestCount();
+
+    acoustid.lookup_failure = error.ConnectionRefused;
+    musicbrainz.failure = error.ConnectionRefused;
+    const offline = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, offline));
+    const stats = try runtime.jobMatchStats(offline);
+    try std.testing.expectEqual(BusyService.none, stats.busy);
+    try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), stats.matched);
+    try std.testing.expectEqual(@as(u64, 0), stats.acoustid_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.acoustid_cache_hits);
+    try std.testing.expectEqual(seeded_lookups + 1, acoustid.lookups.load(.acquire));
+    try std.testing.expectEqual(seeded_searches, musicbrainz.requestCount());
+    try std.testing.expectEqual(@as(usize, 1), try proposalCount(&runtime, library, northern_sky));
+    try std.testing.expectEqual(@as(usize, 0), try proposalCount(&runtime, library, untagged));
+
+    acoustid.lookup_failure = null;
+    musicbrainz.failure = null;
+    runtime.reapFinishedJobs();
+    const online = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, online));
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(online)).acoustid_requests);
+    try std.testing.expectEqual(seeded_lookups + 2, acoustid.lookups.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), try proposalCount(&runtime, library, untagged));
 }
 
 test "a file that fails to decode is not fingerprinted and its Track is still searched on MusicBrainz, and no fingerprints means no AcoustID" {

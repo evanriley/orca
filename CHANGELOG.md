@@ -236,6 +236,11 @@
   store, or is too large for the C ABI's buffer, fails with the new outcome
   `credential_unavailable` (`ORCA_SUBMISSION_OUTCOME_CREDENTIAL_UNAVAILABLE`)
   instead of `needs_user_key`. `orca-gtk` and `orca-cli` report it.
+- A matching or verify job that cannot reach the network no longer stops at
+  the first Track without a cached answer. It sends no further request,
+  matches every Track its cache answers, leaves the rest eligible for the next
+  run, and ends `failed` with `unavailable` set. An outage that gives up after
+  its retries still stops the job.
 
 ## 0.1.0 - 2026-10-06
 
