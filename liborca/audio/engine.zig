@@ -421,9 +421,13 @@ pub const PlayerEngine = struct {
         // A held format-switch successor describes a transition that is no
         // longer happening.
         self.releasePending();
-        loadQueueEntry(self.player, queue, session, position);
+        const seeked = if (session.seek(request.frame)) true else |_| false;
+        loadQueueEntryAt(self.player, queue, session, position, request.frame);
         session = undefined;
-        self.seekLoadedSource(request.frame);
+        if (!seeked) {
+            self.decode_errors += 1;
+            if (self.player.sources) |*sources| sources.current.eof = true;
+        }
         self.consecutive_open_failures = 0;
         self.seek_reopens += 1;
     }
@@ -959,18 +963,36 @@ pub fn loadQueueEntry(
     session: source_session.SourceSession,
     position: u32,
 ) void {
+    loadQueueEntryAt(player, queue, session, position, 0);
+}
+
+/// `loadQueueEntry` for a session already seeked to `start_frame`.
+pub fn loadQueueEntryAt(
+    player: *player_api.Player,
+    queue: *playback_queue.PlaybackQueue,
+    session: source_session.SourceSession,
+    position: u32,
+    start_frame: u64,
+) void {
     player.releaseSources();
     queue.seekTo(position);
-    queue.noteEntrySerial(player.stageSource(session), position);
+    queue.noteEntrySerial(player.stageSourceAt(session, start_frame), position);
     player.adoptLoadedEntryAsAudible();
     player.open_failure.clear();
 }
 
 const source_session = @import("source_session.zig");
 
+const SeekProbe = struct {
+    published_position: *const std.atomic.Value(u64),
+    calls: usize = 0,
+    lowest_position: u64 = std.math.maxInt(u64),
+};
+
 const RampDecoder = struct {
     position: u64 = 0,
     total: u64,
+    probe: ?*SeekProbe = null,
     channels: u16 = 1,
     sample_rate: u32 = 48_000,
 
@@ -1005,6 +1027,10 @@ const RampDecoder = struct {
 
     fn seekTo(context: *anyopaque, frame: u64) !void {
         const self: *RampDecoder = @ptrCast(@alignCast(context));
+        if (self.probe) |probe| {
+            probe.calls += 1;
+            probe.lowest_position = @min(probe.lowest_position, probe.published_position.load(.acquire));
+        }
         self.position = frame;
     }
 
@@ -1737,6 +1763,7 @@ const TestOpener = struct {
     /// re-opened rather than only that some open happened.
     opens_by_id: [8]struct { track_id: i64 = 0, count: usize = 0 } = @splat(.{}),
     fail_ids: []const i64 = &.{},
+    seek_probe: ?*SeekProbe = null,
 
     fn opensOf(self: *const TestOpener, track_id: i64) usize {
         for (self.opens_by_id) |record| {
@@ -1795,6 +1822,7 @@ const TestOpener = struct {
                     .total = plan.frames,
                     .channels = plan.channels,
                     .sample_rate = plan.sample_rate,
+                    .probe = self.seek_probe,
                 },
             };
             return source_session.SourceSession.initOwned(
@@ -2015,6 +2043,8 @@ test "a seek during a gapless transition re-opens the audible entry" {
 
     // The user drags the seek bar. It names a point in the track being *heard*.
     const target: u64 = 8 * frames_per_block;
+    var probe: SeekProbe = .{ .published_position = &harness.player.position_frames };
+    harness.test_opener.seek_probe = &probe;
     _ = try harness.player.seek(target);
     // The control lane could not apply it: entry 0's decoder is already gone.
     try std.testing.expect(harness.player.pending_seek != null);
@@ -2026,6 +2056,8 @@ test "a seek during a gapless transition re-opens the audible entry" {
     try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
     try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
     try std.testing.expectEqual(target, harness.player.snapshot().position_frames);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(target, probe.lowest_position);
 
     // And the following entry still arrives afterwards, still gaplessly.
     const gapless_before = harness.engine.gapless_transitions;

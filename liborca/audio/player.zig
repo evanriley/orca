@@ -191,7 +191,7 @@ pub const Player = struct {
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
         self.adoptLoadedEntryAsAudible();
-        self.resetTimeline();
+        self.resetTimeline(0);
         self.publishSourceInfo();
     }
 
@@ -209,10 +209,16 @@ pub const Player = struct {
     /// the adoption: the audible serial reads 0 until `adoptLoadedEntryAsAudible`,
     /// so a caller can record the returned serial before a host can read it.
     pub fn stageSource(self: *Player, source: source_session.SourceSession) u32 {
+        return self.stageSourceAt(source, 0);
+    }
+
+    /// `stageSource` for a session already positioned at `start_frame`: the
+    /// timeline starts there, so the position a host reads never dips below it.
+    pub fn stageSourceAt(self: *Player, source: source_session.SourceSession, start_frame: u64) u32 {
         std.debug.assert(self.sources == null);
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
-        self.resetTimeline();
+        self.resetTimeline(start_frame);
         self.publishSourceInfo();
         _ = self.epoch.fetchAdd(1, .acq_rel);
         return self.sources.?.current_entry_serial;
@@ -376,9 +382,9 @@ pub const Player = struct {
         return if (frames == 0) null else frames;
     }
 
-    fn resetTimeline(self: *Player) void {
-        self.position_frames.store(0, .release);
-        self.epoch_base_frames.store(0, .release);
+    fn resetTimeline(self: *Player, start_frame: u64) void {
+        self.position_frames.store(start_frame, .release);
+        self.epoch_base_frames.store(start_frame, .release);
     }
 
     pub fn primeNextSource(self: *Player, source: source_session.SourceSession) !void {
