@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         []const u8,
         "provider-contact",
         "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
-    ) orelse "evan@evanriley.com";
+    ) orelse "https://github.com/evanriley/orca";
     const gtk = b.option(bool, "gtk", "Build and install orca-gtk on Linux") orelse true;
     const app_options = b.addOptions();
     app_options.addOption([]const u8, "acoustid_key", acoustid_key);
