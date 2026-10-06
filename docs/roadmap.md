@@ -362,8 +362,6 @@ removed.
 Fixed before 1.0. Each fix adds a test that fails without it, or a headless
 screenshot for a display-only defect, and removes its entry.
 
-- A FLAC seek past the end of the stream fails as a decode error, while WAV
-  clamps to the last frame; the other decoders are unchecked.
 - The scanner skips symbolic links to files without counting them.
 - A release ID tag that names a release MusicBrainz does not return is
   looked up again on every match run of the Library.

@@ -140,6 +140,11 @@
   suggestion and the copy order no longer depend on the order the filesystem
   lists a folder. The duplicate bytes of the health summary free the same
   copies, where they counted the lowest-numbered file of a group as kept.
+- Seeking to or past the end of a stream no longer fails for FLAC, Ogg
+  Vorbis, Opus, AIFF, QOA, MP3 and MP4 (AAC and ALAC); every decoder clamps the
+  target to the stream length, as WAV does, and the next read is end of stream.
+  Seeking to the end of a FLAC track, which the Player does when a seek lands
+  on the last frame, no longer fails as a decode error.
 
 ## 0.1.0 - 2026-10-06
 

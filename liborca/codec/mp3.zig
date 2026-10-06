@@ -303,10 +303,17 @@ fn discardTo(context: *Context, target: u64) !void {
     }
 }
 
-fn seek(context_ptr: *anyopaque, frame: u64) !void {
+fn seek(context_ptr: *anyopaque, requested: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
+    var frame = requested;
     if (context.stream.total_frames) |total| {
-        if (frame > total) return error.SeekOutOfRange;
+        if (context.stream.exact_length and frame >= total) {
+            context.output_position = total;
+            context.scratch_frames = 0;
+            context.scratch_pos = 0;
+            return;
+        }
+        frame = @min(frame, total);
     }
     const target = frame + context.stream.start_skip;
 
@@ -624,13 +631,11 @@ test "corrupted MPEG payloads end or error without reading out of bounds" {
     }
 }
 
-test "seeking beyond the declared length is refused rather than clamped" {
+test "seeking beyond the declared length clamps to the end of the stream" {
     var local = try openFixture("fixtures/audio/vbr-xing-reference.mp3");
     defer local.close();
     var decoder = try openDecoder(testing.allocator, local.readable());
     defer decoder.deinit();
-    try testing.expectError(
-        error.SeekOutOfRange,
-        decoder.seek(decoder.frame_count.? + 1),
-    );
+    try decoder.seek(decoder.frame_count.? + 1);
+    try testing.expectEqual(@as(u64, 0), try drain(&decoder));
 }

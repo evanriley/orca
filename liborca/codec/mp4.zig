@@ -768,7 +768,12 @@ fn readFramesI32(context_ptr: *anyopaque, output: []i32) !usize {
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    if (frame > context.total_frames) return error.SeekOutOfRange;
+    if (frame >= context.total_frames) {
+        context.remaining_frames = 0;
+        context.pending_start = 0;
+        context.pending_end = 0;
+        return;
+    }
     try context.position(frame);
 }
 

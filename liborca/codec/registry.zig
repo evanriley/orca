@@ -441,3 +441,41 @@ test "an ID3-tagged MPEG file still opens as MPEG audio" {
     try std.testing.expectEqualStrings("mp3", probed.codec.?);
     try std.testing.expectEqual(@as(?u32, 44_100), probed.sample_rate);
 }
+test "seeking to or past the end of any stream succeeds and the next read is end of stream" {
+    const fixtures = [_][]const u8{
+        "fixtures/audio/generated-reference.wav",
+        "fixtures/audio/tagged-reference.aiff",
+        "fixtures/audio/sowt-reference.aifc",
+        "fixtures/audio/generated-reference.flac",
+        "fixtures/audio/hires-reference.flac",
+        "fixtures/audio/id3-prefixed-reference.flac",
+        "fixtures/audio/stereo-reference.qoa",
+        "fixtures/audio/tagged-reference.mp3",
+        "fixtures/audio/vbr-xing-reference.mp3",
+        "fixtures/audio/cbr-noxing-reference.mp3",
+        "fixtures/audio/tagged-reference.ogg",
+        "fixtures/audio/tagged-reference.opus",
+        "fixtures/audio/tagged-reference-aac.m4a",
+        "fixtures/audio/tagged-reference-alac.m4a",
+        "fixtures/audio/tagged-reference.aac",
+    };
+    var samples: [4096 * 2]f32 = undefined;
+    for (fixtures) |path| {
+        var local = try storage.LocalFileSource.open(std.testing.io, path);
+        defer local.close();
+        var opened = try CodecRegistry.builtins().openDetected(std.testing.allocator, local.readable());
+        defer opened.deinit();
+        const total = opened.frame_count orelse return error.MissingFrameCount;
+        for ([_]u64{ total, total + 1, total + 100_000, std.math.maxInt(u64) }) |target| {
+            errdefer std.debug.print("seek to {d} of {d} in {s}\n", .{ target, total, path });
+            try opened.seek(0);
+            try std.testing.expect(try opened.readFrames(&samples) > 0);
+            try opened.seek(target);
+            try std.testing.expectEqual(@as(usize, 0), try opened.readFrames(&samples));
+            try std.testing.expectEqual(@as(usize, 0), try opened.readFrames(&samples));
+            try std.testing.expectEqual(@as(?decoder.Damage, null), opened.damage());
+        }
+        try opened.seek(0);
+        try std.testing.expect(try opened.readFrames(&samples) > 0);
+    }
+}

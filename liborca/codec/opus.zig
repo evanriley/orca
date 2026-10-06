@@ -38,6 +38,8 @@ const Context = struct {
     source: storage.ReadableSource,
     native: *anyopaque,
     channels: u16,
+    total_frames: ?u64 = null,
+    at_end: bool = false,
 };
 
 pub fn openDecoder(
@@ -58,6 +60,7 @@ pub fn openDecoder(
     errdefer orca_opus_decoder_destroy(context.native);
     context.channels = std.math.cast(u16, info.channels) orelse return error.InvalidOpus;
     if (context.channels == 0) return error.InvalidOpus;
+    context.total_frames = if (info.total_frames < 0) null else @intCast(info.total_frames);
     return .{
         .context = context,
         .vtable = &vtable,
@@ -89,7 +92,7 @@ fn readSource(
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     const capacity = output.len / context.channels;
-    if (capacity == 0) return 0;
+    if (capacity == 0 or context.at_end) return 0;
     var produced: u32 = 0;
     return switch (orca_opus_decoder_read(
         context.native,
@@ -105,7 +108,14 @@ fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (context.total_frames) |total| {
+        if (frame >= total) {
+            context.at_end = true;
+            return;
+        }
+    }
     if (orca_opus_decoder_seek(context.native, frame) != ok) return error.OpusSeekFailed;
+    context.at_end = false;
 }
 
 fn deinit(context_ptr: *anyopaque) void {

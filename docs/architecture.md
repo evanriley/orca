@@ -89,6 +89,13 @@ fixed-width integers, is visible above its shim.
   `PartialWavFrame` through `Decoder.damage`. An AIFF whose COMM declares more
   frames than SSND holds plays the frames present and reports `TruncatedAiff`;
   an AIFF with no SSND fails to open with `MissingSoundChunk`.
+- Every decoder clamps a seek target to the stream's declared frame count: a
+  seek to or past it succeeds, the next read returns zero frames and
+  `Decoder.damage` reports nothing for it. A later seek inside the stream
+  resumes decoding. A stream that declares no length (Ogg, Opus and FLAC with
+  an unknown total, MP3 without a length header) cannot be clamped, and a
+  target past its end is whatever the underlying library does with it, usually
+  a seek error.
 - A probe reports the encoding as a stable lowercase `decoder.codec_id`: `pcm`,
   `pcm_float`, `flac`, `qoa`, `mp1`, `mp2`, `mp3`, `alac`, `aac`, `opus`,
   `vorbis`. The scanner stores it in `files.codec`. `codec` names the encoding
