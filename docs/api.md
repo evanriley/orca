@@ -351,8 +351,11 @@ section lists the entry points, errors and limits.
   non-null `filter` is the word-prefix search of `librarySearch`
   (`error.SearchTextTooLong`). Each item with a candidate costs a Release view,
   snapshot and alignment. An item in the `reviewed` bucket that only its
-  tags identify has `from_tags` set. `libraryReleaseMatchCounts` counts the
-  buckets.
+  tags identify has `from_tags` set. `ReleaseCandidate.confidence` is null
+  (`ReleaseCandidate.unread`) while a Track's release ID names the candidate
+  and Orca holds no snapshot of it; such an item is in `needs_review` (see
+  [metadata.md](metadata.md#release-candidates-and-confidence)).
+  `libraryReleaseMatchCounts` counts the buckets.
 - `libraryReleaseMatchEvidence` returns a `MatchEvidence` and
   `libraryReleaseMatchDiff` a `ReleaseMatchDiff`, against `release_mbid` or the
   best candidate (`error.NoReleaseCandidate`); with a snapshot a field differs

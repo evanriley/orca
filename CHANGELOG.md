@@ -24,6 +24,14 @@
   `corrupt_audio` by analysis while playback still tolerates them.
 - A Zone attached, detached, moved or destroyed while its Player's engine
   thread starts no longer returns before that engine adopts the change.
+- A release ID tag alone no longer counts as a confident match. Until Orca
+  reads the release a tag names and places the Track on it, the album is in
+  Needs Review with no percentage, its candidate titled from the album tag, and
+  Matches and Match Review say it is not yet read from MusicBrainz. Find
+  Matches reads every release the tags name, including on partially tagged
+  albums, and reads a release ID tag written in uppercase as the lowercase
+  MusicBrainz ID. `ReleaseCandidate.confidence` is optional and
+  `orca_release_match_view_v2` gains `candidate_unread`.
 
 ## 0.1.0 - 2026-10-06
 

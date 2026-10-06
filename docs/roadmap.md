@@ -389,14 +389,6 @@ removed.
   from the Library, contrary to the comment in `core/runtime_status.zig` that
   it keeps its place, so a page's row `n` is then not queue position
   `offset + n`. Checked by a page over a queue with a removed Track.
-- Match confidence is checked evidence. A Track whose release ID tag names a
-  release counts as confidence 1 in `ReleaseCandidate.confidence`, so an
-  album tagged elsewhere shows 100% in Confident before Orca has read the
-  release from MusicBrainz, with "Untitled release" as its best candidate
-  and a Review that has no tracklist. A release a tag names is read before
-  the album is weighed, and an album whose release has not been read shows
-  no percentage. Checked by matching a tagged album with no stored release
-  and with an unreachable MusicBrainz.
 - Match results name what can be reviewed. Search on an Unmatched album
   reports "Found a match to review" when a Track gained a recording proposal
   (`MatchStats.matched`) even when no release candidate forms, as for Big

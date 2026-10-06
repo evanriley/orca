@@ -1584,7 +1584,8 @@ pub const ReleaseMatchViewV2 = extern struct {
     placed: u32,
     needs_pairing: u32,
     has_placement: u8,
-    _reserved: [7]u8 = @splat(0),
+    candidate_unread: u8,
+    _reserved: [6]u8 = @splat(0),
 };
 
 pub const ReleaseMatchV2Callback = *const fn (?*anyopaque, *const ReleaseMatchViewV2) callconv(.c) void;
@@ -5195,7 +5196,7 @@ fn releaseMatchView(item: database.ReleaseMatchItem) ReleaseMatchView {
         .candidate_title = stringView(if (best) |candidate| candidate.title else ""),
         .candidate_date = stringView(if (best) |candidate| candidate.date orelse "" else ""),
         .candidate_track_count = if (best) |candidate| candidate.track_count orelse 0 else 0,
-        .confidence = if (best) |candidate| candidate.confidence else 0,
+        .confidence = if (best) |candidate| candidate.confidence orelse 0 else 0,
     };
 }
 
@@ -5225,6 +5226,7 @@ pub export fn orca_library_query_release_matches_v2(
             .placed = if (item.placement) |placement| placement.placed else 0,
             .needs_pairing = if (item.placement) |placement| placement.needs_pairing else 0,
             .has_placement = @intFromBool(item.placement != null),
+            .candidate_unread = @intFromBool(item.best != null and item.best.?.unread()),
         };
         visit(context, &view);
     }

@@ -172,6 +172,32 @@ after the reprojection, or null when a Track is not placed afterwards or the
 written files lie on several Releases. An Apply that left a Track alone keeps
 the Release listed with its `needs_pairing` count.
 
+#### Release candidates and confidence
+
+A Release's candidates are the releases its Tracks' release IDs in effect name
+and the releases its pending and accepted proposals list. A candidate's
+confidence is the mean over the Release's Tracks of each Track's score:
+
+- 1 when the Track's release ID names the candidate, Orca holds the
+  candidate's snapshot and the alignment places the Track `automatic` or
+  `paired`;
+- otherwise 1 when an accepted proposal was pointed at the candidate;
+- otherwise the confidence of the first pending proposal that lists it;
+- otherwise 0.
+
+Release IDs are compared in lowercase, the form MusicBrainz uses, so a tag
+holding an ID in uppercase names the same release. A value that is not a
+MusicBrainz ID names no release: it is never looked up and gives no
+candidate.
+
+A release ID alone is a claim, not evidence. While a Track's release ID names
+a release Orca holds no snapshot of, that candidate is unread:
+`ReleaseCandidate.confidence` is null (`ReleaseCandidate.unread`), it ranks
+above every read candidate, its title falls back to the Release's album title,
+and the Release is in the `needs_review` bucket whatever the threshold. A
+match run reads it, as [the next section](#marking-a-release-as-reviewed)
+describes, and the candidate is then weighed like any other.
+
 #### Marking a release as reviewed
 
 `Runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid)` and
@@ -197,23 +223,26 @@ Track `automatic` or `paired`. It is listed in the `reviewed` bucket with
 `ReleaseMatchItem.from_tags` set and counted in `ReleaseMatchCounts.reviewed`.
 A person's review that holds takes precedence and clears `from_tags`. The
 release-match page and counts decide this per chunk of Releases with one tag
-statement and, for the Releases whose tags name their best candidate, one
-snapshot read and one pairing read.
+statement and, for the releases its Tracks' release IDs name, one snapshot
+read and one pairing read.
 
 A library-scope match run (`Runtime.startLibraryMatching` without a Release or
-Track, Match Again) looks up the release the tags name once its Track walk
-finishes without stopping. It takes, 64 at a time in ID order, each Release
-whose every Track's play file has a release ID tag naming one release that has
-no snapshot younger than the 30-day cache, and looks that release up only when
-it is the Release's best candidate. Each lookup stores a whole snapshot or none.
-A cancelled, offline or busy run stops at the Release it reached; the next run
-selects the remaining Releases again, since nothing records the step as done.
-A run with a `limit` that the walk reaches skips the step. Before its first
-lookup the step counts the Releases it selects; the Job's `total_units` becomes
-the Tracks walked plus that count, `completed_units` advances by one for each
-Release looked up or skipped and reaches the total when the step ends,
-`current_item` is the Release's album artist and title, and `detail` is
-"looking up the releases your tags name" until the step ends.
+Track, Match Again) looks up the releases the tags name once its Track walk
+finishes without stopping. It takes, 64 at a time in release ID order, each
+distinct release a Track's release ID in effect names, from fully, partially
+and mixed tagged Releases alike, unless the Release with that Track dismissed
+it or it has a snapshot younger than the 30-day cache. Each lookup stores a
+whole snapshot or none, through the same gateway, cache and back-off as every
+other request. A Release-scope run (Match Album) reads each unread candidate
+before its best one. A cancelled, offline or busy run stops at the release it
+reached; the next run selects the remaining releases again, since nothing
+records the step as done. A run with a `limit` that the walk reaches skips the
+step. Before its first lookup the step counts the releases it selects; the
+Job's `total_units` becomes the Tracks walked plus that count,
+`completed_units` advances by one for each release looked up or skipped and
+reaches the total when the step ends, `current_item` is the album artist and
+title of the first Release naming it, and `detail` is "looking up the releases
+your tags name" until the step ends.
 
 `Runtime.libraryUnmarkReleaseReviewed(library, release_id)` and `orca-cli
 unmark-release-reviewed` delete the review, held or stale, and change no value:

@@ -7377,9 +7377,21 @@ test "release match pages and counts across many Releases agree with weighing ea
         \\INSERT INTO files(id, recording_id) SELECT v, v FROM numbers;
         \\INSERT INTO tracks(id, recording_id, release_id, title, track_number, preferred_file_id)
         \\    SELECT v, v, (v + 1) / 2, 'Song', 2 - v % 2, CASE WHEN v % 7 = 0 THEN NULL ELSE v END FROM numbers;
-        \\INSERT INTO observed_file_tags(file_id, musicbrainz_release_id)
-        \\    SELECT v, printf('00000000-0000-4000-8000-%012d', (v + 1) / 2) FROM numbers
-        \\    WHERE ((v + 1) / 2) % 3 = 0 OR (((v + 1) / 2) % 3 = 1 AND v % 2 = 1);
+        \\INSERT INTO observed_file_tags(file_id, musicbrainz_recording_id, musicbrainz_release_id)
+        \\    SELECT v, printf('00000000-0000-4000-9000-%012d', v),
+        \\        CASE WHEN ((v + 1) / 2) % 3 = 1 AND v % 2 = 1 THEN printf('00000000-0000-4000-8000-%012d', (v + 1) / 2) END
+        \\    FROM numbers;
+        \\CREATE TEMP TABLE named(release_id INTEGER PRIMARY KEY, snapshotted INTEGER NOT NULL);
+        \\INSERT INTO named SELECT v, v % 24 <> 0 FROM numbers WHERE v <= 600 AND (v % 3 = 0 OR v % 6 = 2);
+        \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked)
+        \\    SELECT v, 9, printf('00000000-0000-4000-8000-%012d', (v + 1) / 2), 2, 0 FROM numbers
+        \\    WHERE (v + 1) / 2 IN (SELECT release_id FROM named);
+        \\INSERT INTO musicbrainz_releases(musicbrainz_release_id, title, artist_credit, medium_count, track_count, fetched_at)
+        \\    SELECT printf('00000000-0000-4000-8000-%012d', release_id), 'Album', '', 1, 2, 0 FROM named WHERE snapshotted;
+        \\INSERT INTO musicbrainz_release_tracks(musicbrainz_release_id, disc, position, title, artist_credit, recording_id, release_track_id)
+        \\    SELECT printf('00000000-0000-4000-8000-%012d', (v + 1) / 2), 1, 2 - v % 2, 'Song', '',
+        \\        printf('00000000-0000-4000-9000-%012d', v), printf('00000000-0000-4000-a000-%012d', v)
+        \\    FROM numbers WHERE (v + 1) / 2 IN (SELECT release_id FROM named WHERE snapshotted);
         \\INSERT INTO dismissed_release_candidates(release_id, musicbrainz_release_id, dismissed_at)
         \\    SELECT v, printf('00000000-0000-4000-8000-%012d', v), 0 FROM numbers WHERE v <= 600 AND v % 45 = 0;
     );
@@ -7403,8 +7415,9 @@ test "release match pages and counts across many Releases agree with weighing ea
         .needs_review = expected[@backingInt(ReleaseMatchBucket.needs_review)].items.len,
         .unmatched = expected[@backingInt(ReleaseMatchBucket.unmatched)].items.len,
     }, try runtime.libraryReleaseMatchCounts(library, 0.9, null));
-    try std.testing.expectEqual(@as(usize, 187), expected[@backingInt(ReleaseMatchBucket.confident)].items.len);
-    try std.testing.expectEqual(@as(usize, 200), expected[@backingInt(ReleaseMatchBucket.needs_review)].items.len);
+    try std.testing.expectEqual(@as(usize, 263), expected[@backingInt(ReleaseMatchBucket.confident)].items.len);
+    try std.testing.expectEqual(@as(usize, 224), expected[@backingInt(ReleaseMatchBucket.needs_review)].items.len);
+    try std.testing.expectEqual(@as(usize, 113), expected[@backingInt(ReleaseMatchBucket.unmatched)].items.len);
     for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched }) |bucket| {
         const all = expected[@backingInt(bucket)].items;
         for ([_]u32{ 0, 1, 150, 199, 250 }) |offset| for ([_]u32{ 7, 512 }) |limit| {
@@ -7443,7 +7456,7 @@ test "a Release sorts into a bucket by its best release's mean confidence, and d
     try std.testing.expectEqualStrings(bryter_layter_mbid, item.best.?.release_mbid);
     try std.testing.expectEqualStrings("Bryter Layter", item.best.?.title);
     try std.testing.expectEqualStrings("1971-03-01", item.best.?.date.?);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.95), item.best.?.confidence, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.95), item.best.?.confidence.?, 0.001);
 
     var review = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, .needs_review, 0.99, null, 512, 0);
     defer review.deinit();
@@ -8739,8 +8752,8 @@ test "a library match run looks up the release every file's tags name, which pla
     try expectTagged(&runtime, library, album, true);
 }
 
-test "a library match run does not look up a release the tags name when another release is the best candidate" {
-    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+test "a library match run looks up the release a Track's release ID in effect names, not the one its file's tag names" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4), .release_status = 404 };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     try runtime.setClientIdentity(network.testing.test_identity);
@@ -8761,8 +8774,189 @@ test "a library match run does not look up a release the tags name when another 
     edit.deinit();
 
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
-    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d") != null);
     try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases;"));
+}
+
+fn observeRenamedNightcall(library_database: *database.LibraryDatabase, comptime index: usize, release_mbid: ?[]const u8) !i64 {
+    const file_id = try observeFile(library_database, "/music/kavinsky/nightcall/" ++ std.fmt.comptimePrint("{d}", .{index + 1}) ++ ".flac", nightcall_titles[index], "Kavinsky");
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = nightcall_titles[index],
+        .artist = "Kavinsky",
+        .album = "Nightcall (Tagged)",
+        .album_artist = "Kavinsky",
+        .date = "2010-11-08",
+        .track_number = index + 1,
+        .disc_number = 1,
+        .musicbrainz_recording_id = nightcall_recordings[index],
+        .musicbrainz_release_id = release_mbid,
+        .musicbrainz_release_track_id = nightcall_track_mbids[index],
+    } });
+    return file_id;
+}
+
+fn renamedNightcallAlbum(library_database: *database.LibraryDatabase, tagged: usize, release_mbid: []const u8) !i64 {
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeRenamedNightcall(library_database, index, if (index < tagged) release_mbid else null);
+    try library_database.database.exec("UPDATE files SET duration_ms = 258400;");
+    try projectAll(library_database);
+    return releaseOfFile(library_database, files[0]);
+}
+
+const ListedMatch = struct {
+    bucket: ReleaseMatchBucket,
+    title: [64]u8 = @splat(0),
+    title_len: usize = 0,
+    release_mbid: [36]u8 = @splat(0),
+    confidence: ?f32,
+    from_tags: bool,
+
+    fn titleSlice(self: *const ListedMatch) []const u8 {
+        return self.title[0..self.title_len];
+    }
+};
+
+fn listedMatch(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64) !ListedMatch {
+    for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched, .reviewed }) |bucket| {
+        var page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, null, 512, 0);
+        defer page.deinit();
+        for (page.items) |item| if (item.release_id == release_id) {
+            const best = item.best orelse return error.TestExpectedCandidate;
+            var listed: ListedMatch = .{ .bucket = item.bucket, .confidence = best.confidence, .from_tags = item.from_tags };
+            listed.title_len = @min(best.title.len, listed.title.len);
+            @memcpy(listed.title[0..listed.title_len], best.title[0..listed.title_len]);
+            @memcpy(&listed.release_mbid, best.release_mbid[0..36]);
+            return listed;
+        };
+    }
+    return error.TestExpectedRelease;
+}
+
+test "a Release whose tags name a release Orca has not read is in needs review with no confidence, its candidate titled from its album tag" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-named-unread?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try renamedNightcallAlbum(library_database, 4, nightcall_mbid);
+
+    const listed = try listedMatch(&runtime, library, album);
+    try std.testing.expectEqual(ReleaseMatchBucket.needs_review, listed.bucket);
+    try std.testing.expectEqual(@as(?f32, null), listed.confidence);
+    try std.testing.expect(!listed.from_tags);
+    try std.testing.expectEqualStrings(nightcall_mbid, &listed.release_mbid);
+    try std.testing.expectEqualStrings("Nightcall (Tagged)", listed.titleSlice());
+    const counts = try runtime.libraryReleaseMatchCounts(library, 0.9, null);
+    try std.testing.expectEqual(@as(u64, 0), counts.confident);
+    try std.testing.expectEqual(@as(u64, 1), counts.needs_review);
+}
+
+test "a library match run reads the release a Release's tags name, after which the placement gives its confidence and the release its title" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-named-read?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try renamedNightcallAlbum(library_database, 4, nightcall_mbid);
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(@as(i64, 1), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases;"));
+    const listed = try listedMatch(&runtime, library, album);
+    try std.testing.expectEqual(ReleaseMatchBucket.reviewed, listed.bucket);
+    try std.testing.expect(listed.from_tags);
+    try std.testing.expectEqual(@as(?f32, 1), listed.confidence);
+    try std.testing.expectEqualStrings("Nightcall", listed.titleSlice());
+}
+
+test "a library match run that cannot reach MusicBrainz leaves a Release its tags name unread and out of confident" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4), .failure = error.ConnectionRefused };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-named-unreachable?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try renamedNightcallAlbum(library_database, 4, nightcall_mbid);
+
+    const state = try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{}));
+    try std.testing.expect(state != .succeeded);
+    try std.testing.expect(fake.requestCount() >= 1);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases;"));
+    const listed = try listedMatch(&runtime, library, album);
+    try std.testing.expectEqual(ReleaseMatchBucket.needs_review, listed.bucket);
+    try std.testing.expectEqual(@as(?f32, null), listed.confidence);
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.libraryReleaseMatchCounts(library, 0.9, null)).confident);
+}
+
+test "a library match run reads the release a partially tagged Release's tags name, and only its placed tagged Tracks give it confidence" {
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-named-partial?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try renamedNightcallAlbum(library_database, 3, nightcall_mbid);
+    try std.testing.expectEqual(@as(?f32, null), (try listedMatch(&runtime, library, album)).confidence);
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ nightcall_mbid) != null);
+    try std.testing.expectEqual(@as(i64, 1), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases;"));
+    const listed = try listedMatch(&runtime, library, album);
+    try std.testing.expectEqual(ReleaseMatchBucket.needs_review, listed.bucket);
+    try std.testing.expectEqual(@as(?f32, 0.75), listed.confidence);
+    try std.testing.expectEqualStrings("Nightcall", listed.titleSlice());
+}
+
+test "a library match run reads a release its tags name in uppercase as the lowercase MusicBrainz ID, and the next run does not look it up again" {
+    const uppercase_mbid = "9C1D999F-B225-37D4-9347-1C4CCB2B45D8";
+    var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-named-uppercase?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try renamedNightcallAlbum(library_database, 4, uppercase_mbid);
+    try std.testing.expectEqual(@as(i64, 4), try scalarOf(library_database, "SELECT count(*) FROM observed_file_tags WHERE musicbrainz_release_id = '" ++ uppercase_mbid ++ "';"));
+    const unread = try listedMatch(&runtime, library, album);
+    try std.testing.expectEqual(@as(?f32, null), unread.confidence);
+    try std.testing.expectEqualStrings(nightcall_mbid, &unread.release_mbid);
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ nightcall_mbid) != null);
+    try std.testing.expectEqual(@as(i64, 1), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases WHERE musicbrainz_release_id = '" ++ nightcall_mbid ++ "';"));
+    const listed = try listedMatch(&runtime, library, album);
+    try std.testing.expectEqual(ReleaseMatchBucket.reviewed, listed.bucket);
+    try std.testing.expect(listed.from_tags);
+    try std.testing.expectEqual(@as(?f32, 1), listed.confidence);
+    try std.testing.expectEqualStrings("Nightcall", listed.titleSlice());
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+}
+
+test "a release ID tag that is not a MusicBrainz ID is never looked up and gives its Release no candidate" {
+    inline for (.{ "Run The Jewels - Run the Jewels 2 (2014-10-24)", "Run The Jewels - Run the Jewels 2 (2" }, 0..) |malformed, index| {
+        var fake: FakeMusicBrainz = .{ .release_body = nightcallRelease(4) };
+        var runtime = OrcaRuntime.init(std.testing.allocator);
+        defer runtime.deinit();
+        try runtime.setClientIdentity(network.testing.test_identity);
+        runtime.matching_hooks = fake.hooks();
+        const library = try runtime.openLibrary(std.testing.io, std.fmt.comptimePrint("file:orca-named-malformed-{d}?mode=memory&cache=shared", .{index}));
+        const library_database = try libraryDatabase(&runtime, library);
+        _ = try renamedNightcallAlbum(library_database, 4, malformed);
+        const unmatched_only: ReleaseMatchCounts = .{ .confident = 0, .needs_review = 0, .unmatched = 1 };
+        try std.testing.expectEqual(unmatched_only, try runtime.libraryReleaseMatchCounts(library, 0.9, null));
+
+        try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+        try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+        try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM musicbrainz_releases;"));
+        try std.testing.expectEqual(unmatched_only, try runtime.libraryReleaseMatchCounts(library, 0.9, null));
+    }
 }
 
 test "a library match run cancelled during the lookup of a tagged release stores no snapshot, and the next run looks it up" {

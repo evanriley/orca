@@ -28,6 +28,7 @@ const separator = " · ";
 const recording_url = "https://musicbrainz.org/recording/";
 const list_limit: u32 = 100;
 const cover_pixels: c_int = 48;
+const unread_tooltip = "Named by your tags, not yet read from MusicBrainz. Match Again reads it.";
 
 pub const Detail = struct {
     evidence: ?liborca.MatchEvidence = null,
@@ -757,17 +758,23 @@ fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) 
     const best = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     gtk.gtk_widget_set_valign(best, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_hexpand(best, gtk.true_);
-    append(best, &.{ cell(if (item.from_tags) "Identified by your tags" else "Best candidate", "match-caption"), candidate });
+    const unread = item.best != null and item.best.?.unread();
+    const caption: [*:0]const u8 = if (item.from_tags) "Identified by your tags" else if (unread) "Named by your tags" else "Best candidate";
+    append(best, &.{ cell(caption, "match-caption"), candidate });
 
     const confidence = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 5);
     gtk.gtk_widget_set_size_request(confidence, 150, -1);
     gtk.gtk_widget_set_valign(confidence, gtk.ALIGN_CENTER);
-    if (item.best) |candidate_release| {
-        const value = label(strings.format(&buffer, "{d}% confidence", .{percent(candidate_release.confidence)}).ptr, "match-confidence");
+    if (unread) {
+        const value = label("Not yet read", "match-confidence-unread");
+        gtk.gtk_widget_set_tooltip_text(value, unread_tooltip);
+        append(confidence, &.{value});
+    } else if (item.best) |candidate_release| {
+        const value = label(strings.format(&buffer, "{d}% confidence", .{percent(candidate_release.confidence.?)}).ptr, "match-confidence");
         gtk.gtk_widget_add_css_class(value, "numeric");
         const bar = gtk.gtk_progress_bar_new();
         gtk.gtk_widget_add_css_class(bar, "match-bar");
-        gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, bar), std.math.clamp(candidate_release.confidence, 0, 1));
+        gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, bar), std.math.clamp(candidate_release.confidence.?, 0, 1));
         append(confidence, &.{ value, bar });
     }
 

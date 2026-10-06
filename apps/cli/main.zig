@@ -5236,9 +5236,9 @@ fn listReleaseMatches(context: Context) !void {
         for (page.items) |item| {
             try stdout.print("{d}\t{s}\t{s}\t{s}\ttracks={d}", .{ item.release_id, @tagName(item.bucket), item.title, item.artist, item.track_count });
             if (item.best) |best| {
-                try stdout.print("\tcandidate={s} confidence={d:.2} title={s} date={s} candidate_tracks=", .{
-                    best.release_mbid, best.confidence, best.title, best.date orelse "-",
-                });
+                try stdout.print("\tcandidate={s} confidence=", .{best.release_mbid});
+                if (best.confidence) |confidence| try stdout.print("{d:.2}", .{confidence}) else try stdout.writeAll("unread");
+                try stdout.print(" title={s} date={s} candidate_tracks=", .{ best.title, best.date orelse "-" });
                 if (best.track_count) |count| try stdout.print("{d}", .{count}) else try stdout.writeAll("-");
             } else try stdout.writeAll("\tcandidate=-");
             if (item.placement) |placement| {

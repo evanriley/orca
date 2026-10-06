@@ -4630,9 +4630,13 @@ typedef enum orca_release_match_bucket {
 } orca_release_match_bucket;
 
 /* A Release beside its best MusicBrainz release candidate: the release its
- * Tracks are named on, by tag, accepted match or proposal, that has the
- * highest mean per-Track confidence. The candidate fields are empty and
- * `has_best` 0 for an unmatched Release. `from_tags` is 1 for a REVIEWED
+ * Tracks are named on, by release ID, accepted match or proposal, that has
+ * the highest mean per-Track confidence. A release a Track's release ID
+ * names counts toward `confidence` only once Orca read it and the alignment
+ * with its snapshot places the Track. Until Orca read it, it is the best
+ * candidate, in NEEDS_REVIEW, with `confidence` 0 and `candidate_title`
+ * the Release's own title; orca_release_match_view_v2 tells this apart.
+ * The candidate fields are empty and `has_best` 0 for an unmatched Release. `from_tags` is 1 for a REVIEWED
  * Release no person reviewed: every Track's file has a release ID tag
  * naming the best candidate, and the alignment with its tracklist snapshot
  * places every Track by recording ID or by a pairing. Valid only for the
@@ -4790,13 +4794,17 @@ orca_status orca_library_dismiss_release_candidate(
  * `placed` by recording ID or by a pairing, `needs_pairing` only suggested
  * or on no release track. `has_placement` is 0, and both counts 0, without a
  * candidate, before a lookup snapshotted its tracklist, or for a Release of
- * more than 512 Tracks. Valid only for the duration of the callback. */
+ * more than 512 Tracks. `candidate_unread` is 1 when a Track's release ID
+ * names the best candidate and Orca has not read the release from
+ * MusicBrainz: its confidence is unknown, and `base.confidence` is 0.
+ * Valid only for the duration of the callback. */
 typedef struct orca_release_match_view_v2 {
     orca_release_match_view base;
     uint32_t placed;
     uint32_t needs_pairing;
     uint8_t has_placement;
-    uint8_t reserved[7];
+    uint8_t candidate_unread;
+    uint8_t reserved[6];
 } orca_release_match_view_v2;
 
 typedef void (*orca_release_match_v2_callback)(void *context, const orca_release_match_view_v2 *item);

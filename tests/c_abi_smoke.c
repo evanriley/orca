@@ -3768,11 +3768,15 @@ static void capture_apply(void *context, const orca_release_apply_view *outcome)
 struct release_match_v2_capture {
     uint32_t calls;
     orca_release_match_view_v2 first;
+    char candidate_title[64];
 };
 
 static void capture_release_match_v2(void *context, const orca_release_match_view_v2 *item) {
     struct release_match_v2_capture *capture = context;
-    if (capture->calls == 0) capture->first = *item;
+    if (capture->calls == 0) {
+        capture->first = *item;
+        copy_view(capture->candidate_title, sizeof capture->candidate_title, item->base.candidate_title);
+    }
     capture->calls += 1;
 }
 
@@ -3874,6 +3878,16 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
     SMOKE_CHECK(orca_library_edit_tracks(runtime, library, both, 2, &release_id, 1, &edited,
                                          capture_edited_ids) == ORCA_STATUS_OK);
     if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+
+    struct release_match_v2_capture unread;
+    memset(&unread, 0, sizeof unread);
+    SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW, 0.9f,
+                                                      "fixt", 512, 0, &unread,
+                                                      capture_release_match_v2) == ORCA_STATUS_OK);
+    SMOKE_CHECK(unread.calls == 1 && unread.first.base.release_id == ids.release_id);
+    SMOKE_CHECK(unread.first.base.has_best == 1 && unread.first.candidate_unread == 1);
+    SMOKE_CHECK(unread.first.base.confidence == 0.0f && unread.first.has_placement == 0);
+    SMOKE_CHECK(strcmp(unread.candidate_title, "Fixtures") == 0);
 
     struct alignment_capture alignment;
     memset(&alignment, 0, sizeof alignment);
@@ -3994,7 +4008,7 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
     SMOKE_CHECK(listed.calls == 1 && listed.first.base.release_id == ids.release_id);
     SMOKE_CHECK(listed.first.base.bucket == ORCA_RELEASE_MATCH_BUCKET_REVIEWED);
     SMOKE_CHECK(listed.first.has_placement == 1 && listed.first.placed == 2 && listed.first.needs_pairing == 0);
-    SMOKE_CHECK(listed.first.base.from_tags == 0);
+    SMOKE_CHECK(listed.first.base.from_tags == 0 && listed.first.candidate_unread == 0);
     memset(&listed, 0, sizeof listed);
     SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, ORCA_RELEASE_MATCH_BUCKET_REVIEWED, 0.9f,
                                                       "nothing", 512, 0, &listed,

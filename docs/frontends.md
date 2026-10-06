@@ -329,7 +329,11 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_library_pair_release_track`, `orca_library_unpair_release_track`,
   `orca_library_mark_release_reviewed`, `orca_library_query_correction_groups`,
   `orca_library_track_verification`. A second match job while one runs is
-  `ORCA_STATUS_BUSY`. Without a tracklist snapshot, an already paired release
+  `ORCA_STATUS_BUSY`. `orca_release_match_view_v2.candidate_unread` is 1 while
+  the best candidate is a release a Track's release ID names and Orca has not
+  read; the item is then in `ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW` with
+  `confidence` 0, which is no measure, and `candidate_title` is the
+  Release's title. Without a tracklist snapshot, an already paired release
   track or a Release not wholly placed the calls return
   `ORCA_STATUS_INVALID_STATE`; a Release past 512 Tracks is
   `ORCA_STATUS_UNSUPPORTED`; an unknown id is `ORCA_STATUS_NOT_FOUND`; an unpair

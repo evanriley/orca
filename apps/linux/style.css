@@ -5013,7 +5013,8 @@ button.match-toggle:hover {
 .match-caption,
 .match-candidate,
 .match-candidate-none,
-.match-confidence {
+.match-confidence,
+.match-confidence-unread {
   font-weight: 400;
 }
 
@@ -5032,7 +5033,8 @@ button.match-toggle:hover {
   color: @orca_text_2;
 }
 
-.match-candidate-none {
+.match-candidate-none,
+.match-confidence-unread {
   font-size: 13px;
   color: @orca_text_3;
 }

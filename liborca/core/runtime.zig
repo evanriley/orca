@@ -1645,7 +1645,9 @@ pub const OrcaRuntime = struct {
     /// tags identify it (`ReleaseMatchItem.from_tags`), is `reviewed`;
     /// otherwise it is `confident` when its best candidate's
     /// confidence is at least `confident_at`, `needs_review` when it is
-    /// lower, and `unmatched` with no candidate. Weighing every Release, a page costs a walk of the
+    /// lower or unknown (`ReleaseCandidate.unread`: a Track's release ID
+    /// names the release and Orca has not read it), and `unmatched` with no
+    /// candidate. Weighing every Release, a page costs a walk of the
     /// library; each item with a candidate then costs one Release view,
     /// snapshot and pairings read and an alignment for its placement
     /// counts. A `filter` keeps the Releases whose title or album artist has

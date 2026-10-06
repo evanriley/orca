@@ -877,19 +877,27 @@ pub const ReleaseMatchBucket = enum(u8) {
     reviewed,
 };
 
-/// A MusicBrainz release some of a Release's Tracks are named on: by a tag,
-/// an accepted match enriched for it or a proposal listing it.
+/// A MusicBrainz release some of a Release's Tracks are named on: by a
+/// release ID, an accepted match enriched for it or a proposal listing it.
 pub const ReleaseCandidate = struct {
     release_mbid: []const u8,
     /// The release's own title, else the album a proposal on it gave, else
-    /// empty.
+    /// the Release's title when a Track's release ID names it, else empty.
     title: []const u8,
     date: ?[]const u8,
     track_count: ?u32,
-    /// The mean over the Release's Tracks of 1 for a Track whose tag or
-    /// accepted match names the release, else the confidence of its most
-    /// confident pending proposal listing it, else 0.
-    confidence: f32,
+    /// The mean over the Release's Tracks of 1 for a Track whose release ID
+    /// names the release and which the alignment with the release's
+    /// snapshot places, or whose accepted match is enriched for it; else
+    /// the confidence of its most confident pending proposal listing it;
+    /// else 0. Null while a Track's release ID names the release and Orca
+    /// holds no snapshot of it.
+    confidence: ?f32,
+
+    /// A Track's release ID names the release and Orca has not read it.
+    pub fn unread(self: ReleaseCandidate) bool {
+        return self.confidence == null;
+    }
 };
 
 /// How many of a Release's Tracks the alignment with its best candidate's
@@ -987,9 +995,11 @@ pub const ReleaseMatchTrack = struct {
     duration_ms: ?i64,
     track_number: ?u32,
     disc_number: ?u32,
-    /// The play file's release ID in effect, its tag or an Orca value, when
-    /// it is an ID.
+    /// The play file's release ID in effect, its tag or an Orca value,
+    /// lowercased, when it is an ID.
     release_mbid: ?[]const u8,
+    /// What Orca checked of the release `release_mbid` names.
+    named_release: NamedReleaseState = .not_read,
     /// The play file's recording ID in effect, when it is an ID.
     recording_mbid: ?[]const u8 = null,
     /// Accepted and pending, most confident first.
@@ -1005,8 +1015,21 @@ pub const ReleaseMatchTrack = struct {
         return false;
     }
 
+    /// Its release ID in effect names the release.
+    pub fn namesById(self: ReleaseMatchTrack, release_mbid: []const u8) bool {
+        const named = self.release_mbid orelse return false;
+        return std.mem.eql(u8, named, release_mbid);
+    }
+
+    /// 1 when its release ID names the release and the alignment with the
+    /// release's snapshot places it, or its accepted match is enriched for
+    /// the release; else the confidence of its most confident pending
+    /// proposal listing the release; else 0.
     pub fn score(self: ReleaseMatchTrack, release_mbid: []const u8) f32 {
-        if (self.names(release_mbid)) return 1;
+        if (self.namesById(release_mbid) and self.named_release == .placed) return 1;
+        for (self.proposals) |proposal| {
+            if (proposal.state == .accepted and proposal.enrichedOn(release_mbid)) return 1;
+        }
         for (self.proposals) |proposal| {
             if (proposal.state == .pending and proposal.payload.listsRelease(release_mbid))
                 return std.math.clamp(proposal.confidence, 0, 1);
@@ -1029,6 +1052,17 @@ pub const ReleaseMatchTrack = struct {
         }
         return null;
     }
+};
+
+/// What Orca checked of the release a Track's release ID names.
+pub const NamedReleaseState = enum {
+    /// Orca holds no snapshot of the release.
+    not_read,
+    /// The alignment with the release's snapshot places the Track by
+    /// recording ID or by a person's pairing.
+    placed,
+    /// The alignment with the release's snapshot does not place the Track.
+    not_placed,
 };
 
 pub const LocalArtworkSource = enum { embedded, folder, fetched, chosen };
@@ -1074,9 +1108,9 @@ pub const ReleaseMatchView = struct {
         return false;
     }
 
-    /// Every release the Tracks name that is not dismissed, best first: by
-    /// confidence, then a track count equal to the Release's, then the
-    /// earlier date, then the lower ID.
+    /// Every release the Tracks name that is not dismissed, best first: an
+    /// unread one, then by confidence, then a track count equal to the
+    /// Release's, then the earlier date, then the lower ID.
     pub fn candidates(self: *const ReleaseMatchView, allocator: std.mem.Allocator) ![]ReleaseCandidate {
         var list: std.ArrayList(ReleaseCandidate) = .empty;
         errdefer list.deinit(allocator);
@@ -1119,8 +1153,14 @@ pub const ReleaseMatchView = struct {
         const mbid = candidate.release_mbid;
         var total: f32 = 0;
         var album: ?[]const u8 = null;
+        var named_by_id = false;
+        var unread = false;
         for (self.tracks) |track| {
             total += track.score(mbid);
+            if (track.namesById(mbid)) {
+                named_by_id = true;
+                if (track.named_release == .not_read) unread = true;
+            }
             for (track.proposals) |proposal| {
                 const payload = proposal.payload;
                 if (payload.release_mbid) |named| if (std.mem.eql(u8, named, mbid)) {
@@ -1135,8 +1175,13 @@ pub const ReleaseMatchView = struct {
                 }
             }
         }
-        if (candidate.title.len == 0) candidate.title = album orelse "";
-        candidate.confidence = if (self.tracks.len == 0) 0 else total / @as(f32, @floatFromInt(self.tracks.len));
+        if (candidate.title.len == 0) candidate.title = album orelse if (named_by_id) self.title else "";
+        candidate.confidence = if (unread)
+            null
+        else if (self.tracks.len == 0)
+            0
+        else
+            total / @as(f32, @floatFromInt(self.tracks.len));
     }
 };
 
@@ -1153,7 +1198,8 @@ fn presentOrNull(value: ?[]const u8) ?[]const u8 {
 }
 
 fn betterCandidate(track_count: u32, a: ReleaseCandidate, b: ReleaseCandidate) bool {
-    if (a.confidence != b.confidence) return a.confidence > b.confidence;
+    if (a.unread() != b.unread()) return a.unread();
+    if (a.confidence != null and b.confidence != null and a.confidence.? != b.confidence.?) return a.confidence.? > b.confidence.?;
     const a_count = a.track_count == track_count;
     const b_count = b.track_count == track_count;
     if (a_count != b_count) return a_count;
@@ -1205,19 +1251,37 @@ const release_match_filter =
 const release_tag_join = "FROM tracks LEFT JOIN observed_file_tags AS tags ON tags.file_id = " ++ track_play_file ++ "\n";
 const release_tag_grouping = "GROUP BY tracks.release_id\n" ++
     "HAVING count(*) = count(NULLIF(tags.musicbrainz_release_id, ''))\n" ++
-    "   AND min(tags.musicbrainz_release_id) = max(tags.musicbrainz_release_id)";
+    "   AND min(lower(tags.musicbrainz_release_id)) = max(lower(tags.musicbrainz_release_id))";
 
-const tagged_releases_to_snapshot = "(\n" ++
-    "    SELECT tracks.release_id AS release_id, min(tags.musicbrainz_release_id) AS release_mbid\n" ++
-    "    " ++ release_tag_join ++
-    "    WHERE tracks.release_id > ?1\n" ++
-    "    " ++ release_tag_grouping ++ ")\n" ++
-    "WHERE length(CAST(release_mbid AS BLOB)) = 36 AND NOT EXISTS (SELECT 1 FROM musicbrainz_releases\n" ++
+const musicbrainz_id_glob = blk: {
+    var glob: []const u8 = "'";
+    for (0..36) |index| glob = glob ++ switch (index) {
+        8, 13, 18, 23 => "-",
+        else => "[0-9a-f]",
+    };
+    break :blk glob ++ "'";
+};
+
+/// A play file's release ID in effect, lowercased, since MusicBrainz IDs
+/// are lowercase and a tag may hold one in uppercase.
+fn namedReleaseMbid(comptime file_id: []const u8) []const u8 {
+    return "lower(" ++ effectiveReleaseMbid(file_id) ++ ")";
+}
+
+const named_releases_to_snapshot = "(\n" ++
+    "    SELECT min(named.release_id) AS release_id, named.release_mbid AS release_mbid FROM (\n" ++
+    "        SELECT release_id, " ++ namedReleaseMbid("play") ++ " AS release_mbid\n" ++
+    "        FROM (SELECT tracks.release_id, " ++ track_play_file ++ " AS play FROM tracks)) AS named\n" ++
+    "    WHERE named.release_mbid > ?1 AND named.release_mbid GLOB " ++ musicbrainz_id_glob ++ "\n" ++
+    "      AND NOT EXISTS (SELECT 1 FROM dismissed_release_candidates AS dismissed\n" ++
+    "          WHERE dismissed.release_id = named.release_id AND dismissed.musicbrainz_release_id = named.release_mbid COLLATE NOCASE)\n" ++
+    "    GROUP BY named.release_mbid)\n" ++
+    "WHERE NOT EXISTS (SELECT 1 FROM musicbrainz_releases\n" ++
     "    WHERE musicbrainz_release_id = release_mbid AND fetched_at > ?2)";
 
-/// A Release whose every Track's play file has a release ID tag naming
-/// `release_mbid`.
-pub const TaggedRelease = struct {
+/// A release a Track's release ID in effect names, and the first Release
+/// with such a Track.
+pub const NamedRelease = struct {
     release_id: i64,
     release_mbid: [36]u8,
 };
@@ -1232,7 +1296,8 @@ fn reviewOf(db: sqlite.Database, release_id: i64, best: ?ReleaseCandidate, ident
 
 pub fn releaseMatchBucket(best: ?ReleaseCandidate, confident_at: f32) ReleaseMatchBucket {
     const candidate = best orelse return .unmatched;
-    return if (candidate.confidence >= confident_at) .confident else .needs_review;
+    const confidence = candidate.confidence orelse return .needs_review;
+    return if (confidence >= confident_at) .confident else .needs_review;
 }
 pub const IdentificationProposalRepository = struct {
     db: sqlite.Database,
@@ -1695,7 +1760,7 @@ pub const IdentificationProposalRepository = struct {
         {
             var statement = try self.db.prepare(
                 comptime "SELECT release_id, id, play, title, artist, duration_ms, track_number, disc_number,\n" ++
-                    "       " ++ effectiveReleaseMbid("play") ++ ",\n" ++
+                    "       " ++ namedReleaseMbid("play") ++ ",\n" ++
                     "       " ++ effectiveRecordingMbid("play") ++ "\n" ++
                     "FROM (SELECT tracks.release_id, tracks.id, tracks.title, tracks.artist, tracks.duration_ms,\n" ++
                     "             tracks.track_number, tracks.disc_number, " ++ track_play_file ++ " AS play\n" ++
@@ -1778,6 +1843,57 @@ pub const IdentificationProposalRepository = struct {
             }
         }
         for (views, dismissed) |*view, list| view.dismissed = list.items;
+        try self.checkNamedReleases(owned, views, tracks, listed_ids);
+    }
+
+    /// Sets each Track's `named_release` from the snapshot of the release its
+    /// release ID names and the alignment of the Release with it.
+    fn checkNamedReleases(
+        self: *const IdentificationProposalRepository,
+        owned: std.mem.Allocator,
+        views: []const ReleaseMatchView,
+        tracks: []const std.ArrayList(ReleaseMatchTrack),
+        listed_ids: []const u8,
+    ) !void {
+        var named: std.StringArrayHashMapUnmanaged(void) = .empty;
+        for (tracks) |list| for (list.items) |track| {
+            if (track.release_mbid) |mbid| try named.put(owned, mbid, {});
+        };
+        if (named.count() == 0) return;
+        var release_mbids: std.ArrayList(u8) = .empty;
+        try release_mbids.append(owned, '[');
+        for (named.keys(), 0..) |mbid, index| try release_mbids.print(owned, "{s}\"{s}\"", .{ if (index == 0) "" else ",", mbid });
+        try release_mbids.append(owned, ']');
+        const tracklists_repository: release_tracklists.ReleaseTracklistRepository = .{ .db = self.db, .write_lane = self.write_lane };
+        const tracklists = try tracklists_repository.getMany(owned, release_mbids.items);
+        if (tracklists.len == 0) return;
+        const pairings_repository: release_track_pairings.ReleaseTrackPairingRepository = .{ .db = self.db, .write_lane = self.write_lane };
+        const pairings = try pairings_repository.listMany(owned, listed_ids);
+        var tracklist_of: std.StringHashMapUnmanaged(*const release_tracklists.ReleaseTracklistRecord) = .empty;
+        for (tracklists) |*tracklist| try tracklist_of.put(owned, tracklist.release_mbid, tracklist);
+        for (views, tracks) |view, list| {
+            var first: usize = 0;
+            while (first < pairings.len and pairings[first].release_id != view.release_id) first += 1;
+            var end = first;
+            while (end < pairings.len and pairings[end].release_id == view.release_id) end += 1;
+            for (list.items) |track| {
+                const mbid = track.release_mbid orelse continue;
+                if (track.named_release != .not_read) continue;
+                const tracklist = tracklist_of.get(mbid) orelse continue;
+                const alignment = try release_alignment.alignRelease(owned, view.release_id, list.items, tracklist, pairings[first..end]);
+                defer alignment.deinit();
+                for (list.items) |*each| {
+                    if (each.namesById(mbid)) each.named_release = .not_placed;
+                }
+                for (alignment.rows) |row| {
+                    const placed = row.track orelse continue;
+                    if (row.status != .automatic and row.status != .paired) continue;
+                    for (list.items) |*each| {
+                        if (each.track_id == placed.track_id and each.namesById(mbid)) each.named_release = .placed;
+                    }
+                }
+            }
+        }
     }
 
     fn readReleaseMatchDetail(self: *const IdentificationProposalRepository, owned: std.mem.Allocator, view: *ReleaseMatchView) !void {
@@ -2074,7 +2190,7 @@ pub const IdentificationProposalRepository = struct {
             while (ids.next()) |id| try candidate_ids.print(chunk, "{s}{d}", .{ if (candidate_ids.items.len == 1) "" else ",", id.* });
             try candidate_ids.append(chunk, ']');
             var statement = try self.db.prepare(
-                comptime "SELECT tracks.release_id, min(tags.musicbrainz_release_id)\n" ++
+                comptime "SELECT tracks.release_id, min(lower(tags.musicbrainz_release_id))\n" ++
                     release_tag_join ++
                     "WHERE tracks.release_id IN " ++ json_release_ids ++ "\n" ++
                     release_tag_grouping ++ ";",
@@ -2118,14 +2234,14 @@ pub const IdentificationProposalRepository = struct {
         return identified;
     }
 
-    /// The Releases after `cursor`, in ID order and at most `buffer.len`,
-    /// whose every Track's play file has a release ID tag naming one release
-    /// with no snapshot fetched after `fetched_after`.
-    pub fn taggedReleasesToSnapshot(self: *const IdentificationProposalRepository, cursor: i64, fetched_after: i64, buffer: []TaggedRelease) ![]TaggedRelease {
-        var statement = try self.db.prepare(comptime "SELECT release_id, release_mbid FROM " ++ tagged_releases_to_snapshot ++ "\n" ++
-            "ORDER BY release_id LIMIT ?3;");
+    /// The releases after `cursor`, in ID order and at most `buffer.len`,
+    /// that a Track's release ID in effect names, that its Release has not
+    /// dismissed, and with no snapshot fetched after `fetched_after`.
+    pub fn namedReleasesToSnapshot(self: *const IdentificationProposalRepository, cursor: ?[]const u8, fetched_after: i64, buffer: []NamedRelease) ![]NamedRelease {
+        var statement = try self.db.prepare(comptime "SELECT release_id, release_mbid FROM " ++ named_releases_to_snapshot ++ "\n" ++
+            "ORDER BY release_mbid LIMIT ?3;");
         defer statement.deinit();
-        try statement.bindInt64(1, cursor);
+        try statement.bindText(1, cursor orelse "");
         try statement.bindInt64(2, fetched_after);
         try statement.bindInt64(3, @intCast(buffer.len));
         var count: usize = 0;
@@ -2136,12 +2252,12 @@ pub const IdentificationProposalRepository = struct {
         return buffer[0..count];
     }
 
-    /// How many Releases `taggedReleasesToSnapshot` would page through from
+    /// How many releases `namedReleasesToSnapshot` would page through from
     /// the start.
-    pub fn taggedReleasesToSnapshotCount(self: *const IdentificationProposalRepository, fetched_after: i64) !u64 {
-        var statement = try self.db.prepare(comptime "SELECT count(*) FROM " ++ tagged_releases_to_snapshot ++ ";");
+    pub fn namedReleasesToSnapshotCount(self: *const IdentificationProposalRepository, fetched_after: i64) !u64 {
+        var statement = try self.db.prepare(comptime "SELECT count(*) FROM " ++ named_releases_to_snapshot ++ ";");
         defer statement.deinit();
-        try statement.bindInt64(1, 0);
+        try statement.bindText(1, "");
         try statement.bindInt64(2, fetched_after);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
