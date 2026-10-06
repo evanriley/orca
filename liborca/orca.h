@@ -208,7 +208,9 @@ typedef struct orca_track_view {
     /* `rating` is 1..100 when `has_rating` is set. */
     uint8_t has_rating;
     uint8_t rating;
-    uint8_t reserved[1];
+    /* 1 when the view is a queue entry whose Track was removed from the
+     * Library: only `id` is set and every other field is zero. */
+    uint8_t removed;
     orca_string_view title;
     orca_string_view artist;
     orca_string_view album;
@@ -1652,8 +1654,12 @@ typedef struct orca_event {
 const char *orca_version(void);
 
 /* The caller owns the returned runtime and must destroy it exactly once.
- * NULL means out of memory. */
+ * NULL means out of memory. On Linux the first runtime in the process switches
+ * SQLite to OFD locks; create it before opening any SQLite connection of your
+ * own, or every orca_library_open returns ORCA_STATUS_INVALID_STATE. */
 orca_runtime *orca_runtime_create(void);
+/* Call it on the runtime's creating thread. A Debug build ignores a call from
+ * another thread and leaves the runtime alive. */
 void orca_runtime_destroy(orca_runtime *runtime);
 
 /*
@@ -1777,7 +1783,8 @@ orca_status orca_runtime_set_provider_server(
  * credential callback returns one for ORCA_CREDENTIAL_SERVICE_ACOUSTID /
  * ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY. Without either, matching skips AcoustID.
  * Printable ASCII without spaces, at most 256 bytes; anything else is
- * ORCA_STATUS_INVALID_ARGUMENT. Copied; NULL clears it.
+ * ORCA_STATUS_INVALID_ARGUMENT. Copied; NULL clears it. A job resolves its key
+ * once, when its AcoustID work begins, so a change applies from the next job.
  */
 orca_status orca_runtime_set_acoustid_client_key(orca_runtime *runtime, const char *key);
 
@@ -3774,6 +3781,9 @@ typedef enum orca_tag_write_skip_reason {
     /* Orca cannot create files in the file's folder, which a write needs for
      * its staged copy. Check the folder's permissions. */
     ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE = 3,
+    /* The file is read-only: no write permission bit is set, or the process
+     * may not write it. Orca does not change a file made read-only. */
+    ORCA_TAG_WRITE_SKIP_FILE_READ_ONLY = 4,
 } orca_tag_write_skip_reason;
 
 /* A file the plan leaves out. `reason` is an orca_tag_write_skip_reason;
@@ -3873,6 +3883,9 @@ typedef enum orca_tag_write_failure_reason {
      * describes it. Plan the write again. */
     ORCA_TAG_WRITE_FAILURE_CHANGED_SINCE_PLAN = 3,
     ORCA_TAG_WRITE_FAILURE_OTHER = 4,
+    /* The file is read-only: no write permission bit is set, or the process
+     * may not write it. Orca does not change a file made read-only. */
+    ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY = 5,
 } orca_tag_write_failure_reason;
 
 /* The file a failed tag write stopped at: `action_index` is its position
@@ -4408,6 +4421,21 @@ orca_status orca_job_match_stats(
     orca_match_stats *output
 );
 
+/* orca_match_stats with `releases_to_review`: the Releases holding a Track
+ * the job matched that, when its searches ended and before it accepted
+ * anything, were in the CONFIDENT or NEEDS_REVIEW bucket. 0 until then. */
+typedef struct orca_match_stats_v2 {
+    orca_match_stats base;
+    uint64_t releases_to_review;
+} orca_match_stats_v2;
+
+/* orca_job_match_stats with `releases_to_review`. */
+orca_status orca_job_match_stats_v2(
+    orca_runtime *runtime,
+    orca_handle job,
+    orca_match_stats_v2 *output
+);
+
 /* The Release that holds most of a finished Match Album's files, with
  * `has_release_id` 1: the files of the album's Tracks when the job started,
  * so a host can follow an album that accepting a release ID moved to a new
@@ -4630,9 +4658,13 @@ typedef enum orca_release_match_bucket {
 } orca_release_match_bucket;
 
 /* A Release beside its best MusicBrainz release candidate: the release its
- * Tracks are named on, by tag, accepted match or proposal, that has the
- * highest mean per-Track confidence. The candidate fields are empty and
- * `has_best` 0 for an unmatched Release. `from_tags` is 1 for a REVIEWED
+ * Tracks are named on, by release ID, accepted match or proposal, that has
+ * the highest mean per-Track confidence. A release a Track's release ID
+ * names counts toward `confidence` only once Orca read it and the alignment
+ * with its snapshot places the Track. Until Orca read it, it is the best
+ * candidate, in NEEDS_REVIEW, with `confidence` 0 and `candidate_title`
+ * the Release's own title; orca_release_match_view_v2 tells this apart.
+ * The candidate fields are empty and `has_best` 0 for an unmatched Release. `from_tags` is 1 for a REVIEWED
  * Release no person reviewed: every Track's file has a release ID tag
  * naming the best candidate, and the alignment with its tracklist snapshot
  * places every Track by recording ID or by a pairing. Valid only for the
@@ -4790,13 +4822,17 @@ orca_status orca_library_dismiss_release_candidate(
  * `placed` by recording ID or by a pairing, `needs_pairing` only suggested
  * or on no release track. `has_placement` is 0, and both counts 0, without a
  * candidate, before a lookup snapshotted its tracklist, or for a Release of
- * more than 512 Tracks. Valid only for the duration of the callback. */
+ * more than 512 Tracks. `candidate_unread` is 1 when a Track's release ID
+ * names the best candidate and Orca has not read the release from
+ * MusicBrainz: its confidence is unknown, and `base.confidence` is 0.
+ * Valid only for the duration of the callback. */
 typedef struct orca_release_match_view_v2 {
     orca_release_match_view base;
     uint32_t placed;
     uint32_t needs_pairing;
     uint8_t has_placement;
-    uint8_t reserved[7];
+    uint8_t candidate_unread;
+    uint8_t reserved[6];
 } orca_release_match_view_v2;
 
 typedef void (*orca_release_match_v2_callback)(void *context, const orca_release_match_view_v2 *item);
@@ -4835,6 +4871,18 @@ orca_status orca_library_release_match_counts_v2(
     float confident_at,
     const char *filter,
     orca_release_match_counts_v2 *output
+);
+
+/* The orca_release_match_bucket that
+ * orca_library_query_release_matches_v2 lists the Release in against
+ * `confident_at`, so a host can say where a finished search left an album.
+ * NOT_FOUND for an unknown Release. */
+orca_status orca_library_release_match_bucket(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    float confident_at,
+    uint8_t *bucket
 );
 
 /* How a release track of an alignment has its Track. PAIRED: a person paired
@@ -6193,6 +6241,7 @@ typedef enum orca_sample_format {
     ORCA_SAMPLE_FORMAT_SIGNED_32 = 3,
     ORCA_SAMPLE_FORMAT_FLOAT_32 = 4,
     ORCA_SAMPLE_FORMAT_FLOAT_64 = 5,
+    ORCA_SAMPLE_FORMAT_SIGNED_8 = 6,
 } orca_sample_format;
 
 typedef struct orca_pcm_format {
@@ -6226,18 +6275,25 @@ typedef struct orca_device_format {
 /* Why a signal path is not bit-perfect. */
 typedef enum orca_signal_reason {
     /* Either equalizer, crossfeed, a volume other than 1 or a ReplayGain
-     * correction changes the samples. */
+     * correction changes the samples, or audio one of them changed is still
+     * queued for the output after the setting was turned off. */
     ORCA_SIGNAL_REASON_SAMPLE_PROCESSING = 0,
     /* The output, or the device behind it, runs at another rate. */
     ORCA_SIGNAL_REASON_SAMPLE_RATE_CONVERSION = 1,
-    /* The output has another channel count than the source. */
+    /* The output, or the device behind it, has another channel count than
+     * the source. */
     ORCA_SIGNAL_REASON_CHANNEL_LAYOUT_CONVERSION = 2,
     /* The output's sample format differs from the source's, other than an
-     * exact widening of 8-, 16- or 24-bit integers to float32, or the device
-     * runs at another sample format than the output. */
+     * exact widening of 8-, 16- or 24-bit integers to float32, or the
+     * device's format cannot hold every source value: fewer bits than an
+     * integer source, or an integer format for a float or 32-bit source. */
     ORCA_SIGNAL_REASON_SAMPLE_FORMAT_CONVERSION = 3,
     /* The source's codec discarded audio before Orca decoded it. */
     ORCA_SIGNAL_REASON_LOSSY_SOURCE = 4,
+    /* The path cannot be confirmed: nothing is audible, the source declares
+     * no sample format, no output is open, or the device has not reported
+     * its rate or its format. */
+    ORCA_SIGNAL_REASON_PATH_UNKNOWN = 5,
 } orca_signal_reason;
 
 /* The capacity of orca_signal_path_view.reasons; more than the reasons that
@@ -6279,9 +6335,9 @@ typedef struct orca_signal_path_view {
     uint8_t has_equalizer;
     uint8_t has_crossfeed;
     uint8_t has_device_rate;
-    /* 0 as soon as any reason applies. With no source or no output the
-     * format conversions cannot be judged, so only sample processing
-     * counts. */
+    /* 1 only when no reason applies, which needs a declared source format,
+     * an open output, and a device that reported its rate and its format;
+     * without any of those ORCA_SIGNAL_REASON_PATH_UNKNOWN applies. */
     uint8_t bit_perfect_eligible;
     /* The integer source reaches float32 unchanged, which is not a reason. */
     uint8_t widened_exactly;
@@ -6329,9 +6385,10 @@ typedef struct orca_signal_path_view_v2 {
     uint8_t peak_limited;
     uint8_t reserved2[1];
     /* The format the output device itself runs at, after the server converts
-     * the float32 stream. A known format that is not float32 at
-     * base.output.sample_rate is a further conversion; an unknown one leaves the
-     * verdict alone. */
+     * the float32 stream; all zero while unknown. A rate other than
+     * base.output.sample_rate, another channel count, or a format that cannot
+     * hold every source value is a further conversion; an unknown format
+     * makes the path unknown. */
     orca_device_format device_format;
 } orca_signal_path_view_v2;
 
@@ -6405,10 +6462,10 @@ orca_status orca_player_query_queue(
 );
 /* The queue's Tracks as track views, read from the Library the Player is
  * bound to, in playback order starting at position `offset`. `limit` must be
- * between 1 and 512. An entry whose Track has since left the Library is
- * skipped, so the views after it no longer line up with queue positions;
- * orca_player_query_queue gives every position. ORCA_STATUS_INVALID_STATE
- * when the Player has no Library. Strings are valid only for the callback. */
+ * between 1 and 512. The view of call `n` is queue position `offset + n`; an
+ * entry whose Track was removed from the Library has `removed` set and only
+ * its `id`. ORCA_STATUS_INVALID_STATE when the Player has no Library.
+ * Strings are valid only for the callback. */
 orca_status orca_player_query_queue_tracks(
     orca_runtime *runtime,
     orca_handle player,

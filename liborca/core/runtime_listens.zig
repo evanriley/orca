@@ -357,6 +357,10 @@ pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, con
     return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchCounts(self.allocator, confident_at, filter);
 }
 
+pub fn libraryReleaseMatchBucket(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, confident_at: f32) !ReleaseMatchBucket {
+    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchBucketOf(self.allocator, release_id, confident_at);
+}
+
 pub fn libraryReleaseMatchEvidence(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !MatchEvidence {
     return library_pass.release_apply.releaseMatchEvidence(self.allocator, try runtime.libraryDatabase(self, library), release_id, release_mbid);
 }

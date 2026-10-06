@@ -224,6 +224,7 @@ pub const PlayerDsp = struct {
     active_equalizer: ActiveEqualizer = .none,
     crossfeed: nodes.StereoCrossfeed = .{ .amount = 0 },
     crossfeed_active: bool = false,
+    changed: bool = false,
     prepared: bool = false,
     prepared_generation: u64 = 0,
     prepared_sample_rate: u32 = 0,
@@ -291,6 +292,7 @@ pub const PlayerDsp = struct {
             .context = self,
             .process_fn = process,
             .reset_fn = reset,
+            .changed_samples_fn = changedSamples,
             .metadata = .{
                 .name = "player DSP",
                 .changes_samples = true,
@@ -372,15 +374,29 @@ pub const PlayerDsp = struct {
 
     fn process(context: *anyopaque, samples: []f32, frames: u32, channels: u16) void {
         const self: *PlayerDsp = @ptrCast(@alignCast(context));
+        var changed = false;
         if (self.active_equalizer != .none) {
-            if (self.preamp_linear != 1)
+            if (self.preamp_linear != 1) {
                 kernels.gain(samples[0 .. @as(usize, frames) * channels], self.preamp_linear);
-            if (self.filter.band_count > 0)
+                changed = true;
+            }
+            if (self.filter.band_count > 0) {
                 self.filter.processor().process(samples, frames, channels);
+                changed = true;
+            }
         }
-        if (self.crossfeed_active)
+        if (self.crossfeed_active) {
             self.crossfeed.processor().process(samples, frames, channels);
-        self.gain.processor().process(samples, frames, channels);
+            if (channels == 2) changed = true;
+        }
+        const gain = self.gain.processor();
+        gain.process(samples, frames, channels);
+        self.changed = changed or gain.changedSamples();
+    }
+
+    fn changedSamples(context: *anyopaque) bool {
+        const self: *PlayerDsp = @ptrCast(@alignCast(context));
+        return self.changed;
     }
 
     fn reset(context: *anyopaque) void {
@@ -390,6 +406,11 @@ pub const PlayerDsp = struct {
 };
 
 /// What the audio reaching the output has been through, as plain values.
+///
+/// The settings fields (`replay_gain_db` through `volume`) are the settings in
+/// effect for the next block the Player processes. The reasons describe the
+/// audio being heard: audio a setting changed stays `sample_processing` until
+/// it has played, even once that setting is off.
 pub const SignalPath = struct {
     /// The decoder's source format, before conversion to canonical float32.
     source: ?pcm.Format = null,
@@ -430,8 +451,9 @@ pub const SignalPath = struct {
     /// How the output device is attached. Unknown while no output is open,
     /// when the platform does not say, and for the server's default device.
     output_kind: backend.DeviceKind = .unknown,
-    /// False as soon as any reason applies. With no source or no output the
-    /// format conversions cannot be judged, so only sample processing counts.
+    /// True only when no reason applies, which needs a declared source format,
+    /// an open output, and a device that reported its rate and its format.
+    /// Without any of those, `path_unknown` is a reason.
     bit_perfect_eligible: bool = true,
     /// The integer source reaches float32 unchanged, which is not a reason.
     widened_exactly: bool = false,
@@ -464,6 +486,7 @@ pub const SignalPath = struct {
         device_rate: ?u32,
         device_quantum_frames: ?u32 = null,
         device_format: ?backend.DeviceFormat = null,
+        processed_audio_queued: bool = false,
     }) SignalPath {
         var result: SignalPath = .{
             .source = inputs.source,
@@ -496,7 +519,7 @@ pub const SignalPath = struct {
         const parametric_changes = if (inputs.parametric) |setting| !setting.isIdentity() else false;
         const crossfeed_changes = stereo and (inputs.crossfeed orelse 0) > 0;
         if (equalizer_changes or parametric_changes or crossfeed_changes or
-            inputs.volume != 1 or inputs.replay_gain != 1)
+            inputs.volume != 1 or inputs.replay_gain != 1 or inputs.processed_audio_queued)
         {
             result.reasons[0] = .sample_processing;
             result.reason_count = 1;
@@ -516,17 +539,22 @@ pub const SignalPath = struct {
                 if (device_rate != output.sample_rate) result.addReason(.sample_rate_conversion);
             }
             if (inputs.device_format) |device| {
-                if (!deviceCarries(device.sample_format, output.sample_format))
-                    result.addReason(.sample_format_conversion);
                 if (device.sample_rate != output.sample_rate) result.addReason(.sample_rate_conversion);
+                if (device.channels != output.channels) result.addReason(.channel_layout_conversion);
+                if (inputs.source_declared) {
+                    if (inputs.source) |source| {
+                        if (!deviceCarries(device.sample_format, source.sample_format))
+                            result.addReason(.sample_format_conversion);
+                    }
+                }
             }
         }
         if (inputs.codec) |codec| {
-            if (!codec_id.isLossless(codec)) {
-                result.reasons[result.reason_count] = .lossy_source;
-                result.reason_count += 1;
-            }
+            if (!codec_id.isLossless(codec)) result.addReason(.lossy_source);
         }
+        const confirmed = inputs.source != null and inputs.source_declared and
+            inputs.output != null and inputs.device_rate != null and inputs.device_format != null;
+        if (!confirmed) result.addReason(.path_unknown);
         result.bit_perfect_eligible = result.reason_count == 0;
         return result;
     }
@@ -538,13 +566,15 @@ pub const SignalPath = struct {
     }
 };
 
-fn deviceCarries(device: backend.DeviceSampleFormat, stream: pcm.SampleFormat) bool {
-    return switch (device) {
-        .signed_16 => stream == .signed_16,
-        .signed_24, .signed_24_32 => stream == .signed_24,
-        .signed_32 => stream == .signed_32,
-        .float_32 => stream == .float_32,
+fn deviceCarries(device: backend.DeviceSampleFormat, source: pcm.SampleFormat) bool {
+    if (device == .float_32) return true;
+    const source_bits: u8 = switch (source) {
+        .unsigned_8, .signed_8 => 8,
+        .signed_16 => 16,
+        .signed_24 => 24,
+        .signed_32, .float_32, .float_64 => return false,
     };
+    return source_bits <= device.bitsPerSample();
 }
 
 const test_block_frames = 256;
@@ -792,6 +822,12 @@ const test_float_format: pcm.Format = .{
     .bytes_per_frame = 8,
 };
 
+const test_float_device: backend.DeviceFormat = .{
+    .sample_format = .float_32,
+    .sample_rate = 44_100,
+    .channels = 2,
+};
+
 test "a signal path with no processing over matching formats is bit-perfect eligible" {
     const path = SignalPath.describe(.{
         .source = test_float_format,
@@ -802,7 +838,8 @@ test "a signal path with no processing over matching formats is bit-perfect elig
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
     });
     try std.testing.expect(path.bit_perfect_eligible);
     try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
@@ -819,7 +856,8 @@ test "a 16-bit source widened to float32 is exact and stays bit-perfect eligible
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
     });
     try std.testing.expect(path.bit_perfect_eligible);
     try std.testing.expect(path.widened_exactly);
@@ -840,7 +878,8 @@ test "a 32-bit integer source reaching a float output is a sample format convers
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
     });
     try std.testing.expect(!path.bit_perfect_eligible);
     try std.testing.expect(!path.widened_exactly);
@@ -851,7 +890,7 @@ test "a 32-bit integer source reaching a float output is a sample format convers
     );
 }
 
-test "a lossy source that declares no source format is only a lossy source" {
+test "a lossy source that declares no source format is a lossy source on an unknown path" {
     const path = SignalPath.describe(.{
         .source = test_float_format,
         .source_declared = false,
@@ -861,13 +900,14 @@ test "a lossy source that declares no source format is only a lossy source" {
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
     });
     try std.testing.expect(!path.bit_perfect_eligible);
     try std.testing.expect(!path.source_declared);
     try std.testing.expectEqualSlices(
         signal_path.Reason,
-        &.{.lossy_source},
+        &.{ .lossy_source, .path_unknown },
         path.reasonList(),
     );
 }
@@ -882,7 +922,8 @@ test "a lossy codec declaring an integer source format is still a lossy source" 
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
     });
     try std.testing.expect(!path.bit_perfect_eligible);
     try std.testing.expectEqualSlices(
@@ -916,7 +957,8 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
             .crossfeed = case.crossfeed,
             .volume = case.volume,
             .output = test_float_format,
-            .device_rate = null,
+            .device_rate = 44_100,
+            .device_format = test_float_device,
         });
         try std.testing.expect(!path.bit_perfect_eligible);
         try std.testing.expectEqualSlices(
@@ -934,7 +976,8 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
         .crossfeed = 0,
         .volume = 1,
         .output = test_float_format,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
     });
     try std.testing.expect(transparent.bit_perfect_eligible);
 }
@@ -950,6 +993,7 @@ test "a device running at another rate than the output stream is a sample rate c
         .volume = 1,
         .output = test_float_format,
         .device_rate = 48_000,
+        .device_format = .{ .sample_format = .float_32, .sample_rate = 48_000, .channels = 2 },
     });
     try std.testing.expect(!path.bit_perfect_eligible);
     try std.testing.expectEqual(@as(?u32, 48_000), path.device_rate);
@@ -960,8 +1004,12 @@ test "a device running at another rate than the output stream is a sample rate c
     );
 }
 
-test "a device running at the output stream rate, or at an unknown rate, adds no reason" {
-    for ([_]?u32{ 44_100, null }) |device_rate| {
+test "a device running at the output stream rate adds no reason, and an unknown rate leaves the path unknown" {
+    const Case = struct { device_rate: ?u32, reasons: []const signal_path.Reason };
+    for ([_]Case{
+        .{ .device_rate = 44_100, .reasons = &.{} },
+        .{ .device_rate = null, .reasons = &.{.path_unknown} },
+    }) |case| {
         const path = SignalPath.describe(.{
             .source = test_float_format,
             .source_declared = true,
@@ -971,10 +1019,11 @@ test "a device running at the output stream rate, or at an unknown rate, adds no
             .crossfeed = null,
             .volume = 1,
             .output = test_float_format,
-            .device_rate = device_rate,
+            .device_rate = case.device_rate,
+            .device_format = test_float_device,
         });
-        try std.testing.expect(path.bit_perfect_eligible);
-        try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+        try std.testing.expectEqual(case.reasons.len == 0, path.bit_perfect_eligible);
+        try std.testing.expectEqualSlices(signal_path.Reason, case.reasons, path.reasonList());
     }
 }
 
@@ -991,6 +1040,7 @@ test "a device rate mismatch is one reason even when the source rate already dif
         .volume = 1,
         .output = test_float_format,
         .device_rate = 48_000,
+        .device_format = .{ .sample_format = .float_32, .sample_rate = 48_000, .channels = 2 },
     });
     try std.testing.expectEqualSlices(
         signal_path.Reason,
@@ -999,34 +1049,95 @@ test "a device rate mismatch is one reason even when the source rate already dif
     );
 }
 
-test "a float output stream reaching an integer device is a sample format conversion" {
-    const device: backend.DeviceFormat = .{
-        .sample_format = .signed_24_32,
-        .sample_rate = 44_100,
-        .channels = 2,
-    };
-    const path = SignalPath.describe(.{
-        .source = test_flac_format,
-        .source_declared = true,
-        .codec = "flac",
-        .replay_gain = 1,
-        .equalizer = null,
-        .crossfeed = null,
-        .volume = 1,
-        .output = test_float_format,
-        .device_rate = 44_100,
-        .device_format = device,
-    });
-    try std.testing.expect(!path.bit_perfect_eligible);
-    try std.testing.expectEqual(device, path.device_format.?);
-    try std.testing.expectEqualSlices(
-        signal_path.Reason,
-        &.{.sample_format_conversion},
-        path.reasonList(),
-    );
+test "an integer device holding every bit of an integer source is no sample format conversion" {
+    for ([_]backend.DeviceSampleFormat{ .signed_16, .signed_24, .signed_24_32, .signed_32, .float_32 }) |sample_format| {
+        const device: backend.DeviceFormat = .{ .sample_format = sample_format, .sample_rate = 44_100, .channels = 2 };
+        const path = SignalPath.describe(.{
+            .source = test_flac_format,
+            .source_declared = true,
+            .codec = "flac",
+            .replay_gain = 1,
+            .equalizer = null,
+            .crossfeed = null,
+            .volume = 1,
+            .output = test_float_format,
+            .device_rate = 44_100,
+            .device_format = device,
+        });
+        try std.testing.expect(path.bit_perfect_eligible);
+        try std.testing.expect(path.widened_exactly);
+        try std.testing.expectEqual(device, path.device_format.?);
+        try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+    }
 }
 
-test "a device format at another rate is one sample rate conversion beside the format conversion" {
+test "a 24-bit source through a float32 stream to a 24-bit device is bit-perfect eligible" {
+    const source: pcm.Format = .{
+        .sample_format = .signed_24,
+        .channels = 2,
+        .sample_rate = 192_000,
+        .bits_per_sample = 24,
+        .bytes_per_frame = 6,
+    };
+    var output = test_float_format;
+    output.sample_rate = 192_000;
+    for ([_]backend.DeviceSampleFormat{ .signed_24, .signed_24_32, .signed_32, .float_32 }) |sample_format| {
+        const path = SignalPath.describe(.{
+            .source = source,
+            .source_declared = true,
+            .codec = "flac",
+            .replay_gain = 1,
+            .equalizer = null,
+            .crossfeed = null,
+            .volume = 1,
+            .output = output,
+            .device_rate = 192_000,
+            .device_format = .{ .sample_format = sample_format, .sample_rate = 192_000, .channels = 2 },
+        });
+        try std.testing.expect(path.bit_perfect_eligible);
+        try std.testing.expect(path.widened_exactly);
+        try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+    }
+}
+
+test "a device with fewer bits than the source, or an integer device for a float or 32-bit source, is a sample format conversion" {
+    var hires = test_flac_format;
+    hires.sample_format = .signed_24;
+    hires.bits_per_sample = 24;
+    hires.bytes_per_frame = 6;
+    var wide = test_flac_format;
+    wide.sample_format = .signed_32;
+    wide.bits_per_sample = 32;
+    wide.bytes_per_frame = 8;
+    const Case = struct { source: pcm.Format, device: backend.DeviceSampleFormat };
+    for ([_]Case{
+        .{ .source = hires, .device = .signed_16 },
+        .{ .source = test_float_format, .device = .signed_32 },
+        .{ .source = test_float_format, .device = .signed_24 },
+        .{ .source = wide, .device = .signed_32 },
+    }) |case| {
+        const path = SignalPath.describe(.{
+            .source = case.source,
+            .source_declared = true,
+            .codec = "flac",
+            .replay_gain = 1,
+            .equalizer = null,
+            .crossfeed = null,
+            .volume = 1,
+            .output = test_float_format,
+            .device_rate = 44_100,
+            .device_format = .{ .sample_format = case.device, .sample_rate = 44_100, .channels = 2 },
+        });
+        try std.testing.expect(!path.bit_perfect_eligible);
+        try std.testing.expectEqualSlices(
+            signal_path.Reason,
+            &.{.sample_format_conversion},
+            path.reasonList(),
+        );
+    }
+}
+
+test "a device format at another rate is one sample rate conversion" {
     const path = SignalPath.describe(.{
         .source = test_flac_format,
         .source_declared = true,
@@ -1041,18 +1152,13 @@ test "a device format at another rate is one sample rate conversion beside the f
     });
     try std.testing.expectEqualSlices(
         signal_path.Reason,
-        &.{ .sample_rate_conversion, .sample_format_conversion },
+        &.{.sample_rate_conversion},
         path.reasonList(),
     );
 }
 
-test "a float device at the stream rate, or an unknown device format, leaves the verdict alone" {
-    const float_device: backend.DeviceFormat = .{
-        .sample_format = .float_32,
-        .sample_rate = 44_100,
-        .channels = 2,
-    };
-    for ([_]?backend.DeviceFormat{ float_device, null }) |device_format| {
+test "a device running another channel count than the output stream is a channel layout conversion" {
+    for ([_]u16{ 1, 6 }) |channels| {
         const path = SignalPath.describe(.{
             .source = test_flac_format,
             .source_declared = true,
@@ -1063,13 +1169,96 @@ test "a float device at the stream rate, or an unknown device format, leaves the
             .volume = 1,
             .output = test_float_format,
             .device_rate = 44_100,
-            .device_format = device_format,
+            .device_format = .{ .sample_format = .float_32, .sample_rate = 44_100, .channels = channels },
         });
-        try std.testing.expect(path.bit_perfect_eligible);
-        try std.testing.expect(path.widened_exactly);
-        try std.testing.expectEqual(device_format, path.device_format);
-        try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+        try std.testing.expect(!path.bit_perfect_eligible);
+        try std.testing.expectEqualSlices(
+            signal_path.Reason,
+            &.{.channel_layout_conversion},
+            path.reasonList(),
+        );
     }
+}
+
+test "a path missing its source format, its output or a device fact is unknown and never bit-perfect eligible" {
+    const Case = struct {
+        source: ?pcm.Format = test_flac_format,
+        source_declared: bool = true,
+        output: ?pcm.Format = test_float_format,
+        device_rate: ?u32 = 44_100,
+        device_format: ?backend.DeviceFormat = test_float_device,
+    };
+    for ([_]Case{
+        .{ .source = null, .source_declared = false },
+        .{ .source = test_float_format, .source_declared = false },
+        .{ .output = null, .device_rate = null, .device_format = null },
+        .{ .device_rate = null },
+        .{ .device_format = null },
+        .{ .device_rate = null, .device_format = null },
+    }) |case| {
+        const path = SignalPath.describe(.{
+            .source = case.source,
+            .source_declared = case.source_declared,
+            .codec = "flac",
+            .replay_gain = 1,
+            .equalizer = null,
+            .crossfeed = null,
+            .volume = 1,
+            .output = case.output,
+            .device_rate = case.device_rate,
+            .device_format = case.device_format,
+        });
+        try std.testing.expect(!path.bit_perfect_eligible);
+        try std.testing.expectEqualSlices(
+            signal_path.Reason,
+            &.{.path_unknown},
+            path.reasonList(),
+        );
+    }
+}
+
+test "a float device at the stream rate leaves the verdict alone" {
+    const path = SignalPath.describe(.{
+        .source = test_flac_format,
+        .source_declared = true,
+        .codec = "flac",
+        .replay_gain = 1,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
+    });
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqual(test_float_device, path.device_format.?);
+    try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+}
+
+test "processed audio still queued is sample processing while the settings change nothing" {
+    const path = SignalPath.describe(.{
+        .source = test_flac_format,
+        .source_declared = true,
+        .codec = "flac",
+        .replay_gain = 1,
+        .equalizer = .{},
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = 44_100,
+        .device_format = test_float_device,
+        .processed_audio_queued = true,
+    });
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(
+        signal_path.Reason,
+        &.{.sample_processing},
+        path.reasonList(),
+    );
+    try std.testing.expectEqual(@as(?f32, null), path.replay_gain_db);
+    try std.testing.expectEqual(@as(f32, 1), path.volume);
+    try std.testing.expect(!path.equalizer.?.isActive());
 }
 
 test "crossfeed on a layout it does not apply to is not sample processing" {
@@ -1085,7 +1274,8 @@ test "crossfeed on a layout it does not apply to is not sample processing" {
         .crossfeed = 0.3,
         .volume = 1,
         .output = surround,
-        .device_rate = null,
+        .device_rate = 44_100,
+        .device_format = .{ .sample_format = .float_32, .sample_rate = 44_100, .channels = 6 },
     });
     try std.testing.expect(path.bit_perfect_eligible);
 }
@@ -1450,7 +1640,8 @@ test "a parametric equalizer counts as sample processing unless it changes nothi
             .crossfeed = null,
             .volume = 1,
             .output = test_float_format,
-            .device_rate = null,
+            .device_rate = 44_100,
+            .device_format = test_float_device,
         });
         try std.testing.expectEqual(!case.processing, path.bit_perfect_eligible);
         const reasons: []const signal_path.Reason = if (case.processing) &.{.sample_processing} else &.{};

@@ -125,17 +125,21 @@ pub const ZoneRuntime = struct {
     open_format: ?pcm.Format = null,
     open_device_id: u64 = 0,
     open_device_kind: contract.DeviceKind = .unknown,
-    /// Consecutive engine passes during which this Zone accepted no PCM while
-    /// its output claimed to be active. A backend that stops consuming must not
-    /// be able to stall the shared decode cursor for every other Zone.
+    /// Consecutive playing passes in which this Zone held prepared blocks and
+    /// its active output handed none back. A backend that stops consuming must
+    /// neither stall the shared decode cursor for every other Zone nor keep its
+    /// Player from draining.
     stalled_passes: u32 = 0,
+    stall_started_ns: u64 = 0,
     recovery_wait_ns: u64 = 0,
+    stable_blocks: u32 = 0,
     /// Negotiated backend quantum, refreshed from the open output. A device
     /// asks for a whole quantum per callback, so it is a hard floor on how far
     /// ahead the producer has to stay regardless of the Zone's policy target.
     quantum_frames: u32 = 0,
 
-    /// Consecutive stalled passes tolerated before the Zone is treated as lost.
+    /// Consecutive stalled passes after which the Zone stops holding the shared
+    /// decode cursor.
     pub const stall_limit: u32 = 64;
 
     pub fn create(allocator: std.mem.Allocator) !*ZoneRuntime {
@@ -242,6 +246,12 @@ pub const ZoneRuntime = struct {
         else
             (2 * @as(usize, self.quantum_frames) + frames_per_block - 1) / frames_per_block;
         return @min(block_count, @max(policy_blocks, quantum_blocks, minimum_budget_blocks));
+    }
+
+    pub fn reclaim(self: *ZoneRuntime) usize {
+        const free_before = self.pool.free_len;
+        self.pipe.reclaim(&self.pool);
+        return self.pool.free_len - free_before;
     }
 
     pub fn hasRoom(self: *ZoneRuntime) bool {
@@ -399,11 +409,13 @@ test "closing an output lets a Zone reclaim every prepared block" {
 
     const sink = runtime_zone.sink(1);
     var samples: [frames_per_block]f32 = @splat(0.5);
-    try std.testing.expect(sink.submitCopy(&samples, frames_per_block, 3, 1));
+    try std.testing.expect(sink.submitCopy(&samples, frames_per_block, 3, 1, .{}, true));
     try std.testing.expect(!runtime_zone.quiescent());
+    try std.testing.expect(runtime_zone.pool.holdsProcessed());
 
     runtime_zone.resetPipe();
     try std.testing.expect(runtime_zone.quiescent());
+    try std.testing.expect(!runtime_zone.pool.holdsProcessed());
 }
 
 test "Zone render-ahead follows policy but never falls under the device quantum" {

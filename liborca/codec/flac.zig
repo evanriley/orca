@@ -36,6 +36,8 @@ extern fn orca_flac_decoder_read_i32(
     frames_written: *u32,
 ) i32;
 extern fn orca_flac_decoder_seek(decoder: ?*anyopaque, frame: u64) i32;
+extern fn orca_flac_decoder_stream_errors(decoder: ?*anyopaque) u64;
+extern fn orca_flac_decoder_md5_mismatch(decoder: ?*anyopaque) i32;
 
 const Context = struct {
     allocator: std.mem.Allocator,
@@ -55,6 +57,22 @@ const Context = struct {
     /// STREAMINFO's maximum block size, which bounds how much audio a single
     /// unreadable frame can account for.
     max_block_frames: u64,
+    stream_errors_seen: u64 = 0,
+    damage: ?decoder_api.Damage = null,
+
+    fn recordDamage(self: *Context, found: decoder_api.Damage) void {
+        if (self.damage == null) self.damage = found;
+    }
+
+    /// An error libFLAC recovered from is damage when audio followed it or the
+    /// declared total was still owed; after the declared end it is a trailing
+    /// tag or padding.
+    fn judgeStreamErrors(self: *Context, frames_before: u64, produced: u32) void {
+        const errors = orca_flac_decoder_stream_errors(self.native);
+        if (errors == self.stream_errors_seen) return;
+        self.stream_errors_seen = errors;
+        if (produced > 0 or frames_before < self.declared_frames) self.recordDamage(error.FlacStreamErrors);
+    }
 };
 
 pub fn openDecoder(
@@ -202,12 +220,14 @@ fn readFramesAs(
     const capacity = output.len / context.channels;
     if (capacity == 0) return 0;
     var produced: u32 = 0;
+    const frames_before = context.frames_decoded;
     const status = read(
         context.native,
         output.ptr,
         @intCast(@min(capacity, std.math.maxInt(u32))),
         &produced,
     );
+    context.judgeStreamErrors(frames_before, produced);
     switch (status) {
         ok => {
             context.frames_decoded += produced;
@@ -226,10 +246,16 @@ fn readFramesAs(
         // The cost is that a truncated file seeked into ends quietly instead
         // of erroring. That is the right trade for playback, and the unsought
         // path -- every ordinary play from the beginning -- still detects it.
-        end_of_stream => if (context.sought or reachedDeclaredEnd(context))
-            return 0
-        else
-            return error.TruncatedFlac,
+        //
+        // A short final block and an MD5 mismatch end the stream cleanly so
+        // playback is unaffected, and are reported through `damage`.
+        end_of_stream => {
+            if (context.sought) return 0;
+            if (!reachedDeclaredEnd(context)) return context.damage orelse error.TruncatedFlac;
+            if (context.frames_decoded < context.declared_frames) context.recordDamage(error.TruncatedFlac);
+            if (orca_flac_decoder_md5_mismatch(context.native) != 0) context.recordDamage(error.FlacMd5Mismatch);
+            return 0;
+        },
         else => return error.FlacDecodeFailed,
     }
 }
@@ -240,6 +266,12 @@ fn seek(context_ptr: *anyopaque, frame: u64) !void {
     context.sought = true;
     // Absolute, so the declared-total comparison survives a seek.
     context.frames_decoded = frame;
+    context.stream_errors_seen = orca_flac_decoder_stream_errors(context.native);
+}
+
+fn damage(context_ptr: *anyopaque) ?decoder_api.Damage {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    return context.damage;
 }
 
 fn deinit(context_ptr: *anyopaque) void {
@@ -254,6 +286,7 @@ const vtable: decoder_api.Decoder.VTable = .{
     .read_frames_i32 = readFramesI32,
     .seek = seek,
     .deinit = deinit,
+    .damage = damage,
 };
 
 test "FLAC decoding reports stream facts and seeks generated audio" {
@@ -349,6 +382,48 @@ test "mid-side stereo decodes bit-exactly rather than one LSB low" {
     try std.testing.expectEqual(@as(u32, @intCast(total)), frame_index);
 }
 
+fn hiresProbeSample(index: u32) [2]i32 {
+    return .{
+        @as(i32, @intCast((index *% 40961) % (1 << 24))) - (1 << 23),
+        (1 << 23) - 1 - @as(i32, @intCast((index *% 2654435761) >> 8)),
+    };
+}
+
+test "24-bit 192 kHz FLAC decodes to every sample exactly" {
+    var local = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/hires-reference.flac",
+    );
+    defer local.close();
+    var codec = try openDecoder(std.testing.allocator, local.readable());
+    defer codec.deinit();
+
+    const source_format = codec.source_format.?;
+    try std.testing.expectEqual(@import("../audio/pcm.zig").SampleFormat.signed_24, source_format.sample_format);
+    try std.testing.expectEqual(@as(u16, 24), source_format.bits_per_sample);
+    try std.testing.expectEqual(@as(u32, 192_000), codec.format.sample_rate);
+    try std.testing.expectEqual(@as(u16, 2), codec.format.channels);
+    try std.testing.expectEqual(@as(?u64, 4096), codec.frame_count);
+
+    var scratch: [2048]f32 = undefined;
+    var frame_index: u32 = 0;
+    while (true) {
+        const frames = try codec.readFrames(&scratch);
+        if (frames == 0) break;
+        for (0..frames) |offset| {
+            const expected = hiresProbeSample(frame_index + @as(u32, @intCast(offset)));
+            for (expected, 0..) |value, channel| {
+                try std.testing.expectEqual(
+                    @as(f32, @floatFromInt(value)) / (1 << 23),
+                    scratch[offset * 2 + channel],
+                );
+            }
+        }
+        frame_index += @intCast(frames);
+    }
+    try std.testing.expectEqual(@as(u32, 4096), frame_index);
+}
+
 test "reading to the end after a seek reports end of input rather than failing" {
     // After a seek a stream ends having decoded fewer frames than STREAMINFO
     // declares; that must read as end of input, or the engine sees a decode
@@ -424,7 +499,7 @@ fn declareExtraFrames(bytes: []u8, shortfall: u64) void {
     }
 }
 
-test "a stream that stops inside its final block ends cleanly rather than failing" {
+test "a stream that stops inside its final block ends cleanly and reports it as truncated" {
     // Real files can stop short of what STREAMINFO declares, inside their
     // final block. ffmpeg resyncs and returns the audio; treating it as damage
     // would fail analysis and end playback early.
@@ -450,6 +525,7 @@ test "a stream that stops inside its final block ends cleanly rather than failin
         if (try codec.readFrames(&scratch) == 0) break;
     }
     try std.testing.expect(guard < 4096);
+    try std.testing.expectEqual(@as(?decoder_api.Damage, error.TruncatedFlac), codec.damage());
 }
 
 test "a stream missing more than its final block is still reported as damaged" {
@@ -479,4 +555,135 @@ test "a stream missing more than its final block is still reported as damaged" {
     } else error.NeverEnded;
     try std.testing.expect(outcome != error.EndedCleanly);
     try std.testing.expect(outcome != error.NeverEnded);
+}
+
+fn readFixture(path: []const u8) ![]u8 {
+    var local = try storage.LocalFileSource.open(std.testing.io, path);
+    defer local.close();
+    const readable = local.readable();
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(readable.size()));
+    errdefer std.testing.allocator.free(bytes);
+    if (try readable.readAt(0, bytes) != bytes.len) return error.ShortFixtureRead;
+    return bytes;
+}
+
+fn decodeToEnd(codec: decoder_api.Decoder) !u64 {
+    var scratch: [4096]f32 = undefined;
+    var frames: u64 = 0;
+    var guard: usize = 0;
+    while (guard < 4096) : (guard += 1) {
+        const read = try codec.readFrames(&scratch);
+        if (read == 0) return frames;
+        frames += read;
+    }
+    return error.NeverEnded;
+}
+
+fn audioOffset(bytes: []const u8) usize {
+    var offset: usize = 4;
+    while (true) {
+        const last = bytes[offset] & 0x80 != 0;
+        offset += 4 + std.mem.readInt(u24, bytes[offset + 1 ..][0..3], .big);
+        if (last) return offset;
+    }
+}
+
+test "a clean stream decoded to its end reports no damage" {
+    for ([_][]const u8{
+        "fixtures/audio/generated-reference.flac",
+        "fixtures/audio/tagged-reference.flac",
+        "fixtures/audio/midside-reference.flac",
+        "fixtures/audio/covered-reference.flac",
+        "fixtures/audio/lyrics-synced.flac",
+        "fixtures/audio/id3-prefixed-reference.flac",
+        "fixtures/audio/id3-footer-prefixed-reference.flac",
+        "fixtures/audio/id3-covered-reference.flac",
+    }) |path| {
+        const bytes = try readFixture(path);
+        defer std.testing.allocator.free(bytes);
+        var source: storage.MemorySource = .{ .bytes = bytes };
+        var codec = try @import("registry.zig").CodecRegistry.builtins().openDetected(std.testing.allocator, source.readable());
+        defer codec.deinit();
+        try std.testing.expectEqual(codec.frame_count.?, try decodeToEnd(codec));
+        try std.testing.expectEqual(@as(?decoder_api.Damage, null), codec.damage());
+    }
+}
+
+test "a stream whose audio disagrees with its MD5 signature plays in full and reports the mismatch" {
+    const bytes = try readFixture("fixtures/audio/tagged-reference.flac");
+    defer std.testing.allocator.free(bytes);
+    bytes[26] ^= 0xff;
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+    try std.testing.expectEqual(codec.frame_count.?, try decodeToEnd(codec));
+    try std.testing.expectEqual(@as(?decoder_api.Damage, error.FlacMd5Mismatch), codec.damage());
+}
+
+test "a stream with no MD5 signature reports no damage" {
+    const bytes = try readFixture("fixtures/audio/tagged-reference.flac");
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes[26..42], 0);
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+    try std.testing.expectEqual(codec.frame_count.?, try decodeToEnd(codec));
+    try std.testing.expectEqual(@as(?decoder_api.Damage, null), codec.damage());
+}
+
+test "a sought stream with a wrong MD5 signature reports no damage" {
+    const bytes = try readFixture("fixtures/audio/tagged-reference.flac");
+    defer std.testing.allocator.free(bytes);
+    bytes[26] ^= 0xff;
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+    try codec.seek(0);
+    try std.testing.expectEqual(codec.frame_count.?, try decodeToEnd(codec));
+    try std.testing.expectEqual(@as(?decoder_api.Damage, null), codec.damage());
+}
+
+test "a stream decoded to its end can be sought and decoded again" {
+    const bytes = try readFixture("fixtures/audio/tagged-reference.flac");
+    defer std.testing.allocator.free(bytes);
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+    const total = codec.frame_count.?;
+    try std.testing.expectEqual(total, try decodeToEnd(codec));
+    try codec.seek(100);
+    try std.testing.expectEqual(total - 100, try decodeToEnd(codec));
+}
+
+test "a final frame failing its CRC ends cleanly and is reported as stream errors" {
+    const bytes = try readFixture("fixtures/audio/tagged-reference.flac");
+    defer std.testing.allocator.free(bytes);
+    bytes[bytes.len - 1] ^= 0xff;
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+    try std.testing.expect(try decodeToEnd(codec) > 0);
+    try std.testing.expectEqual(@as(?decoder_api.Damage, error.FlacStreamErrors), codec.damage());
+}
+
+test "a first frame failing its CRC plays the frames after it and fails naming stream errors" {
+    const bytes = try readFixture("fixtures/audio/tagged-reference.flac");
+    defer std.testing.allocator.free(bytes);
+    const audio = audioOffset(bytes);
+    const second_frame = std.mem.indexOfPos(u8, bytes, audio + 2, "\xff\xf8").?;
+    bytes[second_frame - 1] ^= 0xff;
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+    var scratch: [4096]f32 = undefined;
+    var frames: u64 = 0;
+    var guard: usize = 0;
+    const outcome = while (guard < 4096) : (guard += 1) {
+        const read = codec.readFrames(&scratch) catch |err| break err;
+        if (read == 0) break error.EndedCleanly;
+        frames += read;
+    } else error.NeverEnded;
+    try std.testing.expectEqual(@as(anyerror, error.FlacStreamErrors), outcome);
+    const first_block_frames = std.mem.readInt(u16, bytes[10..12], .big);
+    try std.testing.expectEqual(codec.frame_count.? - first_block_frames, frames);
 }

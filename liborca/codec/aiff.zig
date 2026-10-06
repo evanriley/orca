@@ -18,6 +18,7 @@ const Layout = struct {
     encoding: Encoding,
     data_offset: u64,
     frames: u64,
+    damage: ?decoder_api.Damage,
 };
 
 const Context = struct {
@@ -105,7 +106,7 @@ fn readLayout(source: storage.ReadableSource) !Layout {
             else => return error.UnsupportedPcmFormat,
         },
         else => switch (stream.bits) {
-            8 => .unsigned_8,
+            8 => .signed_8,
             16 => .signed_16,
             24 => .signed_24,
             32 => .signed_32,
@@ -113,7 +114,8 @@ fn readLayout(source: storage.ReadableSource) !Layout {
         },
     };
     const bytes_per_frame = std.math.mul(u16, stream.channels, stream.bits / 8) catch return error.InvalidAiff;
-    const frames = @min(stream.frames, data_bytes / bytes_per_frame);
+    const sound_offset = data_offset orelse return error.MissingSoundChunk;
+    const sound_frames = data_bytes / bytes_per_frame;
     return .{
         .format = .{
             .sample_format = sample_format,
@@ -123,8 +125,9 @@ fn readLayout(source: storage.ReadableSource) !Layout {
             .bytes_per_frame = bytes_per_frame,
         },
         .encoding = stream.encoding,
-        .data_offset = data_offset orelse if (frames == 0) 0 else return error.MissingSoundChunk,
-        .frames = if (data_offset == null) 0 else frames,
+        .data_offset = sound_offset,
+        .frames = @min(stream.frames, sound_frames),
+        .damage = if (stream.frames > sound_frames) error.TruncatedAiff else null,
     };
 }
 
@@ -211,6 +214,11 @@ fn seek(context_ptr: *anyopaque, frame: u64) !void {
     context.position = frame;
 }
 
+fn damage(context_ptr: *anyopaque) ?decoder_api.Damage {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    return context.layout.damage;
+}
+
 fn deinit(context_ptr: *anyopaque) void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     const allocator = context.allocator;
@@ -222,6 +230,7 @@ const vtable: decoder_api.Decoder.VTable = .{
     .read_frames = readFrames,
     .seek = seek,
     .deinit = deinit,
+    .damage = damage,
 };
 
 const integer_vtable: decoder_api.Decoder.VTable = .{
@@ -229,6 +238,7 @@ const integer_vtable: decoder_api.Decoder.VTable = .{
     .read_frames_i32 = readFramesI32,
     .seek = seek,
     .deinit = deinit,
+    .damage = damage,
 };
 
 fn decodeFile(path: []const u8, output: []f32) !struct { frames: usize, decoder_format: audio_pcm.Format } {
@@ -296,4 +306,69 @@ test "integer AIFF samples read left-justified and agree with the float read" {
 
 test "a compressed AIFC is refused rather than read as PCM" {
     try std.testing.expectError(error.UnsupportedAiffCompression, compression("ima4", 16));
+}
+
+fn monoAiff(buffer: []u8, frames: u32, bits: u16, sound: ?[]const u8) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(buffer);
+    const ssnd_bytes: u32 = if (sound) |samples| 16 + @as(u32, @intCast(samples.len + (samples.len & 1))) else 0;
+    try writer.writeAll("FORM");
+    try writer.writeInt(u32, 4 + 26 + ssnd_bytes, .big);
+    try writer.writeAll("AIFFCOMM");
+    try writer.writeInt(u32, 18, .big);
+    try writer.writeInt(u16, 1, .big);
+    try writer.writeInt(u32, frames, .big);
+    try writer.writeInt(u16, bits, .big);
+    try writer.writeAll("\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00");
+    if (sound) |samples| {
+        try writer.writeAll("SSND");
+        try writer.writeInt(u32, @intCast(8 + samples.len), .big);
+        try writer.writeInt(u64, 0, .big);
+        try writer.writeAll(samples);
+        if (samples.len & 1 == 1) try writer.writeByte(0);
+    }
+    return writer.buffered();
+}
+
+test "an AIFF whose COMM declares more frames than SSND holds plays what is there and reports truncation" {
+    var buffer: [128]u8 = undefined;
+    var source: storage.MemorySource = .{ .bytes = try monoAiff(&buffer, 10, 16, "\x00\x01\x00\x02\x00\x03\x00\x04") };
+    var decoder = try openDecoder(std.testing.allocator, source.readable());
+    defer decoder.deinit();
+    try std.testing.expectEqual(@as(?u64, 4), decoder.frame_count);
+    var samples: [16]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try decoder.readFrames(&samples));
+    try std.testing.expectEqual(@as(usize, 0), try decoder.readFrames(&samples));
+    try std.testing.expectEqual(@as(?decoder_api.Damage, error.TruncatedAiff), decoder.damage());
+}
+
+test "an AIFF whose SSND holds at least the COMM frames reports no damage" {
+    var buffer: [128]u8 = undefined;
+    for ([_]u32{ 4, 3 }) |frames| {
+        var source: storage.MemorySource = .{ .bytes = try monoAiff(&buffer, frames, 16, "\x00\x01\x00\x02\x00\x03\x00\x04") };
+        var decoder = try openDecoder(std.testing.allocator, source.readable());
+        defer decoder.deinit();
+        try std.testing.expectEqual(@as(?u64, frames), decoder.frame_count);
+        try std.testing.expectEqual(@as(?decoder_api.Damage, null), decoder.damage());
+    }
+}
+
+test "an AIFF with no SSND chunk is refused as missing its sound" {
+    var buffer: [128]u8 = undefined;
+    for ([_]u32{ 0, 10 }) |frames| {
+        var source: storage.MemorySource = .{ .bytes = try monoAiff(&buffer, frames, 16, null) };
+        try std.testing.expectError(error.MissingSoundChunk, openDecoder(std.testing.allocator, source.readable()));
+    }
+}
+
+test "an 8-bit AIFF reports signed 8-bit samples and decodes them as signed" {
+    var buffer: [128]u8 = undefined;
+    var source: storage.MemorySource = .{ .bytes = try monoAiff(&buffer, 3, 8, "\x80\x00\x40") };
+    var decoder = try openDecoder(std.testing.allocator, source.readable());
+    defer decoder.deinit();
+    try std.testing.expectEqual(audio_pcm.SampleFormat.signed_8, decoder.source_format.?.sample_format);
+    try std.testing.expectEqual(@as(u16, 8), decoder.source_format.?.bits_per_sample);
+    var samples: [3]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try decoder.readFrames(&samples));
+    try std.testing.expectEqualSlices(f32, &.{ -1.0, 0.0, 0.5 }, &samples);
+    try std.testing.expectEqual(@as(?decoder_api.Damage, null), decoder.damage());
 }

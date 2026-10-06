@@ -68,6 +68,11 @@ fn decoderSeek(context_ptr: *anyopaque, frame: u64) !void {
     context.position = @min(frame, context.reader.frameCount());
 }
 
+fn decoderDamage(context_ptr: *anyopaque) ?decoder_api.Damage {
+    const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
+    return context.reader.damage();
+}
+
 fn decoderDeinit(context_ptr: *anyopaque) void {
     const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
     const allocator = context.allocator;
@@ -79,6 +84,7 @@ const decoder_vtable: @import("decoder.zig").Decoder.VTable = .{
     .read_frames = decoderRead,
     .seek = decoderSeek,
     .deinit = decoderDeinit,
+    .damage = decoderDamage,
 };
 
 const integer_decoder_vtable: @import("decoder.zig").Decoder.VTable = .{
@@ -86,6 +92,7 @@ const integer_decoder_vtable: @import("decoder.zig").Decoder.VTable = .{
     .read_frames_i32 = decoderReadI32,
     .seek = decoderSeek,
     .deinit = decoderDeinit,
+    .damage = decoderDamage,
 };
 
 pub const Reader = struct {
@@ -152,6 +159,11 @@ pub const Reader = struct {
         return self.data_bytes / self.format.bytes_per_frame;
     }
 
+    /// A data chunk that ends inside a frame; the whole frames still read.
+    pub fn damage(self: Reader) ?decoder_api.Damage {
+        return if (self.data_bytes % self.format.bytes_per_frame != 0) error.PartialWavFrame else null;
+    }
+
     pub fn readFrames(self: Reader, frame_offset: u64, output: []u8) !usize {
         if (output.len % self.format.bytes_per_frame != 0) return error.UnalignedPcmBuffer;
         const byte_offset = std.math.mul(u64, frame_offset, self.format.bytes_per_frame) catch
@@ -214,6 +226,7 @@ pub const Reader = struct {
 fn decodeInteger(format: SampleFormat, bytes: []const u8) !i32 {
     return switch (format) {
         .unsigned_8 => @as(i32, @as(i8, @bitCast(bytes[0] ^ 0x80))) << 24,
+        .signed_8 => @as(i32, @as(i8, @bitCast(bytes[0]))) << 24,
         .signed_16 => @as(i32, @as(i16, @bitCast(little16(bytes[0..2])))) << 16,
         .signed_24 => @bitCast((@as(u32, bytes[0]) << 8) |
             (@as(u32, bytes[1]) << 16) |
@@ -226,6 +239,7 @@ fn decodeInteger(format: SampleFormat, bytes: []const u8) !i32 {
 fn decodeSample(format: SampleFormat, bytes: []const u8) f32 {
     return switch (format) {
         .unsigned_8 => (@as(f32, @floatFromInt(bytes[0])) - 128.0) / 128.0,
+        .signed_8 => @as(f32, @floatFromInt(@as(i8, @bitCast(bytes[0])))) / 128.0,
         .signed_16 => @as(f32, @floatFromInt(@as(i16, @bitCast(little16(bytes[0..2]))))) /
             32_768.0,
         .signed_24 => blk: {
@@ -389,4 +403,32 @@ test "a WAVE_FORMAT_EXTENSIBLE file decodes as the format its SubFormat names" {
     try std.testing.expectEqual(@as(usize, 480), try extensible.readFrames(&from_wav));
     try std.testing.expectEqual(@as(usize, 480), try flac.readFrames(&from_flac));
     try std.testing.expectEqualSlices(f32, &from_flac, &from_wav);
+}
+
+fn stereo16Wav(comptime data: []const u8) []const u8 {
+    const size: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, data.len));
+    const riff: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, 36 + data.len + (data.len & 1)));
+    return "RIFF" ++ riff ++ "WAVE" ++
+        "fmt " ++ "\x10\x00\x00\x00" ++
+        "\x01\x00\x02\x00" ++ "\x44\xac\x00\x00" ++
+        "\x10\xb1\x02\x00" ++ "\x04\x00\x10\x00" ++
+        "data" ++ size ++ data ++ (if (data.len & 1 == 1) "\x00" else "");
+}
+
+test "a WAV data chunk that ends inside a frame plays its whole frames and reports the partial one" {
+    var source: storage.MemorySource = .{ .bytes = stereo16Wav("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00") };
+    var decoder = try openDecoder(std.testing.allocator, source.readable());
+    defer decoder.deinit();
+    try std.testing.expectEqual(@as(?u64, 2), decoder.frame_count);
+    var samples: [8]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try decoder.readFrames(&samples));
+    try std.testing.expectEqual(@as(usize, 0), try decoder.readFrames(&samples));
+    try std.testing.expectEqual(@as(?decoder_api.Damage, error.PartialWavFrame), decoder.damage());
+}
+
+test "a WAV data chunk of whole frames reports no damage" {
+    var source: storage.MemorySource = .{ .bytes = stereo16Wav("\x01\x00\x02\x00\x03\x00\x04\x00") };
+    var decoder = try openDecoder(std.testing.allocator, source.readable());
+    defer decoder.deinit();
+    try std.testing.expectEqual(@as(?decoder_api.Damage, null), decoder.damage());
 }

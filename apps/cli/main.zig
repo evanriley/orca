@@ -81,6 +81,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidProposalPayload => "that match cannot be read; dismiss it",
         error.InvalidMinimumConfidence => "--min-score must be above 0 and at most 1",
         error.TagWriteBackupPruned => "the backups for this write were pruned, so it cannot be undone",
+        error.FileReadOnly => "a file of this write is read-only, and Orca does not change a file made read-only; nothing was restored. Make it writable and run undo-tags again",
         error.UnknownTagWriteGroup => "no finished tag write with that group",
         error.TagTargetUnavailable => "a file an interrupted tag write changed is in a folder that is not there; mount it and try again",
         error.NoBackupDirectory => "this library has no database file, so a tag write has nowhere to keep the originals",
@@ -125,6 +126,7 @@ fn describe(err: anyerror) []const u8 {
         error.LettersAndTotals => "give either --letters or --totals, not both",
         error.AsyncListingOnly => "--async lists a page and its count; give it no --letters or --totals",
         error.UnknownFile => "no file with that id",
+        error.UnsupportedChannelCount => "the file has more than two channels; Orca plays and analyses mono and stereo only until multichannel support lands",
         error.UnknownJobKind => "--start takes scan, analysis, duplicates, backfill, project or consistency",
         error.UnknownIssueCategory => "--category takes album_artist, dates, track_numbering, genre_variants or musicbrainz_differs",
         error.IssueNotFound => "no metadata issue with that group id; list them with issues DATABASE",
@@ -2917,6 +2919,7 @@ fn deviceFormatName(sample_format: liborca.DeviceSampleFormat) []const u8 {
 fn formatName(sample_format: liborca.SampleFormat) []const u8 {
     return switch (sample_format) {
         .unsigned_8 => "uint8",
+        .signed_8 => "int8",
         .signed_16 => "int16",
         .signed_24 => "int24",
         .signed_32 => "int32",
@@ -5235,9 +5238,9 @@ fn listReleaseMatches(context: Context) !void {
         for (page.items) |item| {
             try stdout.print("{d}\t{s}\t{s}\t{s}\ttracks={d}", .{ item.release_id, @tagName(item.bucket), item.title, item.artist, item.track_count });
             if (item.best) |best| {
-                try stdout.print("\tcandidate={s} confidence={d:.2} title={s} date={s} candidate_tracks=", .{
-                    best.release_mbid, best.confidence, best.title, best.date orelse "-",
-                });
+                try stdout.print("\tcandidate={s} confidence=", .{best.release_mbid});
+                if (best.confidence) |confidence| try stdout.print("{d:.2}", .{confidence}) else try stdout.writeAll("unread");
+                try stdout.print(" title={s} date={s} candidate_tracks=", .{ best.title, best.date orelse "-" });
                 if (best.track_count) |count| try stdout.print("{d}", .{count}) else try stdout.writeAll("-");
             } else try stdout.writeAll("\tcandidate=-");
             if (item.placement) |placement| {

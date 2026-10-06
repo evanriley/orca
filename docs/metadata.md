@@ -172,6 +172,32 @@ after the reprojection, or null when a Track is not placed afterwards or the
 written files lie on several Releases. An Apply that left a Track alone keeps
 the Release listed with its `needs_pairing` count.
 
+#### Release candidates and confidence
+
+A Release's candidates are the releases its Tracks' release IDs in effect name
+and the releases its pending and accepted proposals list. A candidate's
+confidence is the mean over the Release's Tracks of each Track's score:
+
+- 1 when the Track's release ID names the candidate, Orca holds the
+  candidate's snapshot and the alignment places the Track `automatic` or
+  `paired`;
+- otherwise 1 when an accepted proposal was pointed at the candidate;
+- otherwise the confidence of the first pending proposal that lists it;
+- otherwise 0.
+
+Release IDs are compared in lowercase, the form MusicBrainz uses, so a tag
+holding an ID in uppercase names the same release. A value that is not a
+MusicBrainz ID names no release: it is never looked up and gives no
+candidate.
+
+A release ID alone is a claim, not evidence. While a Track's release ID names
+a release Orca holds no snapshot of, that candidate is unread:
+`ReleaseCandidate.confidence` is null (`ReleaseCandidate.unread`), it ranks
+above every read candidate, its title falls back to the Release's album title,
+and the Release is in the `needs_review` bucket whatever the threshold. A
+match run reads it, as [the next section](#marking-a-release-as-reviewed)
+describes, and the candidate is then weighed like any other.
+
 #### Marking a release as reviewed
 
 `Runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid)` and
@@ -197,23 +223,26 @@ Track `automatic` or `paired`. It is listed in the `reviewed` bucket with
 `ReleaseMatchItem.from_tags` set and counted in `ReleaseMatchCounts.reviewed`.
 A person's review that holds takes precedence and clears `from_tags`. The
 release-match page and counts decide this per chunk of Releases with one tag
-statement and, for the Releases whose tags name their best candidate, one
-snapshot read and one pairing read.
+statement and, for the releases its Tracks' release IDs name, one snapshot
+read and one pairing read.
 
 A library-scope match run (`Runtime.startLibraryMatching` without a Release or
-Track, Match Again) looks up the release the tags name once its Track walk
-finishes without stopping. It takes, 64 at a time in ID order, each Release
-whose every Track's play file has a release ID tag naming one release that has
-no snapshot younger than the 30-day cache, and looks that release up only when
-it is the Release's best candidate. Each lookup stores a whole snapshot or none.
-A cancelled, offline or busy run stops at the Release it reached; the next run
-selects the remaining Releases again, since nothing records the step as done.
-A run with a `limit` that the walk reaches skips the step. Before its first
-lookup the step counts the Releases it selects; the Job's `total_units` becomes
-the Tracks walked plus that count, `completed_units` advances by one for each
-Release looked up or skipped and reaches the total when the step ends,
-`current_item` is the Release's album artist and title, and `detail` is
-"looking up the releases your tags name" until the step ends.
+Track, Match Again) looks up the releases the tags name once its Track walk
+finishes without stopping. It takes, 64 at a time in release ID order, each
+distinct release a Track's release ID in effect names, from fully, partially
+and mixed tagged Releases alike, unless the Release with that Track dismissed
+it or it has a snapshot younger than the 30-day cache. Each lookup stores a
+whole snapshot or none, through the same gateway, cache and back-off as every
+other request. A Release-scope run (Match Album) reads each unread candidate
+before its best one. A cancelled, offline or busy run stops at the release it
+reached; the next run selects the remaining releases again, since nothing
+records the step as done. A run with a `limit` that the walk reaches skips the
+step. Before its first lookup the step counts the releases it selects; the
+Job's `total_units` becomes the Tracks walked plus that count,
+`completed_units` advances by one for each release looked up or skipped and
+reaches the total when the step ends, `current_item` is the album artist and
+title of the first Release naming it, and `detail` is "looking up the releases
+your tags name" until the step ends.
 
 `Runtime.libraryUnmarkReleaseReviewed(library, release_id)` and `orca-cli
 unmark-release-reviewed` delete the review, held or stale, and change no value:
@@ -633,11 +662,38 @@ or a durable, verified copy of it exists:
 3. Revalidate the file's full identity, rename the stage onto it, and fsync the
    directory.
 
+The stage and the backup get the file's exact permission bits, set after
+creation so the umask does not narrow them; the rewritten file keeps its mode,
+and an undo puts back the original's. Both are created by the writing process,
+so the rewritten file belongs to that process's user and group and does not
+keep the original's extended attributes or ACL entries.
+
 The journal records the stage's identity before step 2 and the file's identity
 after step 3; undo and recovery compare the file against that record. The backup
 is a copy, so it may sit on another disk and uses its space until undone or
 pruned. A disk that fills during the copy fails the write at step 2 with the
 file untouched.
+
+### Read-only files
+
+Orca does not change a file the person has made read-only, although the rename
+that replaces it needs only the folder's permission. A file is read-only when
+no write permission bit is set, or when the process may not write it
+(`access(W_OK)` fails, as for another user's file, an ACL or an immutable
+file). `metadata.executor.requireWritableFile` decides it, and Orca never
+changes the file's permissions.
+
+- `planTagWrite` skips the file with `file_read_only`; the plan's other files
+  are written.
+- `executePlan` checks every file to write after journaling the group and
+  before any filesystem change, and again before each backup copy. A read-only
+  file fails its operation with `error.FileReadOnly`, journaled as
+  `FileReadOnly`; it is not staged, copied or backed up, and the group rolls
+  back as any failed write does. The Job's `TagWriteFailure` reason is
+  `file_read_only`.
+- An undo refuses with `error.FileReadOnly` while a file it would restore is
+  read-only. It changes no file and no journal row, and runs once the file is
+  writable again.
 
 ### Undo
 
@@ -652,7 +708,8 @@ of the group's operations:
   `needs_reconciliation`, else `error.MutationGroupNotCommitted`.
 
 Before a fresh undo changes any file it checks every operation. A write whose
-backup was pruned returns `error.TagWriteBackupPruned`. A file that changed
+backup was pruned returns `error.TagWriteBackupPruned`, and a
+[read-only](#read-only-files) file returns `error.FileReadOnly`. A file that changed
 since the write, or a backup that is missing or no longer has the original's
 identity, records `needs_reconciliation` and returns
 `error.MutationNeedsReconciliation`; both are compared by content hash, so an
@@ -822,9 +879,9 @@ file whose only change is its genres has a `change_count` of 0 in
 - `changed_since_scan`: the file's identity no longer matches the last scan.
   Rescan first.
 - `folder_not_writable`: Orca cannot create files in the file's folder, which
-  the staged copy needs. The file's own permissions do not matter, since the
-  copy replaces it by a rename. C value
-  `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE` (3).
+  the staged copy needs. C value `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE` (3).
+- `file_read_only`: the file is [read-only](#read-only-files). C value
+  `ORCA_TAG_WRITE_SKIP_FILE_READ_ONLY` (4).
 
 The runtime holds at most eight plans awaiting approval. `Runtime.startTagWrite`
 approves one by its ID and digest and executes it as a `mutation` Job; a digest
@@ -843,7 +900,8 @@ A write that fails rolls its group back as recovery does and ends the Job
 `failed`. `Runtime.jobTagWriteFailure(job)` returns a `TagWriteFailure`: the
 file it stopped at, its index in the plan's actions, and a
 `TagWriteFailureReason` (`permission_denied`, `read_only_file_system`,
-`no_space`, `changed_since_plan` or `other`). It returns null while the Job
+`no_space`, `changed_since_plan`, `other` or `file_read_only`, C value
+`ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY` (5)). It returns null while the Job
 runs, after success, or when the write failed before reaching a file;
 `error.NotATagWriteJob` for another kind of Job. The C ABI's
 `orca_job_tag_write_failure` fills an `orca_tag_write_failure` and returns

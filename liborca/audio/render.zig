@@ -20,6 +20,23 @@ pub const ReadyBlock = struct {
     frames: u32,
     epoch: u32,
     entry_serial: u32 = 0,
+    successor: Successor = .{},
+
+    fn serialAt(self: ReadyBlock, frame: u32) u32 {
+        if (self.successor.serial != 0 and frame >= self.successor.frame) return self.successor.serial;
+        return self.entry_serial;
+    }
+
+    fn entryEnd(self: ReadyBlock, frame: u32) u32 {
+        if (self.successor.serial != 0 and frame < self.successor.frame) return self.successor.frame;
+        return self.frames;
+    }
+};
+
+pub const Successor = struct {
+    /// Zero when every frame of the block belongs to one entry.
+    serial: u32 = 0,
+    frame: u32 = 0,
 };
 
 pub fn RenderPipe(comptime capacity: usize) type {
@@ -76,7 +93,7 @@ pub fn RenderPipe(comptime capacity: usize) type {
                 }
                 const block = self.current.?;
                 const block_capacity = pool.samples_per_block / channels;
-                if (block.frames > block_capacity) {
+                if (block.frames > block_capacity or block.successor.frame > block.frames) {
                     _ = self.invalid_blocks.fetchAdd(1, .monotonic);
                     self.returnBlock(block.index);
                     self.current = null;
@@ -87,17 +104,18 @@ pub fn RenderPipe(comptime capacity: usize) type {
                     self.current = null;
                     continue;
                 }
-                if (block.entry_serial != self.published_entry_serial) {
+                const serial = block.serialAt(self.current_frame);
+                if (serial != self.published_entry_serial) {
                     // The audible entry changed *here*, at this output frame.
                     // Position has to re-anchor to it: the epoch deliberately
                     // does not move across a gapless transition, so frames
                     // since the epoch keep counting through the whole queue.
-                    self.published_entry_serial = block.entry_serial;
-                    self.rendered_entry_serial.store(block.entry_serial, .monotonic);
+                    self.published_entry_serial = serial;
+                    self.rendered_entry_serial.store(serial, .monotonic);
                     self.entry_started = true;
                     self.entry_start_offset = @intCast(output_frame);
                 }
-                const available = block.frames - self.current_frame;
+                const available = block.entryEnd(self.current_frame) - self.current_frame;
                 const take: usize = @min(available, requested_frames - output_frame);
                 const source_start = @as(usize, self.current_frame) * channels;
                 const destination_start = output_frame * channels;
@@ -396,4 +414,54 @@ test "the render pipe reports the frame at which a new queue entry became audibl
     }));
     try std.testing.expectEqual(@as(usize, 4), pipe.render(&pool, 1, 3, output[0..4]));
     try std.testing.expect(!pipe.entry_started);
+}
+
+test "a block holding a gapless boundary switches entry at the successor's first frame" {
+    var pool = try buffer.BlockPool.init(std.testing.allocator, 2, 4, 1);
+    defer pool.deinit();
+    var pipe: RenderPipe(2) = .{};
+    const index = pool.acquire().?;
+    @memcpy(pool.samples(index), &[_]f32{ 0.25, 0.25, 0.25, 0.5 });
+    try std.testing.expect(pipe.submit(.{
+        .index = index,
+        .frames = 4,
+        .epoch = 3,
+        .entry_serial = 7,
+        .successor = .{ .serial = 8, .frame = 3 },
+    }));
+
+    var output: [2]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), pipe.render(&pool, 1, 3, &output));
+    try std.testing.expectEqual(@as(u32, 7), pipe.rendered_entry_serial.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), pipe.entry_start_offset);
+
+    try std.testing.expectEqual(@as(usize, 2), pipe.render(&pool, 1, 3, &output));
+    try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.5 }, &output);
+    try std.testing.expect(pipe.entry_started);
+    try std.testing.expectEqual(@as(u32, 1), pipe.entry_start_offset);
+    try std.testing.expectEqual(@as(u32, 8), pipe.rendered_entry_serial.load(.monotonic));
+    pipe.reclaim(&pool);
+    try std.testing.expectEqual(@as(usize, 2), pool.free_len);
+}
+
+test "a block whose successor starts past its end is rejected, not overrun" {
+    var pool = try buffer.BlockPool.init(std.testing.allocator, 1, 4, 1);
+    defer pool.deinit();
+    var pipe: RenderPipe(1) = .{};
+    const index = pool.acquire().?;
+    @memset(pool.samples(index), 1);
+    try std.testing.expect(pipe.submit(.{
+        .index = index,
+        .frames = 2,
+        .epoch = 3,
+        .entry_serial = 7,
+        .successor = .{ .serial = 8, .frame = 3 },
+    }));
+
+    var output: [4]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pipe.render(&pool, 1, 3, &output));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0 }, &output);
+    try std.testing.expectEqual(@as(u64, 1), pipe.invalid_blocks.load(.monotonic));
+    pipe.reclaim(&pool);
+    try std.testing.expectEqual(@as(usize, 1), pool.free_len);
 }

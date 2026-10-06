@@ -63,7 +63,7 @@ pub const TrackView = extern struct {
     feedback: u8,
     has_rating: u8,
     rating: u8,
-    _reserved: [1]u8 = @splat(0),
+    removed: u8 = 0,
     title: StringView,
     artist: StringView,
     album: StringView,
@@ -1449,6 +1449,11 @@ pub const MatchStatsView = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const MatchStatsViewV2 = extern struct {
+    base: MatchStatsView,
+    releases_to_review: u64,
+};
+
 pub const SubmissionStatsView = extern struct {
     files_examined: u64,
     submitted: u64,
@@ -1584,7 +1589,8 @@ pub const ReleaseMatchViewV2 = extern struct {
     placed: u32,
     needs_pairing: u32,
     has_placement: u8,
-    _reserved: [7]u8 = @splat(0),
+    candidate_unread: u8,
+    _reserved: [6]u8 = @splat(0),
 };
 
 pub const ReleaseMatchV2Callback = *const fn (?*anyopaque, *const ReleaseMatchViewV2) callconv(.c) void;
@@ -1896,6 +1902,10 @@ pub export fn orca_runtime_create() callconv(.c) ?*Runtime {
 
 pub export fn orca_runtime_destroy(runtime: ?*Runtime) callconv(.c) void {
     const box = runtimeBox(runtime) orelse return;
+    if (box.foreignThread()) {
+        std.log.warn("orca_runtime_destroy called from a thread other than the runtime's creating thread; the runtime was not destroyed", .{});
+        return;
+    }
     box.runtime.deinit();
     box.threaded.deinit();
     std.heap.c_allocator.destroy(box);
@@ -4899,6 +4909,18 @@ pub export fn orca_job_match_stats(
     return .ok;
 }
 
+pub export fn orca_job_match_stats_v2(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*MatchStatsViewV2,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.jobMatchStats(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = .{ .base = exportMatchStats(stats), .releases_to_review = stats.releases_to_review };
+    return .ok;
+}
+
 pub export fn orca_job_match_release(
     runtime: ?*Runtime,
     job_handle: Handle,
@@ -5195,7 +5217,7 @@ fn releaseMatchView(item: database.ReleaseMatchItem) ReleaseMatchView {
         .candidate_title = stringView(if (best) |candidate| candidate.title else ""),
         .candidate_date = stringView(if (best) |candidate| candidate.date orelse "" else ""),
         .candidate_track_count = if (best) |candidate| candidate.track_count orelse 0 else 0,
-        .confidence = if (best) |candidate| candidate.confidence else 0,
+        .confidence = if (best) |candidate| candidate.confidence orelse 0 else 0,
     };
 }
 
@@ -5225,6 +5247,7 @@ pub export fn orca_library_query_release_matches_v2(
             .placed = if (item.placement) |placement| placement.placed else 0,
             .needs_pairing = if (item.placement) |placement| placement.needs_pairing else 0,
             .has_placement = @intFromBool(item.placement != null),
+            .candidate_unread = @intFromBool(item.best != null and item.best.?.unread()),
         };
         visit(context, &view);
     }
@@ -5261,6 +5284,21 @@ pub export fn orca_library_release_match_counts_v2(
         .base = .{ .confident = counts.confident, .needs_review = counts.needs_review, .unmatched = counts.unmatched },
         .reviewed = counts.reviewed,
     };
+    return .ok;
+}
+
+pub export fn orca_library_release_match_bucket(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    confident_at: f32,
+    output: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const bucket = box.runtime.libraryReleaseMatchBucket(importLibrary(library), release_id, confident_at) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportReleaseMatchBucket(bucket);
     return .ok;
 }
 
@@ -7121,7 +7159,7 @@ pub export fn orca_player_query_queue_tracks(
     ) catch |err| return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const view = trackView(item);
+        const view = if (item.track) |track| trackView(track) else removedTrackView(item.id);
         visit(context, &view);
     }
     return .ok;
@@ -7872,6 +7910,13 @@ fn trackView(item: database.TrackSummary) TrackView {
     };
 }
 
+fn removedTrackView(track_id: i64) TrackView {
+    var view = std.mem.zeroes(TrackView);
+    view.id = track_id;
+    view.removed = 1;
+    return view;
+}
+
 fn trackDetailsView(details: *const core.track_details.TrackDetails) TrackDetailsView {
     const loudness = details.loudness;
     return .{
@@ -8007,6 +8052,7 @@ pub fn exportTagWriteSkipReason(reason: core.runtime.TagWriteSkipReason) u8 {
         .format_not_writable => 1,
         .changed_since_scan => 2,
         .folder_not_writable => 3,
+        .file_read_only => 4,
     };
 }
 
@@ -8017,6 +8063,7 @@ pub fn exportTagWriteFailureReason(reason: core.runtime.TagWriteFailureReason) u
         .no_space => 2,
         .changed_since_plan => 3,
         .other => 4,
+        .file_read_only => 5,
     };
 }
 
@@ -8167,6 +8214,7 @@ pub fn importEqualizerPreset(preset: u8) ?audio.dsp.Preset {
 pub fn exportSampleFormat(format: audio.pcm.SampleFormat) u8 {
     return switch (format) {
         .unsigned_8 => 0,
+        .signed_8 => 6,
         .signed_16 => 1,
         .signed_24 => 2,
         .signed_32 => 3,
@@ -8182,6 +8230,7 @@ pub fn exportSignalReason(reason: audio.signal_path.Reason) u8 {
         .channel_layout_conversion => 2,
         .sample_format_conversion => 3,
         .lossy_source => 4,
+        .path_unknown => 5,
     };
 }
 
@@ -8451,6 +8500,15 @@ fn exportFailure(failure: control.Failure) u8 {
     };
 }
 
+pub fn exportReleaseMatchBucket(bucket: database.ReleaseMatchBucket) u8 {
+    return switch (bucket) {
+        .confident => 0,
+        .needs_review => 1,
+        .unmatched => 2,
+        .reviewed => 3,
+    };
+}
+
 pub fn importReleaseMatchBucket(value: u8) ?database.ReleaseMatchBucket {
     return switch (value) {
         0 => .confident,
@@ -8601,7 +8659,7 @@ fn mapError(err: anyerror) Status {
         error.WorkersRunning,
         error.ScrobblingEnabledElsewhere,
         => .invalid_state,
-        error.AlreadyWatching => .invalid_state,
+        error.AlreadyWatching, error.SqliteLocksNotInstalled => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty, error.FolderEmpty => .invalid_state,
         error.PlaylistIsSmart, error.PlaylistIsManual => .invalid_state,
         error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable => .invalid_state,
@@ -8864,6 +8922,41 @@ test "a call refused for its thread leaves the owner's last error untouched" {
 
 fn playFromAnotherThread(runtime: *Runtime, status: *Status) void {
     status.* = orca_player_play(runtime, .{ .index = 0, .generation = 0 });
+}
+
+test "a destroy from another thread is refused in debug builds and leaves the runtime usable" {
+    if (builtin.mode != .debug) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_open(runtime, null, &library));
+
+    const thread = try std.Thread.spawn(.{}, orca_runtime_destroy, .{runtime});
+    thread.join();
+
+    try std.testing.expectEqualStrings("orca_library_open: path is null", std.mem.span(orca_runtime_last_error(runtime)));
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-foreign-destroy?mode=memory&cache=shared", &library));
+}
+
+test "two runtimes share the SQLite lock replacement and destroying one leaves it for the other" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const first = orca_runtime_create() orelse return error.OutOfMemory;
+    const second = orca_runtime_create() orelse {
+        orca_runtime_destroy(first);
+        return error.OutOfMemory;
+    };
+    defer orca_runtime_destroy(second);
+    try std.testing.expect(database.sqlite_locks.active());
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(first, "file:orca-c-api-first-runtime?mode=memory&cache=shared", &library));
+    try std.testing.expectEqual(Status.ok, orca_library_open(second, "file:orca-c-api-second-runtime?mode=memory&cache=shared", &library));
+
+    orca_runtime_destroy(first);
+
+    try std.testing.expect(database.sqlite_locks.active());
+    try std.testing.expectEqual(Status.ok, orca_library_open(second, "file:orca-c-api-after-first-runtime?mode=memory&cache=shared", &library));
 }
 
 test "a last error longer than its buffer is truncated and stays terminated" {
@@ -9759,7 +9852,7 @@ fn captureSignalPathV2(context: ?*anyopaque, view: *const SignalPathViewV2) call
     destination.* = view.*;
 }
 
-test "a Player with no output reports a signal path with no source, no output and only the processing it applies" {
+test "a Player with no output reports a signal path with no source, no output and an unknown path" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
     var player: Handle = undefined;
@@ -9771,8 +9864,10 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(@as(u8, 0), path.has_source);
     try std.testing.expectEqual(@as(u8, 0), path.has_output);
     try std.testing.expectEqual(@as(u8, 0), path.has_equalizer);
-    try std.testing.expectEqual(@as(u32, 0), path.reason_count);
-    try std.testing.expectEqual(@as(u8, 1), path.bit_perfect_eligible);
+    try std.testing.expectEqual(@as(u32, 1), path.reason_count);
+    try std.testing.expectEqual(exportSignalReason(.path_unknown), path.reasons[0]);
+    try std.testing.expectEqual(@as(u8, 5), path.reasons[0]);
+    try std.testing.expectEqual(@as(u8, 0), path.bit_perfect_eligible);
     try std.testing.expectEqual(@as(usize, 0), path.codec.length);
     try std.testing.expectEqual(exportDeviceKind(.unknown), path.output_kind);
     try std.testing.expectEqual(@as(u8, 0), path.has_device_quantum);
@@ -9791,8 +9886,9 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
     try std.testing.expectEqual(@as(u8, 1), path.has_crossfeed);
     try std.testing.expectEqual(@as(f32, 0.5), path.crossfeed);
-    try std.testing.expectEqual(@as(u32, 1), path.reason_count);
+    try std.testing.expectEqual(@as(u32, 2), path.reason_count);
     try std.testing.expectEqual(exportSignalReason(.sample_processing), path.reasons[0]);
+    try std.testing.expectEqual(exportSignalReason(.path_unknown), path.reasons[1]);
     try std.testing.expectEqual(@as(u8, 0), path.bit_perfect_eligible);
 
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
@@ -11069,6 +11165,10 @@ test "a match started through the C ABI stores proposals that review lists, acce
     try std.testing.expectEqual(exportAcoustIdUse(.no_client_key), stats.acoustid);
     try std.testing.expectEqual(exportCoverArtOutcome(.not_requested), stats.cover_art);
     try std.testing.expectEqual(@as(u8, 0), stats.cancelled);
+    var stats_v2: MatchStatsViewV2 = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats_v2(rig.runtime, matching, &stats_v2));
+    try std.testing.expectEqual(stats, stats_v2.base);
+    try std.testing.expectEqual(@as(u64, 0), stats_v2.releases_to_review);
     try std.testing.expectEqual(Status.ok, orca_library_unidentified_count(rig.runtime, rig.library, &count));
     try std.testing.expectEqual(@as(u64, 0), count);
 

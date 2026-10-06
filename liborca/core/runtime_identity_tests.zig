@@ -170,9 +170,11 @@ const Rig = struct {
         const queued = try self.runtime.playerQueueTracks(player, allocator, 0, 16);
         defer queued.deinit();
         try std.testing.expectEqual(order.len, queued.items.len);
-        for (order, refs[0..order.len], queued.items) |song_index, ref, summary| {
+        for (order, refs[0..order.len], queued.items) |song_index, ref, entry| {
             const song = self.songs[song_index];
+            const summary = entry.track orelse return error.TrackLost;
             try std.testing.expectEqual(self.ids[song_index], ref.track_id);
+            try std.testing.expectEqual(self.ids[song_index], entry.id);
             try std.testing.expectEqual(self.ids[song_index], summary.id);
             try std.testing.expectEqualStrings(song.title, summary.title);
             try std.testing.expect(pathNamesSong(summary.path, song));
@@ -378,4 +380,94 @@ test "a matched album whose release positions are applied over the files' own ke
     try rig.expectIdsKeepSongs(&.{ 3, 4 });
     try rig.expectRecordingState(playlist);
     try rig.expectQueueHoldsSongs(player, &.{ 1, 0 });
+}
+
+fn scanFolderAsRoot(runtime: *OrcaRuntime, library: LibraryHandle, folder: *const std.testing.TmpDir) !i64 {
+    const path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}", .{folder.sub_path});
+    defer allocator.free(path);
+    const binding = try runtime.libraryAddRoot(library, io, path);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    return binding.root_id;
+}
+
+fn trackIdOfSong(runtime: *OrcaRuntime, library: LibraryHandle, song: Song) !i64 {
+    const ids = try runtime_tests.allTrackIds(runtime, library);
+    defer allocator.free(ids);
+    for (ids) |id| {
+        const details = (try runtime.libraryTrackDetails(library, id)) orelse continue;
+        defer details.deinit();
+        if (pathNamesSong(details.path orelse continue, song)) return id;
+    }
+    return error.SongHasNoTrack;
+}
+
+fn expectQueueRows(page: runtime_module.QueueTrackPage, first_position: u32, songs: []const ?Song, ids: []const i64) !void {
+    try std.testing.expectEqual(songs.len, page.items.len);
+    for (page.items, songs, ids, 0..) |row, song, id, index| {
+        try std.testing.expectEqual(first_position + @as(u32, @intCast(index)), row.position);
+        try std.testing.expectEqual(id, row.id);
+        if (song) |expected| {
+            const summary = row.track orelse return error.TrackLost;
+            try std.testing.expectEqual(id, summary.id);
+            try std.testing.expectEqualStrings(expected.title, summary.title);
+        } else try std.testing.expect(row.track == null);
+    }
+}
+
+test "queue pages over an entry whose Track was removed from the Library keep every row at its queue position" {
+    const kept = [_]Song{
+        northern_sky,
+        pink_moon,
+        .{ .file_name = "d.mp3", .title = "One of These Things First" },
+        .{ .file_name = "e.mp3", .title = "Fly" },
+    };
+    const removed: Song = hazey_jane;
+
+    var backend: audio.output.TestBackend = .{ .allocator = allocator };
+    defer backend.deinit();
+    var runtime: OrcaRuntime = .init(allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    var kept_folder = std.testing.tmpDir(.{});
+    defer kept_folder.cleanup();
+    var removed_folder = std.testing.tmpDir(.{});
+    defer removed_folder.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try runtime_tests.tempDatabasePath(&data);
+    defer allocator.free(database_path);
+
+    for (kept, [_]u32{ 1, 2, 4, 5 }) |song, track_number| try writeSongMp3(kept_folder.dir, song, track_number, 0);
+    try writeSongMp3(removed_folder.dir, removed, 3, 0);
+    const library = try runtime.openLibrary(io, database_path);
+    _ = try scanFolderAsRoot(&runtime, library, &kept_folder);
+    const removed_root = try scanFolderAsRoot(&runtime, library, &removed_folder);
+
+    const queued = [_]Song{ kept[0], kept[1], removed, kept[2], kept[3] };
+    var ids: [queued.len]i64 = undefined;
+    for (queued, &ids) |song, *id| id.* = try trackIdOfSong(&runtime, library, song);
+    const player = try runtime.createPlayer();
+    try runtime.playerBindLibrary(player, library, io);
+    try runtime.playerEnqueueTracks(player, library, io, &ids);
+
+    const forgotten = try runtime.libraryRemoveRoot(library, removed_root);
+    try std.testing.expectEqual(@as(u64, 1), forgotten.tracks_removed);
+    try std.testing.expect(try runtime.libraryTrackDetails(library, ids[2]) == null);
+    try std.testing.expectEqual(@as(u32, queued.len), (try runtime.playerStatus(player)).queue_length);
+
+    const whole = try runtime.playerQueueTracks(player, allocator, 0, 5);
+    defer whole.deinit();
+    try expectQueueRows(whole, 0, &.{ kept[0], kept[1], null, kept[2], kept[3] }, &ids);
+
+    const middle = try runtime.playerQueueTracks(player, allocator, 2, 2);
+    defer middle.deinit();
+    try expectQueueRows(middle, 2, &.{ null, kept[2] }, ids[2..4]);
+
+    const tail = try runtime.playerQueueTracks(player, allocator, 3, 5);
+    defer tail.deinit();
+    try expectQueueRows(tail, 3, &.{ kept[2], kept[3] }, ids[3..5]);
+
+    const past_end = try runtime.playerQueueTracks(player, allocator, 5, 5);
+    defer past_end.deinit();
+    try std.testing.expectEqual(@as(usize, 0), past_end.items.len);
 }

@@ -93,6 +93,7 @@ fn skipClause(reason: liborca.TagWriteSkipReason, count: usize) []const u8 {
         .format_not_writable => "not a format Orca writes yet",
         .changed_since_scan => "changed since the last scan",
         .folder_not_writable => if (count == 1) "Orca can't create files in its folder" else "Orca can't create files in their folders",
+        .file_read_only => "read-only",
     };
 }
 
@@ -420,6 +421,8 @@ pub fn open(self: *App, ids: []const i64) void {
             "The files' own tags disagree with Orca's matches; edit a field to lock your choice"
         else if (plan.skipped.len != 0 and allSkippedFor(plan.skipped, .folder_not_writable))
             "Orca can't create files in those folders; check their permissions"
+        else if (plan.skipped.len != 0 and allSkippedFor(plan.skipped, .file_read_only))
+            "Those files are read-only; Orca leaves read-only files as they are"
         else if (plan.skipped.len != 0)
             "Those files can't be written yet"
         else

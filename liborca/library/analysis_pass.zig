@@ -44,7 +44,8 @@ pub const Result = struct {
     /// Rows this pass declined: not reachable, not audio, or an identity the
     /// Library's own record no longer matches. Not failures — `locations.state`
     /// models absence and a scan repairs a stale identity — so none of them
-    /// files a health issue.
+    /// files a health issue, except a channel layout analysis does not take,
+    /// which raises `missing_analysis`.
     unsupported: u64 = 0,
     /// Rows whose file opened and then would not decode.
     errors: u64 = 0,
@@ -97,6 +98,11 @@ const Measurement = struct {
         /// backfill deliberately cannot raise or clear it, because a
         /// header-only probe has not looked at the audio.
         unreadable: []const u8,
+        /// Decodable, in a channel layout playback and loudness analysis do
+        /// not take yet. Declined like `skipped`, but it raises
+        /// `missing_analysis` naming the layout, so Health explains why the
+        /// file has no loudness.
+        unsupported_channels,
         /// Not reachable, not audio, or the Library's recorded identity for
         /// the file is not the file's identity any more. Counted and passed
         /// over with no health issue: filing a defect per file when a drive
@@ -110,7 +116,7 @@ const Measurement = struct {
                     allocator.free(value.fingerprint_bytes);
                     if (value.chromaprint_bytes) |bytes| allocator.free(bytes);
                 },
-                .unreadable, .skipped => {},
+                .unreadable, .unsupported_channels, .skipped => {},
             }
         }
     };
@@ -374,6 +380,7 @@ pub const LibraryAnalysis = struct {
                 error.FileNotFound,
                 error.AccessDenied,
                 => return .skipped,
+                error.UnsupportedChannelCount => return .unsupported_channels,
                 // Opened, and would not yield its audio.
                 else => return .{ .unreadable = @errorName(err) },
             };
@@ -501,6 +508,13 @@ pub const LibraryAnalysis = struct {
                 for ([_]database.HealthIssueKind{ .clipping, .excessive_silence, .missing_analysis }) |kind|
                     try self.health_issues.clearLocked(measurement.file_id, kind);
                 result.errors += 1;
+            },
+            .unsupported_channels => {
+                try self.analysis_cache.deleteFileLocked(measurement.file_id);
+                try self.health_issues.recordLocked(measurement.file_id, analysis.health.unsupportedChannels());
+                for ([_]database.HealthIssueKind{ .corrupt_audio, .clipping, .excessive_silence }) |kind|
+                    try self.health_issues.clearLocked(measurement.file_id, kind);
+                result.unsupported += 1;
             },
             .skipped => result.unsupported += 1,
         };
@@ -1344,18 +1358,24 @@ fn sineWav(amplitude: f32) ![]u8 {
     return toneWav(1, amplitude, amplitude);
 }
 
-/// `seconds` of 16-bit mono PCM at 48 kHz: a 1 kHz sine at `edge` times full
-/// scale, and at `middle` times full scale for the middle third.
 fn toneWav(seconds: u32, edge: f32, middle: f32) ![]u8 {
+    return toneWavChannels(seconds, 1, edge, middle);
+}
+
+/// `seconds` of 16-bit PCM at 48 kHz with the same sample in each of
+/// `channels`: a 1 kHz sine at `edge` times full scale, and at `middle` times
+/// full scale for the middle third.
+fn toneWavChannels(seconds: u32, channels: u16, edge: f32, middle: f32) ![]u8 {
     const rate = 48_000;
     const frames = rate * seconds;
+    const block_align: u32 = 2 * @as(u32, channels);
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(testing.allocator);
-    const data_size: u32 = frames * 2;
+    const data_size: u32 = frames * block_align;
     try bytes.appendSlice(testing.allocator, "RIFF");
     try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, 36 + data_size)));
     try bytes.appendSlice(testing.allocator, "WAVEfmt ");
-    for ([_]u32{ 16, 0x0001_0001, rate, rate * 2, 0x0010_0002 }) |word|
+    for ([_]u32{ 16, 0x0001 | @as(u32, channels) << 16, rate, rate * block_align, block_align | 16 << 16 }) |word|
         try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, word)));
     try bytes.appendSlice(testing.allocator, "data");
     try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, data_size)));
@@ -1363,7 +1383,8 @@ fn toneWav(seconds: u32, edge: f32, middle: f32) ![]u8 {
         const amplitude = if (frame >= frames / 3 and frame < 2 * frames / 3) middle else edge;
         const phase = 2 * std.math.pi * 1000 * @as(f32, @floatFromInt(frame % rate)) / rate;
         const sample = std.math.clamp(amplitude * @sin(phase) * 32768, -32768, 32767);
-        try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(i16, @intFromFloat(sample))));
+        for (0..channels) |_|
+            try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(i16, @intFromFloat(sample))));
     }
     return bytes.toOwnedSlice(testing.allocator);
 }
@@ -1445,6 +1466,129 @@ test "a silent file is reported as silent and too quiet to measure" {
     );
 }
 
+test "a six-channel file is declined with missing analysis naming its channels, never corrupt, while mono and stereo are measured" {
+    var fixture = try Fixture.init("file:orca-analysis-six-channels?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const six = try toneWavChannels(1, 6, 0.5, 0.5);
+    defer testing.allocator.free(six);
+    try fixture.writeBytes("six.wav", six);
+    const six_id = try fixture.record("six.wav");
+    const mono = try toneWavChannels(1, 1, 0.5, 0.5);
+    defer testing.allocator.free(mono);
+    try fixture.writeBytes("mono.wav", mono);
+    const mono_id = try fixture.record("mono.wav");
+    const stereo = try toneWavChannels(1, 2, 0.5, 0.5);
+    defer testing.allocator.free(stereo);
+    try fixture.writeBytes("stereo.wav", stereo);
+    const stereo_id = try fixture.record("stereo.wav");
+
+    var pass = fixture.pass();
+    for (0..2) |run| {
+        const result = try pass.run();
+        try testing.expectEqual(@as(u64, 1), result.unsupported);
+        try testing.expectEqual(@as(u64, 0), result.errors);
+        try testing.expectEqual(@as(u64, if (run == 0) 2 else 0), result.changed);
+
+        var issues = try fixture.library.health_issues.page(testing.allocator, 8, 0);
+        defer issues.deinit();
+        try testing.expectEqual(@as(usize, 1), issues.items.len);
+        try testing.expectEqual(six_id, issues.items[0].file_id);
+        try testing.expectEqual(database.HealthIssueKind.missing_analysis, issues.items[0].kind);
+        try testing.expectEqualStrings(analysis.health.unsupportedChannels().details, issues.items[0].details);
+    }
+    for ([_]i64{ six_id, mono_id, stereo_id }, [_]i64{ 0, 1, 1 }) |file_id, expected| {
+        const results = try std.fmt.allocPrintSentinel(
+            testing.allocator,
+            "SELECT count(*) > 0 FROM analysis_results WHERE file_id = {d};",
+            .{file_id},
+            0,
+        );
+        defer testing.allocator.free(results);
+        try testing.expectEqual(expected, try scalar(fixture.library.database, results));
+    }
+}
+
+const MeasuredMembers = struct {
+    measured: [2]?bool = .{ null, null },
+
+    pub fn visit(self: *MeasuredMembers, member: database.ReleaseMember) !void {
+        self.measured[@intCast(member.track_id - 901)] = member.result.len > 0;
+    }
+};
+
+test "results a Library already stored for a six-channel file feed no album gain and are discarded by the next pass, once" {
+    var fixture = try Fixture.init("file:orca-analysis-six-channels-stored?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const stereo = try toneWavChannels(1, 2, 0.5, 0.5);
+    defer testing.allocator.free(stereo);
+    try fixture.writeBytes("stereo.wav", stereo);
+    const stereo_id = try fixture.record("stereo.wav");
+    var pass = fixture.pass();
+    pass.parameters = .{};
+    try testing.expectEqual(@as(u64, 1), (try pass.run()).changed);
+
+    const six = try toneWavChannels(1, 6, 0.5, 0.5);
+    defer testing.allocator.free(six);
+    try fixture.writeBytes("six.wav", six);
+    const six_id = try fixture.record("six.wav");
+    const six_path = try fixture.path("six.wav");
+    defer testing.allocator.free(six_path);
+    const six_digest = try storage.content_hash.fromPath(testing.io, six_path);
+    const seed = try std.fmt.allocPrintSentinel(testing.allocator,
+        \\UPDATE files SET channels = 6, content_hash = X'{[digest]s}', content_hash_algorithm = 1
+        \\    WHERE id = {[six]d};
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version,
+        \\    parameter_hash, source_identity, result)
+        \\SELECT {[six]d}, kind, algorithm_id, algorithm_version, parameter_hash, X'{[digest]s}', result
+        \\    FROM analysis_results WHERE file_id = {[stereo]d};
+        \\INSERT INTO releases(id, title) VALUES (900, 'Album');
+        \\INSERT INTO tracks(id, release_id, title, track_number, preferred_file_id)
+        \\    VALUES (901, 900, 'Stereo', 1, {[stereo]d}), (902, 900, 'Six', 2, {[six]d});
+    , .{ .digest = std.fmt.bytesToHex(six_digest, .lower), .six = six_id, .stereo = stereo_id }, 0);
+    defer testing.allocator.free(seed);
+    try fixture.library.database.exec(seed);
+    const six_results = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "SELECT count(*) FROM analysis_results WHERE file_id = {d};",
+        .{six_id},
+        0,
+    );
+    defer testing.allocator.free(six_results);
+    const six_loudness = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "SELECT count(*) FROM file_loudness WHERE file_id = {d};",
+        .{six_id},
+        0,
+    );
+    defer testing.allocator.free(six_loudness);
+    try testing.expect(try scalar(fixture.library.database, six_results) > 0);
+    try testing.expectEqual(@as(i64, 1), try scalar(fixture.library.database, six_loudness));
+
+    var members: MeasuredMembers = .{};
+    const selector = analysis.service.diagnosticsSelector(.{});
+    try testing.expectEqual(
+        database.ReleaseVisit.visited,
+        try fixture.library.analysis_cache.visitReleaseMembers(901, &selector, &members),
+    );
+    try testing.expectEqualSlices(?bool, &.{ true, false }, &members.measured);
+    try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(pass.selectors()));
+
+    for (0..2) |_| {
+        const result = try pass.run();
+        try testing.expectEqual(@as(u64, 1), result.unsupported);
+        try testing.expectEqual(@as(u64, 0), result.changed + result.unchanged + result.errors);
+        try testing.expectEqual(@as(i64, 0), try scalar(fixture.library.database, six_results));
+        try testing.expectEqual(@as(i64, 0), try scalar(fixture.library.database, six_loudness));
+        try testing.expectEqual(@as(i64, 1), try scalar(
+            fixture.library.database,
+            "SELECT count(*) FROM file_loudness;",
+        ));
+        const kinds = try issueKinds(&fixture.library, six_id);
+        defer testing.allocator.free(kinds);
+        try testing.expectEqualSlices(database.HealthIssueKind, &.{.missing_analysis}, kinds);
+    }
+}
+
 test "a file that turns corrupt keeps only corrupt audio" {
     var fixture = try Fixture.init("file:orca-analysis-turns-corrupt?mode=memory&cache=shared");
     defer fixture.deinit();
@@ -1461,6 +1605,79 @@ test "a file that turns corrupt keeps only corrupt audio" {
     const kinds = try issueKinds(&fixture.library, file_id);
     defer testing.allocator.free(kinds);
     try testing.expectEqualSlices(database.HealthIssueKind, &.{.corrupt_audio}, kinds);
+}
+
+fn readAudioFixture(name: []const u8) ![]u8 {
+    const source = try std.fmt.allocPrint(testing.allocator, "fixtures/audio/{s}", .{name});
+    defer testing.allocator.free(source);
+    return std.Io.Dir.cwd().readFileAlloc(testing.io, source, testing.allocator, .limited(8 * 1024 * 1024));
+}
+
+fn expectCorruptAudio(library: *database.LibraryDatabase, file_id: i64, details: []const u8) !void {
+    var issues = try library.health_issues.page(testing.allocator, 16, 0);
+    defer issues.deinit();
+    for (issues.items) |issue| {
+        if (issue.file_id != file_id) continue;
+        try testing.expectEqual(database.HealthIssueKind.corrupt_audio, issue.kind);
+        try testing.expectEqualStrings(details, issue.details);
+        return;
+    }
+    return error.TestExpectedCorruptAudio;
+}
+
+test "malformed input that still plays is reported as corrupt audio naming the damage, on every pass" {
+    var fixture = try Fixture.init("file:orca-analysis-malformed?mode=memory&cache=shared");
+    defer fixture.deinit();
+
+    const partial_frame = try sineWav(0.5);
+    defer testing.allocator.free(partial_frame);
+    std.mem.writeInt(u32, partial_frame[40..44], std.mem.readInt(u32, partial_frame[40..44], .little) - 1, .little);
+    try fixture.writeBytes("partial-frame.wav", partial_frame);
+
+    const truncated_aiff = try readAudioFixture("tagged-reference.aiff");
+    defer testing.allocator.free(truncated_aiff);
+    const comm = std.mem.indexOf(u8, truncated_aiff, "COMM").?;
+    const comm_frames = truncated_aiff[comm + 10 ..][0..4];
+    std.mem.writeInt(u32, comm_frames, std.mem.readInt(u32, comm_frames, .big) + 1_000, .big);
+    try fixture.writeBytes("truncated.aiff", truncated_aiff);
+
+    const no_sound = "FORM\x00\x00\x00\x1eAIFFCOMM\x00\x00\x00\x12\x00\x01\x00\x00\x00\x0a\x00\x10" ++
+        "\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00";
+    try fixture.writeBytes("no-sound.aiff", no_sound);
+
+    const md5_mismatch = try readAudioFixture("tagged-reference.flac");
+    defer testing.allocator.free(md5_mismatch);
+    md5_mismatch[26] ^= 0xff;
+    try fixture.writeBytes("md5-mismatch.flac", md5_mismatch);
+
+    const short_final_block = try readAudioFixture("tagged-reference.flac");
+    defer testing.allocator.free(short_final_block);
+    try testing.expect(short_final_block[25] != 0xff);
+    short_final_block[25] += 1;
+    try fixture.writeBytes("short-final-block.flac", short_final_block);
+
+    const crc_mismatch = try readAudioFixture("tagged-reference.flac");
+    defer testing.allocator.free(crc_mismatch);
+    crc_mismatch[crc_mismatch.len - 1] ^= 0xff;
+    try fixture.writeBytes("crc-mismatch.flac", crc_mismatch);
+
+    const cases = [_]struct { name: []const u8, details: []const u8 }{
+        .{ .name = "partial-frame.wav", .details = "PartialWavFrame" },
+        .{ .name = "truncated.aiff", .details = "TruncatedAiff" },
+        .{ .name = "no-sound.aiff", .details = "MissingSoundChunk" },
+        .{ .name = "md5-mismatch.flac", .details = "FlacMd5Mismatch" },
+        .{ .name = "short-final-block.flac", .details = "TruncatedFlac" },
+        .{ .name = "crc-mismatch.flac", .details = "FlacStreamErrors" },
+    };
+    var file_ids: [cases.len]i64 = undefined;
+    for (cases, &file_ids) |case, *file_id| file_id.* = try fixture.record(case.name);
+
+    var pass = fixture.pass();
+    for (0..2) |_| {
+        const result = try pass.run();
+        try testing.expectEqual(@as(u64, cases.len), result.errors);
+        for (cases, file_ids) |case, file_id| try expectCorruptAudio(&fixture.library, file_id, case.details);
+    }
 }
 
 test "analysing one file measures it again even when it owes nothing and settles its health" {

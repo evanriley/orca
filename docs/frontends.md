@@ -27,14 +27,44 @@ each function. Static and shared libraries install with it.
   pools take no lock, so a GUI timer racing `orca_runtime_destroy` is a
   use-after-free. The exceptions are the wake and credential callbacks, which
   liborca calls from its own threads.
-- On Linux, liborca switches SQLite to OFD locks for the whole process on its
-  first database open; see [database.md](database.md#concurrency). A host opens
-  no SQLite connection of its own before that.
+- A host embedding liborca follows the process rules in
+  [Embedding](#embedding).
 - `orca_player_play` is refused unless the Player has a loaded source or a
   non-empty queue and an attached Zone: a transport that reports playing while
   nothing renders is a defect, not a state.
 - Events (`orca_runtime_pump`, `orca_runtime_poll_event`) are hints and
   correlations; authoritative consumers read snapshots.
+
+### Embedding
+
+These rules hold for every host, through the C ABI or the Zig API.
+
+- **SQLite locks.** On Linux, liborca replaces the `fcntl` system call of
+  SQLite's `unix` VFS so every connection in the process takes open file
+  description (OFD) locks; see
+  [database.md](database.md#process-wide-lock-replacement). The first
+  `orca_runtime_create` (Zig: `Runtime.init`) installs it. The install runs once
+  per process, is thread-safe, and later runtimes and Library opens reuse it.
+  Destroying a runtime never removes it, so a second runtime, created before or
+  after, keeps it.
+- **Install before any SQLite connection.** The host creates its first runtime
+  before it opens any SQLite connection of its own. If a connection is open
+  when the install runs, liborca leaves `fcntl` unchanged for the life of the
+  process, logs a warning, and every Library open fails with
+  `ORCA_STATUS_INVALID_STATE` (Zig: `error.SqliteLocksNotInstalled`). The same
+  failure follows when the host or another library replaces SQLite's `fcntl`
+  afterwards. The host's own connections opened after the install take OFD
+  locks too; in rollback-journal mode they can see spurious `SQLITE_BUSY`.
+- **Destroy on the creating thread.** `orca_runtime_destroy` follows the
+  threading contract like every other call. A Debug build refuses a destroy
+  from another thread: it logs a warning and returns, and the runtime stays
+  alive and usable on its creating thread. Release builds do not check.
+- **AcoustID application key per job.** A matching or submission job resolves
+  its application key once, when its AcoustID work begins: the credential
+  store's `ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY` when the store holds a valid one,
+  else the key set with `orca_runtime_set_acoustid_client_key` when the job was
+  started or queued. Every request of that job uses it. A key set, or a stored
+  key changed, while a job runs applies from the next job.
 
 ### Errors
 
@@ -287,8 +317,11 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   entry, never the decode cursor), `orca_player_queue_jump`,
   `orca_player_queue_insert_next`, `orca_player_queue_remove`,
   `orca_player_queue_move`, `orca_player_query_queue_tracks`,
-  `orca_player_query_queue_history`, `orca_player_save_queue_as_playlist`. The
-  entry playing and the one lined up after it cannot be removed or moved
+  `orca_player_query_queue_history`, `orca_player_save_queue_as_playlist`.
+  `orca_player_query_queue_tracks` calls back once per queue position from
+  `offset`; an entry whose Track was removed from the Library sets
+  `orca_track_view.removed` and carries only its `id`. The entry playing and
+  the one lined up after it cannot be removed or moved
   (`ORCA_STATUS_INVALID_STATE`). A Track on an unavailable root fails with
   `ORCA_FAILURE_TRACK_FOLDER_UNAVAILABLE`.
 - Saved playback: `orca_player_restore_state`, `orca_player_save_state`,
@@ -300,7 +333,13 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_player_set_replay_gain_preamp`, `orca_player_set_replay_gain_fallback`,
   `orca_player_replay_gain_settings`, `orca_player_set_peak_protection`,
   `orca_player_set_stop_after_current`, `orca_player_signal_path_v2`. The
-  parametric equalizer and the ten-band one exclude each other. The
+  parametric equalizer and the ten-band one exclude each other. A signal path
+  is `bit_perfect_eligible` only when it is confirmed;
+  `ORCA_SIGNAL_REASON_PATH_UNKNOWN` marks one with no declared source format,
+  no open output, or a device that has not reported its rate or format, and a
+  frontend presents it as unconfirmed, never as bit-perfect.
+  `ORCA_SIGNAL_REASON_SAMPLE_PROCESSING` can stand while every setting reads
+  neutral, until audio processed under earlier settings has played. The
   `orca_parametric_equalizer_response`, `orca_parametric_equalizer_parse_apo`
   and `orca_parametric_equalizer_write_apo` calls take no runtime and work from
   any thread; the `ORCA_PARAMETRIC_*` defines state the ranges.
@@ -319,17 +358,22 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   scrobbles; a second is `ORCA_STATUS_INVALID_STATE`. See [Listening from a
   host](#listening-from-a-host).
 - Matching: `orca_library_start_match`, `orca_library_start_cover_art_fetch`,
-  `orca_job_match_stats`, `orca_job_match_release`,
+  `orca_job_match_stats`, `orca_job_match_stats_v2`, `orca_job_match_release`,
   `orca_library_query_match_review`, `orca_library_query_match_proposals`,
   `orca_library_accept_match`, `orca_library_dismiss_match`,
   `orca_library_accept_confident_matches`, `orca_library_apply_release`,
   `orca_library_apply_matched_release_fields`,
   `orca_library_query_release_matches_v2`,
-  `orca_library_release_match_counts_v2`, `orca_library_release_alignment`,
+  `orca_library_release_match_counts_v2`,
+  `orca_library_release_match_bucket`, `orca_library_release_alignment`,
   `orca_library_pair_release_track`, `orca_library_unpair_release_track`,
   `orca_library_mark_release_reviewed`, `orca_library_query_correction_groups`,
   `orca_library_track_verification`. A second match job while one runs is
-  `ORCA_STATUS_BUSY`. Without a tracklist snapshot, an already paired release
+  `ORCA_STATUS_BUSY`. `orca_release_match_view_v2.candidate_unread` is 1 while
+  the best candidate is a release a Track's release ID names and Orca has not
+  read; the item is then in `ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW` with
+  `confidence` 0, which is no measure, and `candidate_title` is the
+  Release's title. Without a tracklist snapshot, an already paired release
   track or a Release not wholly placed the calls return
   `ORCA_STATUS_INVALID_STATE`; a Release past 512 Tracks is
   `ORCA_STATUS_UNSUPPORTED`; an unknown id is `ORCA_STATUS_NOT_FOUND`; an unpair
@@ -354,6 +398,14 @@ GTK main thread, from a signal handler or the tick, which pumps the runtime when
 liborca's waker writes the app's eventfd or the `nextPumpTimeoutMs` timeout
 expires. The application id is `org.orca_music.Orca`. The appearance is dark
 only, forced through libadwaita's style manager over `apps/linux/style.css`.
+
+The signal path views word liborca's verdict and never make their own. A path
+whose only reason is `path_unknown` reads Unconfirmed, not Bit-perfect.
+Processing that stands after every setting returned to neutral reads as
+processed audio still playing. While a view is on screen and playback runs, it
+re-reads the path every 250 ms until that processing clears. It also re-reads
+it up to eight times after an output starts or the popover opens while the
+device has not reported its rate or format.
 
 Run it from the tree:
 
@@ -391,6 +443,14 @@ lives in this list; liborca knows only the open database. With no list yet, the
 first launch lists `$XDG_DATA_HOME/orca/library.db` as Main and creates its
 folder. When the active library's file is gone, the launch opens the first
 listed library that still exists, and Settings names the one it could not open.
+
+When no library is open, because the active one is corrupt, made by a newer
+Orca or unreadable, every page except Settings shows the failure in place of
+its content: the library's name, the reason, and Choose Library… and Create
+Library…, which open the Libraries dialog and the new-library file dialog.
+Settings stays reachable and its Libraries card repeats the failure. Add Music
+Folder, Scan Library and the palette's library commands are unavailable until
+a library opens.
 
 `ORCA_LIBRARY` overrides the list for one run: its library is active and listed
 as from `ORCA_LIBRARY`, but it is never saved and the saved `active` stays as it

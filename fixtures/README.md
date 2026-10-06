@@ -140,6 +140,20 @@ chooses mid-side stereo and a decoder that skips the low-bit restoration is
 wrong on every sample (see [FLAC](../docs/architecture.md#flac)). The decoder
 test regenerates the expected samples from the same sequence.
 
+`audio/hires-reference.flac` is 4,096 frames of 24-bit stereo at 192 kHz built
+from the deterministic integer sequence of `hiresProbeSample` in
+`liborca/codec/flac.zig`: a left channel stepping by 40,961 through the whole
+24-bit range and a right channel taken from a multiplicative hash, so every bit
+of a sample varies. The decoder test and the playback test in
+`liborca/core/runtime_tests.zig` regenerate the expected samples from the same
+sequence. The sequence was written as raw signed 24-bit little-endian PCM and
+encoded with flac 1.5.0:
+
+```sh
+flac --force-raw-format --endian=little --sign=signed --channels=2 --bps=24 \
+  --sample-rate=192000 --no-padding -o hires-reference.flac hires-reference.raw
+```
+
 `audio/lyrics-synced.flac` is `audio/generated-reference.flac` retagged with
 synced LRC in a `LYRICS` comment:
 

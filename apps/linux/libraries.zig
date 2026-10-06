@@ -13,6 +13,7 @@ const app = @import("app.zig");
 const settings = @import("settings.zig");
 const preferences = @import("preferences.zig");
 const window = @import("window.zig");
+const page_ui = @import("page.zig");
 const transport = @import("transport.zig");
 const jobs = @import("jobs.zig");
 const watching = @import("watching.zig");
@@ -72,6 +73,10 @@ pub const State = struct {
     switch_target: usize = 0,
     dialog: ?*adw.Dialog = null,
     list: ?*gtk.ListBox = null,
+    content: ?*gtk.Stack = null,
+    failure: ?*adw.StatusPage = null,
+    choose_button: ?*gtk.Widget = null,
+    create_button: ?*gtk.Widget = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.switch_source != 0) _ = gtk.g_source_remove(self.switch_source);
@@ -293,6 +298,7 @@ fn fail(self: *App, index: usize, failure: Failure) void {
     }
     preferences.rebuildPage(self);
     refreshDialog(self);
+    showFailure(self);
 }
 
 fn switchTo(self: *App, index: usize, create: bool) bool {
@@ -417,6 +423,7 @@ fn rebuild(self: *App) void {
     first_run.startIfEmpty(self);
     preferences.rebuildPage(self);
     refreshDialog(self);
+    showFailure(self);
     settings.save(self);
     self.requestTick();
     toastNamed(self, "Switched to {s}", activeName(self));
@@ -578,6 +585,7 @@ fn changed(self: *App) void {
     settings.save(self);
     preferences.rebuildPage(self);
     refreshDialog(self);
+    showFailure(self);
 }
 
 const RenameRequest = struct {
@@ -697,9 +705,15 @@ fn remove(self: *App, index: usize) void {
     entry.free(self.allocator);
 }
 
+fn refuseWhenFull(self: *App) bool {
+    if (self.libraries.entries.items.len < max_entries) return false;
+    self.toast("Orca keeps at most 16 libraries");
+    return true;
+}
+
 fn addClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    if (self.libraries.entries.items.len >= max_entries) return self.toast("Orca keeps at most 16 libraries");
+    if (refuseWhenFull(self)) return;
     const dialog = adw.adw_alert_dialog_new("Add Library", "Open a library you already have, or create a new, empty one.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
@@ -808,4 +822,89 @@ fn newChosen(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque
     entry.free(self.allocator);
     preferences.rebuildPage(self);
     refreshDialog(self);
+    showFailure(self);
+}
+
+pub fn wrapPages(self: *App, pages: *gtk.Widget) *gtk.Widget {
+    const content = gtk.gtk_stack_new();
+    const stack = gtk.cast(gtk.Stack, content);
+    gtk.gtk_stack_set_transition_type(stack, gtk.STACK_TRANSITION_CROSSFADE);
+    gtk.gtk_stack_set_hhomogeneous(stack, gtk.false_);
+    gtk.gtk_stack_set_vhomogeneous(stack, gtk.false_);
+    _ = gtk.gtk_stack_add_named(stack, pages, "pages");
+    _ = gtk.gtk_stack_add_named(stack, buildFailure(self), "failed");
+    page_ui.showChild(stack, "pages");
+    self.libraries.content = stack;
+    return content;
+}
+
+fn buildFailure(self: *App) *gtk.Widget {
+    const page = adw.adw_status_page_new();
+    const status = gtk.cast(adw.StatusPage, page);
+    adw.adw_status_page_set_icon_name(status, "orca-alert-symbolic");
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_set_halign(actions, gtk.ALIGN_CENTER);
+    const choose = gtk.gtk_button_new_with_label("Choose Library…");
+    gtk.gtk_widget_add_css_class(choose, "pill");
+    _ = gtk.signalConnect(choose, "clicked", gtk.callback(chooseClicked), self);
+    const create = gtk.gtk_button_new_with_label("Create Library…");
+    gtk.gtk_widget_add_css_class(create, "pill");
+    _ = gtk.signalConnect(create, "clicked", gtk.callback(createClicked), self);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), choose);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), create);
+    adw.adw_status_page_set_child(status, actions);
+    self.libraries.failure = status;
+    self.libraries.choose_button = choose;
+    self.libraries.create_button = create;
+    return page;
+}
+
+fn chooseClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    manage(state(data));
+}
+
+fn createClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (refuseWhenFull(self)) return;
+    chooseNew(self);
+}
+
+pub fn showFailure(self: *App) void {
+    const failed = self.library == null;
+    enableLibraryActions(self, !failed);
+    const content = self.libraries.content orelse return;
+    const shown = failed and self.current_page != .settings;
+    if (shown) describeFailure(self);
+    page_ui.showChild(content, if (shown) "failed" else "pages");
+}
+
+fn enableLibraryActions(self: *App, enabled: bool) void {
+    const application = self.application orelse return;
+    for ([_][*:0]const u8{ "add-folder", "rescan" }) |name| {
+        const action = gtk.g_action_map_lookup_action(gtk.cast(gtk.GActionMap, application), name) orelse continue;
+        gtk.g_simple_action_set_enabled(gtk.cast(gtk.GSimpleAction, action), if (enabled) gtk.true_ else gtk.false_);
+    }
+}
+
+fn describeFailure(self: *App) void {
+    const status = self.libraries.failure orelse return;
+    const title: [:0]const u8, const detail: [:0]const u8 = if (self.libraries.problem) |current|
+        .{ current.title, current.detail }
+    else
+        .{ "No library is open", "Choose a library, or create a new one." };
+    adw.adw_status_page_set_title(status, title.ptr);
+    const escaped = gtk.g_markup_escape_text(detail.ptr, @intCast(detail.len));
+    defer gtk.g_free(escaped);
+    adw.adw_status_page_set_description(status, escaped);
+    const others = self.libraries.entries.items.len > 1;
+    suggest(self.libraries.choose_button, others);
+    suggest(self.libraries.create_button, !others);
+}
+
+fn suggest(button: ?*gtk.Widget, suggested: bool) void {
+    const widget = button orelse return;
+    if (suggested)
+        gtk.gtk_widget_add_css_class(widget, "suggested-action")
+    else
+        gtk.gtk_widget_remove_css_class(widget, "suggested-action");
 }

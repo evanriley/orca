@@ -236,6 +236,19 @@ pub fn unavailable(recording_id: i64) ?*TrackObject {
     return self;
 }
 
+pub fn removedFromLibrary(track_id: i64) ?*TrackObject {
+    const object = gtk.g_object_new_with_properties(getType(), 0, null, null) orelse return null;
+    const self: *TrackObject = @ptrCast(object);
+    self.fields().id = track_id;
+    self.fields().in_library = false;
+    self.fields().title = dupe("Removed from library");
+    return self;
+}
+
+pub fn queued(entry: liborca.QueueTrack) ?*TrackObject {
+    return if (entry.track) |track| new(track) else removedFromLibrary(entry.id);
+}
+
 /// What changed about a recording, applied to every row that shows it.
 pub const Change = union(enum) {
     feedback: liborca.Feedback,

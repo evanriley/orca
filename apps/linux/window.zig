@@ -28,6 +28,7 @@ const audio_problems = @import("audio_problems.zig");
 const artwork_review = @import("artwork_review.zig");
 const metadata_issues = @import("metadata_issues.zig");
 const match_review = @import("match_review.zig");
+const libraries = @import("libraries.zig");
 const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
@@ -959,6 +960,7 @@ fn switchTo(self: *App, page: Page) void {
     if (self.current_page == .settings and page != .settings) preferences.leave(self);
     self.current_page = page;
     if (self.pages) |pages| page_ui.showChild(pages, page.name());
+    libraries.showFailure(self);
     if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     syncSidebarSelection(self);
     if (page == .loved) loved.reload(self);
@@ -1463,7 +1465,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const framed = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), offline.build(self));
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), pages);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), libraries.wrapPages(self, pages));
     self.top_bar.view = gtk.cast(adw.ToolbarView, framed);
     page_ui.coverContent(self, self.top_bar.view.?);
     gtk.gtk_widget_set_hexpand(framed, gtk.true_);

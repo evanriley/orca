@@ -31,6 +31,13 @@ and compiles in the rest; see
 [`examples/embed`](../examples/embed) is a complete project; `zig build test`
 builds it.
 
+The process rules in [frontends.md](frontends.md#embedding) apply to Zig hosts
+too. On Linux, the first `Runtime.init` replaces SQLite's `fcntl` with OFD
+locks for the whole process, once; a host creates it before it opens any SQLite
+connection of its own, or every `openLibrary` fails with
+`error.SqliteLocksNotInstalled`. Every call on one `Runtime`, `deinit`
+included, comes from the thread that created it.
+
 ## Surface
 
 ```zig
@@ -316,7 +323,12 @@ section lists the entry points, errors and limits.
   that searches MusicBrainz, and AcoustID by fingerprint, for Tracks without a
   recording ID and stores proposals. `MatchRequest.fingerprints` (default true)
   includes AcoustID when an application key is set; `track_id` and `release_id`
-  narrow it. `jobMatchStats` returns `MatchStats`. One runs per runtime
+  narrow it. `jobMatchStats` returns `MatchStats`: `matched` counts Tracks
+  that gained a recording proposal, and `releases_to_review` the Releases
+  holding them that, when the searches ended and before anything was
+  accepted, were in the `confident` or `needs_review` bucket. A proposal that
+  lists no release forms no release candidate, so `matched` can be nonzero
+  with nothing to review. One runs per runtime
   (`error.MatchingAlreadyRunning`), none beside an AcoustID submission
   (`error.AcoustIdBusy`). `jobMatchRelease(job)` returns the Release that holds
   most of an album's files once a Job started with `release_id` has finished, so
@@ -351,8 +363,14 @@ section lists the entry points, errors and limits.
   non-null `filter` is the word-prefix search of `librarySearch`
   (`error.SearchTextTooLong`). Each item with a candidate costs a Release view,
   snapshot and alignment. An item in the `reviewed` bucket that only its
-  tags identify has `from_tags` set. `libraryReleaseMatchCounts` counts the
-  buckets.
+  tags identify has `from_tags` set. `ReleaseCandidate.confidence` is null
+  (`ReleaseCandidate.unread`) while a Track's release ID names the candidate
+  and Orca holds no snapshot of it; such an item is in `needs_review` (see
+  [metadata.md](metadata.md#release-candidates-and-confidence)).
+  `libraryReleaseMatchCounts` counts the buckets, and
+  `libraryReleaseMatchBucket(library, release_id, confident_at)` gives the
+  one bucket that lists a Release (`error.UnknownRelease`), so a host can say
+  where a finished search left an album.
 - `libraryReleaseMatchEvidence` returns a `MatchEvidence` and
   `libraryReleaseMatchDiff` a `ReleaseMatchDiff`, against `release_mbid` or the
   best candidate (`error.NoReleaseCandidate`); with a snapshot a field differs
@@ -395,7 +413,9 @@ section lists the entry points, errors and limits.
   may be called at any time. A null Wikipedia server asks each language's own
   wiki. `setAcoustIdClientKey(key)` copies the application key, or clears it
   when null; a `CredentialStore` value under `acoustid_credential_service` /
-  `acoustid_client_key_account` overrides it.
+  `acoustid_client_key_account` overrides it. A job resolves its key once, when
+  its AcoustID work begins, from the store or else the key as it was when the
+  job was started or queued; a change applies from the next job.
 - `startArtistInfoFetch(library, artist_id, ArtistInfoOptions)` starts an
   `artist_info` Job that gathers an Artist's photo, biography, years active and
   links, listeners and related artists, and fills genres. Options: `language`
@@ -488,15 +508,38 @@ in [cli.md](cli.md#playlists-and-ratings).
 
 ### Playback
 
+- `playerDrained` turns true once the Player has decoded its queue and every
+  Zone taking part in the drain has played what it held. When every requested
+  output has failed with its recovery attempts used, the engine pauses the
+  Player at its position and wakes the host instead: `PlayerSnapshot.state` is
+  `paused`, `playerDrained` stays false and `zoneStats` reports `failed`. A host
+  waiting for a drain also stops on that state. `zoneCloseOutput`, then
+  `zoneRequestOutput` once the Zone reports `closed`, then `playPlayer` resumes
+  from that position. See [audio-engine.md](audio-engine.md#zones).
 - `PlayerStatus.last_failure` is the last queue entry that could not be opened,
   a `PlaybackFailure` with `track_id` and a `Reason`, cleared once an entry
   opened after it is heard. A Track whose root is unavailable fails with
   `error.TrackFolderUnavailable` and marks nothing missing. See
   [audio-engine.md](audio-engine.md#playback-failures).
+- `playerNext` and `playerPrevious` open the target entry before moving the
+  queue. An entry that fails to open is counted in `QueueStats.open_failures`
+  and stepped over in the same direction, at most 8 entries and never onto the
+  playing one; repeat and shuffle order apply. The last entry stepped over
+  stays in `last_failure` after the skip lands. They
+  return false only at the end of a queue that does not repeat. When every
+  candidate fails they return the last open error, and the cursor, audio,
+  epoch, transport and queue history are unchanged. `playerQueueJump` does not
+  step: a target that fails to open returns its error and changes nothing.
 - Queue edits: `playerQueueJump`, `playerQueueInsertNext`, `playerQueueRemove`
   and `playerQueueMove(player, from, to)`. The entry playing, and one already
   lined up after it, are refused with `error.QueueEntryInUse`, as is a move
   landing between them. Under shuffle a move changes only the shuffled order.
+- `playerQueueTracks(player, allocator, offset, limit)` returns a
+  `QueueTrackPage` of `QueueTrack { position, id, track }` in play order. Row
+  `n` is queue position `offset + n`, and the page is shorter only past the end
+  of the queue. `track` is null when the entry's Track was removed from the
+  Library; the entry keeps its place and `id` until it is removed from the
+  queue.
 - `playerQueueHistory(player, offset, output)` fills `QueueHistoryEntry` values,
   newest first, with a `QueueHistoryReason` (`finished`, `skipped`,
   `replaced`); `playerQueueHistoryTracks` returns a `TrackPage` and
@@ -536,7 +579,11 @@ in [cli.md](cli.md#playlists-and-ratings).
   once it fired.
 - `playerSignalPath` returns a `SignalPath`: the stages from source to output
   stream, `output_kind`, `device_format` (null when unknown) and why the path is
-  or is not bit-perfect. `enumerateOutputDevices` fills `Device` snapshots with
+  or is not bit-perfect. `bit_perfect_eligible` needs a declared source format,
+  an open output and a device that reported its rate and format; otherwise the
+  reasons include `path_unknown`. The settings fields are the current
+  settings, while `sample_processing` also stands until audio processed under
+  earlier settings has played. `enumerateOutputDevices` fills `Device` snapshots with
   `capabilities`, null when the audio server did not report them within 500 ms;
   its `detail` parameter sets the cost: `.identity` asks no device for its
   formats, `.capabilities` waits up to 500 ms and belongs where they are shown.

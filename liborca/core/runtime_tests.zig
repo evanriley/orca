@@ -1145,6 +1145,7 @@ test "a Player's signal path names the device's own format while its output is o
     var backend: audio.output.TestBackend = .{
         .allocator = std.testing.allocator,
         .device_format = device_format,
+        .graph_rate_hz = 48_000,
     };
     defer backend.deinit();
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -1162,6 +1163,8 @@ test "a Player's signal path names the device's own format while its output is o
 
     var path = try runtime.playerSignalPath(player);
     try std.testing.expectEqual(@as(?audio.backend.DeviceFormat, null), path.device_format);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(audio.signal_path.Reason, &.{.path_unknown}, path.reasonList());
 
     try runtime.zoneRequestOutput(zone, 1);
     try runtime.playPlayer(player);
@@ -1173,9 +1176,10 @@ test "a Player's signal path names the device's own format while its output is o
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expectEqual(device_format, path.device_format.?);
-    try std.testing.expect(!path.bit_perfect_eligible);
-    try std.testing.expect(hasReason(path, .sample_format_conversion));
-    try std.testing.expect(!hasReason(path, .sample_rate_conversion));
+    try std.testing.expectEqual(@as(?u32, 48_000), path.device_rate);
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
 
     try runtime.zoneCloseOutput(zone);
     deadline = .init(5_000);
@@ -1184,14 +1188,127 @@ test "a Player's signal path names the device's own format while its output is o
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expectEqual(@as(?audio.backend.DeviceFormat, null), path.device_format);
-    try std.testing.expect(!hasReason(path, .sample_format_conversion));
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(audio.signal_path.Reason, &.{.path_unknown}, path.reasonList());
 
     try runtime.destroyZone(zone);
     try runtime.destroyPlayer(player);
 }
 
-test "a Player's signal path reports sample processing only while DSP or volume is in effect" {
-    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+fn hiresReferenceFrame(index: u32) [2]i32 {
+    return .{
+        @as(i32, @intCast((index *% 40961) % (1 << 24))) - (1 << 23),
+        (1 << 23) - 1 - @as(i32, @intCast((index *% 2654435761) >> 8)),
+    };
+}
+
+const hires_reference_frames = 4096;
+
+fn openHiresOutput(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+) !struct { player: runtime_module.PlayerHandle, zone: ZoneHandle, stream: *audio.output.TestBackend.Stream } {
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/hires-reference.flac");
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+    var deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+    return .{ .player = player, .zone = zone, .stream = stream };
+}
+
+test "a 24-bit 192 kHz FLAC plays at 192 kHz sample for sample, and a 24-bit device keeps it bit-perfect" {
+    const device_format: audio.backend.DeviceFormat = .{
+        .sample_format = .signed_24,
+        .sample_rate = 192_000,
+        .channels = 2,
+    };
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = device_format,
+        .graph_rate_hz = 192_000,
+    };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const opened = try openHiresOutput(&runtime, &backend);
+    try std.testing.expectEqual(audio.pcm.SampleFormat.float_32, opened.stream.request.format.sample_format);
+    try std.testing.expectEqual(@as(u32, 192_000), opened.stream.request.format.sample_rate);
+    try std.testing.expectEqual(@as(u16, 2), opened.stream.request.format.channels);
+
+    const path = try runtime.playerSignalPath(opened.player);
+    const source = path.source orelse return error.SourceMissing;
+    try std.testing.expectEqual(audio.pcm.SampleFormat.signed_24, source.sample_format);
+    try std.testing.expectEqual(@as(u16, 24), source.bits_per_sample);
+    try std.testing.expectEqual(@as(u32, 192_000), source.sample_rate);
+    try std.testing.expectEqual(@as(u32, 192_000), path.output.?.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 192_000), path.device_rate);
+    try std.testing.expectEqual(device_format, path.device_format.?);
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+
+    const runtime_zone = (try runtime.zones.get(opened.zone)).zone;
+    var samples: [256 * 2]f32 = undefined;
+    var frame: u32 = 0;
+    while (frame < hires_reference_frames) {
+        const frames: u32 = @min(256, hires_reference_frames - frame);
+        var deadline: TestDeadline = .init(5_000);
+        while (queuedFrames(&runtime_zone.pipe) < frames and deadline.tick()) {}
+        opened.stream.pump(samples[0 .. frames * 2], frames);
+        for (0..frames) |offset| {
+            const expected = hiresReferenceFrame(frame + @as(u32, @intCast(offset)));
+            for (expected, 0..) |value, channel| {
+                try std.testing.expectEqual(
+                    @as(f32, @floatFromInt(value)) / (1 << 23),
+                    samples[offset * 2 + channel],
+                );
+            }
+        }
+        frame += frames;
+    }
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.zoneStats(opened.zone)).underruns);
+
+    try runtime.destroyZone(opened.zone);
+    try runtime.destroyPlayer(opened.player);
+}
+
+test "a 24-bit source on a 16-bit device is a sample format conversion" {
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = .{ .sample_format = .signed_16, .sample_rate = 192_000, .channels = 2 },
+        .graph_rate_hz = 192_000,
+    };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const opened = try openHiresOutput(&runtime, &backend);
+    const path = try runtime.playerSignalPath(opened.player);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqualSlices(
+        audio.signal_path.Reason,
+        &.{.sample_format_conversion},
+        path.reasonList(),
+    );
+
+    try runtime.destroyZone(opened.zone);
+    try runtime.destroyPlayer(opened.player);
+}
+
+test "a Player's signal path reports sample processing until the audio DSP or volume changed has played" {
+    var backend: audio.output.TestBackend = .{
+        .allocator = std.testing.allocator,
+        .device_format = .{ .sample_format = .float_32, .sample_rate = 48_000, .channels = 2 },
+        .graph_rate_hz = 48_000,
+    };
     defer backend.deinit();
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -1235,16 +1352,35 @@ test "a Player's signal path reports sample processing only while DSP or volume 
     try std.testing.expectEqual(@as(?audio.dsp.Equalizer, audio.dsp.Equalizer.preset(.bass)), path.equalizer);
     try std.testing.expect(path.output != null);
 
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+    const runtime_zone = (try runtime.zones.get(zone)).zone;
+    const queued = queuedFrames(&runtime_zone.pipe);
+    stream.pump(&samples, 256);
+    deadline = .init(5_000);
+    while (queuedFrames(&runtime_zone.pipe) < queued and deadline.tick()) {}
+    try std.testing.expect(queuedFrames(&runtime_zone.pipe) >= queued);
+
     try runtime.playerSetEqualizer(player, null);
     path = try runtime.playerSignalPath(player);
-    try std.testing.expect(!hasReason(path, .sample_processing));
+    try std.testing.expectEqual(@as(?audio.dsp.Equalizer, null), path.equalizer);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqualSlices(audio.signal_path.Reason, &.{.sample_processing}, path.reasonList());
+
+    deadline = .init(5_000);
+    while (hasReason(path, .sample_processing) and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
+        stream.pump(&samples, 256);
+        path = try runtime.playerSignalPath(player);
+    }
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
 
     try runtime.playerSetVolume(player, 0.5);
     path = try runtime.playerSignalPath(player);
     deadline = .init(5_000);
     while (path.volume != 0.5 and deadline.tick()) {
         if (deadline.remaining_ms % 5 != 0) continue;
-        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        stream.pump(&samples, 256);
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expect(hasReason(path, .sample_processing));
@@ -1253,9 +1389,9 @@ test "a Player's signal path reports sample processing only while DSP or volume 
     try runtime.playerSetVolume(player, 1);
     path = try runtime.playerSignalPath(player);
     deadline = .init(5_000);
-    while (path.volume != 1 and deadline.tick()) {
+    while ((path.volume != 1 or hasReason(path, .sample_processing)) and deadline.tick()) {
         if (deadline.remaining_ms % 5 != 0) continue;
-        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        stream.pump(&samples, 256);
         path = try runtime.playerSignalPath(player);
     }
     try std.testing.expectEqual(@as(f32, 1), path.volume);
@@ -1490,6 +1626,80 @@ test "destroying a Zone is acknowledged by the engine before its path is freed" 
         try runtime.zoneOutputState(kept),
     );
     try std.testing.expectError(error.StaleHandle, runtime.zoneOutputState(removed));
+}
+
+fn expectZoneSetAdopted(engine: *const audio.engine.PlayerEngine) !void {
+    try std.testing.expectEqual(engine.control_sequence, engine.ack.load(.acquire));
+}
+
+test "a Zone attached and destroyed right after play is adopted by the engine before each call returns" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const playing = try runtime.createZone();
+    try runtime.attachZone(playing, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.playPlayer(player);
+    const engine = (try runtime.players.get(player)).engine orelse return error.EngineNeverStarted;
+
+    const added = try runtime.createZone();
+    try runtime.attachZone(added, player);
+    try expectZoneSetAdopted(engine);
+    try runtime.destroyZone(added);
+    try expectZoneSetAdopted(engine);
+}
+
+test "a Zone attached, moved, detached or destroyed while its Player's engine starts waits for that engine to adopt the change" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const zone = try runtime.createZone();
+
+    const attached = try runtime.createPlayer();
+    const attached_engine = try runtime_queue.ensureEngine(&runtime, attached);
+    try runtime.attachZone(zone, attached);
+    try expectZoneSetAdopted(attached_engine);
+
+    const moved_from = try runtime.createPlayer();
+    const moved_to = try runtime.createPlayer();
+    try runtime.attachZone(zone, moved_from);
+    const from_engine = try runtime_queue.ensureEngine(&runtime, moved_from);
+    const to_engine = try runtime_queue.ensureEngine(&runtime, moved_to);
+    try runtime.attachZone(zone, moved_to);
+    try expectZoneSetAdopted(from_engine);
+    try expectZoneSetAdopted(to_engine);
+
+    const detached = try runtime.createPlayer();
+    try runtime.attachZone(zone, detached);
+    const detached_engine = try runtime_queue.ensureEngine(&runtime, detached);
+    try runtime.detachZone(zone);
+    try expectZoneSetAdopted(detached_engine);
+
+    const destroyed = try runtime.createPlayer();
+    try runtime.attachZone(zone, destroyed);
+    const destroyed_engine = try runtime_queue.ensureEngine(&runtime, destroyed);
+    try runtime.destroyZone(zone);
+    try expectZoneSetAdopted(destroyed_engine);
+}
+
+test "destroying a Player right after its engine thread is spawned joins that thread" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    _ = try runtime_queue.ensureEngine(&runtime, player);
+    try runtime.destroyPlayer(player);
+
+    try std.testing.expectEqual(@as(usize, 0), inFlightWorkCount(&runtime));
 }
 
 fn awaitZoneActive(runtime: *OrcaRuntime, zone: ZoneHandle) !void {
@@ -1923,6 +2133,371 @@ test "a Player reports the Track whose file has gone, until another entry opens"
     try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
 }
 
+test "playing a six-channel Track is refused before any output opens, and a mono Track then plays" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "six.wav", 6, 11_025);
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "mono.wav", 1, 11_025);
+    const six_path = try absoluteTestPath(".zig-cache/tmp/{s}/six.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(six_path);
+    const mono_path = try absoluteTestPath(".zig-cache/tmp/{s}/mono.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(mono_path);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-six-channels?mode=memory&cache=shared",
+        &.{ six_path, mono_path },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+
+    try std.testing.expectError(
+        error.UnsupportedChannelCount,
+        runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 0),
+    );
+    const failure = (try runtime.playerStatus(player)).last_failure.?;
+    try std.testing.expectEqual(fixtures.ids[0], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.unsupported_channels, failure.reason);
+    try std.testing.expectError(
+        error.UnsupportedChannelCount,
+        runtime.playerLoadFile(player, std.testing.io, six_path),
+    );
+    try std.testing.expectEqual(@as(usize, 0), backend.opens);
+
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 1);
+    try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerSnapshot(player)).position_frames > 0) break;
+    }
+    try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
+    try std.testing.expectEqual(@as(u16, 1), backend.liveStream().?.request.format.channels);
+}
+
+test "a six-channel Track next in the queue is refused at the gapless prime, and the stereo Track before it plays to its end" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const frames = 5_512;
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "stereo.wav", 2, frames);
+    try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, "six.wav", 6, frames);
+    const stereo_path = try absoluteTestPath(".zig-cache/tmp/{s}/stereo.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(stereo_path);
+    const six_path = try absoluteTestPath(".zig-cache/tmp/{s}/six.wav", .{temporary.sub_path});
+    defer std.testing.allocator.free(six_path);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-six-channels-next?mode=memory&cache=shared",
+        &.{ stereo_path, six_path },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 0);
+
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if (try runtime.playerDrained(player)) break;
+    }
+    try std.testing.expect(try runtime.playerDrained(player));
+    const stats = try runtime.playerQueueStats(player);
+    try std.testing.expectEqual(@as(u64, 0), stats.entries_started);
+    try std.testing.expectEqual(@as(u64, 0), stats.gapless_transitions);
+    try std.testing.expectEqual(@as(u64, 1), stats.open_failures);
+    try std.testing.expectEqual(@as(u64, 0), stats.decode_errors);
+    try std.testing.expectEqual(@as(u64, frames), (try runtime.playerSnapshot(player)).position_frames);
+    try std.testing.expectEqual(fixtures.ids[0], (try runtime.playerNowPlaying(player)).?.track_id);
+    const failure = (try runtime.playerStatus(player)).last_failure.?;
+    try std.testing.expectEqual(fixtures.ids[1], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.unsupported_channels, failure.reason);
+    try std.testing.expectEqual(@as(usize, 1), backend.opens);
+    try std.testing.expectEqual(@as(u16, 2), backend.liveStream().?.request.format.channels);
+}
+
+const skip_wave_frames = 4 * 11_025;
+
+const SkipQueue = struct {
+    library: LibraryHandle,
+    ids: [4]i64,
+    player: runtime_module.PlayerHandle,
+};
+
+fn startSkipQueue(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+    temporary: *std.testing.TmpDir,
+    uri: [:0]const u8,
+    channels: []const u16,
+    queue: []const usize,
+    start: u32,
+) !SkipQueue {
+    var paths: [4][]const u8 = undefined;
+    var written: usize = 0;
+    defer for (paths[0..written]) |path| std.testing.allocator.free(path);
+    for (channels, 0..) |count, index| {
+        const name = try skipWaveName(index);
+        try runtime_provider_tests.writeSilentWaveChannels(temporary.dir, name.slice(), count, skip_wave_frames);
+        paths[index] = try absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name.slice() });
+        written += 1;
+    }
+    const fixtures = try openFixtureLibrary(runtime, uri, paths[0..written]);
+    var track_ids: [16]i64 = undefined;
+    for (queue, track_ids[0..queue.len]) |index, *id| id.* = fixtures.ids[index];
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, track_ids[0..queue.len], start);
+    try pumpUntilHeardPast(runtime, backend, player, 0);
+    return .{ .library = fixtures.library, .ids = fixtures.ids, .player = player };
+}
+
+const SkipWaveName = struct {
+    buffer: [16]u8,
+    len: usize,
+
+    fn slice(self: *const SkipWaveName) []const u8 {
+        return self.buffer[0..self.len];
+    }
+};
+
+fn skipWaveName(index: usize) !SkipWaveName {
+    var name: SkipWaveName = .{ .buffer = undefined, .len = 0 };
+    name.len = (try std.fmt.bufPrint(&name.buffer, "skip-{d}.wav", .{index})).len;
+    return name;
+}
+
+fn deleteSkipWave(temporary: *std.testing.TmpDir, index: usize) !void {
+    const name = try skipWaveName(index);
+    try temporary.dir.deleteFile(std.testing.io, name.slice());
+}
+
+fn pumpUntilHeardPast(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+    player: runtime_module.PlayerHandle,
+    frame: u64,
+) !void {
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerSnapshot(player)).position_frames > frame) return;
+    }
+    return error.PlayerNeverAdvanced;
+}
+
+fn expectSkipLeftPlaying(
+    runtime: *OrcaRuntime,
+    backend: *audio.output.TestBackend,
+    player: runtime_module.PlayerHandle,
+    cursor: u32,
+    track_id: i64,
+    before: audio.player.Snapshot,
+) !void {
+    try std.testing.expectEqual(cursor, (try runtime.playerQueueSnapshot(player)).cursor);
+    try std.testing.expectEqual(track_id, (try runtime.playerNowPlaying(player)).?.track_id);
+    const after = try runtime.playerSnapshot(player);
+    try std.testing.expectEqual(before.epoch, after.epoch);
+    try std.testing.expectEqual(audio.player.TransportState.playing, after.state);
+    var entries: [4]QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try runtime.playerQueueHistory(player, 0, &entries));
+    try pumpUntilHeardPast(runtime, backend, player, after.position_frames);
+    try std.testing.expectEqual(track_id, (try runtime.playerNowPlaying(player)).?.track_id);
+}
+
+fn expectSkippedOnly(runtime: *OrcaRuntime, player: runtime_module.PlayerHandle, track_id: i64) !void {
+    var entries: [4]QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try runtime.playerQueueHistory(player, 0, &entries));
+    try std.testing.expectEqual(track_id, entries[0].track.track_id);
+    try std.testing.expectEqual(QueueHistoryReason.skipped, entries[0].reason);
+}
+
+test "next steps over an entry whose file has gone and plays the one after it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-next-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 1);
+    const epoch_before = (try runtime.playerSnapshot(fixture.player)).epoch;
+
+    try std.testing.expect(try runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u32, 2), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    const failure = (try runtime.playerStatus(fixture.player)).last_failure.?;
+    try std.testing.expectEqual(fixture.ids[1], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.file_missing, failure.reason);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[0]);
+    try std.testing.expect((try runtime.playerSnapshot(fixture.player)).epoch != epoch_before);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+    try pumpUntilHeardPast(&runtime, &backend, fixture.player, 0);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+}
+
+test "next with every later entry unopenable returns the open error and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-next-all-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 1);
+    try deleteSkipWave(&temporary, 2);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expectError(error.TrackFileMissing, runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 0, fixture.ids[0], before);
+}
+
+test "previous steps back over an entry whose file has gone and plays the one before it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-previous-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 2);
+    try deleteSkipWave(&temporary, 1);
+
+    try std.testing.expect(try runtime.playerPrevious(fixture.player));
+    try std.testing.expectEqual(@as(u32, 0), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try std.testing.expectEqual(fixture.ids[1], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[2]);
+    try std.testing.expectEqual(fixture.ids[0], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+    try pumpUntilHeardPast(&runtime, &backend, fixture.player, 0);
+    try std.testing.expectEqual(fixture.ids[0], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+}
+
+test "previous with every earlier entry unopenable returns the open error and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-previous-all-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 2);
+    try deleteSkipWave(&temporary, 0);
+    try deleteSkipWave(&temporary, 1);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expectError(error.TrackFileMissing, runtime.playerPrevious(fixture.player));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try std.testing.expectEqual(fixture.ids[0], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 2, fixture.ids[2], before);
+}
+
+test "next under repeat_all wraps over an unopenable entry and stops before reaching the playing one" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-repeat-all?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 2);
+    try runtime.playerSetRepeat(fixture.player, .all);
+    try deleteSkipWave(&temporary, 0);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expect(try runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u32, 1), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expect((try runtime.playerSnapshot(fixture.player)).epoch != before.epoch);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[2]);
+
+    try runtime.playerClearQueueHistory(fixture.player);
+    try deleteSkipWave(&temporary, 2);
+    const playing = try runtime.playerSnapshot(fixture.player);
+    if (runtime.playerNext(fixture.player)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqual(@as(u64, 3), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 1, fixture.ids[1], playing);
+}
+
+test "a queue jump to an entry whose file has gone returns the open error and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-jump-missing?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 2);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    try std.testing.expectError(error.TrackFileMissing, runtime.playerQueueJump(fixture.player, 2));
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerStatus(fixture.player)).last_failure.?.track_id);
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 0, fixture.ids[0], before);
+}
+
+test "next steps over a six-channel entry like a missing file" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-six-channels?mode=memory&cache=shared", &.{ 2, 6, 2 }, &.{ 0, 1, 2 }, 0);
+
+    try std.testing.expect(try runtime.playerNext(fixture.player));
+    try std.testing.expectEqual(@as(u32, 2), (try runtime.playerQueueSnapshot(fixture.player)).cursor);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.playerQueueStats(fixture.player)).open_failures);
+    const failure = (try runtime.playerStatus(fixture.player)).last_failure.?;
+    try std.testing.expectEqual(fixture.ids[1], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.unsupported_channels, failure.reason);
+    try expectSkippedOnly(&runtime, fixture.player, fixture.ids[0]);
+    try std.testing.expectEqual(fixture.ids[2], (try runtime.playerNowPlaying(fixture.player)).?.track_id);
+    try pumpUntilHeardPast(&runtime, &backend, fixture.player, 0);
+}
+
+test "next gives up after eight consecutive unopenable entries and leaves the playing entry playing" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixture = try startSkipQueue(&runtime, &backend, &temporary, "file:orca-skip-bounded?mode=memory&cache=shared", &.{ 2, 2, 2 }, &.{ 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 }, 0);
+    try deleteSkipWave(&temporary, 1);
+    const before = try runtime.playerSnapshot(fixture.player);
+
+    if (runtime.playerNext(fixture.player)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqual(
+        @as(u64, audio.engine.max_consecutive_open_failures),
+        (try runtime.playerQueueStats(fixture.player)).open_failures,
+    );
+    try expectSkipLeftPlaying(&runtime, &backend, fixture.player, 0, fixture.ids[0], before);
+}
 test "a Track under a root that has moved is reported as folder unavailable until the root is relocated" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
@@ -3775,6 +4350,101 @@ test "a failed tag write reports its file and reason" {
     const scan = try runtime.startLibraryScan(library, .{});
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, scan));
     try std.testing.expectError(error.NotATagWriteJob, runtime.jobTagWriteFailure(scan));
+}
+
+fn expectFileMode(dir: std.Io.Dir, name: []const u8, expected: std.posix.mode_t) !void {
+    const stat = try dir.statFile(std.testing.io, name, .{});
+    try std.testing.expectEqual(expected, stat.permissions.toMode() & 0o7777);
+}
+
+test "a read-only file is skipped before writing and the plan's other file is written" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const other_original = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_original);
+    try temporary.dir.setFilePermissions(std.testing.io, "b.flac", .fromMode(0o444), .{});
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+    try std.testing.expect(std.mem.endsWith(u8, preview.files[0].path, "/a.mp3"));
+    var read_only_skips: usize = 0;
+    for (preview.skipped) |skip| if (skip.reason == .file_read_only) {
+        read_only_skips += 1;
+        try std.testing.expect(std.mem.endsWith(u8, skip.path, "/b.flac"));
+    };
+    try std.testing.expectEqual(@as(usize, 1), read_only_skips);
+
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations WHERE source_path LIKE '%/b.flac';"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectFileMode(temporary.dir, "b.flac", 0o444);
+    const other_after = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_after);
+    try std.testing.expect(!std.mem.eql(u8, other_original, other_after));
+    try expectOnlyFixtureFiles(temporary.dir);
+}
+
+test "a file made read-only after planning fails the tag write job as read-only and is left unchanged" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const read_only_index: u32 = for (preview.files, 0..) |file, index| {
+        if (std.mem.endsWith(u8, file.path, "/b.flac")) break @intCast(index);
+    } else return error.TestUnexpectedResult;
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const other_original = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_original);
+    try temporary.dir.setFilePermissions(std.testing.io, "b.flac", .fromMode(0o444), .{});
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(preview.files[read_only_index].file_id, failure.file_id);
+    try std.testing.expectEqual(read_only_index, failure.action_index);
+    try std.testing.expectEqual(TagWriteFailureReason.file_read_only, failure.reason);
+    const library_database = try libraryDatabase(&runtime, library);
+    try expectJournaledError(library_database, preview.plan_id, read_only_index, "FileReadOnly");
+
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectFileMode(temporary.dir, "b.flac", 0o444);
+    const other_after = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_after);
+    try std.testing.expectEqualSlices(u8, other_original, other_after);
+    try expectOnlyFixtureFiles(temporary.dir);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, library_database.backup_directory.?, .{}));
 }
 
 test "writing tags to one copy of a shared file splits that copy off and marks the written value on the file that holds it" {

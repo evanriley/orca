@@ -341,6 +341,16 @@ cover ([Cover Art Archive](#cover-art-archive)); the files given values are
 reprojected once. `orca-gtk`'s Match Album runs all three with the review
 threshold from Settings.
 
+A search that stores proposals has not necessarily left anything to review on
+the Matches page: a recording whose answer lists no release forms no release
+candidate, and its Release stays `unmatched`. `MatchStats.releases_to_review`
+counts the Releases a run's matches left in `confident` or `needs_review`, and
+`libraryReleaseMatchBucket` gives one Release's bucket. `orca-gtk` names the
+album and its tab after a search of one album or Track ("Big Grams is ready to
+review in Needs Review", with a Review button that opens it), says "No album
+match found" otherwise, and gives Find Matches' count of albums ready to
+review.
+
 A second `startLibraryMatching` while one runs returns
 `error.MatchingAlreadyRunning`, and one during an AcoustID submission returns
 `error.AcoustIdBusy`, so each service sees one client and one backoff.
@@ -473,6 +483,13 @@ set it with `Runtime.setAcoustIdClientKey` from the build option
 under `org.acoustid` / `client-key` overrides it. Without a key AcoustID is
 skipped and reported `no_client_key`; a key AcoustID refuses (error code 4)
 stops AcoustID for the rest of the job and is reported `invalid_client_key`.
+
+A matching or submission job resolves its key once, on its worker thread, when
+its AcoustID work begins: the stored key when the store holds a valid one, else
+the runtime's key as it was when the job was started or queued. Every request
+of the job uses that key. A `setAcoustIdClientKey` call or a store change while
+the job runs applies from the next job
+([frontends.md](frontends.md#embedding)).
 
 ## Verification
 

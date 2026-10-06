@@ -103,6 +103,7 @@ pub const TestBackend = struct {
     fail_next_open: bool = false,
     fail_device_id: ?u64 = null,
     device_format: ?contract.DeviceFormat = null,
+    graph_rate_hz: ?u32 = null,
     opens: usize = 0,
     discoveries: std.atomic.Value(usize) = .init(0),
 
@@ -241,7 +242,7 @@ pub const TestBackend = struct {
             .render_ahead_frames = render_ahead_frames,
             .dsp_frames = dsp_frames,
             .hardware_frames = null,
-            .graph_rate_hz = null,
+            .graph_rate_hz = stream.backend.graph_rate_hz,
             .device_format = stream.backend.device_format,
         };
     }
@@ -260,7 +261,7 @@ pub const TestBackend = struct {
             .queued_frames = 0,
             .buffered_frames = 0,
             .backend_quantum_frames = 256,
-            .graph_rate_hz = null,
+            .graph_rate_hz = stream.backend.graph_rate_hz,
             .device_format = stream.backend.device_format,
         };
     }

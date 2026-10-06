@@ -12,6 +12,9 @@ peak, RMS, clipped samples, leading, trailing and total silence, a bucketed
 waveform, a temporal fingerprint with a decoded-audio hash, and the AcoustID
 fingerprint. `library/analysis_pass.zig` measures every file in a Library, so
 ReplayGain on playback and duplicate detection always have a measurement.
+Only mono and stereo are measured: a file with more than two channels fails
+with `UnsupportedChannelCount`, because equal channel weights would misstate a
+surround layout's loudness.
 
 ## AcoustID fingerprints
 
@@ -82,7 +85,15 @@ rung that survives Orca's own tag writes; see
 [the audio hash](#the-audio-hash)); `corrupt_audio` cleared; and `clipping`,
 `excessive_silence` and `missing_analysis` raised or cleared. A file with no
 gateable loudness (too short or silent) is still stored so it is not decoded
-every run; it yields no correction and raises `missing_analysis`. Results are
+every run; it yields no correction and raises `missing_analysis`. A file with
+more than two channels stores nothing, raises `missing_analysis` with details
+naming the channel count, clears `corrupt_audio`, `clipping` and
+`excessive_silence`, and is counted with the declined files. The channel check
+runs before the cache lookup, so a stored result is never reused for such a
+file. A file recorded with more than two channels that still holds results,
+as a Library analysed before the limit holds them, is selected by the pass,
+which deletes all its results (and with them its `file_loudness` row) in the
+same transaction. Results are
 keyed by the content hash of the bytes decoded, taken in a second sequential
 read beside the decode, and the same transaction records that hash on the file
 (see [database.md](database.md#schema)).
@@ -96,8 +107,13 @@ them. A declined file is counted and raises no health issue; repairing a stale
 identity is a scan's job. The first check runs before the decode, on two 64 KiB
 reads.
 
-A file that opened and would not decode raises `corrupt_audio` and clears the
-pass's other three kinds. The pass never raises `unreadable_file`, which
+A file that a codec claims but cannot open or decode raises `corrupt_audio` and
+clears the pass's other three kinds. So does a file that decodes to its end
+past damage its decoder reports through `Decoder.damage`: an AIFF whose COMM
+declares more frames than SSND holds, a WAV data chunk that ends inside a frame,
+or a FLAC stream with frame errors, a short final block or an MD5 mismatch.
+Playback of the same file continues. The issue's details name the error or the
+damage, and the file stays unanalysed, so every pass decodes it again. The pass never raises `unreadable_file`, which
 belongs to the property backfill.
 
 ### Threads
@@ -179,7 +195,9 @@ the cap lowered the audible correction.
 an album stay as mastered. `TrackSourceOpener.openTrack` computes it at open
 from one bounded statement over the entry's Release
 (`AnalysisCacheRepository.visitReleaseMembers`); nothing is cached per Release,
-so re-analysing or moving a Track cannot leave a stale figure.
+so re-analysing or moving a Track cannot leave a stale figure. A member whose
+file is recorded with more than two channels reads as having no stored
+measurement, whatever is stored for it.
 
 The album's integrated loudness is a duration-weighted energy mean,
 `10·log10(Σ dᵢ·10^(Lᵢ/10) / Σ dᵢ)`, over the Tracks' integrated loudness `Lᵢ`
@@ -448,10 +466,10 @@ calls it. The rules live in `analysis/health.zig`.
 | `album_artist_anomaly` | information | projection | the file has an album but no album artist |
 | `artwork_problem` | information | projection | the file has no embedded cover and its Release has no fetched cover |
 | `technical_anomaly` | warning | projection | the file's track number is held by another recording |
-| `missing_analysis` | information | analysis pass | the audio is too short or silent for an integrated loudness |
+| `missing_analysis` | information | analysis pass | the audio is too short or silent for an integrated loudness, or has more than two channels |
 | `clipping` | warning | analysis pass | see [Clipping](#clipping) |
 | `excessive_silence` | warning | analysis pass | more than a fifth of the decoded frames are silent |
-| `corrupt_audio` | error | analysis pass | the file opened and would not decode |
+| `corrupt_audio` | error | analysis pass | the file would not decode, or decoded past damage |
 | `exact_duplicate` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
 | `identical_audio` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
 | `likely_duplicate` | information | duplicate pass | see [Duplicate detection](#duplicate-detection) |

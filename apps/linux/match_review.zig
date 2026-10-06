@@ -29,7 +29,8 @@ const apply_tooltip = "Take the checked fields into Orca's library; no file is w
 
 pub const Entry = struct {
     release_id: i64,
-    confidence: f32,
+    /// Null while the release a Track's release ID names is not read.
+    confidence: ?f32,
     from_tags: bool = false,
 };
 
@@ -889,7 +890,13 @@ fn show(self: *App) void {
         art.setInitials(cover, album);
         art.show(self, cover, art.Key.release(entry.release_id, art.Size.atLeast(cover_pixels)));
     }
-    if (review.summary) |summary| gtk.gtk_label_set_text(summary, strings.format(&buffer, "Local album vs MusicBrainz candidate" ++ separator ++ "{d}% confidence" ++ separator, .{matches.percent(entry.confidence)}).ptr);
+    if (review.summary) |summary| {
+        const text = if (entry.confidence) |confidence|
+            strings.format(&buffer, "Local album vs MusicBrainz candidate" ++ separator ++ "{d}% confidence" ++ separator, .{matches.percent(confidence)})
+        else
+            strings.terminated(&buffer, "Local album vs the release your tags name" ++ separator ++ "not yet read from MusicBrainz" ++ separator);
+        gtk.gtk_label_set_text(summary, text.ptr);
+    }
 
     var kept: std.EnumArray(Field, ?bool) = .initFill(null);
     if (review.shown_release == entry.release_id) for (std.enums.values(Field)) |field| {

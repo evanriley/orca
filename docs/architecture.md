@@ -83,7 +83,12 @@ fixed-width integers, is visible above its shim.
 
 - WAV reads integer PCM at 8, 16, 24 and 32 bits and IEEE float at 32 and 64
   bits, in `fmt ` or `WAVE_FORMAT_EXTENSIBLE`. AIFC is accepted only
-  uncompressed (`NONE`, `twos`, `sowt`, `fl32`, `fl64`).
+  uncompressed (`NONE`, `twos`, `sowt`, `fl32`, `fl64`). 8-bit WAV is unsigned
+  and 8-bit AIFF is signed.
+- A WAV data chunk that ends inside a frame plays its whole frames and reports
+  `PartialWavFrame` through `Decoder.damage`. An AIFF whose COMM declares more
+  frames than SSND holds plays the frames present and reports `TruncatedAiff`;
+  an AIFF with no SSND fails to open with `MissingSoundChunk`.
 - A probe reports the encoding as a stable lowercase `decoder.codec_id`: `pcm`,
   `pcm_float`, `flac`, `qoa`, `mp1`, `mp2`, `mp3`, `alac`, `aac`, `opus`,
   `vorbis`. The scanner stores it in `files.codec`. `codec` names the encoding
@@ -119,10 +124,20 @@ reference decoder. A different decoder is not substituted.
 
 `ReadableSource` is positional and holds no cursor or file handle, so the shim
 uses `FLAC__stream_decoder_init_stream` and carries the byte cursor libFLAC
-believes it is at. MD5 verification and metadata callbacks are off. A sought
-stream that ends is finished, not damaged, because frames before a seek target
-are never decoded; a shortfall smaller than one maximum block is the final
-frame. A file missing more than its last block is an error.
+believes it is at. Metadata callbacks are off. A sought stream that ends is
+finished, not damaged, because frames before a seek target are never decoded.
+An unsought stream that ends short by more than one maximum block fails, with
+`FlacStreamErrors` when libFLAC reported frame errors and `TruncatedFlac`
+otherwise.
+
+Playback tolerates the rest and reports it through `Decoder.damage` once an
+unsought decode reaches its end: frame errors libFLAC recovered from before the
+declared end (`FlacStreamErrors`), a shortfall smaller than one maximum block
+(`TruncatedFlac`), and decoded audio that disagrees with a nonzero STREAMINFO
+MD5 (`FlacMd5Mismatch`). The shim checks MD5 on every decode from the start and
+reads the result when libFLAC finishes the stream; a later seek restarts the
+decoder. The analysis pass turns damage into `corrupt_audio`
+([analysis.md](analysis.md)).
 `fixtures/audio/midside-reference.flac` guards mid-side reconstruction: a
 decoder that skips restoring the low bit of `mid` is wrong on every sample.
 

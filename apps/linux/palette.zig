@@ -170,6 +170,7 @@ const Command = struct {
     shortcut: ?[:0]const u8 = null,
     icon: [:0]const u8,
     section: Section = .commands,
+    needs_library: bool = false,
     run: *const fn (*App) void,
 };
 
@@ -211,15 +212,15 @@ fn setting(comptime title: [:0]const u8, comptime tab: app.SettingsTab, comptime
 }
 
 const commands = [_]Command{
-    .{ .title = "Scan library", .subtitle = "Rescan all music folders", .keywords = "rescan", .shortcut = "Ctrl ⇧ R", .icon = "view-refresh-symbolic", .run = jobs.rescan },
-    .{ .title = "Scan for duplicates", .subtitle = "Library tools", .keywords = "find duplicates", .icon = "edit-copy-symbolic", .run = jobs.startDuplicates },
+    .{ .title = "Scan library", .subtitle = "Rescan all music folders", .keywords = "rescan", .shortcut = "Ctrl ⇧ R", .icon = "view-refresh-symbolic", .run = jobs.rescan, .needs_library = true },
+    .{ .title = "Scan for duplicates", .subtitle = "Library tools", .keywords = "find duplicates", .icon = "edit-copy-symbolic", .run = jobs.startDuplicates, .needs_library = true },
     .{ .title = "Show Library Health", .subtitle = "Go to", .keywords = "scan issues problems", .icon = "orca-health-symbolic", .run = goTo(.health) },
-    .{ .title = "Measure loudness", .subtitle = "Library tools", .keywords = "analyze analyse replaygain fingerprints", .icon = "orca-pulse-symbolic", .run = jobs.startAnalysis },
-    .{ .title = "Find matches", .subtitle = "Library tools", .keywords = "musicbrainz acoustid identify", .icon = "orca-matches-symbolic", .run = jobs.startMatching },
-    .{ .title = "Verify recording IDs", .subtitle = "Library tools", .keywords = "acoustid", .icon = "auth-fingerprint-symbolic", .run = jobs.startLibraryVerification },
-    .{ .title = "Submit to AcoustID", .subtitle = "Library tools", .icon = "auth-fingerprint-symbolic", .run = jobs.startSubmission },
-    .{ .title = "Add music folder…", .subtitle = "Library tools", .shortcut = "Ctrl O", .icon = "list-add-symbolic", .run = jobs.chooseFolder },
-    .{ .title = "Search library", .subtitle = "Go to", .keywords = "find", .icon = "orca-search-symbolic", .run = summonSearch },
+    .{ .title = "Measure loudness", .subtitle = "Library tools", .keywords = "analyze analyse replaygain fingerprints", .icon = "orca-pulse-symbolic", .run = jobs.startAnalysis, .needs_library = true },
+    .{ .title = "Find matches", .subtitle = "Library tools", .keywords = "musicbrainz acoustid identify", .icon = "orca-matches-symbolic", .run = jobs.startMatching, .needs_library = true },
+    .{ .title = "Verify recording IDs", .subtitle = "Library tools", .keywords = "acoustid", .icon = "auth-fingerprint-symbolic", .run = jobs.startLibraryVerification, .needs_library = true },
+    .{ .title = "Submit to AcoustID", .subtitle = "Library tools", .icon = "auth-fingerprint-symbolic", .run = jobs.startSubmission, .needs_library = true },
+    .{ .title = "Add music folder…", .subtitle = "Library tools", .shortcut = "Ctrl O", .icon = "list-add-symbolic", .run = jobs.chooseFolder, .needs_library = true },
+    .{ .title = "Search library", .subtitle = "Go to", .keywords = "find", .icon = "orca-search-symbolic", .run = summonSearch, .needs_library = true },
     .{ .title = "Show Albums", .subtitle = "Go to", .icon = "orca-albums-symbolic", .run = goTo(.albums) },
     .{ .title = "Show Artists", .subtitle = "Go to", .icon = "orca-artists-symbolic", .run = goTo(.artists) },
     .{ .title = "Show Tracks", .subtitle = "Go to", .icon = "orca-tracks-symbolic", .run = goTo(.tracks) },
@@ -245,7 +246,7 @@ const commands = [_]Command{
     .{ .title = "Previous", .subtitle = "Playback", .shortcut = "Ctrl ←", .icon = "orca-previous-symbolic", .run = transport.previous },
     .{ .title = "Shuffle on/off", .subtitle = "Playback", .icon = "orca-shuffle-symbolic", .run = transport.toggleShuffle },
     .{ .title = "Repeat mode", .subtitle = "Playback", .icon = "orca-repeat-symbolic", .run = transport.cycleRepeat },
-    .{ .title = "Save queue as playlist", .subtitle = "Playback", .icon = "orca-playlists-symbolic", .run = queue.askSaveName },
+    .{ .title = "Save queue as playlist", .subtitle = "Playback", .icon = "orca-playlists-symbolic", .run = queue.askSaveName, .needs_library = true },
     .{ .title = "Keyboard shortcuts", .subtitle = "Help", .shortcut = "Ctrl ?", .icon = "orca-more-symbolic", .run = activateAction("app.shortcuts") },
     .{ .title = "About Orca", .subtitle = "Help", .icon = "orca-more-symbolic", .run = activateAction("app.about") },
     setting("Startup", .general, "General", "login autostart default page", "orca-play-symbolic"),
@@ -627,6 +628,7 @@ fn showCommands(self: *App, section: Section, heading: [*:0]const u8, query: []c
     var headed = false;
     for (commands, 0..) |command, index| {
         if (command.section != section) continue;
+        if (command.needs_library and self.library == null) continue;
         if (!matches(&.{ command.title, command.subtitle, command.keywords }, query)) continue;
         if (!headed) paletteHeading(self, heading);
         headed = true;

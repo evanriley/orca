@@ -18,6 +18,7 @@ const submissions = @import("submissions.zig");
 const tags = @import("tags.zig");
 const page_ui = @import("page.zig");
 const match_review = @import("match_review.zig");
+const match_outcome = @import("match_outcome.zig");
 
 const App = app.App;
 
@@ -28,6 +29,7 @@ const separator = " · ";
 const recording_url = "https://musicbrainz.org/recording/";
 const list_limit: u32 = 100;
 const cover_pixels: c_int = 48;
+const unread_tooltip = "Named by your tags, not yet read from MusicBrainz. Match Again reads it.";
 
 pub const Detail = struct {
     evidence: ?liborca.MatchEvidence = null,
@@ -757,17 +759,23 @@ fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) 
     const best = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     gtk.gtk_widget_set_valign(best, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_hexpand(best, gtk.true_);
-    append(best, &.{ cell(if (item.from_tags) "Identified by your tags" else "Best candidate", "match-caption"), candidate });
+    const unread = item.best != null and item.best.?.unread();
+    const caption: [*:0]const u8 = if (item.from_tags) "Identified by your tags" else if (unread) "Named by your tags" else "Best candidate";
+    append(best, &.{ cell(caption, "match-caption"), candidate });
 
     const confidence = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 5);
     gtk.gtk_widget_set_size_request(confidence, 150, -1);
     gtk.gtk_widget_set_valign(confidence, gtk.ALIGN_CENTER);
-    if (item.best) |candidate_release| {
-        const value = label(strings.format(&buffer, "{d}% confidence", .{percent(candidate_release.confidence)}).ptr, "match-confidence");
+    if (unread) {
+        const value = label("Not yet read", "match-confidence-unread");
+        gtk.gtk_widget_set_tooltip_text(value, unread_tooltip);
+        append(confidence, &.{value});
+    } else if (item.best) |candidate_release| {
+        const value = label(strings.format(&buffer, "{d}% confidence", .{percent(candidate_release.confidence.?)}).ptr, "match-confidence");
         gtk.gtk_widget_add_css_class(value, "numeric");
         const bar = gtk.gtk_progress_bar_new();
         gtk.gtk_widget_add_css_class(bar, "match-bar");
-        gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, bar), std.math.clamp(candidate_release.confidence, 0, 1));
+        gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, bar), std.math.clamp(candidate_release.confidence.?, 0, 1));
         append(confidence, &.{ value, bar });
     }
 
@@ -840,20 +848,11 @@ fn tabClicked(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     }
 }
 
-fn bucketName(bucket: Bucket) [*:0]const u8 {
-    return switch (bucket) {
-        .confident => "Confident",
-        .needs_review => "Needs Review",
-        .unmatched => "Unmatched",
-        .reviewed => "Reviewed",
-    };
-}
-
 fn tabButton(self: *App, bucket: Bucket, group: ?*gtk.Widget) *gtk.Widget {
     const count = label("", "match-tab-count");
     gtk.gtk_widget_add_css_class(count, "numeric");
     const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    append(content, &.{ gtk.gtk_label_new(bucketName(bucket)), count });
+    append(content, &.{ gtk.gtk_label_new(match_outcome.bucketName(bucket).ptr), count });
     const button = gtk.gtk_toggle_button_new();
     gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
     gtk.gtk_widget_add_css_class(button, "match-tab");
@@ -1217,16 +1216,40 @@ pub fn reveal(self: *App, track_id: i64) void {
 }
 
 pub fn showBucket(self: *App, bucket: Bucket) void {
-    const matches = &self.matches;
-    if (bucket != matches.bucket) {
-        matches.bucket = bucket;
-        matches.expanded = null;
-        matches.stale = true;
-        matches.generation +%= 1;
-        if (matches.tabs.get(bucket).button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
-    }
+    selectBucket(self, bucket);
     window.goTo(self, .matches);
     shown(self);
+}
+
+/// Opens `bucket` searched for the album's title, with the album's row open.
+pub fn showRelease(self: *App, bucket: Bucket, release_id: i64, title: []const u8) void {
+    selectBucket(self, bucket);
+    const matches = &self.matches;
+    const trimmed = std.mem.trim(u8, title, " \t");
+    const text = if (trimmed.len <= matches.filter.buffer.len) trimmed else "";
+    if (!std.mem.eql(u8, text, matches.filter.buffer[0..matches.filter.len])) {
+        matches.filter.set(text);
+        matches.filtered_counts = null;
+        matches.stale = true;
+        matches.generation +%= 1;
+        if (matches.search) |entry| {
+            var buffer: [liborca.max_search_text + 1]u8 = undefined;
+            gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, entry), strings.terminated(&buffer, matches.filter.buffer[0..matches.filter.len]).ptr);
+        }
+    }
+    matches.expanded = release_id;
+    window.goTo(self, .matches);
+    shown(self);
+}
+
+fn selectBucket(self: *App, bucket: Bucket) void {
+    const matches = &self.matches;
+    if (bucket == matches.bucket) return;
+    matches.bucket = bucket;
+    matches.expanded = null;
+    matches.stale = true;
+    matches.generation +%= 1;
+    if (matches.tabs.get(bucket).button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
 }
 
 pub fn invalidate(self: *App) void {

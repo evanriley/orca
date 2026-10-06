@@ -10,6 +10,103 @@
 ### Changed
 
 - The application icon is a white "O" on the window's dark background.
+- Embedding rules are specified and enforced. The first runtime installs the
+  process-wide SQLite OFD lock replacement once and thread-safely; when SQLite
+  connections were already open, or the replacement was later undone, Library
+  opens fail with `ORCA_STATUS_INVALID_STATE` instead of running on POSIX
+  locks. A Debug build refuses `orca_runtime_destroy` from another thread. An
+  AcoustID job keeps the application key it resolved when it began.
+
+### Fixed
+
+- An AIFF whose COMM frame count exceeds its SSND data plays the frames
+  present and is reported as `corrupt_audio` by analysis; an AIFF with no SSND
+  chunk fails to open instead of decoding as an empty track.
+- An 8-bit AIFF reports its samples as signed 8-bit (`signed_8`,
+  `ORCA_SAMPLE_FORMAT_SIGNED_8`), not unsigned.
+- A WAV whose data chunk ends inside a frame is reported as `corrupt_audio` by
+  analysis.
+- FLAC frame errors, a short final block and an MD5 mismatch are reported as
+  `corrupt_audio` by analysis while playback still tolerates them.
+- A Zone attached, detached, moved or destroyed while its Player's engine
+  thread starts no longer returns before that engine adopts the change.
+- A release ID tag alone no longer counts as a confident match. Until Orca
+  reads the release a tag names and places the Track on it, the album is in
+  Needs Review with no percentage, its candidate titled from the album tag, and
+  Matches and Match Review say it is not yet read from MusicBrainz. Find
+  Matches reads every release the tags name, including on partially tagged
+  albums, and reads a release ID tag written in uppercase as the lowercase
+  MusicBrainz ID. `ReleaseCandidate.confidence` is optional and
+  `orca_release_match_view_v2` gains `candidate_unread`.
+- A file with more than two channels is refused for playback with
+  `UnsupportedChannelCount` before any output opens, including as the gapless
+  next entry, and is not measured by analysis, which raises `missing_analysis`
+  naming the channel count instead of storing a loudness from unweighted
+  surround channels. Results a Library already stored for such a file are
+  ignored for album gain and discarded by the next analysis pass.
+- A search no longer reports "Found a match to review" when its proposals form
+  no release candidate and the album stays Unmatched. A search of one album or
+  Track names the album and the Matches tab it is ready to review in, with a
+  Review button that opens it, or says "No album match found"; Find Matches
+  names how many albums are ready to review. `MatchStats` gains
+  `releases_to_review` (`orca_job_match_stats_v2`), and
+  `libraryReleaseMatchBucket` (`orca_library_release_match_bucket`) gives one
+  Release's bucket.
+- Next and previous open the target entry before moving the queue. An entry
+  that fails to open is stepped over, at most 8 in a row; when none opens, the
+  open error is returned and the playing entry keeps playing with now-playing
+  and the queue history unchanged. A queue jump to an entry that fails to open
+  changes nothing.
+- An output that stops consuming while its Player plays leaves the shared
+  decoder after 64 engine passes, and after 2 s is lost and goes through the
+  same bounded recovery as any other lost output.
+- A tag write no longer replaces a read-only file. `planTagWrite` skips it
+  with `file_read_only` (`ORCA_TAG_WRITE_SKIP_FILE_READ_ONLY`); a file made
+  read-only after planning fails the write with `FileReadOnly`, reported as
+  `file_read_only` (`ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY`), before any file
+  changes; and undo refuses, changing nothing, while a file to restore is
+  read-only. A rewritten or restored file keeps its exact permission bits
+  instead of losing those the umask removes, such as group write.
+- A lost output that reopens counts each reopen as a recovery attempt until it
+  has played 32 blocks, or until the host closes it. A device-0 output, which
+  always reopens on the default sink, now ends `failed` after its fourth loss
+  without a stable interval instead of retrying without end, so its Player
+  drains.
+- A playing Player whose every requested output has failed with its recovery
+  attempts used is paused at its position and wakes the host, instead of
+  never draining while its engine woke every 2 ms. It reports `paused` and not
+  drained; closing and requesting the output again, then playing, resumes it.
+- When no Library opens, `orca-gtk` shows the failure in place of every page
+  but Settings, instead of the empty-library welcome: the Library's name, the
+  reason, with the newer-version sentence when it applies, and buttons to
+  choose or create a Library. Add Music Folder, Scan Library and the
+  palette's library commands are unavailable instead of answering "No
+  library is open".
+- A queue entry whose Track was removed from the Library keeps its row in queue
+  pages, so row `n` is queue position `offset + n`. `playerQueueTracks` returns
+  a `QueueTrackPage` whose rows carry the position, the Track id and a summary
+  that is null for a removed Track; `orca_player_query_queue_tracks` passes such
+  an entry as an `orca_track_view` with `removed` set and only `id` filled. The
+  Queue page and Now Playing show it as "Removed from library", and it can be
+  removed from the queue.
+- A gapless successor that was primed before its predecessor's last block was
+  decoded, as after a seek back inside the predecessor, becomes the
+  now-playing entry at its first frame, with position counted from there, even
+  when that frame falls partway through a 256-frame block. Before, the whole
+  block holding the predecessor's last frame was reported as the successor's,
+  so identity changed and the successor's position started counting up to one
+  block early.
+- The signal path reports the audio being heard. A path is bit-perfect
+  eligible only when the source declares its sample format, an output is open
+  and the device has reported its rate and format; otherwise it carries the
+  new reason `path_unknown` (`ORCA_SIGNAL_REASON_PATH_UNKNOWN`), and
+  `orca-gtk` calls it unconfirmed instead of bit-perfect. A device with a
+  different channel count adds `channel_layout_conversion`. The float32 stream
+  on an integer device adds `sample_format_conversion` only when the device
+  cannot hold the source's values, so a 16- or 24-bit source on a 24-bit
+  device stays eligible. `sample_processing` stays until audio processed under
+  earlier settings has played, instead of clearing while that audio is still
+  queued.
 
 ## 0.1.0 - 2026-10-06
 

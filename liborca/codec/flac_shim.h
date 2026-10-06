@@ -56,4 +56,12 @@ int32_t orca_flac_decoder_read_i32(struct orca_flac_decoder *decoder, int32_t *o
 int32_t orca_flac_decoder_seek(struct orca_flac_decoder *decoder,
                                uint64_t frame);
 
+/* Errors libFLAC reported and recovered from (lost sync, bad header, CRC
+ * mismatch) since creation. */
+uint64_t orca_flac_decoder_stream_errors(const struct orca_flac_decoder *decoder);
+
+/* Nonzero once a stream decoded to its end without a seek and its audio did
+ * not match the STREAMINFO MD5 signature. Zero when STREAMINFO carries none. */
+int32_t orca_flac_decoder_md5_mismatch(const struct orca_flac_decoder *decoder);
+
 #endif /* ORCA_FLAC_SHIM_H */

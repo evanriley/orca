@@ -25,6 +25,7 @@ pub const Processor = struct {
     context: *anyopaque,
     process_fn: *const fn (*anyopaque, []f32, u32, u16) void,
     reset_fn: ?*const fn (*anyopaque) void = null,
+    changed_samples_fn: ?*const fn (*anyopaque) bool = null,
     metadata: Metadata,
 
     pub fn process(self: Processor, samples: []f32, frames: u32, channels: u16) void {
@@ -33,6 +34,11 @@ pub const Processor = struct {
 
     pub fn reset(self: Processor) void {
         if (self.reset_fn) |reset_fn| reset_fn(self.context);
+    }
+
+    pub fn changedSamples(self: Processor) bool {
+        if (self.changed_samples_fn) |changed| return changed(self.context);
+        return self.metadata.changes_samples;
     }
 };
 
@@ -295,6 +301,7 @@ pub const Gain = struct {
     remaining_frames: u32 = 0,
     step: f32 = 0,
     seen_generation: u64 = 0,
+    scaled: bool = false,
 
     pub fn setLinear(self: *Gain, linear: f32, ramp_frames: u32) void {
         self.linear.store(linear, .release);
@@ -317,12 +324,18 @@ pub const Gain = struct {
         return .{
             .context = self,
             .process_fn = process,
+            .changed_samples_fn = changedSamples,
             .metadata = .{
                 .name = "gain",
                 .changes_samples = true,
                 .realtime_safe = true,
             },
         };
+    }
+
+    fn changedSamples(context: *anyopaque) bool {
+        const self: *Gain = @ptrCast(@alignCast(context));
+        return self.scaled;
     }
 
     fn process(context: *anyopaque, samples: []f32, frames: u32, channels: u16) void {
@@ -345,9 +358,11 @@ pub const Gain = struct {
             }
         }
         if (self.remaining_frames == 0) {
+            self.scaled = self.current != 1;
             kernels.gain(samples[0 .. @as(usize, frames) * channels], self.current);
             return;
         }
+        self.scaled = true;
         for (0..frames) |frame| {
             if (self.remaining_frames > 0) {
                 self.remaining_frames -= 1;
@@ -461,6 +476,28 @@ test "a ramp ending on a block boundary lands exactly on its target" {
     const original = samples;
     gain.processor().process(&samples, 256, 2);
     try std.testing.expectEqualSlices(f32, &original, &samples);
+}
+
+test "the gain node reports whether its last block changed any sample" {
+    var gain: Gain = .{};
+    const processor = gain.processor();
+    var block: [4]f32 = @splat(1);
+    processor.process(&block, 4, 1);
+    try std.testing.expect(!processor.changedSamples());
+
+    gain.setLinear(0.5, 0);
+    processor.process(&block, 4, 1);
+    try std.testing.expect(processor.changedSamples());
+
+    gain.setLinear(1, 8);
+    for (0..2) |_| {
+        processor.process(&block, 4, 1);
+        try std.testing.expect(processor.changedSamples());
+    }
+    block = @splat(1);
+    processor.process(&block, 4, 1);
+    try std.testing.expect(!processor.changedSamples());
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, &block);
 }
 
 test "a boost is capped by the peak it would clip" {

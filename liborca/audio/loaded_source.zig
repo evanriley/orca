@@ -32,7 +32,9 @@ pub const LoadedSource = struct {
             .file = try storage.LocalFileSource.open(io, path),
         };
         errdefer loaded.file.close();
-        const decoder = try registry.openDetected(allocator, loaded.file.readable());
+        var decoder = try registry.openDetected(allocator, loaded.file.readable());
+        errdefer decoder.deinit();
+        try decoder.requireSupportedChannels();
         return .initOwned(decoder, loaded.ownedSource());
     }
 

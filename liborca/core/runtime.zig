@@ -50,6 +50,8 @@ pub const TrackRef = audio.playback_queue.TrackRef;
 pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const QueueHistoryEntry = queue_history.QueueHistoryEntry;
+pub const QueueTrack = runtime_status.QueueTrack;
+pub const QueueTrackPage = runtime_status.QueueTrackPage;
 pub const QueueHistoryReason = queue_history.QueueHistoryReason;
 pub const RestoreMode = runtime_resume.RestoreMode;
 pub const RestoreOutcome = runtime_resume.RestoreOutcome;
@@ -339,6 +341,9 @@ pub const TagWriteSkipReason = enum {
     /// Orca cannot create files in the file's folder, which a write needs for
     /// its staged copy.
     folder_not_writable,
+    /// The file is read-only: no write permission bit is set, or the process
+    /// may not write it. Orca does not change a file made read-only.
+    file_read_only,
 };
 
 /// What `pruneTagWriteBackups` deleted: how many backups, and their bytes.
@@ -636,6 +641,7 @@ pub const OrcaRuntime = struct {
     watch_limit: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
+        database.sqlite_locks.installOnce();
         return .{
             .allocator = allocator,
             .libraries = .init(allocator),
@@ -1645,7 +1651,9 @@ pub const OrcaRuntime = struct {
     /// tags identify it (`ReleaseMatchItem.from_tags`), is `reviewed`;
     /// otherwise it is `confident` when its best candidate's
     /// confidence is at least `confident_at`, `needs_review` when it is
-    /// lower, and `unmatched` with no candidate. Weighing every Release, a page costs a walk of the
+    /// lower or unknown (`ReleaseCandidate.unread`: a Track's release ID
+    /// names the release and Orca has not read it), and `unmatched` with no
+    /// candidate. Weighing every Release, a page costs a walk of the
     /// library; each item with a candidate then costs one Release view,
     /// snapshot and pairings read and an alignment for its placement
     /// counts. A `filter` keeps the Releases whose title or album artist has
@@ -1668,6 +1676,12 @@ pub const OrcaRuntime = struct {
     /// under the same `filter`.
     pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32, filter: ?[]const u8) !ReleaseMatchCounts {
         return runtime_listens.libraryReleaseMatchCounts(self, library, confident_at, filter);
+    }
+
+    /// The bucket of `libraryReleaseMatchPage` that lists the Release
+    /// against `confident_at`. Costs one Release's weighing.
+    pub fn libraryReleaseMatchBucket(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, confident_at: f32) !ReleaseMatchBucket {
+        return runtime_listens.libraryReleaseMatchBucket(self, library, release_id, confident_at);
     }
 
     /// Why the Release is or is not `release_mbid`, or its best candidate
@@ -3463,14 +3477,16 @@ pub const OrcaRuntime = struct {
     /// resolution, which is the one thing frontends here must never do.
     ///
     /// Returned in queue order, so entry `n` of the result is queue position
-    /// `offset + n`, and a shuffled queue reads as the order it will play.
+    /// `offset + n`, and a shuffled queue reads as the order it will play. An
+    /// entry whose Track was removed from the Library keeps its row with a
+    /// null `track`.
     pub fn playerQueueTracks(
         self: *OrcaRuntime,
         player: PlayerHandle,
         allocator: std.mem.Allocator,
         offset: u32,
         limit: u32,
-    ) !database.TrackPage {
+    ) !QueueTrackPage {
         return runtime_status.playerQueueTracks(self, player, allocator, offset, limit);
     }
 

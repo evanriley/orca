@@ -90,8 +90,8 @@ zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers v
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--album=…] [--album-artist=…] [--date=…] [--track=N] [--disc=N] [--compilation=0|1] [--recording-id=MBID] [--composer=…] [--comment=…] [--explicit=yes|no|clean] [--genre=A;B] [--clear=FIELD]…   # library only; no edits lists the values held; FIELD is a metadata field name such as album_artist or musicbrainz_recording_id, or genre
 zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|chosen|embedded|folder|fetched file= mime= tracks=N/M`
-zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
-zig build run -- undo-tags DATABASE GROUP
+zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS; `skip FILE_ID REASON PATH` for each file left out, `failed FILE_ID REASON PATH` for the file a failed write stopped at; a read-only file is never changed (file_read_only)
+zig build run -- undo-tags DATABASE GROUP   # refuses, changing nothing, while a file to restore is read-only
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes cannot be undone
 zig build run -- changes DATABASE [--limit N] [--offset N]   # tag writes newest first: group= written_at= files= state=applied|undoing|undone|rolled_back|failed|needs_reconciliation can_undo=yes|no expired=yes|no title=; reads the journal only
 zig build run -- changes DATABASE GROUP   # the same line with fields= more_files=, then FILE<TAB>FIELD<TAB>RESTORES<TAB>CURRENT per changed tag; unknown when a backup is gone
@@ -147,7 +147,7 @@ zig build run -- love-artist DATABASE IDS [--clear]   # artist love; kept in the
 zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
 zig build run -- match DATABASE (--track=ID | --release=ID) --reidentify   # again, ignoring IDs and earlier searches; confirmed= counts IDs found again
 zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal; the replaced ID last
-zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched|reviewed] [--min-score=0.9] [--filter=TEXT] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= title= date= candidate_tracks=, placed= needs_pairing= (- without a tracklist snapshot) and from_tags on a reviewed Release only its release ID tags identify, then `confident= needs_review= unmatched= reviewed=`
+zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched|reviewed] [--min-score=0.9] [--filter=TEXT] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= (unread while the release a Track's release ID names is not read) title= date= candidate_tracks=, placed= needs_pairing= (- without a tracklist snapshot) and from_tags on a reviewed Release only its release ID tags identify, then `confident= needs_review= unmatched= reviewed=`
 zig build run -- matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff | --dismiss=MBID)   # evidence: fingerprints=N/M durations_within_1s= date_agrees= artist_agrees= title_agrees=, then note=; diff: a line per field, then per Track with local_artist= candidate_artist=; dismiss: Not This Release
 zig build run -- verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N] [--cancel-after=MS]   # recording IDs against AcoustID; proposes corrections
 zig build run -- corrections DATABASE [--limit N] [--offset N]   # album groups of corrections

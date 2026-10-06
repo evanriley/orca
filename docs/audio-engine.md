@@ -49,12 +49,16 @@ The callback compares only the epoch of a prepared block, never its track: a
 gapless transition appends the successor's blocks under the same epoch, so a
 track comparison would discard the audio gapless depends on. The successor
 carries a new `entry_serial`, which the callback publishes and never compares.
-The decode cursor leads the audible cursor by the whole render-ahead depth, so
-identity, duration and position of the audible entry all resolve from the
-published serial (identity through the queue's serial records, duration through
-a serial-keyed ring of per-entry timeline shapes, position through the entry
-anchor) and never from `SourceQueue.current`. The serial is adopted only once
-the position published with it belongs to the current epoch.
+A block holds frames of at most two entries. When the successor starts partway
+through one, the block also carries the successor's serial and the block frame
+of its first frame, and the callback publishes that serial and the entry anchor
+at that frame, not at the block's first. The decode cursor leads the audible
+cursor by the whole render-ahead depth, so identity, duration and position of
+the audible entry all resolve from the published serial (identity through the
+queue's serial records, duration through a serial-keyed ring of per-entry
+timeline shapes, position through the entry anchor) and never from
+`SourceQueue.current`. The serial is adopted only once the position published
+with it belongs to the current epoch.
 
 ### Rendered position
 
@@ -95,7 +99,18 @@ Detaching a Zone and destroying its Player retire it the same way.
 A Zone takes part in a drain while its output is requested and its recovery is
 not exhausted. A format switch waits for every such Zone to hand back its
 blocks, and a Player reports drained only once they all have. A Zone whose
-recovery is exhausted does not take part, so it cannot stall the others.
+recovery is exhausted does not take part, so it cannot stall the others. An
+output that stops consuming while its Player plays is lost and recovered (see
+[Recovery](#recovery)), so it cannot hold a drain open either.
+
+A Player whose every requested output has failed cannot drain, because nothing
+consumes its audio. Once the Player is playing with its queue not finished, at
+least one attached Zone has its output requested and every such Zone reports
+`failed` with its recovery attempts exhausted, the engine pauses the Player at
+its current position and wakes the host. The Player then reports `paused` and
+not drained. A host waiting for a drain also stops on this state: the Player
+paused while its Zones report `failed`. Closing a Zone's output, requesting it
+again once the Zone reports `closed`, and playing resumes from that position.
 
 ## Engine thread
 
@@ -123,11 +138,12 @@ only after observing the acknowledgement.
 A busy engine parks for 2 ms. An idle engine parks with no timeout and costs no
 wakeups. It is idle when its next pass would do nothing: no seek or
 format-switch successor is pending; the Player is not playing, or has its queue
-decoded with every draining Zone drained and no entry left to open; the clock
-Zone's position has been sent as a hint; and every attached Zone is settled
-(output active in the decoded format and silenced or empty, or no output and
-nothing to open one for). A Zone that is opening, lost or waiting out its
-recovery backoff keeps the engine busy, as does a suspended engine.
+decoded with every draining Zone drained and no entry left to open (a Player
+whose requested outputs have all failed is paused, see [Zones](#zones)); the
+clock Zone's position has been sent as a hint; and every attached Zone is
+settled (output active in the decoded format and silenced or empty, or no
+output and nothing to open one for). A Zone that is opening, lost or waiting
+out its recovery backoff keeps the engine busy, as does a suspended engine.
 
 Everything that can end idleness wakes the engine after the write it must act
 on: `wakeUp` (play, pause and output requests), zone publication, `quiesce`,
@@ -137,8 +153,8 @@ output's waker from the stream's state-changed callback on its loop thread,
 never from the process callback. An engine sets that waker on every output it
 adopts or opens and clears it on every output it drops or leaves open at exit;
 setting it takes the stream loop's lock, so an output that outlives its engine
-never calls into a freed one. Telemetry cadence and recovery backoff use a
-monotonic clock.
+never calls into a freed one. Telemetry cadence, recovery backoff and the stall
+timeout use a monotonic clock.
 
 ## Player DSP
 
@@ -226,19 +242,44 @@ conversions, direct-RT eligibility and total algorithmic latency. They
 distinguish source PCM from canonical float32 working PCM and conservatively
 explain why a path is not bit-perfect. The reasons are:
 
-- `sample_format_conversion`: a 32-bit integer or 64-bit float source, or the
-  float32 stream reaching an integer device;
+- `sample_processing`: any ReplayGain, either equalizer, crossfeed, a volume
+  that is not exactly 1, or audio processed under earlier settings that has
+  not played yet;
+- `sample_rate_conversion`: a stream rate that is not the source's, or a
+  device rate that is not the stream's;
+- `channel_layout_conversion`: a stream channel count that is not the
+  source's, or a device channel count that is not the stream's;
+- `sample_format_conversion`: a 32-bit integer or 64-bit float source, which
+  float32 cannot hold exactly, or a device sample format that cannot hold the
+  source's values: an integer device for a float or 32-bit integer source, or
+  an integer device with fewer bits than an integer source;
 - `lossy_source`: a lossy codec;
-- `sample_processing`: any ReplayGain, either equalizer, crossfeed, or a volume
-  that is not exactly 1;
-- `sample_rate_conversion` and `channel_layout_conversion`: a rate or channel
-  layout that changes.
+- `path_unknown`: the path cannot be confirmed because nothing is audible, the
+  source declares no sample format, no output is open, or the device has not
+  reported its rate or its format.
 
 Widening an 8-, 16- or 24-bit integer source to float32 is exact, so it is not
-a reason; the report marks it `widened_exactly`. Eligibility covers the stream
-Orca hands the backend and the device's rate and format as PipeWire reports
-them (see [Device format](#device-format)); it does not assert a bit-perfect
-native path.
+a reason; the report marks it `widened_exactly`. For the same reason the
+float32 stream reaching an integer device is not a reason by itself: a device
+with at least the source's bits can carry every value float32 holds for it. A
+path is eligible only when no reason applies, so only with a declared source
+format, an open output, and a device that reported its rate, sample format and
+channels (see [Device format](#device-format)). Eligibility covers the stream
+Orca hands the backend and the device's format as PipeWire reports it; it does
+not assert a bit-perfect native path.
+
+The report describes the audio being heard, not only the settings that apply
+to the next block. A setting takes effect a render-ahead later, so
+`sample_processing` stays while any of the Player's Zones still holds audio a
+gain or DSP stage changed: queued, being rendered, or rendered and not yet
+reclaimed by the engine. Each Zone's block pool marks a block processed when
+the engine fans it out and clears the mark when the engine reclaims the block;
+the render callback never reads or writes the mark. The settings fields
+(`replay_gain_db`, the equalizers, `crossfeed` and `volume`) always describe
+the current settings, so the reason can stand while all of them read neutral.
+The check is conservative: a processed block a seek made stale counts until
+the engine reclaims it, and a setting that changes the samples is reported at
+once, before the audio it changed is audible.
 
 `Runtime.playerSignalPath` reports the live path of one Player: the audible
 entry's source format, codec and applied ReplayGain (the track's, the album's
@@ -270,8 +311,9 @@ against the current user's server; normal tests need no live audio service.
 Each stream requests `node.rate` at the entry's source rate. PipeWire honours
 it only when the graph's `clock.allowed-rates` permits it and no other stream
 holds the device at another rate; otherwise it resamples. The device rate read
-from the stream's timing is reported as `device_rate` and adds
-`sample_rate_conversion` when it differs from the stream's rate.
+from the stream's timing is reported as `device_rate`. It adds
+`sample_rate_conversion` when it differs from the stream's rate, and
+`path_unknown` until it is known.
 
 ### Device format
 
@@ -284,9 +326,11 @@ into one atomic that the timing read loads; the render callback never touches
 it. The Zone refreshes it on activation and every 16 engine passes, and the
 signal path reports it as `device_format`.
 
-A known format adds `sample_format_conversion` when it is an integer format and
-`sample_rate_conversion` when its rate is not the stream's. Unknown is
-explicit, never guessed, and leaves the verdict as it is. The format is unknown
+A known format adds `sample_rate_conversion` when its rate is not the stream's,
+`channel_layout_conversion` when its channel count is not the stream's, and
+`sample_format_conversion` when it cannot hold the source's values (see
+[Signal path](#signal-path)). Unknown is explicit, never guessed, and adds
+`path_unknown`, so the path is never eligible while it lasts. The format is unknown
 while the node is suspended, before PipeWire has answered, for a virtual sink
 such as `support.null-audio-sink`, for any other sample format, and on a
 backend other than PipeWire. A sink that is itself processing, such as a filter
@@ -296,11 +340,35 @@ chain, reports its own input format, not that of the hardware behind it.
 
 A lost output is closed and reopened with bounded attempts while its Player
 epoch and prepared render path remain intact. Recovery state belongs to each
-Zone; another Zone stays active if reopening fails. Once
-`zone_runtime.max_recovery_attempts` (3) reopens have failed, the Zone reports
-`failed` and returns every prepared block to its pool. It stays failed until
+Zone; another Zone stays active if reopening fails. Each reopen counts as one
+attempt, whether it succeeds or not. The count returns to zero only once a
+reopened output has handed back `zone_runtime.block_count` (32) blocks, or when
+the host closes the output. When `zone_runtime.max_recovery_attempts` (3)
+attempts are counted and the output is lost or fails to open again, the Zone
+reports `failed` and returns every prepared block to its pool. A device that
+reopens but never plays, such as device 0 following a default sink that does
+not consume, therefore fails after its fourth loss. The Zone stays failed until
 the host closes its output and, once the Zone reports `closed`, requests it
-again, which starts a new set of attempts.
+again, which starts a new set of attempts. When every requested output of a
+playing Player has failed this way, the engine pauses the Player (see
+[Zones](#zones)), and the host plays it again after requesting the outputs.
+
+An output that stops consuming is handled in two stages. A pass counts as
+stalled for a Zone when its Player is playing, the Zone holds prepared blocks
+and its output handed none back since the previous pass. A block handed back,
+a paused or stopped Player, or an empty Zone resets the count.
+
+1. After `ZoneRuntime.stall_limit` (64) consecutive stalled passes, the Zone
+   stops holding the shared decode cursor, so the other Zones keep playing. It
+   rejoins once its output hands a block back.
+2. Once the stall has also lasted `engine.stall_timeout_ns` (2 s) on the
+   engine's monotonic clock, measured from the first stalled pass or from the
+   output's latest open, whichever is later, the output is lost and recovered
+   as above.
+
+The pass count alone is not enough: control operations run many passes inside
+one device quantum, and a sink resuming from suspend reports active before its
+first callback.
 
 ### Device selection
 
@@ -361,8 +429,10 @@ A Player owns the active `SourceQueue`: one current SourceSession and one
 prepared successor. When decoding reaches the current source's end, it appends
 compatible successor blocks behind the current blocks already in the render
 queue, then releases the exhausted decoder, so transitions are primed before
-the audible end and need no callback-side source switch. Transitions are
-gapless; there is no crossfade.
+the audible end and need no callback-side source switch. A successor primed
+before the current source's end, such as one kept through a seek back inside
+the current entry, fills the rest of the block that holds the current source's
+last frame. Transitions are gapless; there is no crossfade.
 
 A `PlaybackQueue` sits above it: bounded track references, an audible cursor, a
 decode cursor, repeat and shuffle. Only the control lane and the engine thread
@@ -404,6 +474,16 @@ the cursor, so toggling it does not restart the song; toggling it moves each
 serial record to its entry's new position, and removing an entry forgets its
 record. `repeat_one` re-opens a fresh session for the same entry rather than
 seeking the one still draining into the pipe.
+
+`next`, `previous` and a queue jump open their target on the control lane,
+under the quiesce, before anything moves. Only an opened entry ends the audible
+one as `skipped` and is hard-loaded. `next` and `previous` step over an entry
+that fails to open, recording it as an open failure, for at most
+`max_consecutive_open_failures` (8) entries and never back onto the playing
+one. The last entry stepped over is recorded again after the hard load, whose
+own clear would otherwise erase it. When every candidate fails, the last open
+error is returned and the cursor, the loaded sources, the epoch and the history
+are untouched, so the playing entry keeps playing. A queue jump does not step.
 
 ### Moving entries
 
@@ -447,6 +527,13 @@ opened, as a `PlaybackFailure`: its Track id and a reason (`file_missing`,
 `unsupported_channels`). `folder_unavailable` means the Track's root or volume
 is gone, so its files are not marked missing; `file_missing` means the root is
 there but the file is not.
+
+Playback takes mono and stereo sources only. `LoadedSource.open` refuses a
+decoder reporting more than two channels with `UnsupportedChannelCount` before
+any output opens, so the check covers every open: a played or loaded file, a
+queue cursor, the gapless next entry, a format switch and a seek. The reason is
+`unsupported_channels`. A refused next entry is an ordinary open failure: the
+entry before it plays to its end and the engine steps past the refused one.
 
 The failure lives in `Player.open_failure`, an `OpenFailureSlot` readable from
 any host thread. Three rules keep it from naming the wrong Track:

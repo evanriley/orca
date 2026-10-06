@@ -119,7 +119,9 @@ names each `Runtime` method the C ABI does not reach and why.
 - Tag write-back for FLAC, MP3 and ADTS from an approved plan, with undo.
   One process at a time owns a Library's mutation journal through a lock
   file; an undo interrupted by a crash is finished by the next open, and
-  recovery never touches another process's write in progress.
+  recovery never touches another process's write in progress. A read-only
+  file is never written or restored over, and a rewritten file keeps its
+  permission bits.
 - Track details: format, file, loudness, tags and MusicBrainz recording ID
   with its source for one Track (`orca-cli track`), and the inspector in
   `orca-gtk`.
@@ -349,60 +351,6 @@ removed.
 
 ### Before 1.0
 
-- Signal path truth. Unknown device details must not produce an unqualified
-  bit-perfect verdict: zero known reasons currently means eligible, and a
-  channel mismatch is not checked. A float32-to-integer device path is not by
-  itself sample loss. The report must describe the audio actually playing,
-  not settings applied to future blocks: `playerSignalPath` describes the
-  current DSP settings while audio processed under earlier settings is still
-  queued, so it can report bit-perfect output for up to a pipe's worth of
-  processed audio. Checked by signal path tests with unknown device details,
-  and by a settings change under playback.
-- Gapless transitions inside one 256-frame block apply the successor's
-  identity and position anchor at its first frame, not the block's. Checked
-  by an engine test with a boundary mid-block.
-- More than two channels are refused for playback and loudness analysis with
-  a clear error until [full multichannel support](#later) lands. Checked by
-  playing and analysing a six-channel file.
-- Malformed input is reported. An AIFF whose COMM frame count exceeds its SSND
-  data, or with no SSND, is reported damaged; an 8-bit AIFF reports its sample
-  format correctly; a WAV with a data chunk that is not a whole number of
-  frames is reported; tolerant FLAC playback (errors discarded, MD5 off, short
-  final block accepted) does not clear `corrupt_audio` in analysis. Checked
-  by fixtures for each.
-- Player lifecycle. `playerNext` and `playerPrevious` move the queue before
-  opening the target, so a target that fails to open leaves now-playing on it
-  while the previous entry keeps playing. A Zone whose stream stays active but
-  stops calling back after decoding finished blocks draining for ever. A Zone
-  attached, detached or moved while its Player's engine thread is starting can
-  return before that engine adopts the change. Once every Zone has failed
-  with its recovery attempts used, the engine stops pumping and the Player
-  never drains, so a host that waits for the drain waits for ever; `orca-cli`
-  checks the Zone instead. A device-0 output lost after it opened resets its
-  recovery count on each reopen and retries without end. Each must have a
-  defined result, checked by a test of each.
-- `orca-gtk` shows a Library that fails to open. `libraries.openFailed`
-  logs a warning, leaves no Library active and records a problem ("Could not
-  open NAME", with "was made by a different version of Orca; create a new
-  library" for a newer schema). Only a row in Settings > Library's Libraries
-  card shows it. The Tracks page shows the empty-library welcome, and Add
-  Music Folder answers with the toast "No library is open". The window must
-  state the failure and offer to choose or create a Library. Checked by
-  launching against such a Library.
-- `write-tags` on a read-only file follows a stated policy. It rewrites a file
-  whose permissions make it read-only. Checked by a test of the stated
-  policy.
-- Queue pages keep queue positions. `playerQueueTracks` and
-  `orca_player_query_queue_tracks` skip a queue entry whose Track was removed
-  from the Library, contrary to the comment in `core/runtime_status.zig` that
-  it keeps its place, so a page's row `n` is then not queue position
-  `offset + n`. Checked by a page over a queue with a removed Track.
-- Embedding is specified. The SQLite unix-VFS lock replacement on Linux
-  (`liborca/database/sqlite_locks.zig`) is process-wide; its initialization
-  contract is documented and enforced. `orca_runtime_destroy` skips the Debug
-  wrong-thread check; document or fix. Whether the AcoustID application key
-  is snapshotted per job or per request is specified. Checked by tests and
-  by [frontends.md](frontends.md) stating each.
 - Compatibility promises for 1.0 are written separately for the Zig API, the
   C ABI and the Library schema. Schema upgrades from 0.1.0 are
   tested. A GTK launch, open, play and close smoke test runs on a private
@@ -477,6 +425,11 @@ Small defects that are not yet scheduled:
 - When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
   sometimes not drawn, and stays missing. The race is likely in
   `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
+- On the Match Review page, the Best candidate and confidence columns start
+  at a different position on each row. `matchRow` in
+  `apps/linux/matches.zig` splits each row's width between two expanding
+  boxes, and the width left over depends on that row's action buttons, such
+  as Accept or "Review · 1 track needs pairing".
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.
@@ -544,8 +497,9 @@ are sniffed or not recognized until then:
   default, since only that path can be bit-perfect.
 - Full multichannel support. Canonical PCM carries a channel count but no
   layout, so decode, loudness analysis (BS.1770 channel weights, LFE excluded),
-  DSP and PipeWire channel positions need one. Until then more than two
-  channels are refused (see [Before 1.0](#before-10)).
+  DSP and PipeWire channel positions need one. Until then playback and
+  loudness analysis refuse a file with more than two channels
+  (`UnsupportedChannelCount`).
 - Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files. A
   figure comes only from Orca's own analysis.
 - Exact album loudness from each file's block-energy distribution instead of

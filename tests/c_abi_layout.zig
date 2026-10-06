@@ -127,6 +127,7 @@ const struct_pairs = .{
     .{ c_api.Event, c.orca_event },
     .{ c_api.MatchOptions, c.orca_match_options },
     .{ c_api.MatchStatsView, c.orca_match_stats },
+    .{ c_api.MatchStatsViewV2, c.orca_match_stats_v2 },
     .{ c_api.SubmissionStatsView, c.orca_submission_stats },
     .{ c_api.AcoustIdSubmittableView, c.orca_acoustid_submittable_view },
     .{ c_api.MatchProposalView, c.orca_match_proposal_view },

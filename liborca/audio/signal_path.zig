@@ -17,6 +17,7 @@ pub const Reason = enum {
     channel_layout_conversion,
     sample_format_conversion,
     lossy_source,
+    path_unknown,
 };
 
 pub const max_reasons = @typeInfo(Reason).@"enum".field_names.len;
@@ -95,7 +96,7 @@ pub fn inspect(
 fn widensExactly(source: pcm.SampleFormat, output: pcm.SampleFormat) bool {
     if (output != .float_32) return false;
     return switch (source) {
-        .unsigned_8, .signed_16, .signed_24 => true,
+        .unsigned_8, .signed_8, .signed_16, .signed_24 => true,
         else => false,
     };
 }

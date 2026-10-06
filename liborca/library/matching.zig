@@ -93,6 +93,9 @@ pub const Result = struct {
     /// Files a verification passed over for having no quick hash.
     skipped: u64 = 0,
     correction_groups: u64 = 0,
+    /// Releases holding a matched Track that, once the searches end, the
+    /// Matches page lists as Confident or Needs Review.
+    releases_to_review: u64 = 0,
     acoustid: AcoustIdUse = .off,
     cancelled: bool = false,
     unavailable: bool = false,
@@ -105,8 +108,8 @@ pub const Progress = struct {
     matched: std.atomic.Value(u64) = .init(0),
     fingerprinted: std.atomic.Value(u64) = .init(0),
     verified: std.atomic.Value(u64) = .init(0),
-    /// Releases the library-scope step for the releases tags name has
-    /// handled, looked up or not, of `tagged_releases_total`, which is 0
+    /// Releases the library-scope step for the releases Tracks' release IDs
+    /// name has handled, looked up or not, of `tagged_releases_total`, which is 0
     /// until that step starts; both equal the total once it finishes.
     tagged_releases: std.atomic.Value(u64) = .init(0),
     tagged_releases_total: std.atomic.Value(u64) = .init(0),
@@ -177,10 +180,12 @@ pub const LibraryMatching = struct {
     mode: Mode = .search,
     last_release: ?ReleaseLookup = null,
     unusable_releases: std.StringHashMapUnmanaged(void) = .empty,
+    matched_tracks: std.ArrayList(i64) = .empty,
 
     pub fn run(self: *LibraryMatching) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
         defer self.forgetReleases();
+        defer self.matched_tracks.clearAndFree(self.allocator);
         const acoustid_service = self.acoustid;
         var result: Result = .{ .acoustid = if (acoustid_service != null) .searched else self.acoustid_use };
         const page_limit: u32 = @intCast(@min(self.batch_size, @as(usize, database.repository.max_page)));
@@ -231,6 +236,7 @@ pub const LibraryMatching = struct {
             .library => if (!limited) try self.snapshotTaggedReleases(&result),
             .track => {},
         };
+        result.releases_to_review = try self.proposals.reviewableReleaseCount(self.allocator, self.matched_tracks.items);
         return self.finish(result, acoustid_service);
     }
 
@@ -519,6 +525,7 @@ pub const LibraryMatching = struct {
                 result.proposals_stored += stored;
                 if (stored != 0) {
                     result.matched += 1;
+                    try self.matched_tracks.append(self.allocator, candidate.track_id);
                 } else if (!confirmed) {
                     result.unmatched += 1;
                 }
@@ -558,9 +565,9 @@ pub const LibraryMatching = struct {
 
     /// Match Album's second phase. Each file votes once for every release
     /// its stored proposals list; the winner is looked up, and every proposal
-    /// whose recording it holds is pointed at it with what it says. Then the
-    /// Release's best candidate is snapshotted when it has no current
-    /// snapshot.
+    /// whose recording it holds is pointed at it with what it says. Then
+    /// every release its Tracks' release IDs name and the Release's best
+    /// candidate are snapshotted when they have no current snapshot.
     fn alignRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
         const step = try self.voteRelease(release_id);
         if (step != .done) return step;
@@ -618,21 +625,21 @@ pub const LibraryMatching = struct {
         return .done;
     }
 
-    /// Snapshots the release a library's Releases are tagged with, as
-    /// Match Album does, for each Release whose every play file's release ID
-    /// tag names its best candidate and which has no fresh snapshot of it.
-    /// Releases are taken in ID order a page at a time; each lookup stores
-    /// a whole snapshot or nothing.
+    /// Snapshots every release a Track's release ID in effect names, unless
+    /// its Release dismissed it or it has a fresh snapshot, so no Release is
+    /// weighed on a release Orca has not read. They are taken in release ID
+    /// order a page at a time; each lookup stores a whole snapshot or
+    /// nothing.
     fn snapshotTaggedReleases(self: *LibraryMatching, result: *Result) !void {
-        var buffer: [64]database.repository.TaggedRelease = undefined;
-        var cursor: i64 = 0;
+        var buffer: [64]database.repository.NamedRelease = undefined;
+        var cursor: ?[36]u8 = null;
         var handled: u64 = 0;
         if (self.progress) |progress| {
-            const total = try self.proposals.taggedReleasesToSnapshotCount(self.freshAfter());
+            const total = try self.proposals.namedReleasesToSnapshotCount(self.freshAfter());
             progress.tagged_releases_total.store(total, .release);
         }
         while (true) {
-            const page = try self.proposals.taggedReleasesToSnapshot(cursor, self.freshAfter(), &buffer);
+            const page = try self.proposals.namedReleasesToSnapshot(if (cursor) |*last| last else null, self.freshAfter(), &buffer);
             if (page.len == 0) {
                 if (self.progress) |progress| {
                     const total = @max(handled, progress.tagged_releases_total.load(.acquire));
@@ -642,13 +649,13 @@ pub const LibraryMatching = struct {
                 if (self.current_item) |current| current.set("");
                 return;
             }
-            for (page) |tagged| {
-                cursor = tagged.release_id;
+            for (page) |*named| {
+                cursor = named.release_mbid;
                 if (self.isCancelled()) {
                     _ = self.stop(result, .cancelled);
                     return;
                 }
-                switch (try self.snapshotCandidate(tagged.release_id, &tagged.release_mbid)) {
+                switch (try self.snapshotNamedRelease(named)) {
                     .done => {
                         handled += 1;
                         if (self.progress) |progress| progress.tagged_releases.store(handled, .release);
@@ -682,22 +689,41 @@ pub const LibraryMatching = struct {
         return now_s - self.musicbrainz.cache_ttl_seconds;
     }
 
+    /// Snapshots every release a Track's release ID names that Orca has not
+    /// read, then the Release's best candidate.
     fn snapshotBestCandidate(self: *LibraryMatching, release_id: i64) !ReleaseStep {
-        return self.snapshotCandidate(release_id, null);
-    }
-
-    /// Snapshots the Release's best candidate when it has no fresh snapshot,
-    /// and only when it is `named`, given one.
-    fn snapshotCandidate(self: *LibraryMatching, release_id: i64, named: ?[]const u8) !ReleaseStep {
+        {
+            const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
+            defer view.deinit();
+            const candidates = try view.candidates(self.allocator);
+            defer self.allocator.free(candidates);
+            for (candidates) |candidate| {
+                if (!candidate.unread()) break;
+                const step = try self.snapshotRelease(candidate.release_mbid);
+                if (step != .done) return step;
+            }
+        }
         const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
         defer view.deinit();
-        if (named != null) self.showRelease(&view);
         const best = try view.best(self.allocator) orelse return .done;
-        if (named) |mbid| if (!std.mem.eql(u8, best.release_mbid, mbid)) return .done;
-        if (try self.tracklists.fetchedAt(best.release_mbid)) |fetched_at| {
+        return self.snapshotRelease(best.release_mbid);
+    }
+
+    fn snapshotNamedRelease(self: *LibraryMatching, named: *const database.repository.NamedRelease) !ReleaseStep {
+        {
+            const view = try self.proposals.releaseMatchView(self.allocator, named.release_id, false);
+            defer view.deinit();
+            self.showRelease(&view);
+        }
+        return self.snapshotRelease(&named.release_mbid);
+    }
+
+    /// Snapshots the release when it has no fresh snapshot.
+    fn snapshotRelease(self: *LibraryMatching, release_mbid: []const u8) !ReleaseStep {
+        if (try self.tracklists.fetchedAt(release_mbid)) |fetched_at| {
             if (fetched_at > self.freshAfter()) return .done;
         }
-        return switch (try self.lookUpRelease(best.release_mbid)) {
+        return switch (try self.lookUpRelease(release_mbid)) {
             .found, .unusable => .done,
             .cancelled => .cancelled,
             .unavailable => .unavailable,

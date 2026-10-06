@@ -107,13 +107,33 @@ pub fn playerQueuePage(
     return count;
 }
 
+pub const QueueTrack = struct {
+    position: u32,
+    id: i64,
+    track: ?database.TrackSummary,
+
+    pub fn deinit(self: QueueTrack, allocator: std.mem.Allocator) void {
+        if (self.track) |track| track.deinit(allocator);
+    }
+};
+
+pub const QueueTrackPage = struct {
+    allocator: std.mem.Allocator,
+    items: []QueueTrack,
+
+    pub fn deinit(self: QueueTrackPage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
 pub fn playerQueueTracks(
     self: *OrcaRuntime,
     player: PlayerHandle,
     allocator: std.mem.Allocator,
     offset: u32,
     limit: u32,
-) !database.TrackPage {
+) !QueueTrackPage {
     try runtime.requireRunning(self);
     if (limit == 0 or limit > database.repository.max_page)
         return error.PageOutOfRange;
@@ -122,19 +142,20 @@ pub fn playerQueueTracks(
     const library = opener.library;
     const library_database = try runtime.libraryDatabase(self, library);
 
-    var rows: std.ArrayList(database.TrackSummary) = .empty;
+    var rows: std.ArrayList(QueueTrack) = .empty;
     errdefer {
         for (rows.items) |item| item.deinit(allocator);
         rows.deinit(allocator);
     }
     var index: u32 = 0;
     while (index < limit) : (index += 1) {
-        const ref = object_value.queue.refAt(offset + index) orelse break;
-        // A queue entry whose Track has since been removed keeps its place
-        // rather than silently shortening the queue the host is showing.
-        const summary = try library_database.tracks.byId(allocator, ref.track_id) orelse
-            continue;
-        try rows.append(allocator, summary);
+        const position = std.math.add(u32, offset, index) catch break;
+        const ref = object_value.queue.refAt(position) orelse break;
+        // An entry whose Track was removed from the Library keeps its row, with
+        // no summary, so row `n` stays queue position `offset + n`.
+        const track = try library_database.tracks.byId(allocator, ref.track_id);
+        errdefer if (track) |summary| summary.deinit(allocator);
+        try rows.append(allocator, .{ .position = position, .id = ref.track_id, .track = track });
     }
     return .{ .allocator = allocator, .items = try rows.toOwnedSlice(allocator) };
 }
@@ -319,6 +340,7 @@ pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.Sig
         .device_rate = if (engine) |value| value.deviceRate() else null,
         .device_quantum_frames = if (engine) |value| value.deviceQuantum() else null,
         .device_format = if (engine) |value| value.deviceFormat() else null,
+        .processed_audio_queued = if (engine) |value| value.holdsProcessedAudio() else false,
     });
     if (engine) |value| path.output_kind = value.outputDeviceKind();
     return path;
