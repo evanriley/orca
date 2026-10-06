@@ -5345,6 +5345,9 @@ orca_status orca_job_submission_stats(
 /* How many files a submission would send now, fingerprints permitting. */
 orca_status orca_library_acoustid_submittable_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
 
+/* How many files and recording IDs AcoustID has accepted from the Library. */
+orca_status orca_library_acoustid_submitted_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
+
 /* A file whose chosen recording ID has not been sent to AcoustID. Each
  * optional value has a `has_*` flag and reads 0 when absent; `path` is empty
  * without `has_path`. `recording_length_ms` is the accepted match's

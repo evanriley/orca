@@ -3295,6 +3295,11 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.libraryAcoustIdSubmittableCount(self, library);
     }
 
+    /// Files and recording IDs AcoustID has accepted from this Library.
+    pub fn libraryAcoustIdSubmittedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return runtime_jobs.libraryAcoustIdSubmittedCount(self, library);
+    }
+
     /// The files an AcoustID submission would send, by file id after `cursor`.
     pub fn libraryAcoustIdSubmittablePage(
         self: *OrcaRuntime,

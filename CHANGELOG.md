@@ -6,6 +6,10 @@
 
 - A binary cache at [orca.cachix.org](https://orca.cachix.org) for the flake's
   package, named in the flake's `nixConfig` and filled by CI from `main`.
+- `libraryAcoustIdSubmittedCount` and `orca_library_acoustid_submitted_count`
+  return how many files and recording IDs AcoustID has accepted from a
+  Library. Settings › Matching shows it under the AcoustID status row, and
+  `orca-cli submit-acoustid` prints `submitted_total=`.
 
 ### Changed
 

@@ -384,6 +384,7 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   writes the library, never a file.
 - AcoustID submission: `orca_library_start_acoustid_submission`,
   `orca_job_submission_stats`, `orca_library_acoustid_submittable_count`,
+  `orca_library_acoustid_submitted_count`,
   `orca_library_query_acoustid_submittable`. It cannot run beside a matching
   job. A missing user key is `ORCA_SUBMISSION_OUTCOME_NEEDS_USER_KEY`.
 - Idle maintenance: `orca_library_set_maintenance`,

@@ -3113,6 +3113,7 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     for (proposal_ids) |proposal_id| _ = try runtime.libraryAcceptMatch(library, proposal_id);
     _ = try addMatchTrack(library_database, "Hazey Jane II", "Nick Drake", null);
     try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittedCount(library));
 
     const matching = try runtime.startLibraryMatching(library, .{ .fingerprints = false });
     try musicbrainz.awaitRequests(1);
@@ -3124,6 +3125,7 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, without_key));
     try std.testing.expectEqual(SubmissionOutcome.needs_user_key, (try runtime.jobSubmissionStats(without_key)).outcome);
     try std.testing.expectEqual(@as(u32, 0), acoustid.submissions.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittedCount(library));
 
     user.key = "user key";
     acoustid.submit_status = 400;
@@ -3134,6 +3136,7 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, refused));
     try std.testing.expectEqual(SubmissionOutcome.invalid_user_key, (try runtime.jobSubmissionStats(refused)).outcome);
     try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittedCount(library));
 
     acoustid.submit_status = 200;
     acoustid.submit_body = accepted_body;
@@ -3151,11 +3154,13 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     try std.testing.expect(std.mem.indexOf(u8, form, "&track.1=Pink%20Moon&artist.1=Nick%20Drake") != null);
     try std.testing.expectEqual(@as(i64, 72), try database.columns.scalar(library_database.database, "SELECT submission_id FROM acoustid_submissions WHERE recording_mbid = '" ++ pink_moon_mbid ++ "';"));
     try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittableCount(library));
+    try std.testing.expectEqual(stats.submitted, try runtime.libraryAcoustIdSubmittedCount(library));
 
     const again = try runtime.startAcoustIdSubmission(library);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, again));
     try std.testing.expectEqual(@as(u64, 0), (try runtime.jobSubmissionStats(again)).files_examined);
     try std.testing.expectEqual(@as(u32, 2), acoustid.submissions.load(.acquire));
+    try std.testing.expectEqual(stats.submitted, try runtime.libraryAcoustIdSubmittedCount(library));
 }
 
 pub const bryter_layter_mbid = "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b";

@@ -125,6 +125,14 @@ pub const AcoustIdSubmissionRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 
+    /// Files and recording IDs AcoustID has accepted, one row each.
+    pub fn submittedCount(self: *const AcoustIdSubmissionRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM acoustid_submissions;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
     /// Records what AcoustID accepted, in one transaction.
     pub fn record(self: *AcoustIdSubmissionRepository, submissions: []const AcoustIdSubmission) !void {
         if (submissions.len == 0) return;

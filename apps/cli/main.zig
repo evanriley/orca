@@ -5159,7 +5159,10 @@ fn submitAcoustId(context: Context) !void {
     try configureAcoustId(allocator, &runtime, environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     try stdout.print("{d} files to submit\n", .{try runtime.libraryAcoustIdSubmittableCount(library)});
-    if (options.dry_run) return listSubmittable(&runtime, library, stdout);
+    if (options.dry_run) {
+        try stdout.print("submitted_total={d}\n", .{try runtime.libraryAcoustIdSubmittedCount(library)});
+        return listSubmittable(&runtime, library, stdout);
+    }
     try stdout.flush();
 
     const job_handle = try runtime.startAcoustIdSubmission(library);
@@ -5179,6 +5182,7 @@ fn submitAcoustId(context: Context) !void {
             stats.requests,
         },
     );
+    try stdout.print("submitted_total={d}\n", .{try runtime.libraryAcoustIdSubmittedCount(library)});
     try stdout.flush();
     return switch (stats.outcome) {
         .completed, .cancelled => {},

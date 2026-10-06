@@ -4854,6 +4854,10 @@ static int acoustid_submission_smoke(orca_runtime *runtime, orca_handle library)
     SMOKE_CHECK(orca_library_acoustid_submittable_count(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_library_acoustid_submittable_count(runtime, library, &count) == ORCA_STATUS_OK);
     SMOKE_CHECK(count == 0);
+    count = 1;
+    SMOKE_CHECK(orca_library_acoustid_submitted_count(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_acoustid_submitted_count(runtime, library, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 0);
 
     struct match_smoke_count calls = {0};
     SMOKE_CHECK(orca_library_query_acoustid_submittable(runtime, library, 0, 0, &calls,

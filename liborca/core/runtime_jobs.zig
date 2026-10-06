@@ -770,6 +770,10 @@ pub fn jobSubmissionStats(self: *OrcaRuntime, job_handle: JobHandle) !Submission
     return error.StaleHandle;
 }
 
+pub fn libraryAcoustIdSubmittedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+    return (try runtime.libraryDatabase(self, library)).acoustid_submissions.submittedCount();
+}
+
 pub fn libraryAcoustIdSubmittableCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
     return (try runtime.libraryDatabase(self, library)).acoustid_submissions.submittableCount();
 }

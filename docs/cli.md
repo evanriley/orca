@@ -193,7 +193,8 @@ zig build run -- release-group-cover DATABASE MBID --out=PATH   # a release grou
 zig build run -- release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline] [--lang=xx]   # description=, release-group=, outcome=
 
 # AcoustID submission of recording IDs from accepted matches or edits -- user key
-# from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing
+# from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing;
+# prints submitted_total=, the files and recording IDs AcoustID has accepted
 zig build run -- submit-acoustid DATABASE [--dry-run]
 ```
 

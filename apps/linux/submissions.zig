@@ -14,6 +14,11 @@ pub fn waiting(self: *App) u64 {
     return self.runtime.libraryAcoustIdSubmittableCount(library) catch 0;
 }
 
+pub fn submitted(self: *App) u64 {
+    const library = self.library orelse return 0;
+    return self.runtime.libraryAcoustIdSubmittedCount(library) catch 0;
+}
+
 pub fn keyChecked(self: *App, presence: secret.Presence) void {
     self.acoustid_key_stored = presence == .stored;
     self.acoustid_key_known = true;

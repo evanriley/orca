@@ -402,7 +402,8 @@ section lists the entry points, errors and limits.
   `acoustid_credential_service` / `acoustid_user_key_account`.
   `jobSubmissionStats` returns `SubmissionStats` and a `SubmissionOutcome`;
   `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
-  `AcoustIdSubmittable`s. See [providers.md](providers.md#acoustid-submission).
+  `AcoustIdSubmittable`s; `libraryAcoustIdSubmittedCount` counts the files
+  and recording IDs AcoustID has accepted. See [providers.md](providers.md#acoustid-submission).
 
 ### Providers
 

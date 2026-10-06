@@ -645,7 +645,9 @@ one, the ID is sent.
 metadata fields. A batch holds at most 50 items and 900 KiB of form, below the
 service's 1 MiB limit; an item that would pass either bound starts the next
 batch. Each accepted item's submission ID is stored in `acoustid_submissions`
-with the file and recording ID.
+with the file and recording ID. `libraryAcoustIdSubmittedCount` returns the
+number of those rows: the files and recording IDs the Library has sent. It
+falls when a file leaves the Library.
 
 ### User key and failures
 

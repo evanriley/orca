@@ -4985,6 +4985,14 @@ pub export fn orca_library_acoustid_submittable_count(runtime: ?*Runtime, librar
     return .ok;
 }
 
+pub export fn orca_library_acoustid_submitted_count(runtime: ?*Runtime, library: Handle, output: ?*u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryAcoustIdSubmittedCount(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
 pub export fn orca_library_query_acoustid_submittable(
     runtime: ?*Runtime,
     library: Handle,
@@ -11600,6 +11608,11 @@ test "a submission started through the C ABI sends an accepted recording ID once
     try std.testing.expectEqual(Status.stale_handle, orca_library_acoustid_submittable_count(rig.runtime, .{ .index = 7, .generation = 3 }, &count));
     try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
     try std.testing.expectEqual(@as(u64, 0), count);
+    count = 7;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_acoustid_submitted_count(rig.runtime, rig.library, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_acoustid_submitted_count(rig.runtime, .{ .index = 7, .generation = 3 }, &count));
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submitted_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
 
     var matching: Handle = undefined;
     const options: MatchOptions = .{
@@ -11688,6 +11701,8 @@ test "a submission started through the C ABI sends an accepted recording ID once
     try std.testing.expect(std.mem.indexOf(u8, rig.acoustid.lastForm(), "&user=userkey&") != null);
     try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
     try std.testing.expectEqual(@as(u64, 0), count);
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submitted_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
     submittable = .{};
     try std.testing.expectEqual(Status.ok, orca_library_query_acoustid_submittable(rig.runtime, rig.library, 0, 10, &submittable, captureSubmittable));
     try std.testing.expectEqual(@as(usize, 0), submittable.count);
