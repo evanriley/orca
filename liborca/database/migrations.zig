@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 59;
+pub const current_version = 60;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1649,6 +1649,19 @@ const migration_59 =
     \\
 ;
 
+const migration_60 =
+    \\ALTER TABLE musicbrainz_releases ADD COLUMN artist_credit_ids TEXT;
+    \\CREATE TABLE reviewed_releases (
+    \\    release_id INTEGER PRIMARY KEY NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    \\    musicbrainz_release_id TEXT NOT NULL,
+    \\    digest BLOB NOT NULL CHECK (length(digest) = 32),
+    \\    reviewed_at INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX orca_metadata_values_release ON orca_metadata_values(file_id)
+    \\    WHERE field = 9 AND value > '';
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2192,6 +2205,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 57 and target_version >= 57) try db.exec(migration_57);
     if (version < 58 and target_version >= 58) try db.exec(migration_58);
     if (version < 59 and target_version >= 59) try db.exec(migration_59);
+    if (version < 60 and target_version >= 60) try db.exec(migration_60);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(

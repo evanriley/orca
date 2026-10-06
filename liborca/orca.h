@@ -4581,10 +4581,10 @@ orca_status orca_library_apply_matched_release(
 
 /* A value Match Review compares between a Release and a MusicBrainz release.
  * Bit `1u << field` selects it for orca_library_apply_matched_release_fields.
- * RELEASE_ID covers the release, release group, release track and album
- * artist IDs, the track and disc numbers and the recording ID; TRACK_TITLES
- * each Track's title and artist. RELEASE_TYPE, GENRE and ARTWORK are compared
- * but never stored. */
+ * RELEASE_ID covers the release, release group and album artist IDs on every
+ * Track, and the release track and recording IDs and the track and disc
+ * numbers on a placed Track; TRACK_TITLES a placed Track's title and artist.
+ * RELEASE_TYPE, GENRE and ARTWORK are compared but never stored. */
 typedef enum orca_release_field {
     ORCA_RELEASE_FIELD_ALBUM = 0,
     ORCA_RELEASE_FIELD_ALBUM_ARTIST = 1,
@@ -4597,12 +4597,14 @@ typedef enum orca_release_field {
 } orca_release_field;
 
 /* Stores the fields whose bits are set in `fields` of the Release's best
- * candidate, locked, so they outrank the files' own tags; the other values
- * and their provenance stay. The Tracks' values come from their accepted
- * matches on the release, else their
- * pending proposals enriched for it that are neither corrections nor in an
- * album group; with RELEASE_ID such a proposal is accepted, and without it it
- * stays pending. A user lock wins and no file is written. A bit past
+ * candidate's tracklist snapshot, locked, so they outrank the files' own
+ * tags; the other values and their provenance stay. The release's own values
+ * go to every Track with a file; a Track placed on a release track by
+ * recording ID or by a pairing also takes that release track's values, and
+ * with RELEASE_ID the pending proposal that placed it is accepted. A user
+ * lock wins and no file is written. `values_written` counts the values
+ * stored; it is 0 without a candidate, before a lookup snapshotted its
+ * tracklist, or for a Release of more than 512 Tracks. A bit past
  * TRACK_TITLES is INVALID_ARGUMENT. */
 orca_status orca_library_apply_matched_release_fields(
     orca_runtime *runtime,

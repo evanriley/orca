@@ -698,7 +698,8 @@ one transaction and refuses one of more than 512 media or 512 tracks
 
 Migration 59 adds release-track pairings (see
 [metadata.md](metadata.md#pairing-a-track)). `release_track_pairings`
-(primary key `(track_id, musicbrainz_release_id)`, `release_id`,
+(primary key `track_id`, so a Track has one pairing,
+`musicbrainz_release_id`, `release_id`,
 `release_track_id`, `recording_id`, `origin` 0 for a confirmed suggestion
 and 1 for by hand, `created_at` in Unix seconds, `WITHOUT ROWID`) is
 deleted with its Track or Release by foreign-key cascade, and by the
@@ -706,13 +707,33 @@ trigger `release_track_pairings_track_moved` when its Track's `release_id`
 changes. A unique index on `(release_id, musicbrainz_release_id,
 release_track_id)` gives each release track at most one Track. It has no
 foreign key to `musicbrainz_releases`, so a new snapshot, which replaces
-the release's rows, keeps it. `paired_recording_ids` (primary key
-`(file_id, recording_id)`, `WITHOUT ROWID`, deleted with its file) records
-the recording IDs a pairing set on each file, so AcoustID submission can
-hold them back after the pairing itself is gone.
-`ReleaseTrackPairingRepository.pair` validates, stores the pairing, the
-locked user values and the markers in one transaction; `unpair` removes
-them in one.
+the release's rows, keeps it. `paired_metadata_values` (primary key
+`(file_id, field)`, `WITHOUT ROWID`, deleted with its file) holds, for each
+recording ID and release-track ID a pairing set on a file, the `value` it
+set and the `orca_metadata_values` row it replaced (`replaced_value`,
+`replaced_provenance`, `replaced_locked`, `replaced_written_at`, all NULL
+when there was none). Unpairing restores that row where the file still
+holds `value`; AcoustID submission holds back a recording ID listed there;
+an edit of the field deletes the row. A row outlives a pairing its Track's
+move to another Release deleted, so a later pairing keeps the first
+replaced row. `ReleaseTrackPairingRepository.pair` undoes the Track's
+earlier pairing, validates, and stores the pairing, the replaced rows and
+the locked user values in one transaction; `unpair` restores them in one.
+
+Migration 60 adds `musicbrainz_releases.artist_credit_ids`, a JSON array of
+the MusicBrainz artist IDs the release's credit names in credit order (at
+most 64), NULL for a snapshot taken before it, which the next lookup of
+the release replaces; and `reviewed_releases` (primary key `release_id`,
+deleted with its Release by foreign-key cascade, `musicbrainz_release_id`,
+`digest`, a 32-byte SHA-256 blob, and `reviewed_at` in Unix seconds), a
+person's review of a Release against a release (see
+[metadata.md](metadata.md#marking-a-release-as-reviewed)). A review holds
+only while its release is the Release's best candidate and the digest of
+the Release still equals `digest`; nothing deletes a row that stopped
+holding, and the next review replaces it. It also adds the partial index
+`orca_metadata_values_release` on `file_id` where `field` is the release
+ID and `value > ''`, so the release-match walk finds files whose release
+ID is an Orca value without scanning every value.
 
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables

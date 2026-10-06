@@ -380,7 +380,9 @@ The boundary covers the whole engine, not a fragment of it:
   confidence in (0, 1], and `orca_library_apply_matched_release` applies a
   Release whose Tracks came to agree; `orca_library_apply_matched_release_fields`
   stores only the `orca_release_field` bits it is given, locked, from the
-  best candidate.
+  best candidate's tracklist snapshot, and stores nothing without one; an
+  Apply that leaves no Track alone and no value differing takes the Release
+  off the bucket pages and counts.
   `orca_library_query_release_matches` pages Releases by
   `orca_release_match_bucket` with their best MusicBrainz release,
   `orca_library_release_match_counts` counts the buckets,

@@ -26,6 +26,7 @@ const MatchEvidence = runtime.MatchEvidence;
 const ReleaseFieldSet = runtime.ReleaseFieldSet;
 const ReleaseMatchBucket = runtime.ReleaseMatchBucket;
 const ReleaseMatchCounts = runtime.ReleaseMatchCounts;
+const ReleaseApplyOutcome = runtime.ReleaseApplyOutcome;
 const ReleaseMatchDiff = runtime.ReleaseMatchDiff;
 const ReleaseAlignment = runtime.ReleaseAlignment;
 const ReleaseTrackPairings = runtime.ReleaseTrackPairings;
@@ -286,18 +287,46 @@ pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, re
     const library_database = try runtime.libraryDatabase(self, library);
     var written: std.ArrayList(i64) = .empty;
     defer written.deinit(self.allocator);
-    const proposals = &library_database.identification_proposals;
-    const values_written = if (fields) |chosen|
-        try proposals.applyMatchedRelease(self.allocator, release_id, chosen, &written)
-    else consensus: {
-        const release = try library_database.releases.byId(self.allocator, release_id) orelse return error.UnknownRelease;
-        release.deinit(self.allocator);
-        break :consensus try proposals.applyReleaseConsensus(self.allocator, release_id, &written);
-    };
+    if (fields) |chosen| {
+        const outcome = libraryApplyRelease(self, library, self.allocator, release_id, chosen) catch |err| switch (err) {
+            error.NoReleaseCandidate, error.NoReleaseTracklist, error.ReleaseTooLarge => return 0,
+            else => |other| return other,
+        };
+        defer outcome.deinit();
+        return outcome.values_written;
+    }
+    const release = try library_database.releases.byId(self.allocator, release_id) orelse return error.UnknownRelease;
+    release.deinit(self.allocator);
+    const values_written = try library_database.identification_proposals.applyReleaseConsensus(self.allocator, release_id, &written);
     if (values_written == 0) return 0;
     try reproject(self, library_database, written.items);
     recordingIdsChanged(self, library);
     return values_written;
+}
+
+pub fn libraryApplyRelease(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    release_id: i64,
+    fields: ReleaseFieldSet,
+) !ReleaseApplyOutcome {
+    const library_database = try runtime.libraryDatabase(self, library);
+    var written: std.ArrayList(i64) = .empty;
+    defer written.deinit(self.allocator);
+    var outcome = try library_pass.release_apply.apply(allocator, library_database, release_id, fields, &written);
+    errdefer outcome.deinit();
+    if (outcome.values_written != 0) {
+        try reproject(self, library_database, written.items);
+        recordingIdsChanged(self, library);
+    }
+    if (outcome.left_alone.len == 0)
+        outcome.reviewed_release_id = try library_pass.release_apply.reviewApplied(self.allocator, library_database, release_id, written.items, outcome.release_mbid);
+    return outcome;
+}
+
+pub fn libraryMarkReleaseReviewed(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !void {
+    try library_pass.release_apply.markReviewed(self.allocator, try runtime.libraryDatabase(self, library), release_id, release_mbid);
 }
 
 pub fn libraryReleaseMatchPage(
@@ -310,7 +339,14 @@ pub fn libraryReleaseMatchPage(
     limit: u32,
     offset: u32,
 ) !ReleaseMatchPage {
-    return (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchPage(allocator, bucket, confident_at, filter, limit, offset);
+    const library_database = try runtime.libraryDatabase(self, library);
+    const page = try library_database.identification_proposals.releaseMatchPage(allocator, bucket, confident_at, filter, limit, offset);
+    errdefer page.deinit();
+    for (page.items) |*item| {
+        const best = item.best orelse continue;
+        item.placement = try library_pass.release_apply.placementCounts(self.allocator, library_database, item.release_id, best.release_mbid);
+    }
+    return page;
 }
 
 pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, confident_at: f32, filter: ?[]const u8) !ReleaseMatchCounts {

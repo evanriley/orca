@@ -73,6 +73,8 @@ declare -A reasons=(
     [libraryPairReleaseTrack]="pending: the C ABI arrives with partial Apply, which builds on track pairing"
     [libraryUnpairReleaseTrack]="pending: the C ABI arrives with partial Apply, which builds on track pairing"
     [libraryReleaseTrackPairings]="pending: the C ABI arrives with partial Apply, which builds on track pairing"
+    [libraryApplyRelease]="pending: the C ABI arrives with track pairing's, which partial Apply builds on"
+    [libraryMarkReleaseReviewed]="pending: the C ABI arrives with track pairing's, which Mark as Reviewed builds on"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

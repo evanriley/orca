@@ -473,6 +473,10 @@ pub const ReleaseCandidate = database.ReleaseCandidate;
 pub const ReleaseMatchItem = database.ReleaseMatchItem;
 pub const ReleaseMatchPage = database.ReleaseMatchPage;
 pub const ReleaseMatchCounts = database.ReleaseMatchCounts;
+pub const ReleasePlacementCounts = database.ReleasePlacementCounts;
+pub const ReleaseApplyOutcome = library_pass.release_apply.ReleaseApplyOutcome;
+pub const LeftAloneTrack = library_pass.release_apply.LeftAloneTrack;
+pub const LeftAloneReason = library_pass.release_apply.LeftAloneReason;
 pub const ReleaseField = database.ReleaseField;
 pub const ReleaseFieldSet = database.ReleaseFieldSet;
 pub const MatchEvidence = library_pass.matching.MatchEvidence;
@@ -1584,25 +1588,60 @@ pub const OrcaRuntime = struct {
     /// With null `fields`, stores what the MusicBrainz release a Release's
     /// accepted matches agree on says, unlocked, when every Track names it:
     /// for a Release that came to agree without an accept, after an edit
-    /// moved a stray file out or a rescan. With `fields`, a person's choice
-    /// in Match Review, stores those fields of the Release's best candidate
-    /// locked, so they outrank file tags; every Track must name the release
-    /// by its tag or accepted match, or have a pending proposal enriched for
-    /// it that is neither a correction nor in an album group, and applying
-    /// `release_id` accepts those proposals. A user's locked value stays
-    /// either way, no media file is written, and the Release is reprojected.
-    /// Returns how many values were stored.
+    /// moved a stray file out or a rescan. With `fields`, does what
+    /// `libraryApplyRelease` does, storing nothing where that refuses for
+    /// want of a candidate or a snapshot or for a Release too large. A
+    /// user's locked value stays either way,
+    /// no media file is written, and the Release is reprojected. Returns how
+    /// many values were stored.
     pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, fields: ?ReleaseFieldSet) !u32 {
         return runtime_listens.libraryApplyMatchedRelease(self, library, release_id, fields);
+    }
+
+    /// A person's Apply in Match Review: stores `fields` of the Release's
+    /// best candidate's tracklist snapshot, locked, so they outrank file
+    /// tags. The release's own values go to every Track with a play file;
+    /// a Track the alignment places by recording ID or by a pairing also
+    /// takes its release track's, and applying `release_id` accepts the
+    /// pending proposal that placed it. Unplaced Tracks never refuse an
+    /// Apply. A user's locked value stays, a pairing's included; no media
+    /// file is written, and the Release is reprojected. An Apply that left
+    /// no Track alone and no value differing marks the Release as reviewed,
+    /// as `libraryMarkReleaseReviewed` would.
+    /// `error.NoReleaseCandidate`, `error.NoReleaseTracklist` until a lookup
+    /// snapshotted the release, `error.ReleaseTooLarge` past `max_page`
+    /// Tracks.
+    pub fn libraryApplyRelease(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+        fields: ReleaseFieldSet,
+    ) !ReleaseApplyOutcome {
+        return runtime_listens.libraryApplyRelease(self, library, allocator, release_id, fields);
+    }
+
+    /// Marks the Release as reviewed against `release_mbid`, or its best
+    /// candidate when that is null: it leaves the Matches list while that
+    /// release stays its best candidate and its Tracks, their values and the
+    /// snapshot stay unchanged. `error.ReleaseNotPlaced` unless every Track
+    /// has a play file and is placed; `error.ReleaseDiffers` when an Apply
+    /// of every field would change a value in effect;
+    /// `error.NoReleaseTracklist` without a snapshot.
+    pub fn libraryMarkReleaseReviewed(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !void {
+        return runtime_listens.libraryMarkReleaseReviewed(self, library, release_id, release_mbid);
     }
 
     /// Releases in `bucket`, by album artist and title, at most `max_page`.
     /// A Release is `confident` when its best candidate's confidence is at
     /// least `confident_at`, `needs_review` when it is lower, and
-    /// `unmatched` with no candidate. Weighing every Release, a page costs a
-    /// walk of the library. A `filter` keeps the Releases whose title or
-    /// album artist has a word starting with each of its words, as `search`
-    /// matches them; at most 256 bytes.
+    /// `unmatched` with no candidate. A Release whose review still holds is
+    /// in no bucket. Weighing every Release, a page costs a walk of the
+    /// library; each item with a candidate then costs one Release view,
+    /// snapshot and pairings read and an alignment for its placement
+    /// counts. A `filter` keeps the Releases whose title or album artist has
+    /// a word starting with each of its words, as `search` matches them; at
+    /// most 256 bytes.
     pub fn libraryReleaseMatchPage(
         self: *OrcaRuntime,
         library: LibraryHandle,

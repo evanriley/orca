@@ -9,6 +9,7 @@ const duplicateNullableColumn = columns.duplicateNullableColumn;
 const max_page = columns.max_page;
 const optionalInt64 = columns.optionalInt64;
 const effectiveRecordingMbid = @import("tracks.zig").effectiveRecordingMbid;
+const effectiveReleaseMbid = @import("tracks.zig").effectiveReleaseMbid;
 const orderTerms = @import("tracks.zig").orderTerms;
 const track_play_file = @import("tracks.zig").track_play_file;
 const track_file_ids_sql = @import("tracks.zig").track_file_ids_sql;
@@ -16,6 +17,8 @@ const file_track_ids_sql = @import("tracks.zig").file_track_ids_sql;
 const WriteLane = @import("write_lane.zig").WriteLane;
 const recording_verifications = @import("recording_verifications.zig");
 const health = @import("health.zig");
+const release_tracklists = @import("release_tracklists.zig");
+const reviewed_releases = @import("reviewed_releases.zig");
 
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
 
@@ -526,10 +529,15 @@ const ValueWrite = enum {
     /// Locked, over an unlocked or locked `provider` value; the recording ID
     /// over any value.
     correction,
+    /// Locked, over an unlocked or locked `provider` value; never over a
+    /// value locked by anyone else, the recording ID included.
+    release,
 };
 
 /// Stores `provider` values. A value equal to the stored one is left as it
-/// is, so it keeps its `written_at` and is not counted.
+/// is, so it keeps its `written_at` and is not counted. A `dry_run` writer
+/// stores nothing and counts the values it would store that differ from the
+/// value in effect.
 const ProviderValueWriter = struct {
     db: sqlite.Database,
     statement: sqlite.Statement,
@@ -537,6 +545,7 @@ const ProviderValueWriter = struct {
     written: ?*std.ArrayList(i64),
     write: ValueWrite,
     values_written: u32 = 0,
+    dry_run: bool = false,
 
     fn init(db: sqlite.Database, allocator: std.mem.Allocator, written: ?*std.ArrayList(i64), write: ValueWrite) !ProviderValueWriter {
         return .{
@@ -553,7 +562,7 @@ const ProviderValueWriter = struct {
                 \\  AND (orca_metadata_values.value IS NOT excluded.value
                 \\       OR orca_metadata_values.provenance IS NOT excluded.provenance);
                 ,
-                .correction =>
+                .correction, .release =>
                 \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
                 \\VALUES (?1, ?2, ?3, ?4, 1, unixepoch())
                 \\ON CONFLICT(file_id, field) DO UPDATE SET value=excluded.value,
@@ -579,17 +588,58 @@ const ProviderValueWriter = struct {
     fn text(self: *ProviderValueWriter, file_id: i64, field: metadata.Field, value: ?[]const u8) !void {
         const clean = cleanValue(value orelse return) orelse return;
         if (isMusicBrainzIdField(field) and !metadata.isMusicBrainzId(clean)) return;
+        if (self.dry_run) {
+            if (try self.wouldChange(file_id, field, clean)) self.values_written += 1;
+            return;
+        }
         try self.statement.bindInt64(1, file_id);
         try self.statement.bindInt64(2, @backingInt(field));
         try self.statement.bindText(3, clean);
         try self.statement.bindInt64(4, @backingInt(metadata.Provenance.provider));
-        if (self.write == .correction) try self.statement.bindInt64(5, @intFromBool(field == .musicbrainz_recording_id));
+        switch (self.write) {
+            .match => {},
+            .correction => try self.statement.bindInt64(5, @intFromBool(field == .musicbrainz_recording_id)),
+            .release => try self.statement.bindInt64(5, 0),
+        }
         if (try self.statement.step() != .done) return error.SqlFailed;
         const changed = self.db.changes() != 0;
         try self.statement.reset();
         if (!changed) return;
         self.values_written += 1;
         if (self.written) |files| try appendUnique(files, self.allocator, file_id);
+    }
+
+    /// Whether storing `value` as a `release` write would change the value in
+    /// effect, resolved as the projection resolves it under `prefer_file`.
+    fn wouldChange(self: *ProviderValueWriter, file_id: i64, field: metadata.Field, value: []const u8) !bool {
+        std.debug.assert(self.write == .release);
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        var orca: ?metadata.Value = null;
+        {
+            var statement = try self.db.prepare("SELECT value, provenance, locked FROM orca_metadata_values WHERE file_id=?1 AND field=?2;");
+            defer statement.deinit();
+            try statement.bindInt64(1, file_id);
+            try statement.bindInt64(2, @backingInt(field));
+            if (try statement.step() == .row) {
+                const provenance = std.enums.fromInt(metadata.Provenance, statement.columnInt64(1)) orelse
+                    return error.InvalidStoredProvenance;
+                const locked = statement.columnInt64(2) != 0;
+                if (locked and provenance != .provider) return false;
+                orca = .{ .text = try scratch.dupe(u8, statement.columnText(0)), .provenance = provenance, .locked = locked };
+            }
+        }
+        var observed: ?metadata.Value = null;
+        {
+            var statement = try self.db.prepare(observedFieldSql(field));
+            defer statement.deinit();
+            try statement.bindInt64(1, file_id);
+            if (try statement.step() == .row and !statement.columnIsNull(0))
+                observed = .{ .text = try scratch.dupe(u8, statement.columnText(0)), .provenance = .observed_file };
+        }
+        const effective = metadata.resolveValue(observed, orca, .prefer_file) orelse return true;
+        return !std.mem.eql(u8, effective.text, value);
     }
 
     fn number(self: *ProviderValueWriter, file_id: i64, field: metadata.Field, value: ?u32) !void {
@@ -626,17 +676,50 @@ fn writeReleaseValues(
     }
 }
 
-/// The Release's best candidate, when every Track has a play file and names
-/// it or has a proposal an apply can take its values from.
-fn applicableRelease(view: *const ReleaseMatchView, allocator: std.mem.Allocator) !?[]const u8 {
-    const best = (try view.best(allocator)) orelse return null;
-    if (view.tracks.len == 0) return null;
-    for (view.tracks) |*track| {
-        if (track.play_file == null) return null;
-        if (!track.names(best.release_mbid) and track.applicable(best.release_mbid) == null) return null;
-    }
-    return best.release_mbid;
+/// The observed tag column a release Apply compares `field` with.
+fn observedFieldSql(field: metadata.Field) [:0]const u8 {
+    return switch (field) {
+        inline else => |each| comptime blk: {
+            const column = switch (each) {
+                .title => "title",
+                .artist => "artist",
+                .album => "album",
+                .album_artist => "album_artist",
+                .track_number => "track_number",
+                .disc_number => "disc_number",
+                .date => "date",
+                .compilation => "compilation",
+                .musicbrainz_recording_id => "musicbrainz_recording_id",
+                .musicbrainz_release_id => "musicbrainz_release_id",
+                .musicbrainz_release_group_id => "musicbrainz_release_group_id",
+                .musicbrainz_release_track_id => "musicbrainz_release_track_id",
+                .musicbrainz_album_artist_id => "musicbrainz_album_artist_id",
+                .explicit => "explicit",
+                .composer => "composer",
+                .comment => "comment",
+            };
+            break :blk "SELECT " ++ column ++ " FROM observed_file_tags WHERE file_id=?1;";
+        },
+    };
 }
+
+/// What a release Apply stores on one Track with a play file.
+pub const ReleaseApplyTrack = struct {
+    track_id: i64,
+    play_file: i64,
+    /// The release track the Track is placed on; null stores only the
+    /// release's own values.
+    placed: ?release_tracklists.ReleaseTracklistTrack = null,
+    /// The pending proposal for the placed recording that storing
+    /// `release_id` accepts.
+    accept: ?i64 = null,
+};
+
+/// A release Apply decided from a Release's alignment with a snapshot.
+pub const ReleaseApplyPlan = struct {
+    tracklist: *const release_tracklists.ReleaseTracklistRecord,
+    tracks: []const ReleaseApplyTrack,
+};
 
 fn isMusicBrainzIdField(field: metadata.Field) bool {
     return switch (field) {
@@ -805,6 +888,15 @@ pub const ReleaseCandidate = struct {
     confidence: f32,
 };
 
+/// How many of a Release's Tracks the alignment with its best candidate's
+/// snapshot places.
+pub const ReleasePlacementCounts = struct {
+    /// Placed by recording ID or by a person's pairing.
+    placed: u32,
+    /// Only suggested, or on none of the release's tracks.
+    needs_pairing: u32,
+};
+
 pub const ReleaseMatchItem = struct {
     release_id: i64,
     title: []const u8,
@@ -812,6 +904,8 @@ pub const ReleaseMatchItem = struct {
     track_count: u32,
     best: ?ReleaseCandidate,
     bucket: ReleaseMatchBucket,
+    /// Null without a snapshot of `best`'s release; filled by the runtime.
+    placement: ?ReleasePlacementCounts = null,
 };
 
 pub const ReleaseMatchPage = struct {
@@ -829,6 +923,9 @@ pub const ReleaseMatchCounts = struct {
     confident: u64 = 0,
     needs_review: u64 = 0,
     unmatched: u64 = 0,
+    /// Releases a person marked as reviewed whose review still holds; in no
+    /// bucket.
+    reviewed: u64 = 0,
 };
 
 /// A Release value Match Review compares with a candidate's.
@@ -837,13 +934,13 @@ pub const ReleaseField = enum(u8) {
     album_artist,
     release_date,
     release_type,
-    /// The release, release group, release track and album artist IDs, the
-    /// track and disc numbers, and the recording ID that accepting the
-    /// Track's proposal on the release stores.
+    /// The release, release group and album artist IDs on every Track; the
+    /// release track and recording IDs and the track and disc numbers on a
+    /// Track placed on a release track.
     release_id,
     genre,
     artwork,
-    /// Each Track's title and artist as the release credits them.
+    /// A placed Track's title and artist as its release track credits them.
     track_titles,
 };
 
@@ -882,16 +979,18 @@ pub const ReleaseMatchTrack = struct {
     duration_ms: ?i64,
     track_number: ?u32,
     disc_number: ?u32,
-    /// The play file's MusicBrainz release tag, when it is an ID.
-    tagged_release: ?[]const u8,
+    /// The play file's release ID in effect, its tag or an Orca value, when
+    /// it is an ID.
+    release_mbid: ?[]const u8,
     /// The play file's recording ID in effect, when it is an ID.
     recording_mbid: ?[]const u8 = null,
     /// Accepted and pending, most confident first.
     proposals: []const ReleaseMatchProposal,
 
-    /// Its tag or an accepted match enriched for it names the release.
+    /// Its release ID in effect or an accepted match enriched for it names
+    /// the release.
     pub fn names(self: ReleaseMatchTrack, release_mbid: []const u8) bool {
-        if (self.tagged_release) |tag| if (std.mem.eql(u8, tag, release_mbid)) return true;
+        if (self.release_mbid) |named| if (std.mem.eql(u8, named, release_mbid)) return true;
         for (self.proposals) |proposal| {
             if (proposal.state == .accepted and proposal.enrichedOn(release_mbid)) return true;
         }
@@ -919,21 +1018,6 @@ pub const ReleaseMatchTrack = struct {
         }
         for (self.proposals) |*proposal| {
             if (proposal.state == .pending and proposal.payload.listsRelease(release_mbid)) return proposal;
-        }
-        return null;
-    }
-
-    /// The proposal an apply takes the Track's values from: its accepted
-    /// match enriched for the release, else its most confident pending
-    /// proposal enriched for it that is neither a correction nor in an
-    /// album group.
-    fn applicable(self: *const ReleaseMatchTrack, release_mbid: []const u8) ?*const ReleaseMatchProposal {
-        for (self.proposals) |*proposal| {
-            if (proposal.state == .accepted and proposal.enrichedOn(release_mbid)) return proposal;
-        }
-        for (self.proposals) |*proposal| {
-            if (proposal.state == .pending and proposal.enrichedOn(release_mbid) and
-                !proposal.in_album_group and !proposal.corrects) return proposal;
         }
         return null;
     }
@@ -989,7 +1073,7 @@ pub const ReleaseMatchView = struct {
         var list: std.ArrayList(ReleaseCandidate) = .empty;
         errdefer list.deinit(allocator);
         for (self.tracks) |track| {
-            if (track.tagged_release) |tag| try self.addCandidate(allocator, &list, tag);
+            if (track.release_mbid) |named| try self.addCandidate(allocator, &list, named);
             for (track.proposals) |proposal| {
                 if (proposal.state == .accepted) {
                     if (proposal.payload.isEnriched()) try self.addCandidate(allocator, &list, proposal.payload.release_mbid.?);
@@ -1091,10 +1175,13 @@ fn releaseIdsJson(owned: std.mem.Allocator, views: []const ReleaseMatchView, lis
 /// The Releases with a Track whose play file may carry a release tag or a
 /// proposal that is not dismissed (`?1`); a superset of those with a
 /// candidate.
+const release_mbid_field = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Field.musicbrainz_release_id)});
+
 const releases_with_candidate_sources =
     "WITH sources(file_id) AS (\n" ++
     "    SELECT file_id FROM identification_proposals WHERE state != ?1\n" ++
-    "    UNION SELECT file_id FROM observed_file_tags WHERE musicbrainz_release_id > '')\n" ++
+    "    UNION SELECT file_id FROM observed_file_tags WHERE musicbrainz_release_id > ''\n" ++
+    "    UNION SELECT file_id FROM orca_metadata_values WHERE field = " ++ release_mbid_field ++ " AND value > '')\n" ++
     "SELECT tracks.release_id FROM sources JOIN tracks ON tracks.preferred_file_id = sources.file_id\n" ++
     "UNION SELECT tracks.release_id FROM sources JOIN files ON files.id = sources.file_id\n" ++
     "    JOIN tracks ON tracks.recording_id = files.recording_id";
@@ -1572,7 +1659,7 @@ pub const IdentificationProposalRepository = struct {
         {
             var statement = try self.db.prepare(
                 comptime "SELECT release_id, id, play, title, artist, duration_ms, track_number, disc_number,\n" ++
-                    "       (SELECT musicbrainz_release_id FROM observed_file_tags WHERE observed_file_tags.file_id = play),\n" ++
+                    "       " ++ effectiveReleaseMbid("play") ++ ",\n" ++
                     "       " ++ effectiveRecordingMbid("play") ++ "\n" ++
                     "FROM (SELECT tracks.release_id, tracks.id, tracks.title, tracks.artist, tracks.duration_ms,\n" ++
                     "             tracks.track_number, tracks.disc_number, " ++ track_play_file ++ " AS play\n" ++
@@ -1583,7 +1670,7 @@ pub const IdentificationProposalRepository = struct {
             try statement.bindText(1, listed_ids);
             while (try statement.step() == .row) {
                 const index = index_of.get(statement.columnInt64(0)) orelse continue;
-                const tag = statement.columnText(8);
+                const release = statement.columnText(8);
                 const recording = statement.columnText(9);
                 try tracks[index].append(owned, .{
                     .track_id = statement.columnInt64(1),
@@ -1593,7 +1680,7 @@ pub const IdentificationProposalRepository = struct {
                     .duration_ms = optionalInt64(statement, 5),
                     .track_number = if (optionalInt64(statement, 6)) |number| std.math.cast(u32, number) else null,
                     .disc_number = if (optionalInt64(statement, 7)) |number| std.math.cast(u32, number) else null,
-                    .tagged_release = if (metadata.isMusicBrainzId(tag)) try owned.dupe(u8, tag) else null,
+                    .release_mbid = if (metadata.isMusicBrainzId(release)) try owned.dupe(u8, release) else null,
                     .recording_mbid = if (metadata.isMusicBrainzId(recording)) try owned.dupe(u8, recording) else null,
                     .proposals = &.{},
                 });
@@ -1740,10 +1827,12 @@ pub const IdentificationProposalRepository = struct {
     }
 
     /// Releases by album artist and title whose best candidate puts them in
-    /// `bucket` against `confident_at`. Only Releases a tag or a proposal
-    /// could name a release for are weighed; every other one is unmatched.
-    /// A `filter` keeps only Releases whose title or album artist has a word
-    /// starting with each of its words.
+    /// `bucket` against `confident_at`. Only Releases a release ID or a
+    /// proposal could name a release for are weighed; every other one is
+    /// unmatched.
+    /// A Release whose review of its best candidate still holds is in no
+    /// bucket. A `filter` keeps only Releases whose title or album artist
+    /// has a word starting with each of its words.
     pub fn releaseMatchPage(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
@@ -1811,6 +1900,7 @@ pub const IdentificationProposalRepository = struct {
                     if (!exists) continue;
                     best = try view.best(chunk);
                 }
+                if (best) |candidate| if (try reviewed_releases.stillReviewed(self.db, id, candidate.release_mbid)) continue;
                 if (releaseMatchBucket(best, confident_at) != bucket) continue;
                 if (skipped < offset) {
                     skipped += 1;
@@ -1890,14 +1980,19 @@ pub const IdentificationProposalRepository = struct {
             try self.fillReleaseMatchViews(chunk, views.items, found);
             for (views.items, found) |*view, exists| {
                 if (!exists) continue;
-                switch (releaseMatchBucket(try view.best(chunk), confident_at)) {
+                const best = try view.best(chunk);
+                if (best) |candidate| if (try reviewed_releases.stillReviewed(self.db, view.release_id, candidate.release_mbid)) {
+                    counts.reviewed += 1;
+                    continue;
+                };
+                switch (releaseMatchBucket(best, confident_at)) {
                     .confident => counts.confident += 1,
                     .needs_review => counts.needs_review += 1,
                     .unmatched => {},
                 }
             }
         }
-        counts.unmatched = total -| (counts.confident + counts.needs_review);
+        counts.unmatched = total -| (counts.confident + counts.needs_review + counts.reviewed);
         return counts;
     }
 
@@ -1925,55 +2020,66 @@ pub const IdentificationProposalRepository = struct {
         }
     }
 
-    /// Stores `fields` of the Release's best candidate, locked, on every
-    /// file of each Track: from its accepted match enriched for the release,
-    /// else from its pending proposal enriched for it, which `release_id`
-    /// accepts. A user's locked value stays. Writes nothing and returns 0
-    /// unless every Track has a play file and its tag, accepted match or
-    /// such a proposal names the release. Returns how many values were
-    /// stored.
-    pub fn applyMatchedRelease(
+    /// Stores `fields` of `plan`'s snapshot, locked, on every file of each
+    /// of its Tracks, for a caller holding the write lane and an open
+    /// transaction. The release's own values go to every Track; a placed
+    /// Track also takes its release track's, and storing `release_id`
+    /// accepts its `accept` proposal. A value locked by anyone but a
+    /// provider stays. The album artist ID and compilation flag are left
+    /// alone when the snapshot does not know the credit's artist IDs, and
+    /// the album artist ID also unless it credits one artist. Returns how
+    /// many values were stored, or with `dry_run`, stores nothing and
+    /// returns how many would change the value in effect.
+    pub fn applyReleasePlanLocked(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
-        release_id: i64,
+        plan: *const ReleaseApplyPlan,
         fields: ReleaseFieldSet,
+        dry_run: bool,
         written: ?*std.ArrayList(i64),
     ) !u32 {
-        self.write_lane.acquire();
-        defer self.write_lane.release();
-        try self.db.exec("BEGIN IMMEDIATE;");
-        errdefer self.db.exec("ROLLBACK;") catch {};
-        const view = try self.releaseMatchView(allocator, release_id, false);
-        defer view.deinit();
-        const release_mbid = if (try applicableRelease(&view, allocator)) |mbid| mbid else {
-            try self.db.exec("COMMIT;");
-            return 0;
-        };
-
         var arena: std.heap.ArenaAllocator = .init(allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
+        const tracklist = plan.tracklist;
+        const credited_ids = tracklist.artist_credit_mbids orelse &.{};
+        const album_artist_mbid: ?[]const u8 = if (credited_ids.len == 1) credited_ids[0] else null;
+        const various_artists = if (album_artist_mbid) |mbid| std.mem.eql(u8, mbid, various_artists_mbid) else false;
         var values_written: u32 = 0;
-        var writer = try ProviderValueWriter.init(self.db, allocator, written, .correction);
+        var writer = try ProviderValueWriter.init(self.db, allocator, written, .release);
         defer writer.deinit();
-        for (view.tracks) |*track| {
-            const proposal = track.applicable(release_mbid) orelse continue;
-            const play_file = track.play_file.?;
-            if (proposal.state == .pending and fields.contains(.release_id)) {
-                var touched: std.ArrayList(i64) = .empty;
-                defer touched.deinit(allocator);
-                values_written += (try self.acceptLocked(allocator, proposal.id, .release, written, &touched)).values_written;
-            }
-            const payload = proposal.payload;
-            for (try self.filesOfTracks(scratch, &.{track.track_id}, play_file)) |file_id| {
-                if (fields.contains(.track_titles)) {
-                    try writer.text(file_id, .title, payload.track_title orelse payload.title);
-                    try writer.text(file_id, .artist, payload.track_artist orelse payload.artist);
+        writer.dry_run = dry_run;
+        for (plan.tracks) |track| {
+            for (try self.filesOfTracks(scratch, &.{track.track_id}, track.play_file)) |file_id| {
+                if (fields.contains(.album)) try writer.text(file_id, .album, tracklist.title);
+                if (fields.contains(.album_artist)) {
+                    try writer.text(file_id, .album_artist, tracklist.artist_credit);
+                    if (various_artists) try writer.text(file_id, .compilation, "1");
                 }
-                try writeReleaseValues(&writer, file_id, payload, release_mbid, fields);
+                if (fields.contains(.release_date)) try writer.text(file_id, .date, tracklist.release_date);
+                if (fields.contains(.release_id)) {
+                    try writer.text(file_id, .musicbrainz_release_id, tracklist.release_mbid);
+                    try writer.text(file_id, .musicbrainz_release_group_id, tracklist.release_group_mbid);
+                    try writer.text(file_id, .musicbrainz_album_artist_id, album_artist_mbid);
+                }
+                const placed = track.placed orelse continue;
+                if (fields.contains(.release_id)) {
+                    try writer.number(file_id, .disc_number, placed.disc);
+                    try writer.number(file_id, .track_number, placed.position);
+                    try writer.text(file_id, .musicbrainz_release_track_id, placed.release_track_mbid);
+                    try writer.text(file_id, .musicbrainz_recording_id, placed.recording_mbid);
+                }
+                if (fields.contains(.track_titles)) {
+                    try writer.text(file_id, .title, placed.title);
+                    try writer.text(file_id, .artist, placed.artist_credit);
+                }
             }
+            if (dry_run or !fields.contains(.release_id)) continue;
+            const proposal_id = track.accept orelse continue;
+            var touched: std.ArrayList(i64) = .empty;
+            defer touched.deinit(allocator);
+            values_written += (try self.acceptLocked(allocator, proposal_id, .release, written, &touched)).values_written;
         }
-        try self.db.exec("COMMIT;");
         return values_written + writer.values_written;
     }
 

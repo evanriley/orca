@@ -53,6 +53,8 @@ fn describe(err: anyerror) []const u8 {
         error.UnknownReleaseTrack => "the release's tracklist has no track with that MBID; run release-alignment for its release track MBIDs",
         error.ReleaseTrackAlreadyPaired => "another track is paired with that release track; run unpair-track on it first",
         error.TrackNotPaired => "that track is not paired on that release",
+        error.ReleaseNotPlaced => "every track must have a file and be placed on the release first; run release-alignment, then pair-track",
+        error.ReleaseDiffers => "applying the release would change a value; run matches --release=ID --diff, then apply-release",
         error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
         error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -317,6 +319,7 @@ const commands = [_]Command{
     .{ .name = "release-alignment", .usage = "release-alignment DATABASE RELEASE_ID [RELEASE_MBID]", .min_arguments = 2, .max_arguments = 3, .run = printReleaseAlignment, .shares_usage_line = true },
     .{ .name = "pair-track", .usage = "pair-track DATABASE RELEASE_ID TRACK_ID RELEASE_TRACK_MBID [RELEASE_MBID]", .min_arguments = 4, .max_arguments = 5, .run = pairTrack, .shares_usage_line = true },
     .{ .name = "unpair-track", .usage = "unpair-track DATABASE RELEASE_ID TRACK_ID", .min_arguments = 3, .max_arguments = 3, .run = unpairTrack, .shares_usage_line = true },
+    .{ .name = "mark-release-reviewed", .usage = "mark-release-reviewed DATABASE RELEASE_ID [RELEASE_MBID]", .min_arguments = 2, .max_arguments = 3, .run = markReleaseReviewed, .shares_usage_line = true },
     .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
     .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
     .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
@@ -779,6 +782,23 @@ const help_details =
     \\many values they stored. apply-release stores those release values for
     \\a Release that came to agree without an accept, as after an edit moved
     \\a stray file out of it. Releases can get new ids as albums regroup.
+    \\apply-release --fields stores those fields of the best candidate's
+    \\tracklist, locked: the release's album, album artist, date and IDs on
+    \\every Track with a file, and each release track's title, artist,
+    \\numbers and IDs on the Track release-alignment places on it. It prints
+    \\release=, values_written=, track_values= and release_values_only= (how
+    \\many Tracks took each), artist_ids=unknown when the tracklist predates
+    \\Orca keeping the release's artist IDs (the album artist ID and
+    \\compilation flag are then left alone until match --release=ID looks
+    \\the release up again), and a left_alone line for each Track given no
+    \\release-track values, with reason not_placed or no_play_file. An Apply
+    \\that leaves no Track alone and nothing differing marks the Release as
+    \\reviewed and prints its ID after reprojection as reviewed=, else -.
+    \\mark-release-reviewed takes a Release off matches --releases while its
+    \\best candidate, tracklist, Tracks and their values stay as they are;
+    \\every Track must be placed and apply-release must have nothing left to
+    \\change. matches --releases prints placed= and needs_pairing= for each
+    \\Release with a tracklist, and reviewed= in its totals.
     \\accept-matches accepts each file's best match at least as confident as
     \\--min-score. A match AcoustID found with a fingerprint score of at least
     \\0.9 comes first; among those, the higher percent, then the Track's own
@@ -2463,9 +2483,36 @@ fn applyMatchedRelease(context: Context) !void {
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    const fields: ?liborca.ReleaseFieldSet = if (context.arguments.len == 3) try parseReleaseFields(context.arguments[2]) else null;
-    const values_written = try runtime.libraryApplyMatchedRelease(library, release_id, fields);
-    try context.stdout.print("values_written={d}\n", .{values_written});
+    if (context.arguments.len == 2) {
+        const values_written = try runtime.libraryApplyMatchedRelease(library, release_id, null);
+        return context.stdout.print("values_written={d}\n", .{values_written});
+    }
+    const fields = try parseReleaseFields(context.arguments[2]);
+    const outcome = try runtime.libraryApplyRelease(library, context.allocator, release_id, fields);
+    defer outcome.deinit();
+    try context.stdout.print("release={s}\tvalues_written={d}\ttrack_values={d}\trelease_values_only={d}\tartist_ids={s}", .{
+        outcome.release_mbid,
+        outcome.values_written,
+        outcome.track_values,
+        outcome.release_values_only,
+        if (outcome.artist_ids_unknown) "unknown" else "known",
+    });
+    if (outcome.reviewed_release_id) |reviewed| {
+        try context.stdout.print("\treviewed={d}\n", .{reviewed});
+    } else try context.stdout.writeAll("\treviewed=-\n");
+    for (outcome.left_alone) |track| {
+        try context.stdout.print("left_alone\ttrack={d}\treason={s}\ttitle={s}\n", .{ track.track_id, @tagName(track.reason), track.title });
+    }
+}
+
+fn markReleaseReviewed(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const release_mbid: ?[]const u8 = if (context.arguments.len == 3) context.arguments[2] else null;
+    try runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid);
+    try context.stdout.print("reviewed\trelease={d}\n", .{release_id});
 }
 
 fn printReleaseAlignment(context: Context) !void {
@@ -5173,11 +5220,14 @@ fn listReleaseMatches(context: Context) !void {
                 });
                 if (best.track_count) |count| try stdout.print("{d}", .{count}) else try stdout.writeAll("-");
             } else try stdout.writeAll("\tcandidate=-");
+            if (item.placement) |placement| {
+                try stdout.print("\tplaced={d} needs_pairing={d}", .{ placement.placed, placement.needs_pairing });
+            } else try stdout.writeAll("\tplaced=- needs_pairing=-");
             try stdout.writeAll("\n");
         }
     }
     const counts = try runtime.libraryReleaseMatchCounts(library, confident_at, filter);
-    try stdout.print("confident={d} needs_review={d} unmatched={d}\n", .{ counts.confident, counts.needs_review, counts.unmatched });
+    try stdout.print("confident={d} needs_review={d} unmatched={d} reviewed={d}\n", .{ counts.confident, counts.needs_review, counts.unmatched, counts.reviewed });
 }
 
 fn reviewReleaseMatch(context: Context) !void {

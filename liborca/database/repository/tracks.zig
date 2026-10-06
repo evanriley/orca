@@ -1513,18 +1513,27 @@ pub const track_play_file =
     \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1))
 ;
 
-const recording_mbid_field = std.fmt.comptimePrint("{d}", .{@backingInt(metadata.Field.musicbrainz_recording_id)});
-
 /// A locked Orca value, else the file's tag, else an Orca value: the order
 /// `TrackRepository.recordingMbid` applies through `metadata.resolveValue`.
 /// The two must agree, or details and sync name different recordings.
 pub fn effectiveRecordingMbid(comptime file_id: []const u8) []const u8 {
+    return effectiveIdSql(.musicbrainz_recording_id, "musicbrainz_recording_id", file_id);
+}
+
+/// The file's release ID in effect, resolved in the order of
+/// `effectiveRecordingMbid`, which is the projection's under `prefer_file`.
+pub fn effectiveReleaseMbid(comptime file_id: []const u8) []const u8 {
+    return effectiveIdSql(.musicbrainz_release_id, "musicbrainz_release_id", file_id);
+}
+
+fn effectiveIdSql(comptime field: metadata.Field, comptime tag_column: []const u8, comptime file_id: []const u8) []const u8 {
+    const field_number = std.fmt.comptimePrint("{d}", .{@backingInt(field)});
     return "COALESCE(" ++
         "(SELECT NULLIF(value, '') FROM orca_metadata_values WHERE orca_metadata_values.file_id = " ++ file_id ++
-        " AND orca_metadata_values.field = " ++ recording_mbid_field ++ " AND orca_metadata_values.locked = 1), " ++
-        "(SELECT NULLIF(musicbrainz_recording_id, '') FROM observed_file_tags WHERE observed_file_tags.file_id = " ++ file_id ++ "), " ++
+        " AND orca_metadata_values.field = " ++ field_number ++ " AND orca_metadata_values.locked = 1), " ++
+        "(SELECT NULLIF(" ++ tag_column ++ ", '') FROM observed_file_tags WHERE observed_file_tags.file_id = " ++ file_id ++ "), " ++
         "(SELECT NULLIF(value, '') FROM orca_metadata_values WHERE orca_metadata_values.file_id = " ++ file_id ++
-        " AND orca_metadata_values.field = " ++ recording_mbid_field ++ "))";
+        " AND orca_metadata_values.field = " ++ field_number ++ "))";
 }
 
 test "every page of a whole-library sort, in either form, and of a genre's sort holds the rows a single ORDER BY puts there" {

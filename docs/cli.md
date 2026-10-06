@@ -142,7 +142,7 @@ zig build run -- love-artist DATABASE IDS [--clear]   # artist love; kept in the
 zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
 zig build run -- match DATABASE (--track=ID | --release=ID) --reidentify   # again, ignoring IDs and earlier searches; confirmed= counts IDs found again
 zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal; the replaced ID last
-zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9] [--filter=TEXT] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= title= date= candidate_tracks=, then `confident= needs_review= unmatched=`
+zig build run -- matches DATABASE --releases [--bucket=confident|needs_review|unmatched] [--min-score=0.9] [--filter=TEXT] [--limit=N] [--offset=N]   # id, bucket, title, artist, tracks=, candidate= confidence= title= date= candidate_tracks=, placed= needs_pairing= (- without a tracklist snapshot), then `confident= needs_review= unmatched= reviewed=`
 zig build run -- matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff | --dismiss=MBID)   # evidence: fingerprints=N/M durations_within_1s= date_agrees= artist_agrees= title_agrees=, then note=; diff: a line per field, then per Track; dismiss: Not This Release
 zig build run -- verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N] [--cancel-after=MS]   # recording IDs against AcoustID; proposes corrections
 zig build run -- corrections DATABASE [--limit N] [--offset N]   # album groups of corrections
@@ -152,11 +152,13 @@ zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FI
 zig build run -- accept-match DATABASE PROPOSAL_ID   # recording ID, title, artist (and album values) in the library only; a correction locked
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
-zig build run -- apply-release DATABASE RELEASE_ID [--fields=album,album_artist,date,release_id,track_titles]   # the album's values once every Track names one release; --fields stores only those of the best candidate, locked, also from proposals on it
+zig build run -- apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release
+zig build run -- apply-release DATABASE RELEASE_ID --fields=album,album_artist,date,release_id,track_titles   # those fields of the best candidate's tracklist snapshot, locked: release values on every Track with a file, release-track values on placed Tracks; prints release= values_written= track_values= release_values_only= artist_ids=known|unknown reviewed=ID|- (the Release's ID after reprojection when the Apply left nothing alone or differing and so marked it reviewed), then left_alone track= reason=not_placed|no_play_file title= lines
 zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album; release= is the album's Release afterwards
 zig build run -- release-alignment DATABASE RELEASE_ID [RELEASE_MBID]   # the release's tracklist snapshot (default: the best candidate) against the Tracks: a line per release track, DISC-POSITION status track= source= title_equal= length_close= position_equal= delta_ms=, then not_on_release lines, then unlisted_pairing lines for pairings whose release track the snapshot no longer lists
 zig build run -- pair-track DATABASE RELEASE_ID TRACK_ID RELEASE_TRACK_MBID [RELEASE_MBID]   # pairs the Track with that release track of the release (default: the best candidate); its recording and release-track IDs become locked user values; prints origin=confirmed_suggestion or by_hand
-zig build run -- unpair-track DATABASE RELEASE_ID TRACK_ID   # removes the Track's pairings on the Release and the IDs they set that its files still hold
+zig build run -- unpair-track DATABASE RELEASE_ID TRACK_ID   # removes the Track's pairing and puts back the IDs it replaced where its files still hold the paired ones
+zig build run -- mark-release-reviewed DATABASE RELEASE_ID [RELEASE_MBID]   # takes the Release off matches --releases while it stays as reviewed; refused unless every Track is placed and apply-release --fields would change nothing
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
 # localhost); stores the cover in the library, never in a file

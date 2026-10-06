@@ -884,6 +884,8 @@ test "opening a Library leaves another process's in-flight write alone" {
 
 fn rewindToVersion55(db: sqlite.Database) !void {
     try db.exec(
+        \\DROP INDEX orca_metadata_values_release;
+        \\DROP TABLE reviewed_releases;
         \\DROP TABLE paired_metadata_values;
         \\DROP TRIGGER release_track_pairings_track_moved;
         \\DROP TABLE release_track_pairings;

@@ -834,12 +834,18 @@ pub const ReleaseLookup = struct {
             }
         }
         std.mem.sort(database.ReleaseTracklistTrack, tracks.items, {}, trackBefore);
+        var artist_ids: std.ArrayList([]const u8) = .empty;
+        for (release.@"artist-credit") |credit| {
+            if (artist_ids.items.len == database.release_tracklist_max_credit_artists) break;
+            if (soleArtistId(credit)) |artist_id| try artist_ids.append(arena, artist_id);
+        }
         return .{
             .release_mbid = release.id,
             .title = release.title,
             .artist_credit = try creditedArtist(arena, release.@"artist-credit"),
             .release_date = nonEmpty(release.date orelse ""),
             .release_group_mbid = if (release.@"release-group") |group| validId(group.id) else null,
+            .artist_credit_mbids = artist_ids.items,
             .medium_count = @intCast(release.media.len),
             .fetched_at = fetched_at,
             .tracks = tracks.items,
@@ -1314,6 +1320,9 @@ test "a recording on a release twice takes the track at the file's tagged number
     try testing.expectEqual(@as(?u32, 1), untagged.track_number);
     const elsewhere = (try release.enrichment(duet_mbid, 9)).?;
     try testing.expectEqual(@as(?u32, 1), elsewhere.track_number);
+    const credited = (try release.tracklist(0)).?.artist_credit_mbids.?;
+    try testing.expectEqual(@as(usize, 2), credited.len);
+    try testing.expectEqualStrings("5441c29d-3602-4898-b1a1-b77fa23b8e50", credited[1]);
 }
 
 test "a release's tracklist keeps every track in disc and position order with its own length and IDs" {
@@ -1327,6 +1336,8 @@ test "a release's tracklist keeps every track in disc and position order with it
     try testing.expectEqualStrings("Hot Space", tracklist.title);
     try testing.expectEqualStrings("Queen", tracklist.artist_credit);
     try testing.expectEqualStrings("3918b90b-340e-3779-9d7e-ba1593653498", tracklist.release_group_mbid.?);
+    try testing.expectEqual(@as(usize, 1), tracklist.artist_credit_mbids.?.len);
+    try testing.expectEqualStrings("0383dadf-2a4e-4d10-a46a-e9e041da8eb3", tracklist.artist_credit_mbids.?[0]);
     try testing.expectEqual(@as(u32, 2), tracklist.medium_count);
     try testing.expectEqual(@as(usize, 19), tracklist.tracks.len);
     const first = tracklist.tracks[0];

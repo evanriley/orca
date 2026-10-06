@@ -849,17 +849,44 @@ defer page.deinit();
   release_id, fields)` returns how many values it stored. With `fields` null
   it stores, unlocked, every value of the release all the Release's Tracks
   name; with a `ReleaseFieldSet` it stores those fields of the best
-  candidate locked, so they outrank file tags.
-  [metadata.md](metadata.md#applying-a-release) says when each applies.
+  candidate's tracklist snapshot locked, so they outrank file tags, and
+  returns 0 without a candidate or snapshot or past 512 Tracks.
+  `libraryApplyRelease(library, allocator, release_id, fields)` does the
+  same and returns a `ReleaseApplyOutcome`, freed with `deinit`: the
+  release ID, `values_written`, `track_values` and `release_values_only`
+  (Tracks given release-track values, and those given only the release's),
+  `artist_ids_unknown` (a snapshot from before the release's artist IDs
+  were kept, so the album-artist ID and compilation flag were left alone),
+  `left_alone`, a `LeftAloneTrack` (Track ID, title, `LeftAloneReason`
+  `not_placed` or `no_play_file`) per Track given no release-track values,
+  and `reviewed_release_id`: with nothing left alone, the Apply marks the
+  reprojected Release as reviewed, as `libraryMarkReleaseReviewed` would,
+  and this is its new ID, else null.
+  It fails with `error.NoReleaseCandidate`, `error.NoReleaseTracklist` or
+  `error.ReleaseTooLarge`.
+  `libraryMarkReleaseReviewed(library, release_id, release_mbid)` marks the
+  Release reviewed against `release_mbid`, or the best candidate when null;
+  `error.ReleaseNotPlaced` unless every Track has a file and is placed,
+  `error.ReleaseDiffers` when an Apply of every field would change a value,
+  and the errors of `libraryReleaseAlignment`.
+  [metadata.md](metadata.md#applying-a-release) says when each applies and
+  [how a review holds](metadata.md#marking-a-release-as-reviewed).
   Release matches serve the Matches and Match Review screens.
   `libraryReleaseMatchPage(library, allocator, bucket, confident_at,
   filter, limit, offset)` returns a `ReleaseMatchPage` of at most 512 `ReleaseMatchItem`s in
   one `ReleaseMatchBucket`, by album artist and title: each Release's title,
-  artist, Track count and `best` `ReleaseCandidate` (release ID, title, date,
-  track count, confidence). A Release's candidates are the MusicBrainz
-  releases its Tracks name by tag, accepted match or pending proposal, less
-  those dismissed for it; a candidate's confidence is the mean over the
-  Tracks of 1 for a Track whose tag or accepted match names it, else its
+  artist, Track count, `best` `ReleaseCandidate` (release ID, title, date,
+  track count, confidence) and `placement`, a `ReleasePlacementCounts`
+  (`placed`, the Tracks the alignment with the best candidate's snapshot
+  places `automatic` or `paired`, and `needs_pairing`, the rest), null
+  without a snapshot or past 512 Tracks. Each item with a candidate costs
+  one Release view, snapshot and pairings read and an alignment, so a page
+  costs at most `limit` of each on top of weighing the Releases. A
+  Release's candidates are the MusicBrainz releases its Tracks name by
+  their play file's release ID in effect (a locked Orca value, else the
+  tag, else an Orca value), accepted match or pending proposal, less those
+  dismissed for it; a candidate's confidence is the mean over the Tracks
+  of 1 for a Track whose release ID or accepted match names it, else its
   most confident pending proposal listing it, else 0. The best is the most
   confident, then one with as many tracks as the Release, then the earliest
   date, then the lowest ID. The buckets:
@@ -867,14 +894,16 @@ defer page.deinit();
     caller's auto-accept score, and is not dismissed;
   - `needs_review`: a candidate exists below that score;
   - `unmatched`: there is no candidate.
+  A Release whose review still holds is in no bucket.
   `confident_at` is in (0, 1], else `error.InvalidMinimumConfidence`. Only
-  Releases with a Track whose play file has a release tag or an undismissed
+  Releases with a Track whose play file has a release ID or an undismissed
   proposal are weighed, 256 at a time; the rest are unmatched. A non-null
   `filter` keeps the Releases whose title or album artist has a word
   starting with each of its words, through the search index; one with no
   word filters nothing, and one over `max_search_text` bytes is
   `error.SearchTextTooLong`. `libraryReleaseMatchCounts(library,
-  confident_at, filter)` counts each bucket under the same filter. `libraryReleaseMatchEvidence(library,
+  confident_at, filter)` counts each bucket under the same filter, and in
+  `reviewed` the Releases whose review holds. `libraryReleaseMatchEvidence(library,
   release_id, release_mbid)` returns a `MatchEvidence` against
   `release_mbid`, or the best candidate when null
   (`error.NoReleaseCandidate` when there is none): Tracks AcoustID heard on
@@ -911,19 +940,20 @@ defer page.deinit();
   MusicBrainz ID `error.InvalidMusicBrainzId`. It reads only.
   `libraryPairReleaseTrack(library, release_id, release_mbid, track_id,
   release_track_mbid)` pairs a Track of the Release with a release track of
-  `release_mbid`'s snapshot, or the best candidate's when null, replacing
-  the Track's pairing on that release, and returns the `PairingOrigin`:
+  `release_mbid`'s snapshot, or the best candidate's when null, undoing the
+  Track's earlier pairing on any release, and returns the `PairingOrigin`:
   `confirmed_suggestion` when the alignment suggested that Track there,
   else `by_hand`. Every file of the Track takes the release track's
-  recording and release-track IDs as locked user values, and the files are
-  reprojected. Errors: `error.TrackNotOnRelease`,
+  recording and release-track IDs as locked user values, the values they
+  replace are kept, and the files are reprojected. Errors: `error.TrackNotOnRelease`,
   `error.NoReleaseTracklist`, `error.UnknownReleaseTrack`,
   `error.ReleaseTrackAlreadyPaired`, and those of
   `libraryReleaseAlignment`.
-  `libraryUnpairReleaseTrack(library, release_id, track_id, release_mbid)`
-  removes the Track's pairings on the Release, on `release_mbid` only when
-  not null, and the values they set that its files still hold;
-  `error.TrackNotPaired` when there is none.
+  `libraryUnpairReleaseTrack(library, release_id, track_id)` removes the
+  Track's pairing and, where its files still hold the values it set, puts
+  back the values it replaced; `error.TrackNotPaired` when the Track has no
+  pairing on that Release. `libraryEditTracks` on either field makes the
+  value the person's own, which unpairing leaves.
   `libraryReleaseTrackPairings(library, allocator, release_id)` returns the
   Release's `ReleaseTrackPairings`, freed with `deinit`, at most 512: each
   `ReleaseTrackPairing` holds the Track, the release, release-track and

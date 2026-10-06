@@ -135,33 +135,80 @@ release that every Track names by tag or accepted match, as unlocked
 provider values under the `.match` write, and accepts no proposal. A
 Release whose Tracks do not all name one release stores nothing.
 
-With a `ReleaseFieldSet` (`--fields=`, or
+With a `ReleaseFieldSet` (`Runtime.libraryApplyRelease`, `--fields=`, or
 `orca_library_apply_matched_release_fields`), a person chose those fields
 of the Release's best candidate (see [api.md](api.md)) after reviewing it,
-so they are stored locked under the `.correction` write. It applies when
-every Track has a play file and either names the candidate (tag or
-accepted match enriched for it) or has an applicable proposal: its
-accepted match enriched for the candidate, else its most confident pending
-proposal enriched for it that is neither a correction nor in an album
-group. A Release of more than 512 Tracks never applies; one that does not
-apply stores nothing and returns 0. For each Track with an applicable
-proposal, on every file of the Track:
+so they are stored locked under the `.release` write. Values come from the
+candidate's tracklist snapshot laid against the Release as
+[Release alignment](#release-alignment) describes, not from proposals.
+Without a snapshot it is `error.NoReleaseTracklist`, without a candidate
+`error.NoReleaseCandidate`, and a Release of more than 512 Tracks is
+`error.ReleaseTooLarge`; the count-only API returns 0 for those. Tracks the
+alignment does not place never refuse an Apply. On every file of each
+Track with a play file:
 
 - `album`: the release title;
-- `album_artist`: the release artist, plus `compilation=1` for Various
-  Artists;
+- `album_artist`: the release artist credit, plus `compilation=1` when the
+  credit is the Various Artists artist alone;
 - `release_date`: the release date;
-- `release_id`: disc and track numbers and the release, release-group,
-  release-track and album-artist IDs; a pending proposal is accepted, storing
-  its recording ID;
-- `track_titles`: the title and artist the release credits.
+- `release_id`: the release and release-group IDs, and the album-artist ID
+  when the credit names one artist.
 
-`release_type`, `genre` and `artwork` are compared by Match Review but never
-stored. A user's lock wins, an equal value is not counted, and fields not
-selected keep their values and provenance. Without `release_id` pending
-proposals stay pending. Being locked, the stored values outrank the files'
-own tags under the projection's `prefer_file` policy, and a later user edit
-replaces them. Nothing is written to a file.
+A Track the alignment places `automatic` or `paired` also takes its
+release track's values:
+
+- `release_id`: disc and track numbers and the release-track and recording
+  IDs; the pending proposal that placed it automatically (one for that
+  recording, enriched for this release first, never a correction or one in
+  an album group) is accepted;
+- `track_titles`: the title and artist credit the release track carries.
+
+A snapshot taken before migration 60 does not hold the release's artist
+IDs, so the album-artist ID and compilation flag are left alone; the next
+lookup of the release, which a matching run makes once the 30-day cache
+expires, replaces the snapshot. `release_type`, `genre` and `artwork` are
+compared by Match Review but never stored. A user's locked value wins,
+including a value a pairing set, and `paired_metadata_values` is left as it
+is; a locked provider value is replaced. An equal value is not counted, and
+fields not selected keep their values and provenance. Without `release_id`
+pending proposals stay pending. Being locked, the stored values outrank the
+files' own tags under the projection's `prefer_file` policy, and a later
+user edit replaces them. Nothing is written to a file; the Release is
+reprojected.
+
+`libraryApplyRelease` returns a `ReleaseApplyOutcome`: the release ID, the
+values stored, how many Tracks took release-track values
+(`track_values`) and how many only the release's (`release_values_only`),
+`artist_ids_unknown`, a `LeftAloneTrack` for each Track given no
+release-track values, with the reason `not_placed` or `no_play_file`, and
+`reviewed_release_id`. An Apply that left no Track alone then marks the
+reprojected Release as reviewed against the release, as
+[below](#marking-a-release-as-reviewed), so a finished Release leaves the
+Confident and Needs Review lists; `reviewed_release_id` is its ID after the
+reprojection, or null when marking was refused or the written files lie on
+several Releases. An Apply that left a Track alone keeps the Release listed
+with its `needs_pairing` count. The release ID an Apply stores keeps the
+release a candidate of the Release, since candidates come from each play
+file's release ID in effect.
+
+#### Marking a release as reviewed
+
+`Runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid)`
+and `orca-cli mark-release-reviewed` record that a person found the
+Release equal to `release_mbid`, or its best candidate when null. It is
+refused with `error.ReleaseNotPlaced` unless the Release has Tracks and
+every Track has a play file and is placed `automatic` or `paired`, and
+with `error.ReleaseDiffers` when an Apply of every field would change a
+value in effect (a user's locked value counts as unchanged). The review is
+stored in `reviewed_releases` with a SHA-256 digest of the snapshot's
+header and tracks, the Release's Track IDs, and each of their files'
+observed tags and Orca values of the fields an Apply stores. It holds
+while that release is the best candidate and the digest is unchanged; a
+Release whose review holds is in no bucket of the release-match page and
+counts, and `ReleaseMatchCounts.reviewed` counts it. A change to the
+Tracks, a value, the best candidate or the snapshot brings the Release
+back; the stale row is left in place and replaced by the next review.
+
 `libraryDismissReleaseCandidate` removes a release from the candidates.
 
 The projection resolves a Release's MusicBrainz release ID from the Orca
@@ -214,8 +261,8 @@ last), then Track ID order, so:
 - a recording ID in effect or accepted outranks another Track's pending
   match for the same release track.
 
-The alignment reads only. Apply and the conditions under
-[Applying a release](#applying-a-release) do not use it yet.
+The alignment reads only. An Apply with fields stores values from it, as
+[Applying a release](#applying-a-release) describes.
 
 #### Pairing a Track
 
@@ -227,15 +274,17 @@ recording ID and whether it confirmed the suggestion the alignment showed
 for that Track at that moment (`confirmed_suggestion`) or not (`by_hand`).
 
 - Every file of the Track takes the release track's recording ID and
-  release-track ID as user values, locked, as an edit stores them. No
-  media file is written; a tag write writes them like any edit. The
-  Track's files are reprojected.
+  release-track ID as user values, locked, as an edit stores them, and
+  Orca keeps the value each replaced (an accepted match's, an edit's, or
+  none). No media file is written; a tag write writes them like any
+  edit. The Track's files are reprojected.
+- A Track has one pairing. Pairing it again, on the same or another
+  release, undoes the earlier pairing first, as unpairing does.
 - A Track not on the Release is `error.TrackNotOnRelease`; a release
   without a snapshot `error.NoReleaseTracklist`; a release-track ID the
   snapshot does not list `error.UnknownReleaseTrack`; a release track
   another Track of the Release is paired with
-  `error.ReleaseTrackAlreadyPaired`, until that one is unpaired. Pairing a
-  Track again on the same release replaces its pairing.
+  `error.ReleaseTrackAlreadyPaired`, until that one is unpaired.
 - A pairing outranks automatic placement: a Track that held the release
   track's recording ID is placed elsewhere, suggested, or listed as not on
   the release.
@@ -243,10 +292,12 @@ for that Track at that moment (`confirmed_suggestion`) or not (`by_hand`).
   stored, is ignored by the alignment, and is listed by
   `Runtime.libraryReleaseTrackPairings` with `in_snapshot` false.
 - Unpairing (`Runtime.libraryUnpairReleaseTrack`, `orca-cli
-  unpair-track`) removes the pairing and the two values it set, only where
-  a file still holds them as locked user values; a later edit stays. The
-  recording ID in effect then falls back to the file's tag or another
-  value.
+  unpair-track`) removes the pairing and, where a file still holds the
+  value the pairing set, puts back the value it replaced with its
+  provenance and lock, or removes it when there was none, so the file's
+  tag applies again.
+- Editing either field in the metadata editor makes the value the
+  person's own: unpairing leaves it, and AcoustID treats it as an edit.
 - A pairing goes with its Track or Release, and when its Track moves to
   another Release; the values it set stay, as an edit's would.
 - An ID a pairing set reaches AcoustID only where the file's fingerprint

@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Applying a release that not every Track is on.**
+  `Runtime.libraryApplyRelease` and `orca-cli apply-release --fields` write
+  the chosen fields from the release's tracklist snapshot: release values to
+  every Track with a file, release-track values only to placed Tracks. The
+  outcome names each Track left alone instead of refusing with "Every track
+  must be on the release first". `libraryMarkReleaseReviewed` and
+  `mark-release-reviewed` mark a fully placed Release that an Apply would not
+  change as reviewed, which an Apply that leaves nothing alone also does;
+  the review holds while that release stays the best candidate and nothing
+  it covered changes. Matches report how many Tracks are placed and how many
+  need pairing.
 - **Pairing a Track with a release track.** `Runtime.libraryPairReleaseTrack`
   places a Track the release alignment could not place, or confirms a
   suggestion, and `orca-cli pair-track` does the same;

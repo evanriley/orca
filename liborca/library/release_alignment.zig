@@ -368,7 +368,7 @@ fn localTrack(id: i64, title: []const u8, number: ?u32, duration_ms: ?i64, recor
         .duration_ms = duration_ms,
         .track_number = number,
         .disc_number = null,
-        .tagged_release = null,
+        .release_mbid = null,
         .recording_mbid = recording,
         .proposals = &.{},
     };

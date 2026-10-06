@@ -586,7 +586,8 @@ be identified. It is started only by a person; no job starts it.
   set (see [metadata.md](metadata.md#release-alignment)) is sent only when
   the file also holds a proposal from AcoustID for that recording, in any
   state: a pairing rests on a person's judgment, and is sent only where the
-  file's fingerprint agreed.
+  file's fingerprint agreed. An ID the person then edits, even to the same
+  value, counts as an edit.
   `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
   them without fingerprinting anything.
 - **ID or metadata.** When the file's length differs from the recording's by
@@ -631,6 +632,7 @@ orca-cli matches DATABASE --release=ID [--candidate=MBID] (--evidence | --diff |
 orca-cli release-alignment DATABASE RELEASE_ID [RELEASE_MBID]
 orca-cli pair-track DATABASE RELEASE_ID TRACK_ID RELEASE_TRACK_MBID [RELEASE_MBID]
 orca-cli unpair-track DATABASE RELEASE_ID TRACK_ID
+orca-cli mark-release-reviewed DATABASE RELEASE_ID [RELEASE_MBID]
 orca-cli fingerprint DATABASE TRACK_ID
 ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 ```
