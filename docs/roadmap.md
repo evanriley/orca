@@ -397,6 +397,20 @@ removed.
   from the Library, contrary to the comment in `core/runtime_status.zig` that
   it keeps its place, so a page's row `n` is then not queue position
   `offset + n`. Checked by a page over a queue with a removed Track.
+- Match confidence is checked evidence. A Track whose release ID tag names a
+  release counts as confidence 1 in `ReleaseCandidate.confidence`, so an
+  album tagged elsewhere shows 100% in Confident before Orca has read the
+  release from MusicBrainz, with "Untitled release" as its best candidate
+  and a Review that has no tracklist. A release a tag names is read before
+  the album is weighed, and an album whose release has not been read shows
+  no percentage. Checked by matching a tagged album with no stored release
+  and with an unreachable MusicBrainz.
+- Match results name what can be reviewed. Search on an Unmatched album
+  reports "Found a match to review" when a Track gained a recording proposal
+  (`MatchStats.matched`) even when no release candidate forms, as for Big
+  Grams by Big Grams, which then stays Unmatched with nothing to review. The
+  result names an album the person can open, or says none was found.
+  Checked by a search whose proposals form no release candidate.
 - Embedding is specified. The SQLite unix-VFS lock replacement on Linux
   (`liborca/database/sqlite_locks.zig`) is process-wide; its initialization
   contract is documented and enforced. `orca_runtime_destroy` skips the Debug
@@ -477,6 +491,11 @@ Small defects that are not yet scheduled:
 - When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
   sometimes not drawn, and stays missing. The race is likely in
   `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
+- On the Match Review page, the Best candidate and confidence columns start
+  at a different position on each row. `matchRow` in
+  `apps/linux/matches.zig` splits each row's width between two expanding
+  boxes, and the width left over depends on that row's action buttons, such
+  as Accept or "Review · 1 track needs pairing".
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.
