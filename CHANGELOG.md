@@ -89,6 +89,13 @@
   an entry as an `orca_track_view` with `removed` set and only `id` filled. The
   Queue page and Now Playing show it as "Removed from library", and it can be
   removed from the queue.
+- A gapless successor that was primed before its predecessor's last block was
+  decoded, as after a seek back inside the predecessor, becomes the
+  now-playing entry at its first frame, with position counted from there, even
+  when that frame falls partway through a 256-frame block. Before, the whole
+  block holding the predecessor's last frame was reported as the successor's,
+  so identity changed and the successor's position started counting up to one
+  block early.
 
 ## 0.1.0 - 2026-10-06
 

@@ -37,6 +37,7 @@ pub fn ZoneSink(comptime capacity: usize) type {
             frames: u32,
             epoch: u32,
             entry_serial: u32,
+            successor: render.Successor,
         ) bool {
             self.pipe.reclaim(self.pool);
             if (self.pipe.ready.len() >= self.max_queued_blocks) return false;
@@ -53,6 +54,7 @@ pub fn ZoneSink(comptime capacity: usize) type {
                 .frames = frames,
                 .epoch = epoch,
                 .entry_serial = entry_serial,
+                .successor = successor,
             })) {
                 self.pool.release(index);
                 return false;
@@ -69,10 +71,11 @@ pub fn submit(
     frames: u32,
     epoch: u32,
     entry_serial: u32,
+    successor: render.Successor,
 ) usize {
     var accepted: usize = 0;
     for (sinks) |sink| {
-        if (sink.submitCopy(samples, frames, epoch, entry_serial)) accepted += 1;
+        if (sink.submitCopy(samples, frames, epoch, entry_serial, successor)) accepted += 1;
     }
     return accepted;
 }
@@ -88,10 +91,10 @@ test "full Zone does not prevent fanout to another Zone" {
     const FullSink = ZoneSink(1);
     const full: FullSink = .{ .pool = &full_pool, .pipe = &full_pipe, .channels = 1 };
     const healthy: FullSink = .{ .pool = &healthy_pool, .pipe = &healthy_pipe, .channels = 1 };
-    try std.testing.expect(full.submitCopy(&.{ 0.1, 0.2 }, 2, 4, 1));
+    try std.testing.expect(full.submitCopy(&.{ 0.1, 0.2 }, 2, 4, 1, .{}));
 
     var sinks = [_]FullSink{ full, healthy };
-    try std.testing.expectEqual(@as(usize, 1), submit(1, &sinks, &.{ 0.5, 0.75 }, 2, 4, 1));
+    try std.testing.expectEqual(@as(usize, 1), submit(1, &sinks, &.{ 0.5, 0.75 }, 2, 4, 1, .{}));
     var output: [2]f32 = undefined;
     try std.testing.expectEqual(@as(usize, 2), healthy_pipe.render(&healthy_pool, 1, 4, &output));
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.75 }, &output);
@@ -104,7 +107,7 @@ test "Zone strategy bounds independent render-ahead depth" {
     var pipe: render.RenderPipe(4) = .{};
     const Sink = ZoneSink(4);
     const sink = Sink.init(&pool, &pipe, 1, .direct_rt);
-    try std.testing.expect(sink.submitCopy(&.{ 0, 0 }, 2, 1, 1));
-    try std.testing.expect(!sink.submitCopy(&.{ 1, 1 }, 2, 1, 1));
+    try std.testing.expect(sink.submitCopy(&.{ 0, 0 }, 2, 1, 1, .{}));
+    try std.testing.expect(!sink.submitCopy(&.{ 1, 1 }, 2, 1, 1, .{}));
     try std.testing.expectEqual(@as(usize, 1), pipe.ready.len());
 }

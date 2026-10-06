@@ -360,9 +360,6 @@ removed.
   queued, so it can report bit-perfect output for up to a pipe's worth of
   processed audio. Checked by signal path tests with unknown device details,
   and by a settings change under playback.
-- Gapless transitions inside one 256-frame block apply the successor's
-  identity and position anchor at its first frame, not the block's. Checked
-  by an engine test with a boundary mid-block.
 - Compatibility promises for 1.0 are written separately for the Zig API, the
   C ABI and the Library schema. Schema upgrades from 0.1.0 are
   tested. A GTK launch, open, play and close smoke test runs on a private

@@ -409,7 +409,7 @@ test "closing an output lets a Zone reclaim every prepared block" {
 
     const sink = runtime_zone.sink(1);
     var samples: [frames_per_block]f32 = @splat(0.5);
-    try std.testing.expect(sink.submitCopy(&samples, frames_per_block, 3, 1));
+    try std.testing.expect(sink.submitCopy(&samples, frames_per_block, 3, 1, .{}));
     try std.testing.expect(!runtime_zone.quiescent());
 
     runtime_zone.resetPipe();

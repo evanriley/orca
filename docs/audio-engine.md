@@ -49,12 +49,16 @@ The callback compares only the epoch of a prepared block, never its track: a
 gapless transition appends the successor's blocks under the same epoch, so a
 track comparison would discard the audio gapless depends on. The successor
 carries a new `entry_serial`, which the callback publishes and never compares.
-The decode cursor leads the audible cursor by the whole render-ahead depth, so
-identity, duration and position of the audible entry all resolve from the
-published serial (identity through the queue's serial records, duration through
-a serial-keyed ring of per-entry timeline shapes, position through the entry
-anchor) and never from `SourceQueue.current`. The serial is adopted only once
-the position published with it belongs to the current epoch.
+A block holds frames of at most two entries. When the successor starts partway
+through one, the block also carries the successor's serial and the block frame
+of its first frame, and the callback publishes that serial and the entry anchor
+at that frame, not at the block's first. The decode cursor leads the audible
+cursor by the whole render-ahead depth, so identity, duration and position of
+the audible entry all resolve from the published serial (identity through the
+queue's serial records, duration through a serial-keyed ring of per-entry
+timeline shapes, position through the entry anchor) and never from
+`SourceQueue.current`. The serial is adopted only once the position published
+with it belongs to the current epoch.
 
 ### Rendered position
 
@@ -397,8 +401,10 @@ A Player owns the active `SourceQueue`: one current SourceSession and one
 prepared successor. When decoding reaches the current source's end, it appends
 compatible successor blocks behind the current blocks already in the render
 queue, then releases the exhausted decoder, so transitions are primed before
-the audible end and need no callback-side source switch. Transitions are
-gapless; there is no crossfade.
+the audible end and need no callback-side source switch. A successor primed
+before the current source's end, such as one kept through a seek back inside
+the current entry, fills the rest of the block that holds the current source's
+last frame. Transitions are gapless; there is no crossfade.
 
 A `PlaybackQueue` sits above it: bounded track references, an audible cursor, a
 decode cursor, repeat and shuffle. Only the control lane and the engine thread

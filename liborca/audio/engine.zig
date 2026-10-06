@@ -2802,6 +2802,121 @@ test "a seek base stays inside the entry it was stamped for" {
     try std.testing.expect(first_after_advance.? <= 128);
 }
 
+fn expectGaplessBoundaryInsideBlock(boundary: u32, callback_ends_at_boundary: bool) !void {
+    const allocator = std.testing.allocator;
+    const first_frames: u64 = 3 * frames_per_block + boundary;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = first_frames },
+        .{ .track_id = 11, .frames = 16 * frames_per_block },
+    });
+    defer harness.deinit();
+    const other_zone = try harness.addZone(2);
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    var pass: usize = 0;
+    while (pass < 16 and harness.engine.gapless_transitions == 0) : (pass += 1)
+        harness.step(0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.gapless_transitions);
+    try std.testing.expect(harness.player.sources.?.next != null);
+    const first_serial = harness.player.entrySerial();
+
+    const epoch = try harness.player.seek(0);
+    harness.step(frames_per_block);
+    harness.step(0);
+    for (0..3) |_| harness.step(frames_per_block);
+    harness.step(0);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(u64, 3 * frames_per_block), harness.player.snapshot().position_frames);
+
+    if (callback_ends_at_boundary) {
+        harness.step(boundary);
+        harness.step(0);
+        try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+        try std.testing.expectEqual(first_serial, harness.player.audible_entry_serial.load(.acquire));
+        try std.testing.expectEqual(first_frames, harness.player.snapshot().position_frames);
+        harness.step(frames_per_block - boundary);
+    } else {
+        harness.step(frames_per_block);
+    }
+    harness.step(0);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expect(harness.player.audible_entry_serial.load(.acquire) != first_serial);
+    try std.testing.expectEqual(
+        @as(u64, frames_per_block - boundary),
+        harness.player.snapshot().position_frames,
+    );
+    for ([_]*ZoneRuntime{ harness.runtime_zone, other_zone }) |runtime_zone| {
+        try std.testing.expectEqual(
+            harness.player.audible_entry_serial.load(.acquire),
+            runtime_zone.rendered_entry_serial.load(.monotonic),
+        );
+        try std.testing.expectEqual(
+            first_frames,
+            render.entryAnchorFrames(runtime_zone.entry_anchor.load(.monotonic)),
+        );
+    }
+
+    harness.step(frames_per_block);
+    harness.step(0);
+    try std.testing.expectEqual(
+        @as(u64, 2 * frames_per_block - boundary),
+        harness.player.snapshot().position_frames,
+    );
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.entries_started);
+    try std.testing.expectEqual(epoch, harness.player.snapshot().epoch);
+}
+
+test "a gapless boundary inside a prepared block moves identity and position at the successor's first frame" {
+    try expectGaplessBoundaryInsideBlock(232, true);
+    try expectGaplessBoundaryInsideBlock(232, false);
+}
+
+test "a gapless boundary one frame into a prepared block moves identity and position there" {
+    try expectGaplessBoundaryInsideBlock(1, true);
+    try expectGaplessBoundaryInsideBlock(1, false);
+}
+
+test "a gapless boundary on a prepared block's last frame moves identity and position there" {
+    try expectGaplessBoundaryInsideBlock(frames_per_block - 1, true);
+    try expectGaplessBoundaryInsideBlock(frames_per_block - 1, false);
+}
+
+test "an entry that ends with a prepared block keeps that block when its successor is already primed" {
+    const allocator = std.testing.allocator;
+    const first_frames: u64 = 4 * frames_per_block;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = first_frames },
+        .{ .track_id = 11, .frames = 16 * frames_per_block },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    var pass: usize = 0;
+    while (pass < 16 and harness.engine.gapless_transitions == 0) : (pass += 1)
+        harness.step(0);
+    try std.testing.expect(harness.player.sources.?.next != null);
+    const first_serial = harness.player.entrySerial();
+
+    const epoch = try harness.player.seek(0);
+    harness.step(frames_per_block);
+    harness.step(0);
+    for (0..4) |_| harness.step(frames_per_block);
+    harness.step(0);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(first_serial, harness.player.audible_entry_serial.load(.acquire));
+    try std.testing.expectEqual(first_frames, harness.player.snapshot().position_frames);
+
+    harness.step(1);
+    harness.step(0);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(u64, 1), harness.player.snapshot().position_frames);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(epoch, harness.player.snapshot().epoch);
+}
+
 test "a format change between entries reopens the output instead of failing" {
     const allocator = std.testing.allocator;
     var harness = try QueueHarness.init(allocator, &.{

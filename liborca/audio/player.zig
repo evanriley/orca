@@ -477,23 +477,25 @@ pub const Player = struct {
         sinks: []fanout.ZoneSink(capacity),
         epoch: u32,
     ) !FanoutResult {
-        const format_value = self.format() orelse return error.PlayerHasNoSource;
-        const frames = try self.decodeFrames(scratch);
-        const samples = scratch[0 .. frames * format_value.channels];
+        const sources = if (self.sources) |*loaded| loaded else return error.PlayerHasNoSource;
+        const channels = sources.format().channels;
+        const block = try sources.readBlock(scratch, self.replayGainSettings());
+        const samples = scratch[0 .. block.frames * channels];
         if (player_processor) |processor|
-            processor.process(samples, @intCast(frames), format_value.channels);
+            processor.process(samples, @intCast(block.frames), channels);
         return .{
-            .frames = frames,
-            .zones_accepted = if (frames == 0)
+            .frames = block.frames,
+            .zones_accepted = if (block.frames == 0)
                 0
             else
                 fanout.submit(
                     capacity,
                     sinks,
                     samples,
-                    @intCast(frames),
+                    @intCast(block.frames),
                     epoch,
-                    self.entrySerial(),
+                    block.entry_serial,
+                    block.successor,
                 ),
         };
     }

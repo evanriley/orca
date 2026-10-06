@@ -204,21 +204,37 @@ pub const SourceQueue = struct {
         self.next_entry_serial = self.nextSerial();
     }
 
+    pub const DecodedBlock = struct {
+        frames: usize,
+        /// The entry of the block's first frame, not the entry decoding last.
+        entry_serial: u32,
+        successor: render.Successor = .{},
+    };
+
     /// Decode canonical PCM without assigning it to an output. The control
     /// lane can process this Player-scoped block once, then copy it into each
     /// independently owned Zone pipeline.
-    pub fn readFrames(self: *SourceQueue, samples: []f32, settings: processing.ReplayGainSettings) !usize {
+    pub fn readBlock(self: *SourceQueue, samples: []f32, settings: processing.ReplayGainSettings) !DecodedBlock {
         const channels = self.current.decoder.format.channels;
         if (samples.len % channels != 0) return error.ChannelMismatch;
-        var total_frames: usize = 0;
-        while (total_frames < samples.len / channels) {
-            const offset = total_frames * channels;
-            const frames = try self.current.readFrames(samples[offset..], settings);
-            total_frames += frames;
+        const capacity = samples.len / channels;
+        var block: DecodedBlock = .{ .frames = 0, .entry_serial = self.current_entry_serial };
+        while (block.frames < capacity) {
+            const offset = block.frames * channels;
+            block.frames += try self.current.readFrames(samples[offset..], settings);
             if (!self.current.eof) break;
             if (!self.advance()) break;
+            if (block.frames == 0) {
+                block.entry_serial = self.current_entry_serial;
+            } else if (block.frames < capacity) {
+                block.successor = .{ .serial = self.current_entry_serial, .frame = @intCast(block.frames) };
+            }
         }
-        return total_frames;
+        return block;
+    }
+
+    pub fn readFrames(self: *SourceQueue, samples: []f32, settings: processing.ReplayGainSettings) !usize {
+        return (try self.readBlock(samples, settings)).frames;
     }
 
     pub fn prime(
@@ -437,6 +453,70 @@ test "a gapless transition keeps the epoch and only changes the entry serial" {
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5 }, &output);
     try std.testing.expectEqual(second_serial, pipe.rendered_entry_serial.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 0), pipe.underruns.load(.monotonic));
+}
+
+test "a decoded block names the successor that starts partway through it" {
+    var first_decoder: ConstantDecoder = .{ .value = 0.25, .remaining = 2 };
+    var second_decoder: ConstantDecoder = .{ .value = 0.5, .remaining = 2 };
+    var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
+    defer sources.deinit();
+    const first_serial = sources.current_entry_serial;
+    try sources.primeNext(SourceSession.init(second_decoder.decoder()));
+    const second_serial = sources.next_entry_serial;
+
+    var samples: [3]f32 = @splat(0);
+    const mixed = try sources.readBlock(&samples, .{ .mode = .off });
+    try std.testing.expectEqual(@as(usize, 3), mixed.frames);
+    try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.25, 0.5 }, &samples);
+    try std.testing.expectEqual(first_serial, mixed.entry_serial);
+    try std.testing.expectEqual(second_serial, mixed.successor.serial);
+    try std.testing.expectEqual(@as(u32, 2), mixed.successor.frame);
+
+    const rest = try sources.readBlock(&samples, .{ .mode = .off });
+    try std.testing.expectEqual(@as(usize, 1), rest.frames);
+    try std.testing.expectEqual(second_serial, rest.entry_serial);
+    try std.testing.expectEqual(@as(u32, 0), rest.successor.serial);
+}
+
+test "a decoded block that ends with its entry leaves the successor to the next block" {
+    var first_decoder: ConstantDecoder = .{ .value = 0.25, .remaining = 2 };
+    var second_decoder: ConstantDecoder = .{ .value = 0.5, .remaining = 2 };
+    var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
+    defer sources.deinit();
+    const first_serial = sources.current_entry_serial;
+    try sources.primeNext(SourceSession.init(second_decoder.decoder()));
+    const second_serial = sources.next_entry_serial;
+
+    var samples: [2]f32 = @splat(0);
+    const first = try sources.readBlock(&samples, .{ .mode = .off });
+    try std.testing.expectEqual(@as(usize, 2), first.frames);
+    try std.testing.expectEqual(first_serial, first.entry_serial);
+    try std.testing.expectEqual(@as(u32, 0), first.successor.serial);
+
+    const second = try sources.readBlock(&samples, .{ .mode = .off });
+    try std.testing.expectEqual(@as(usize, 2), second.frames);
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5 }, &samples);
+    try std.testing.expectEqual(second_serial, second.entry_serial);
+    try std.testing.expectEqual(@as(u32, 0), second.successor.serial);
+}
+
+test "a successor primed after its predecessor ended owns the whole next block" {
+    var first_decoder: ConstantDecoder = .{ .value = 0.25, .remaining = 2 };
+    var second_decoder: ConstantDecoder = .{ .value = 0.5, .remaining = 2 };
+    var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
+    defer sources.deinit();
+
+    var samples: [4]f32 = @splat(0);
+    try std.testing.expectEqual(@as(usize, 2), (try sources.readBlock(&samples, .{ .mode = .off })).frames);
+    try std.testing.expect(sources.finishedDecoding());
+    try sources.primeNext(SourceSession.init(second_decoder.decoder()));
+    const second_serial = sources.next_entry_serial;
+
+    const block = try sources.readBlock(&samples, .{ .mode = .off });
+    try std.testing.expectEqual(@as(usize, 2), block.frames);
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5 }, samples[0..2]);
+    try std.testing.expectEqual(second_serial, block.entry_serial);
+    try std.testing.expectEqual(@as(u32, 0), block.successor.serial);
 }
 
 test "each entry's frames are scaled by that entry's own correction across a transition" {
