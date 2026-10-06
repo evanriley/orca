@@ -729,9 +729,14 @@ pub const Gateway = struct {
         return ready;
     }
 
+    /// Waits out this Gateway's own spacing before it claims the service. A
+    /// time adopted from the store is waited for under the lease instead, so
+    /// a Gateway that just sent cannot take the next turn from one waiting.
     fn awaitOwnTurn(self: *Gateway) !void {
         const now = self.clock.nowMs();
-        const ready = self.readyAtMs(now) orelse return;
+        _ = self.readyAtMs(now) orelse return;
+        const last = self.last_request_ms orelse return;
+        const ready = last +| @as(i64, @intCast(self.config.minimum_interval_ms));
         if (ready > now) try self.sleepCancelable(@intCast(ready - now));
     }
 

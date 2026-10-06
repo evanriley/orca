@@ -67,14 +67,16 @@ blocks.
 
 A Gateway claims the service's lease in the Library (`provider_leases`) for each
 request, stores the next request time before sending, and releases the lease
-when the request, one retry attempt or its redirect hops end. A request whose
-timeout would outlast the lease extends it first. Another Gateway, in this or
-another process, polls every 250 ms until its deadline or at most 120 s, then
-fails with `error.ProviderBusy` without sending. A matching or submission job
-then fails and names the busy service (`MatchStats.busy`,
-`SubmissionOutcome.busy`); the listen worker reports `busy` and tries again 120
-s later. The lease of a crashed process is free once it runs out, at most 120 s
-after it was claimed or extended.
+when the request, one retry attempt or its redirect hops end. A Gateway waits
+out its own interval before it claims the lease and the service's stored next
+request time while holding it, so Gateways that want one service take turns. A
+request whose timeout would outlast the lease extends it first. Another
+Gateway, in this or another process, polls every 250 ms until its deadline or
+at most 120 s, then fails with `error.ProviderBusy` without sending. A
+matching or submission job then fails and names the busy service
+(`MatchStats.busy`, `SubmissionOutcome.busy`); the listen worker reports `busy`
+and tries again 120 s later. The lease of a crashed process is free once it
+runs out, at most 120 s after it was claimed or extended.
 
 ### Retries and jitter
 
