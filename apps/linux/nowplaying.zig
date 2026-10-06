@@ -665,7 +665,7 @@ pub fn refreshUpNext(self: *App) void {
     if (page.up_next_empty) |empty| gtk.gtk_widget_set_visible(empty, boolean(shown <= 1));
 }
 
-fn upNextRow(self: *App, item: liborca.TrackSummary, position: u32, current: bool, slot: usize) *gtk.Widget {
+fn upNextRow(self: *App, entry: liborca.QueueTrack, position: u32, current: bool, slot: usize) *gtk.Widget {
     var buffer: [512]u8 = undefined;
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(row, "now-up-next-row");
@@ -682,22 +682,31 @@ fn upNextRow(self: *App, item: liborca.TrackSummary, position: u32, current: boo
     const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 1);
     gtk.gtk_widget_set_hexpand(labels, gtk.true_);
     gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    const title = label(strings.terminated(&buffer, if (item.title.len != 0) item.title else "Unknown title").ptr, "now-up-next-title");
+    const title_text = if (entry.track) |item| (if (item.title.len != 0) item.title else "Unknown title") else "Removed from library";
+    const title = label(strings.terminated(&buffer, title_text).ptr, "now-up-next-title");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
     append(labels, title);
-    const artist = label(strings.terminated(&buffer, if (item.artist.len != 0) item.artist else item.album_artist).ptr, "now-up-next-artist");
+    const artist_text = if (entry.track) |item| (if (item.artist.len != 0) item.artist else item.album_artist) else "";
+    const artist = label(strings.terminated(&buffer, artist_text).ptr, "now-up-next-artist");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, artist), 0.0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, artist), gtk.ELLIPSIZE_END);
     append(labels, artist);
     append(row, labels);
+    if (entry.track == null) gtk.gtk_widget_set_opacity(labels, 0.55);
 
+    const target: feedback.Target = if (entry.track) |item|
+        .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback }
+    else
+        .{ .track_id = entry.id, .recording_id = null, .feedback = .none };
     const heart = feedback.newRowButton(gtk.callback(upNextHeartClicked), self);
-    feedback.showRowButton(heart, item.feedback);
+    feedback.showRowButton(heart, target.feedback);
+    gtk.gtk_widget_set_visible(heart, boolean(entry.track != null));
     gtk.gtk_widget_set_valign(heart, gtk.ALIGN_CENTER);
     gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(slot + 1));
     append(row, heart);
-    const duration = label(if (item.duration_ms) |ms| strings.formatMs(&buffer, @intCast(@max(ms, 0))).ptr else "", "numeric");
+    const duration_ms = if (entry.track) |item| item.duration_ms else null;
+    const duration = label(if (duration_ms) |ms| strings.formatMs(&buffer, @intCast(@max(ms, 0))).ptr else "", "numeric");
     gtk.gtk_widget_add_css_class(duration, "now-up-next-duration");
     append(row, duration);
 
@@ -706,7 +715,7 @@ fn upNextRow(self: *App, item: liborca.TrackSummary, position: u32, current: boo
     gtk.gtk_widget_add_css_class(list_row, "now-up-next");
     if (current) gtk.gtk_widget_add_css_class(list_row, "now-playing");
 
-    up_next_targets[slot] = .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback };
+    up_next_targets[slot] = target;
     up_next_hearts[slot] = heart;
     return list_row;
 }

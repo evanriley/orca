@@ -76,6 +76,13 @@
   choose or create a Library. Add Music Folder, Scan Library and the
   palette's library commands are unavailable instead of answering "No
   library is open".
+- A queue entry whose Track was removed from the Library keeps its row in queue
+  pages, so row `n` is queue position `offset + n`. `playerQueueTracks` returns
+  a `QueueTrackPage` whose rows carry the position, the Track id and a summary
+  that is null for a removed Track; `orca_player_query_queue_tracks` passes such
+  an entry as an `orca_track_view` with `removed` set and only `id` filled. The
+  Queue page and Now Playing show it as "Removed from library", and it can be
+  removed from the queue.
 
 ## 0.1.0 - 2026-10-06
 

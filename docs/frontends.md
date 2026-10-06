@@ -287,8 +287,11 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   entry, never the decode cursor), `orca_player_queue_jump`,
   `orca_player_queue_insert_next`, `orca_player_queue_remove`,
   `orca_player_queue_move`, `orca_player_query_queue_tracks`,
-  `orca_player_query_queue_history`, `orca_player_save_queue_as_playlist`. The
-  entry playing and the one lined up after it cannot be removed or moved
+  `orca_player_query_queue_history`, `orca_player_save_queue_as_playlist`.
+  `orca_player_query_queue_tracks` calls back once per queue position from
+  `offset`; an entry whose Track was removed from the Library sets
+  `orca_track_view.removed` and carries only its `id`. The entry playing and
+  the one lined up after it cannot be removed or moved
   (`ORCA_STATUS_INVALID_STATE`). A Track on an unavailable root fails with
   `ORCA_FAILURE_TRACK_FOLDER_UNAVAILABLE`.
 - Saved playback: `orca_player_restore_state`, `orca_player_save_state`,

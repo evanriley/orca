@@ -363,11 +363,6 @@ removed.
 - Gapless transitions inside one 256-frame block apply the successor's
   identity and position anchor at its first frame, not the block's. Checked
   by an engine test with a boundary mid-block.
-- Queue pages keep queue positions. `playerQueueTracks` and
-  `orca_player_query_queue_tracks` skip a queue entry whose Track was removed
-  from the Library, contrary to the comment in `core/runtime_status.zig` that
-  it keeps its place, so a page's row `n` is then not queue position
-  `offset + n`. Checked by a page over a queue with a removed Track.
 - Embedding is specified. The SQLite unix-VFS lock replacement on Linux
   (`liborca/database/sqlite_locks.zig`) is process-wide; its initialization
   contract is documented and enforced. `orca_runtime_destroy` skips the Debug

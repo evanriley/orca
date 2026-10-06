@@ -23,6 +23,7 @@ const TrackObject = track_model.TrackObject;
 const now_cover_pixels: c_int = 56;
 const history_capacity = liborca.queue_history_capacity;
 const origin_capacity = 256;
+const unavailable_opacity = 0.55;
 
 pub const State = struct {
     now_store: ?*gtk.ListStore = null,
@@ -38,9 +39,7 @@ pub const State = struct {
     history_list: ?*gtk.Widget = null,
     history_toggle: ?*gtk.Widget = null,
     history_shown: bool = true,
-    /// The queue position behind each Up Next row: `playerQueueTracks` skips
-    /// entries whose Track is gone, so a row index is not a position.
-    next_positions: [app.page_size]u32 = undefined,
+    next_first: u32 = 0,
     next_count: usize = 0,
     next_ms: i64 = 0,
     next_complete: bool = false,
@@ -100,6 +99,10 @@ fn showStacked(labels: *gtk.Widget, top: [:0]const u8, bottom: [:0]const u8) voi
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, second), bottom.ptr);
 }
 
+fn dimUnlessInLibrary(labels: *gtk.Widget, track: *TrackObject) void {
+    gtk.gtk_widget_set_opacity(labels, if (track.inLibrary()) 1.0 else unavailable_opacity);
+}
+
 fn artistAndAlbum(buffer: []u8, track: *TrackObject) [:0]const u8 {
     if (track.album().len == 0) return track.artist();
     if (track.artist().len == 0) return track.album();
@@ -129,6 +132,7 @@ fn bindNow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     const time = gtk.gtk_widget_get_next_sibling(labels) orelse return;
     var buffer: [1024]u8 = undefined;
     showStacked(labels, track.title(), artistAndAlbum(&buffer, track));
+    dimUnlessInLibrary(labels, track);
     self.queue.now_time = gtk.cast(gtk.Label, time);
     if (self.runtime.playerStatus(self.player)) |status| showTime(self, status) else |_| {}
     showCover(self, cover, track);
@@ -197,6 +201,7 @@ fn bindNext(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void
     const number_text: [:0]const u8 = strings.printZ(&buffer, "{d}", .{position + 1}) catch "";
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, number), number_text.ptr);
     showStacked(labels, track.title(), track.artist());
+    dimUnlessInLibrary(labels, track);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, duration), track.durationText(&buffer).ptr);
 }
 
@@ -245,7 +250,7 @@ fn playedText(buffer: []u8, elapsed_ms: i64) [:0]const u8 {
 fn nextPosition(self: *App, item: *anyopaque) ?u32 {
     const row = gtk.gtk_list_item_get_position(gtk.cast(gtk.ListItem, item));
     if (row >= self.queue.next_count) return null;
-    return self.queue.next_positions[row];
+    return self.queue.next_first + row;
 }
 
 fn removeAt(self: *App, item: *anyopaque) void {
@@ -296,7 +301,7 @@ fn nextActivated(_: ?*anyopaque, row: c_uint, data: ?*anyopaque) callconv(.c) vo
     const self = state(data);
     if (row >= self.queue.next_count) return;
     if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
-    self.runtime.playerQueueJump(self.player, self.queue.next_positions[row]) catch return;
+    self.runtime.playerQueueJump(self.player, self.queue.next_first + row) catch return;
     self.mpris.notify();
     self.requestTick();
 }
@@ -639,12 +644,18 @@ pub fn build(self: *App) *gtk.Widget {
     return view;
 }
 
-fn replace(self: *App, store: *gtk.ListStore, items: []const liborca.TrackSummary) void {
+fn replace(
+    self: *App,
+    store: *gtk.ListStore,
+    comptime Item: type,
+    items: []const Item,
+    comptime make: fn (Item) ?*TrackObject,
+) void {
     gtk.g_list_store_remove_all(store);
     var additions: std.ArrayList(?*anyopaque) = .empty;
     defer additions.deinit(self.allocator);
     for (items) |item| {
-        const row = track_model.new(item) orelse continue;
+        const row = make(item) orelse continue;
         additions.append(self.allocator, row) catch {
             gtk.g_object_unref(row);
             break;
@@ -677,7 +688,7 @@ fn readOrigin(self: *App, status: liborca.PlayerStatus, current: ?*const liborca
     }
     var first = self.runtime.playerQueueTracks(self.player, self.allocator, 0, 1) catch return;
     defer first.deinit();
-    if (first.items.len != 0) keepOrigin(page, first.items[0].album);
+    if (first.items.len != 0) if (first.items[0].track) |track| keepOrigin(page, track.album);
 }
 
 fn currentLeftMs(self: *App, status: liborca.PlayerStatus) i64 {
@@ -724,39 +735,26 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
     const next_store = page.next_store orelse return;
     const history_store = page.history_store orelse return;
 
-    var refs: [app.page_size + 1]liborca.TrackRef = undefined;
-    const ref_count = self.runtime.playerQueuePage(self.player, status.queue_index, &refs) catch 0;
-    var tracks: ?liborca.TrackPage = if (ref_count == 0)
+    var tracks: ?liborca.QueueTrackPage = if (status.queue_index >= status.queue_length)
         null
     else
-        self.runtime.playerQueueTracks(self.player, self.allocator, status.queue_index, @intCast(ref_count)) catch null;
+        self.runtime.playerQueueTracks(self.player, self.allocator, status.queue_index, app.page_size) catch null;
     defer if (tracks) |*value| value.deinit();
-    const summaries: []const liborca.TrackSummary = if (tracks) |value| value.items else &.{};
+    const rows: []const liborca.QueueTrack = if (tracks) |value| value.items else &.{};
 
-    var now: []const liborca.TrackSummary = &.{};
-    var next_start: usize = 0;
-    page.next_count = 0;
+    var now = rows[0..@min(rows.len, 1)];
+    const upcoming = rows[now.len..];
+    page.next_first = status.queue_index + 1;
+    page.next_count = upcoming.len;
     page.next_ms = 0;
-    var cursor: usize = 0;
-    for (refs[0..ref_count], 0..) |ref, offset| {
-        if (cursor >= summaries.len) break;
-        if (summaries[cursor].id != ref.track_id) continue;
-        if (offset == 0) {
-            now = summaries[0..1];
-            next_start = 1;
-        } else {
-            page.next_positions[page.next_count] = status.queue_index + @as(u32, @intCast(offset));
-            page.next_count += 1;
-            page.next_ms += summaries[cursor].duration_ms orelse 0;
-        }
-        cursor += 1;
-    }
-    page.next_complete = status.queue_length -| status.queue_index <= ref_count;
-    readOrigin(self, status, if (now.len != 0) &now[0] else null);
+    for (upcoming) |row| page.next_ms += if (row.track) |track| track.duration_ms orelse 0 else 0;
+    page.next_complete = remainingTracks(status) <= rows.len;
+    const current: ?*const liborca.TrackSummary = if (now.len != 0) if (now[0].track) |*track| track else null else null;
+    readOrigin(self, status, current);
     if (status.track_id == null) now = &.{};
-    page.now_duration_ms = if (now.len != 0) now[0].duration_ms orelse 0 else 0;
-    replace(self, now_store, now);
-    replace(self, next_store, summaries[next_start .. next_start + page.next_count]);
+    page.now_duration_ms = if (now.len != 0) if (current) |track| track.duration_ms orelse 0 else 0 else 0;
+    replace(self, now_store, liborca.QueueTrack, now, track_model.queued);
+    replace(self, next_store, liborca.QueueTrack, upcoming, track_model.queued);
 
     var history: [history_capacity]liborca.QueueHistoryEntry = undefined;
     const history_read = self.runtime.playerQueueHistory(self.player, 0, &history) catch 0;
@@ -773,7 +771,7 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
         page.history_ended_ms[page.history_count] = entry.ended_at_ms;
         page.history_count += 1;
     }
-    replace(self, history_store, played[0..page.history_count]);
+    replace(self, history_store, liborca.TrackSummary, played[0..page.history_count], track_model.new);
     page.shown_minute = @divFloor(nowMs(self), std.time.ms_per_min);
 
     visible(page.now_section, now.len != 0);

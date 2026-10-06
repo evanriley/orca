@@ -50,6 +50,8 @@ pub const TrackRef = audio.playback_queue.TrackRef;
 pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const QueueHistoryEntry = queue_history.QueueHistoryEntry;
+pub const QueueTrack = runtime_status.QueueTrack;
+pub const QueueTrackPage = runtime_status.QueueTrackPage;
 pub const QueueHistoryReason = queue_history.QueueHistoryReason;
 pub const RestoreMode = runtime_resume.RestoreMode;
 pub const RestoreOutcome = runtime_resume.RestoreOutcome;
@@ -3474,14 +3476,16 @@ pub const OrcaRuntime = struct {
     /// resolution, which is the one thing frontends here must never do.
     ///
     /// Returned in queue order, so entry `n` of the result is queue position
-    /// `offset + n`, and a shuffled queue reads as the order it will play.
+    /// `offset + n`, and a shuffled queue reads as the order it will play. An
+    /// entry whose Track was removed from the Library keeps its row with a
+    /// null `track`.
     pub fn playerQueueTracks(
         self: *OrcaRuntime,
         player: PlayerHandle,
         allocator: std.mem.Allocator,
         offset: u32,
         limit: u32,
-    ) !database.TrackPage {
+    ) !QueueTrackPage {
         return runtime_status.playerQueueTracks(self, player, allocator, offset, limit);
     }
 

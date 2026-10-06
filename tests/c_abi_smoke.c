@@ -3598,6 +3598,145 @@ static int coverless_release_smoke(orca_runtime *runtime) {
     return 0;
 }
 
+struct queue_rows {
+    uint32_t count;
+    int64_t ids[8];
+    uint8_t removed[8];
+    uint8_t titled[8];
+    uint8_t has_file[8];
+};
+
+static void capture_queue_row(void *context, const orca_track_view *track) {
+    struct queue_rows *capture = context;
+    if (capture->count < 8) {
+        capture->ids[capture->count] = track->id;
+        capture->removed[capture->count] = track->removed;
+        capture->titled[capture->count] = track->title.length != 0;
+        capture->has_file[capture->count] = track->has_file;
+    }
+    capture->count += 1;
+}
+
+static int scan_new_root(orca_runtime *runtime, orca_handle library, const char *path,
+                         int64_t *root_id) {
+    SMOKE_CHECK(orca_library_add_root(runtime, library, path, root_id) == ORCA_STATUS_OK);
+    orca_handle scan_job;
+    SMOKE_CHECK(orca_library_start_scan(runtime, library, *root_id, 0, &scan_job) ==
+                ORCA_STATUS_OK);
+    uint8_t scan_state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, scan_job, &scan_state, EXPECT_WALK_TOTAL, 60000) == 1);
+    SMOKE_CHECK(scan_state == ORCA_JOB_SUCCEEDED);
+    return 0;
+}
+
+static int removed_queue_track_steps(orca_runtime *runtime, orca_handle library,
+                                     orca_handle player, const char *kept, const char *gone) {
+    int64_t kept_root = 0;
+    int64_t gone_root = 0;
+    SMOKE_CHECK(scan_new_root(runtime, library, kept, &kept_root) == 0);
+    static struct titled_tracks before;
+    memset(&before, 0, sizeof before);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &before,
+                                          collect_titled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(before.count == 2);
+    SMOKE_CHECK(scan_new_root(runtime, library, gone, &gone_root) == 0);
+    static struct titled_tracks after;
+    memset(&after, 0, sizeof after);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &after,
+                                          collect_titled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(after.count == 3);
+    int64_t gone_id = 0;
+    for (uint32_t i = 0; i < after.count; i += 1)
+        if (after.ids[i] != before.ids[0] && after.ids[i] != before.ids[1]) gone_id = after.ids[i];
+    SMOKE_CHECK(gone_id > 0);
+
+    int64_t queued[5] = {before.ids[0], before.ids[1], gone_id, before.ids[0], before.ids[1]};
+    SMOKE_CHECK(orca_player_set_library(runtime, player, library) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_enqueue_tracks(runtime, player, queued, 5) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_remove_root(runtime, library, gone_root) == ORCA_STATUS_OK);
+
+    struct queue_rows rows;
+    memset(&rows, 0, sizeof rows);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 5, 0, &rows,
+                                               capture_queue_row) == ORCA_STATUS_OK);
+    SMOKE_CHECK(rows.count == 5);
+    for (uint32_t i = 0; i < 5; i += 1) {
+        SMOKE_CHECK(rows.ids[i] == queued[i]);
+        SMOKE_CHECK(rows.removed[i] == (i == 2));
+        SMOKE_CHECK(rows.titled[i] == (i != 2));
+        SMOKE_CHECK(rows.has_file[i] == (i != 2));
+    }
+    memset(&rows, 0, sizeof rows);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 2, 2, &rows,
+                                               capture_queue_row) == ORCA_STATUS_OK);
+    SMOKE_CHECK(rows.count == 2);
+    SMOKE_CHECK(rows.ids[0] == gone_id && rows.removed[0] == 1);
+    SMOKE_CHECK(rows.ids[1] == queued[3] && rows.removed[1] == 0);
+    memset(&rows, 0, sizeof rows);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 5, 3, &rows,
+                                               capture_queue_row) == ORCA_STATUS_OK);
+    SMOKE_CHECK(rows.count == 2);
+    SMOKE_CHECK(rows.ids[0] == queued[3] && rows.ids[1] == queued[4]);
+    memset(&rows, 0, sizeof rows);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 5, 5, &rows,
+                                               capture_queue_row) == ORCA_STATUS_OK);
+    SMOKE_CHECK(rows.count == 0);
+
+    SMOKE_CHECK(orca_player_queue_remove(runtime, player, 2) == ORCA_STATUS_OK);
+    memset(&rows, 0, sizeof rows);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 5, 0, &rows,
+                                               capture_queue_row) == ORCA_STATUS_OK);
+    SMOKE_CHECK(rows.count == 4);
+    for (uint32_t i = 0; i < 4; i += 1) SMOKE_CHECK(rows.removed[i] == 0);
+    return 0;
+}
+
+static int removed_queue_track_smoke(orca_runtime *runtime) {
+    char relative[] = ".zig-cache/tmp/orca-c-smoke-removed-queue-XXXXXX";
+    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(mkdtemp(relative) != 0);
+    char root[1024];
+    char kept[1024];
+    char gone[1024];
+    char first[1024];
+    char second[1024];
+    char third[1024];
+    int failed = getcwd(root, sizeof root - sizeof relative - 1) == 0;
+    if (!failed) {
+        strcat(root, "/");
+        strcat(root, relative);
+        failed = snprintf(kept, sizeof kept, "%s/kept", root) >= (int)sizeof kept ||
+                 snprintf(gone, sizeof gone, "%s/gone", root) >= (int)sizeof gone ||
+                 snprintf(first, sizeof first, "%s/a.flac", kept) >= (int)sizeof first ||
+                 snprintf(second, sizeof second, "%s/b.flac", kept) >= (int)sizeof second ||
+                 snprintf(third, sizeof third, "%s/c.flac", gone) >= (int)sizeof third ||
+                 mkdir(kept, 0700) != 0 || mkdir(gone, 0700) != 0 ||
+                 copy_file("fixtures/audio/tagged-reference.flac", first) != 0 ||
+                 copy_file("fixtures/audio/lyrics-synced.flac", second) != 0 ||
+                 copy_file("fixtures/audio/generated-reference.flac", third) != 0;
+    }
+    orca_handle library;
+    int library_open = 0;
+    if (!failed) {
+        library_open = orca_library_open(runtime, "file:orca-c-smoke-removed-queue?mode=memory&cache=shared",
+                                         &library) == ORCA_STATUS_OK;
+        failed = !library_open;
+    }
+    orca_handle player;
+    int player_open = 0;
+    if (!failed) {
+        player_open = orca_player_create(runtime, &player) == ORCA_STATUS_OK;
+        failed = !player_open;
+    }
+    if (!failed && removed_queue_track_steps(runtime, library, player, kept, gone) != 0) failed = 1;
+    if (player_open && orca_player_destroy(runtime, player) != ORCA_STATUS_OK) failed = 1;
+    if (library_open && orca_library_close(runtime, library) != ORCA_STATUS_OK) failed = 1;
+    if (drain_events(runtime) != 0) failed = 1;
+    if (remove_tree(relative) != 0) failed = 1;
+    SMOKE_CHECK(failed == 0);
+    return 0;
+}
+
 #define REVIEW_RELEASE_MBID "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e01"
 #define REVIEW_FIRST_TRACK_MBID "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e11"
 #define REVIEW_SECOND_TRACK_MBID "5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e12"
@@ -5864,6 +6003,7 @@ int main(int argc, char **argv) {
     if (artwork_smoke(runtime, library) != 0) return 1;
     if (lyrics_smoke(runtime, library) != 0) return 1;
     if (coverless_release_smoke(runtime) != 0) return 1;
+    if (removed_queue_track_smoke(runtime) != 0) return 1;
     if (health_smoke(runtime, library) != 0) return 1;
     if (duplicate_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;

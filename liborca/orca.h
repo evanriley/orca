@@ -208,7 +208,9 @@ typedef struct orca_track_view {
     /* `rating` is 1..100 when `has_rating` is set. */
     uint8_t has_rating;
     uint8_t rating;
-    uint8_t reserved[1];
+    /* 1 when the view is a queue entry whose Track was removed from the
+     * Library: only `id` is set and every other field is zero. */
+    uint8_t removed;
     orca_string_view title;
     orca_string_view artist;
     orca_string_view album;
@@ -6447,10 +6449,10 @@ orca_status orca_player_query_queue(
 );
 /* The queue's Tracks as track views, read from the Library the Player is
  * bound to, in playback order starting at position `offset`. `limit` must be
- * between 1 and 512. An entry whose Track has since left the Library is
- * skipped, so the views after it no longer line up with queue positions;
- * orca_player_query_queue gives every position. ORCA_STATUS_INVALID_STATE
- * when the Player has no Library. Strings are valid only for the callback. */
+ * between 1 and 512. The view of call `n` is queue position `offset + n`; an
+ * entry whose Track was removed from the Library has `removed` set and only
+ * its `id`. ORCA_STATUS_INVALID_STATE when the Player has no Library.
+ * Strings are valid only for the callback. */
 orca_status orca_player_query_queue_tracks(
     orca_runtime *runtime,
     orca_handle player,

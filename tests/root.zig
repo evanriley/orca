@@ -1250,8 +1250,8 @@ test "the queue reports the rows a host displays, in the order it will play them
     var page = try runtime.playerQueueTracks(player, std.testing.allocator, 0, 16);
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 2), page.items.len);
-    try std.testing.expectEqualStrings("Entry 1", page.items[0].title);
-    try std.testing.expectEqualStrings("Entry 0", page.items[1].title);
+    try std.testing.expectEqualStrings("Entry 1", page.items[0].track.?.title);
+    try std.testing.expectEqualStrings("Entry 0", page.items[1].track.?.title);
 
     // Bounded like every other page in this codebase.
     try std.testing.expectError(
@@ -1263,7 +1263,7 @@ test "the queue reports the rows a host displays, in the order it will play them
     var tail = try runtime.playerQueueTracks(player, std.testing.allocator, 1, 16);
     defer tail.deinit();
     try std.testing.expectEqual(@as(usize, 1), tail.items.len);
-    try std.testing.expectEqualStrings("Entry 0", tail.items[0].title);
+    try std.testing.expectEqualStrings("Entry 0", tail.items[0].track.?.title);
 }
 
 test {

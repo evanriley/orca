@@ -63,7 +63,7 @@ pub const TrackView = extern struct {
     feedback: u8,
     has_rating: u8,
     rating: u8,
-    _reserved: [1]u8 = @splat(0),
+    removed: u8 = 0,
     title: StringView,
     artist: StringView,
     album: StringView,
@@ -7155,7 +7155,7 @@ pub export fn orca_player_query_queue_tracks(
     ) catch |err| return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const view = trackView(item);
+        const view = if (item.track) |track| trackView(track) else removedTrackView(item.id);
         visit(context, &view);
     }
     return .ok;
@@ -7904,6 +7904,13 @@ fn trackView(item: database.TrackSummary) TrackView {
         .album = stringView(item.album),
         .album_artist = stringView(item.album_artist),
     };
+}
+
+fn removedTrackView(track_id: i64) TrackView {
+    var view = std.mem.zeroes(TrackView);
+    view.id = track_id;
+    view.removed = 1;
+    return view;
 }
 
 fn trackDetailsView(details: *const core.track_details.TrackDetails) TrackDetailsView {

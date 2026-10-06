@@ -525,6 +525,12 @@ in [cli.md](cli.md#playlists-and-ratings).
   and `playerQueueMove(player, from, to)`. The entry playing, and one already
   lined up after it, are refused with `error.QueueEntryInUse`, as is a move
   landing between them. Under shuffle a move changes only the shuffled order.
+- `playerQueueTracks(player, allocator, offset, limit)` returns a
+  `QueueTrackPage` of `QueueTrack { position, id, track }` in play order. Row
+  `n` is queue position `offset + n`, and the page is shorter only past the end
+  of the queue. `track` is null when the entry's Track was removed from the
+  Library; the entry keeps its place and `id` until it is removed from the
+  queue.
 - `playerQueueHistory(player, offset, output)` fills `QueueHistoryEntry` values,
   newest first, with a `QueueHistoryReason` (`finished`, `skipped`,
   `replaced`); `playerQueueHistoryTracks` returns a `TrackPage` and
