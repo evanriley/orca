@@ -325,7 +325,10 @@ names each `Runtime` method the C ABI does not reach and why.
   module and the installed tree), `zig build package-check` against the
   fetched Zig package, and a build and test run with the official Zig release
   against the libraries of Debian 13 (with `-Dgtk=false`) and Fedora 43. A
-  `required` job fails when any of them fails. On pushes to `main`, the `nix`
+  `required` job fails when any of them fails. A change that touches only
+  `docs/`, `orca-design/` or Markdown files skips the test, cross-build,
+  package and distribution jobs, and the `nix` job takes the package from the
+  cache because its build source excludes them. On pushes to `main`, the `nix`
   job uploads the package to the [orca.cachix.org](https://orca.cachix.org)
   binary cache. Dependabot proposes action updates weekly, a week after their
   release.

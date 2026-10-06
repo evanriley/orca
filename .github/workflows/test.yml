@@ -13,7 +13,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=${BEFORE:-HEAD^1}
+          code=true
+          if files=$(git diff --name-only "$base" HEAD) && [ -n "$files" ] &&
+            ! grep -Ev '^(docs|orca-design)/|\.md$' <<<"$files" >/dev/null; then
+            code=false
+          fi
+          echo "$files"
+          echo "code=$code" >>"$GITHUB_OUTPUT"
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +70,8 @@ jobs:
         run: nix run --inputs-from . nixpkgs#pinact -- run --check --verify
 
   cross-macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,6 +95,8 @@ jobs:
       - run: nix flake check -L
 
   package:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,6 +106,8 @@ jobs:
       - run: nix develop -c zig build package-check
 
   distro:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -114,11 +145,11 @@ jobs:
 
   required:
     if: always()
-    needs: [test, fmt, pinact, cross-macos, nix, package, distro]
+    needs: [changes, test, fmt, pinact, cross-macos, nix, package, distro]
     runs-on: ubuntu-24.04
     steps:
       - env:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
           echo "$RESULTS"
-          jq -e 'all(. == "success")' <<<"$RESULTS"
+          jq -e 'all(. == "success" or . == "skipped")' <<<"$RESULTS"
