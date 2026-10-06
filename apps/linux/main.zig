@@ -173,7 +173,6 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artists.reload(self);
     health.reload(self);
     matches.invalidate(self);
-    if (self.library == null) self.toast("The library could not be opened");
     window.showPage(self, switch (self.general.start_page) {
         .albums => .albums,
         .artists => .artists,

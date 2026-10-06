@@ -363,14 +363,6 @@ removed.
 - Gapless transitions inside one 256-frame block apply the successor's
   identity and position anchor at its first frame, not the block's. Checked
   by an engine test with a boundary mid-block.
-- `orca-gtk` shows a Library that fails to open. `libraries.openFailed`
-  logs a warning, leaves no Library active and records a problem ("Could not
-  open NAME", with "was made by a different version of Orca; create a new
-  library" for a newer schema). Only a row in Settings > Library's Libraries
-  card shows it. The Tracks page shows the empty-library welcome, and Add
-  Music Folder answers with the toast "No library is open". The window must
-  state the failure and offer to choose or create a Library. Checked by
-  launching against such a Library.
 - Queue pages keep queue positions. `playerQueueTracks` and
   `orca_player_query_queue_tracks` skip a queue entry whose Track was removed
   from the Library, contrary to the comment in `core/runtime_status.zig` that

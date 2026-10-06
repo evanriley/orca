@@ -70,6 +70,12 @@
   attempts used is paused at its position and wakes the host, instead of
   never draining while its engine woke every 2 ms. It reports `paused` and not
   drained; closing and requesting the output again, then playing, resumes it.
+- When no Library opens, `orca-gtk` shows the failure in place of every page
+  but Settings, instead of the empty-library welcome: the Library's name, the
+  reason, with the newer-version sentence when it applies, and buttons to
+  choose or create a Library. Add Music Folder, Scan Library and the
+  palette's library commands are unavailable instead of answering "No
+  library is open".
 
 ## 0.1.0 - 2026-10-06
 

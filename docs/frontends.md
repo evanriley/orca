@@ -397,6 +397,14 @@ first launch lists `$XDG_DATA_HOME/orca/library.db` as Main and creates its
 folder. When the active library's file is gone, the launch opens the first
 listed library that still exists, and Settings names the one it could not open.
 
+When no library is open, because the active one is corrupt, made by a newer
+Orca or unreadable, every page except Settings shows the failure in place of
+its content: the library's name, the reason, and Choose Library… and Create
+Library…, which open the Libraries dialog and the new-library file dialog.
+Settings stays reachable and its Libraries card repeats the failure. Add Music
+Folder, Scan Library and the palette's library commands are unavailable until
+a library opens.
+
 `ORCA_LIBRARY` overrides the list for one run: its library is active and listed
 as from `ORCA_LIBRARY`, but it is never saved and the saved `active` stays as it
 was, unless the user switches to a listed library during the run.
