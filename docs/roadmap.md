@@ -393,10 +393,6 @@ To release:
 Each fix adds a test that fails without it, or a headless screenshot for a
 display-only defect, and removes its entry.
 
-- An AcoustID candidate without a title is scored on length and fingerprint
-  alone, so for a tagged Track it can rank level with a candidate whose title
-  and artist match. Several recording IDs sharing one AcoustID fingerprint
-  rank by how closely their artist credit matches the Track's.
 - Re-identifying a Release turns its pending album correction into
   single-file corrections, which can then be accepted one at a time and
   leave the album's positions half-moved until the rest are accepted.

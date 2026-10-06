@@ -305,7 +305,7 @@ fn validateKey(key: []const u8) !void {
 fn cacheKey(allocator: std.mem.Allocator, query: LookupQuery) ![]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.Blake3.hash(query.fingerprint, &digest, .{});
-    return std.fmt.allocPrint(allocator, "lookup:{d}:{x}", .{ query.duration_s, &digest });
+    return std.fmt.allocPrint(allocator, "lookup2:{d}:{x}", .{ query.duration_s, &digest });
 }
 
 fn refusal(allocator: std.mem.Allocator, body: []const u8) error{ InvalidClientKey, InvalidUserKey, ProviderRejectedRequest } {
@@ -389,10 +389,8 @@ const Parsed = struct {
         errdefer self.deinit();
         if (!std.mem.eql(u8, parsed.value.status, "ok")) return error.InvalidProviderResponse;
         for (parsed.value.fingerprints) |entry| for (entry.results) |result| for (result.recordings) |recording| {
-            if (recording.title != null or recording.artists != null or recording.duration != null) {
-                const slot = try self.recordings.getOrPut(allocator, recording.id);
-                if (!slot.found_existing) slot.value_ptr.* = recording;
-            }
+            const slot = try self.recordings.getOrPut(allocator, recording.id);
+            slot.value_ptr.* = if (slot.found_existing) filledFrom(slot.value_ptr.*, recording) else recording;
             for (recording.artists orelse &.{}) |artist| if (artist.name) |name|
                 try self.artist_names.put(allocator, artist.id, name);
             for (recording.releasegroups orelse &.{}) |group| if (group.title) |title|
@@ -415,10 +413,7 @@ const Parsed = struct {
         var kept: std.ArrayList(Normalized) = .empty;
         for (results) |result| for (result.recordings) |listed| {
             if (!metadata.isMusicBrainzId(listed.id)) continue;
-            const recording = if (listed.title == null and listed.artists == null)
-                self.recordings.get(listed.id) orelse listed
-            else
-                listed;
+            const recording = if (self.recordings.get(listed.id)) |named| filledFrom(listed, named) else listed;
             const score = std.math.clamp(result.score, 0, 1);
             const existing = for (kept.items) |*item| {
                 if (std.mem.eql(u8, item.id, listed.id)) break item;
@@ -471,6 +466,16 @@ const Parsed = struct {
         return titles.items;
     }
 };
+
+fn filledFrom(recording: Recording, other: Recording) Recording {
+    return .{
+        .id = recording.id,
+        .title = recording.title orelse other.title,
+        .duration = recording.duration orelse other.duration,
+        .artists = recording.artists orelse other.artists,
+        .releasegroups = recording.releasegroups orelse other.releasegroups,
+    };
+}
 
 fn decodeCached(allocator: std.mem.Allocator, body: []const u8, album: ?[]const u8) !model.CandidateList {
     const parsed = std.json.parseFromSlice([]const Normalized, allocator, body, .{
@@ -701,6 +706,50 @@ test "a batched lookup asks once for every query, keys results by index and reso
     try testing.expectEqual(@as(usize, 1), second.items.len);
     try testing.expectEqualStrings("Nick Drake; John Cale", second.items[0].artist);
     try testing.expectEqualStrings("Bryter Layter", second.items[0].album);
+    try testing.expectEqualStrings("Northern Sky", second.items[0].title);
+    try testing.expectEqual(@as(?u64, 224_400), second.items[0].duration_ms);
+}
+
+const shared_fingerprint_answer =
+    \\{"status":"ok","fingerprints":[
+    \\ {"index":0,"results":[
+    \\  {"id":"t1","score":0.95,"recordings":[
+    \\   {"id":"8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a","title":"Northern Sky","duration":224,
+    \\    "artists":[{"id":"a1","name":"Nick Drake","joinphrase":" & "},{"id":"a2","name":"Robert Kirby"}]},
+    \\   {"id":"9a2c1f6e-3b4d-4e5f-8a7b-6c5d4e3f2a1b","duration":224,"artists":[{"id":"a1"}]},
+    \\   {"id":"0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091","duration":224,"artists":[{"id":"a1"}]}]}]},
+    \\ {"index":1,"results":[
+    \\  {"id":"t2","score":0.9,"recordings":[
+    \\   {"id":"9a2c1f6e-3b4d-4e5f-8a7b-6c5d4e3f2a1b","title":"Hazey Jane","duration":224,
+    \\    "artists":[{"id":"a1"}]}]}]}]}
+;
+
+test "recordings sharing a fingerprint rank on their full evidence, so the title match beats a closer artist credit" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-acoustid-shared?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.respond(200, shared_fingerprint_answer);
+    const queries = [_]LookupQuery{
+        .{ .duration_s = 224, .fingerprint = "AQAD first" },
+        .{ .duration_s = 224, .fingerprint = "AQAD second" },
+    };
+
+    const answers = try rig.adapter.lookup(testing.allocator, &queries);
+    defer answers.deinit();
+    const shared = answers.answers[0].?;
+    try testing.expectEqual(@as(usize, 3), shared.items.len);
+    try testing.expectEqualStrings("Hazey Jane", shared.items[1].title);
+    try testing.expectEqualStrings("Nick Drake", shared.items[1].artist);
+    try testing.expectEqualStrings("", shared.items[2].title);
+
+    const ranked = try scoring.rank(testing.allocator, .{
+        .title = "Northern Sky",
+        .artist = "Nick Drake",
+        .duration_ms = 224_000,
+    }, shared.items);
+    defer testing.allocator.free(ranked);
+    try testing.expectEqualStrings(first_recording, shared.items[ranked[0].candidate_index].provider_id);
+    try testing.expect(ranked[0].score > ranked[1].score);
 }
 
 test "answers are cached per query, so asking again sends nothing and a new query is asked alone" {

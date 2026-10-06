@@ -248,6 +248,13 @@
   cover". `scripts/headless-gui.sh` points MusicBrainz and AcoustID at
   `ORCA_HEADLESS_MUSICBRAINZ_URL` and `ORCA_HEADLESS_ACOUSTID_URL` when they
   are set.
+- A match candidate without a title or artist scores below one whose title
+  and artist match a tagged Track, instead of being judged on its length and
+  fingerprint alone. An AcoustID recording named in part under one
+  fingerprint takes its title, artists, length and release groups from where
+  the same answer names it in full, so recordings sharing a fingerprint rank
+  on all their evidence rather than on their artist credit. AcoustID answers
+  cached before this, which may lack those fields, are asked again.
 
 ## 0.1.0 - 2026-10-06
 

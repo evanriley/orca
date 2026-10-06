@@ -316,9 +316,11 @@ a dismissed or accepted proposal is never offered again.
 
 Orca scores each service's candidate from 0 to 1 against the Track's title,
 artist, album and length; AcoustID's own score is the fingerprint evidence in
-that score. The proposal's confidence is `1 − (1 − c_musicbrainz)(1 −
-c_acoustid)` over the services that found it, so two services agreeing rank
-above either alone. Candidates below 0.5 are dropped.
+that score. A candidate with no title or no artist scores 0 on that field when
+the Track has one; a candidate with no album is scored without it. The
+proposal's confidence is `1 − (1 − c_musicbrainz)(1 − c_acoustid)` over the
+services that found it, so two services agreeing rank above either alone.
+Candidates below 0.5 are dropped.
 
 ### Failures
 
@@ -508,7 +510,8 @@ Kept: each recording with an ID once per fingerprint under its best score: the
 ID, the title (empty when AcoustID has none), the artists joined by their join
 phrases, the release group title closest to the Track's album, the length and
 AcoustID's score. With `compress`, an artist or release group named in full once
-may appear by ID alone elsewhere, so names are resolved across the whole answer.
+may appear by ID alone elsewhere, so names are resolved across the whole answer,
+and a recording listed in part takes each missing field from its other listings.
 
 Each fingerprint's answer is cached in `provider_cache` for 90 days, keyed by
 the duration and a BLAKE3 hash of the fingerprint; fingerprints already answered
