@@ -23,7 +23,16 @@ pub const Decoder = struct {
         /// Present only for a lossless integer source. The same frames as
         /// `read_frames`, from the same cursor, left-justified in 32 bits.
         read_frames_i32: ?*const fn (*anyopaque, []i32) anyerror!usize = null,
+        /// Present only for a decoder that can find damage it decodes past.
+        damage: ?*const fn (*anyopaque) ?Damage = null,
     };
+
+    /// Damage found in a stream that still decoded. Final only once
+    /// `readFrames` has returned 0 on a stream that was never sought.
+    pub fn damage(self: Decoder) ?Damage {
+        const report = self.vtable.damage orelse return null;
+        return report(self.context);
+    }
 
     pub fn readFrames(self: Decoder, output: []f32) !usize {
         if (output.len % self.format.channels != 0) return error.UnalignedPcmBuffer;
@@ -52,6 +61,22 @@ pub const Decoder = struct {
         self.vtable.deinit(self.context);
         self.* = undefined;
     }
+};
+
+/// What a decoder tolerated so playback continues: the frames it yields are
+/// the file's, but the file is not what it declares.
+pub const Damage = error{
+    /// COMM declares more frames than SSND holds.
+    TruncatedAiff,
+    /// The data chunk ends inside a frame.
+    PartialWavFrame,
+    /// libFLAC reported lost sync, a bad header or a CRC mismatch before the
+    /// declared end of the audio.
+    FlacStreamErrors,
+    /// The stream ended inside its final block, short of the STREAMINFO total.
+    TruncatedFlac,
+    /// The decoded audio does not match the STREAMINFO MD5 signature.
+    FlacMd5Mismatch,
 };
 
 pub fn integerSampleToFloat(sample: i32) f32 {

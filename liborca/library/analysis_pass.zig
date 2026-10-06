@@ -1463,6 +1463,79 @@ test "a file that turns corrupt keeps only corrupt audio" {
     try testing.expectEqualSlices(database.HealthIssueKind, &.{.corrupt_audio}, kinds);
 }
 
+fn readAudioFixture(name: []const u8) ![]u8 {
+    const source = try std.fmt.allocPrint(testing.allocator, "fixtures/audio/{s}", .{name});
+    defer testing.allocator.free(source);
+    return std.Io.Dir.cwd().readFileAlloc(testing.io, source, testing.allocator, .limited(8 * 1024 * 1024));
+}
+
+fn expectCorruptAudio(library: *database.LibraryDatabase, file_id: i64, details: []const u8) !void {
+    var issues = try library.health_issues.page(testing.allocator, 16, 0);
+    defer issues.deinit();
+    for (issues.items) |issue| {
+        if (issue.file_id != file_id) continue;
+        try testing.expectEqual(database.HealthIssueKind.corrupt_audio, issue.kind);
+        try testing.expectEqualStrings(details, issue.details);
+        return;
+    }
+    return error.TestExpectedCorruptAudio;
+}
+
+test "malformed input that still plays is reported as corrupt audio naming the damage, on every pass" {
+    var fixture = try Fixture.init("file:orca-analysis-malformed?mode=memory&cache=shared");
+    defer fixture.deinit();
+
+    const partial_frame = try sineWav(0.5);
+    defer testing.allocator.free(partial_frame);
+    std.mem.writeInt(u32, partial_frame[40..44], std.mem.readInt(u32, partial_frame[40..44], .little) - 1, .little);
+    try fixture.writeBytes("partial-frame.wav", partial_frame);
+
+    const truncated_aiff = try readAudioFixture("tagged-reference.aiff");
+    defer testing.allocator.free(truncated_aiff);
+    const comm = std.mem.indexOf(u8, truncated_aiff, "COMM").?;
+    const comm_frames = truncated_aiff[comm + 10 ..][0..4];
+    std.mem.writeInt(u32, comm_frames, std.mem.readInt(u32, comm_frames, .big) + 1_000, .big);
+    try fixture.writeBytes("truncated.aiff", truncated_aiff);
+
+    const no_sound = "FORM\x00\x00\x00\x1eAIFFCOMM\x00\x00\x00\x12\x00\x01\x00\x00\x00\x0a\x00\x10" ++
+        "\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00";
+    try fixture.writeBytes("no-sound.aiff", no_sound);
+
+    const md5_mismatch = try readAudioFixture("tagged-reference.flac");
+    defer testing.allocator.free(md5_mismatch);
+    md5_mismatch[26] ^= 0xff;
+    try fixture.writeBytes("md5-mismatch.flac", md5_mismatch);
+
+    const short_final_block = try readAudioFixture("tagged-reference.flac");
+    defer testing.allocator.free(short_final_block);
+    try testing.expect(short_final_block[25] != 0xff);
+    short_final_block[25] += 1;
+    try fixture.writeBytes("short-final-block.flac", short_final_block);
+
+    const crc_mismatch = try readAudioFixture("tagged-reference.flac");
+    defer testing.allocator.free(crc_mismatch);
+    crc_mismatch[crc_mismatch.len - 1] ^= 0xff;
+    try fixture.writeBytes("crc-mismatch.flac", crc_mismatch);
+
+    const cases = [_]struct { name: []const u8, details: []const u8 }{
+        .{ .name = "partial-frame.wav", .details = "PartialWavFrame" },
+        .{ .name = "truncated.aiff", .details = "TruncatedAiff" },
+        .{ .name = "no-sound.aiff", .details = "MissingSoundChunk" },
+        .{ .name = "md5-mismatch.flac", .details = "FlacMd5Mismatch" },
+        .{ .name = "short-final-block.flac", .details = "TruncatedFlac" },
+        .{ .name = "crc-mismatch.flac", .details = "FlacStreamErrors" },
+    };
+    var file_ids: [cases.len]i64 = undefined;
+    for (cases, &file_ids) |case, *file_id| file_id.* = try fixture.record(case.name);
+
+    var pass = fixture.pass();
+    for (0..2) |_| {
+        const result = try pass.run();
+        try testing.expectEqual(@as(u64, cases.len), result.errors);
+        for (cases, file_ids) |case, file_id| try expectCorruptAudio(&fixture.library, file_id, case.details);
+    }
+}
+
 test "analysing one file measures it again even when it owes nothing and settles its health" {
     var fixture = try Fixture.init("file:orca-analysis-one-file?mode=memory&cache=shared");
     defer fixture.deinit();

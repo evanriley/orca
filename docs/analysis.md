@@ -96,8 +96,13 @@ them. A declined file is counted and raises no health issue; repairing a stale
 identity is a scan's job. The first check runs before the decode, on two 64 KiB
 reads.
 
-A file that opened and would not decode raises `corrupt_audio` and clears the
-pass's other three kinds. The pass never raises `unreadable_file`, which
+A file that a codec claims but cannot open or decode raises `corrupt_audio` and
+clears the pass's other three kinds. So does a file that decodes to its end
+past damage its decoder reports through `Decoder.damage`: an AIFF whose COMM
+declares more frames than SSND holds, a WAV data chunk that ends inside a frame,
+or a FLAC stream with frame errors, a short final block or an MD5 mismatch.
+Playback of the same file continues. The issue's details name the error or the
+damage, and the file stays unanalysed, so every pass decodes it again. The pass never raises `unreadable_file`, which
 belongs to the property backfill.
 
 ### Threads
@@ -451,7 +456,7 @@ calls it. The rules live in `analysis/health.zig`.
 | `missing_analysis` | information | analysis pass | the audio is too short or silent for an integrated loudness |
 | `clipping` | warning | analysis pass | see [Clipping](#clipping) |
 | `excessive_silence` | warning | analysis pass | more than a fifth of the decoded frames are silent |
-| `corrupt_audio` | error | analysis pass | the file opened and would not decode |
+| `corrupt_audio` | error | analysis pass | the file would not decode, or decoded past damage |
 | `exact_duplicate` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
 | `identical_audio` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
 | `likely_duplicate` | information | duplicate pass | see [Duplicate detection](#duplicate-detection) |

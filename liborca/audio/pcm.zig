@@ -1,5 +1,6 @@
 pub const SampleFormat = enum {
     unsigned_8,
+    signed_8,
     signed_16,
     signed_24,
     signed_32,

@@ -260,6 +260,7 @@ pub const Service = struct {
             if (self.yield_between_chunks) std.Thread.yield() catch {};
         }
         if (self.cancelled()) return error.Cancelled;
+        if (decoder.damage()) |damage| return damage;
         const result = try analyzer.finish();
         errdefer result.deinit();
         const fingerprint_result = try fingerprinter.finish();

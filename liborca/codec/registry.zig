@@ -250,6 +250,11 @@ const PrefixedDecoder = struct {
         return self.inner.seek(frame);
     }
 
+    fn damage(context: *anyopaque) ?decoder.Damage {
+        const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
+        return self.inner.damage();
+    }
+
     fn deinit(context: *anyopaque) void {
         const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
         const allocator = self.allocator;
@@ -261,6 +266,7 @@ const PrefixedDecoder = struct {
         .read_frames = readFrames,
         .seek = seek,
         .deinit = deinit,
+        .damage = damage,
     };
 
     const integer_vtable: decoder.Decoder.VTable = .{
@@ -268,6 +274,7 @@ const PrefixedDecoder = struct {
         .read_frames_i32 = readFramesI32,
         .seek = seek,
         .deinit = deinit,
+        .damage = damage,
     };
 };
 

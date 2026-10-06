@@ -699,7 +699,7 @@ fn writeSourceFormat(writer: *std.Io.Writer, source: liborca.PcmFormat, source_d
 fn writeSampleFormat(writer: *std.Io.Writer, format: liborca.PcmFormat) std.Io.Writer.Error!void {
     try writer.print("{d}-bit {s}", .{ format.bits_per_sample, switch (format.sample_format) {
         .unsigned_8 => "unsigned integer",
-        .signed_16, .signed_24, .signed_32 => "integer",
+        .signed_8, .signed_16, .signed_24, .signed_32 => "integer",
         .float_32, .float_64 => "float",
     } });
 }
@@ -764,7 +764,7 @@ const testing = std.testing;
 
 fn pcm(sample_format: liborca.SampleFormat, bits: u16, rate: u32) liborca.PcmFormat {
     const bytes: u16 = switch (sample_format) {
-        .unsigned_8 => 1,
+        .unsigned_8, .signed_8 => 1,
         .signed_16 => 2,
         .signed_24 => 3,
         .signed_32, .float_32 => 4,

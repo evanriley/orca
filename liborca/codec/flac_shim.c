@@ -31,6 +31,11 @@ struct orca_flac_decoder {
      * an aborted read the same way it reports several benign conditions, so
      * the distinction is kept here rather than inferred from decoder state. */
     int read_failed;
+    uint64_t stream_errors;
+    int md5_mismatch;
+    /* Set once end of stream has finished the native decoder, which is the
+     * only point libFLAC reports the MD5 comparison. */
+    int finished;
 };
 
 static FLAC__StreamDecoderReadStatus read_callback(const FLAC__StreamDecoder *native,
@@ -169,14 +174,34 @@ static void error_callback(const FLAC__StreamDecoder *native,
                            FLAC__StreamDecoderErrorStatus status,
                            void *client_data)
 {
+    struct orca_flac_decoder *self = client_data;
+
     (void)native;
     (void)status;
-    (void)client_data;
-    /* Deliberately ignored. Real files end untidily -- a trailing tag looks
-     * like a lost sync, and libFLAC resyncs or reaches end of stream on its
-     * own. Whether a stream ended early enough to count as damage is decided
-     * against STREAMINFO's declared total by the caller, which is the only
-     * place that knows how much audio was owed. */
+    /* Counted, never fatal: libFLAC resyncs on its own, and a trailing tag
+     * looks like a lost sync. Whether an error is damage is decided by the
+     * caller against STREAMINFO's declared total. */
+    self->stream_errors++;
+}
+
+static int start_native(struct orca_flac_decoder *self)
+{
+    self->position = 0;
+    self->finished = 0;
+    /* The caller parses STREAMINFO itself, so no metadata block needs to reach
+     * a callback; ignoring them keeps a large picture block from being
+     * assembled on every open. MD5 is compared only when the whole stream was
+     * decoded without a seek, and only reported, never fatal. */
+    FLAC__stream_decoder_set_md5_checking(self->native, true);
+    FLAC__stream_decoder_set_metadata_ignore_all(self->native);
+    if (FLAC__stream_decoder_init_stream(self->native, read_callback, seek_callback,
+                                         tell_callback, length_callback, eof_callback,
+                                         write_callback, metadata_callback,
+                                         error_callback,
+                                         self) != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
+        return 0;
+    }
+    return FLAC__stream_decoder_process_until_end_of_metadata(self->native);
 }
 
 struct orca_flac_decoder *orca_flac_decoder_create(void *context,
@@ -203,26 +228,7 @@ struct orca_flac_decoder *orca_flac_decoder_create(void *context,
         return NULL;
     }
     self->native = FLAC__stream_decoder_new();
-    if (!self->native) {
-        orca_flac_decoder_destroy(self);
-        return NULL;
-    }
-    /* The caller parses STREAMINFO itself, so no metadata block needs to reach
-     * a callback; ignoring them keeps a large picture block from being
-     * assembled on every open. MD5 verification is declined explicitly: it is
-     * a whole-file check that only reports at finish, and this decoder is
-     * routinely seeked and abandoned mid-stream. */
-    FLAC__stream_decoder_set_md5_checking(self->native, false);
-    FLAC__stream_decoder_set_metadata_ignore_all(self->native);
-    if (FLAC__stream_decoder_init_stream(self->native, read_callback, seek_callback,
-                                         tell_callback, length_callback, eof_callback,
-                                         write_callback, metadata_callback,
-                                         error_callback,
-                                         self) != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
-        orca_flac_decoder_destroy(self);
-        return NULL;
-    }
-    if (!FLAC__stream_decoder_process_until_end_of_metadata(self->native)) {
+    if (!self->native || !start_native(self)) {
         orca_flac_decoder_destroy(self);
         return NULL;
     }
@@ -248,10 +254,15 @@ static int32_t fill_pending(struct orca_flac_decoder *self)
 
     self->pending_frames = 0;
     self->pending_offset = 0;
+    if (self->finished) {
+        return ORCA_FLAC_END_OF_STREAM;
+    }
     for (steps = 0; steps < ORCA_FLAC_MAX_EMPTY_STEPS; steps++) {
         FLAC__StreamDecoderState state = FLAC__stream_decoder_get_state(self->native);
 
         if (state == FLAC__STREAM_DECODER_END_OF_STREAM) {
+            self->md5_mismatch = !FLAC__stream_decoder_finish(self->native);
+            self->finished = 1;
             return ORCA_FLAC_END_OF_STREAM;
         }
         if (state == FLAC__STREAM_DECODER_ABORTED ||
@@ -361,6 +372,9 @@ int32_t orca_flac_decoder_seek(struct orca_flac_decoder *decoder, uint64_t frame
      * the write callback before returning. */
     decoder->pending_frames = 0;
     decoder->pending_offset = 0;
+    if (decoder->finished && !start_native(decoder)) {
+        return ORCA_FLAC_FAILED;
+    }
     if (!FLAC__stream_decoder_seek_absolute(decoder->native, frame)) {
         /* A failed seek leaves the decoder unusable until it is flushed. */
         FLAC__stream_decoder_flush(decoder->native);
@@ -369,4 +383,14 @@ int32_t orca_flac_decoder_seek(struct orca_flac_decoder *decoder, uint64_t frame
         return ORCA_FLAC_FAILED;
     }
     return ORCA_FLAC_OK;
+}
+
+uint64_t orca_flac_decoder_stream_errors(const struct orca_flac_decoder *decoder)
+{
+    return decoder ? decoder->stream_errors : 0;
+}
+
+int32_t orca_flac_decoder_md5_mismatch(const struct orca_flac_decoder *decoder)
+{
+    return decoder ? decoder->md5_mismatch : 0;
 }

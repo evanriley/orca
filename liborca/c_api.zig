@@ -8167,6 +8167,7 @@ pub fn importEqualizerPreset(preset: u8) ?audio.dsp.Preset {
 pub fn exportSampleFormat(format: audio.pcm.SampleFormat) u8 {
     return switch (format) {
         .unsigned_8 => 0,
+        .signed_8 => 6,
         .signed_16 => 1,
         .signed_24 => 2,
         .signed_32 => 3,

@@ -2917,6 +2917,7 @@ fn deviceFormatName(sample_format: liborca.DeviceSampleFormat) []const u8 {
 fn formatName(sample_format: liborca.SampleFormat) []const u8 {
     return switch (sample_format) {
         .unsigned_8 => "uint8",
+        .signed_8 => "int8",
         .signed_16 => "int16",
         .signed_24 => "int24",
         .signed_32 => "int32",

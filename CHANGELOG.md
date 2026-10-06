@@ -11,6 +11,18 @@
 
 - The application icon is a white "O" on the window's dark background.
 
+### Fixed
+
+- An AIFF whose COMM frame count exceeds its SSND data plays the frames
+  present and is reported as `corrupt_audio` by analysis; an AIFF with no SSND
+  chunk fails to open instead of decoding as an empty track.
+- An 8-bit AIFF reports its samples as signed 8-bit (`signed_8`,
+  `ORCA_SAMPLE_FORMAT_SIGNED_8`), not unsigned.
+- A WAV whose data chunk ends inside a frame is reported as `corrupt_audio` by
+  analysis.
+- FLAC frame errors, a short final block and an MD5 mismatch are reported as
+  `corrupt_audio` by analysis while playback still tolerates them.
+
 ## 0.1.0 - 2026-10-06
 
 The first public release. Ships Library schema version 1.

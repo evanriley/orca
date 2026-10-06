@@ -364,12 +364,6 @@ removed.
 - More than two channels are refused for playback and loudness analysis with
   a clear error until [full multichannel support](#later) lands. Checked by
   playing and analysing a six-channel file.
-- Malformed input is reported. An AIFF whose COMM frame count exceeds its SSND
-  data, or with no SSND, is reported damaged; an 8-bit AIFF reports its sample
-  format correctly; a WAV with a data chunk that is not a whole number of
-  frames is reported; tolerant FLAC playback (errors discarded, MD5 off, short
-  final block accepted) does not clear `corrupt_audio` in analysis. Checked
-  by fixtures for each.
 - Player lifecycle. `playerNext` and `playerPrevious` move the queue before
   opening the target, so a target that fails to open leaves now-playing on it
   while the previous entry keeps playing. A Zone whose stream stays active but

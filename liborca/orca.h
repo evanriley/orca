@@ -6193,6 +6193,7 @@ typedef enum orca_sample_format {
     ORCA_SAMPLE_FORMAT_SIGNED_32 = 3,
     ORCA_SAMPLE_FORMAT_FLOAT_32 = 4,
     ORCA_SAMPLE_FORMAT_FLOAT_64 = 5,
+    ORCA_SAMPLE_FORMAT_SIGNED_8 = 6,
 } orca_sample_format;
 
 typedef struct orca_pcm_format {
