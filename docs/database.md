@@ -334,7 +334,10 @@ The tables by purpose; keys are those that carry identity or a contract.
   sees a path change without hashing it leaves results stale. The pass records
   the hash it read in the transaction that writes results, only while the file
   still records the quick hash it read and either records that content hash or
-  has the read location still recording the identity read.
+  has the read location still recording the identity read. Kind 4 holds no
+  measurement: it records that the registered decoders refused the bytes with
+  that content hash, keyed on a hash of the decoder set, so the pass skips the
+  file until its bytes or the decoders change.
 - `file_loudness`: integrated loudness of the default `orca.audio-diagnostics`
   result, kept by triggers on `analysis_results` and counted only while its
   `source_identity` equals the file's content hash and the file records at most

@@ -74,6 +74,22 @@ re-selects the file, and there is no force mode. `analysis_results` is
 `repository.unanalyzed_predicate` is the one definition shared by the page
 query and the count that gives the job its denominator.
 
+A file the decoders refused is excused. When every byte of a file was read and
+no decoder took them, or they hold more than two channels, the pass stores a
+verdict in `analysis_results` as kind
+4, `orca.decoder-set`, keyed like a measurement: `source_identity` is the
+content hash of the refused bytes, `parameter_hash` is a Blake3 hash of the
+registered decoders (each format and decoder name, in format order;
+`analysis.service.decoderSetHash`) and `algorithm_version` is
+`undecodable_algorithm_version`. Its result is the decoder's error name. While
+that row matches the file's recorded content hash, the file is neither selected
+nor counted. Changed bytes, a decoder registered for another format (a WavPack
+decoder, for example) or a version bump select it again. The version is bumped
+when a decoder starts accepting content it refused without its format or name
+changing, and when analysis starts taking more than two channels. A verdict is
+not a measurement: no loudness reader and no release member lookup reads kind
+4.
+
 A stored loudness counts as a measurement only for a file recorded with at most
 two channels (`measurableChannels` in `database/repository/analysis.zig`). A
 file recorded with more than two channels, or with no channel count, has no
@@ -102,7 +118,9 @@ which deletes all its results (and with them its `file_loudness` row) in the
 same transaction. A file with no recorded channel count that holds results is
 selected too: the pass measures it again and records the decoded count in
 `files.channels`, or, at more than two channels, deletes its results as
-above. Results are
+above. After deleting the results of a file with more than two channels, the
+pass stores the undecodable verdict for the bytes it read in the same
+transaction, so later runs skip the file until its bytes change. Results are
 keyed by the content hash of the bytes decoded, taken in a second sequential
 read beside the decode, and the same transaction records that hash on the file
 (see [database.md](database.md#schema)).
@@ -122,8 +140,20 @@ past damage its decoder reports through `Decoder.damage`: an AIFF whose COMM
 declares more frames than SSND holds, a WAV data chunk that ends inside a frame,
 or a FLAC stream with frame errors, a short final block or an MD5 mismatch.
 Playback of the same file continues. The issue's details name the error or the
-damage, and the file stays unanalysed, so every pass decodes it again. The pass never raises `unreadable_file`, which
-belongs to the property backfill.
+damage. A file whose format no decoder takes (an unrecognised container such as
+APE, or WavPack, which Orca detects but cannot decode) is counted with the
+declined files and raises no health issue. Either way, when every read
+succeeded, the pass records the file's content hash and the undecodable
+verdict under the checks a measurement passes, and later runs skip the file
+(see [What "already analyzed" means](#what-already-analyzed-means)). The
+`corrupt_audio` issue stays until a run that decodes the file clears it.
+
+`analysis.service.Service.examineFile` tells a refusal from a failure: it reads
+the file through a wrapper that records any failed read, and a decoder error
+counts as a refusal only when no read had failed. A failed read, a missing or
+inaccessible file, cancellation and a file that changes during the decode
+record no verdict, so the next run examines the file again. A read that fails during the decode still raises `corrupt_audio`. The
+pass never raises `unreadable_file`, which belongs to the property backfill.
 
 ### Threads
 

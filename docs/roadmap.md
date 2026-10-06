@@ -370,8 +370,6 @@ screenshot for a display-only defect, and removes its entry.
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.
-- Undecodable files are examined again by every analysis run: a library of
-  WavPack or APE files pays two 64 KiB reads per file per run.
 - Matching has no offline setting, and `orca-gtk` has none for scrobbling.
   Without a network, matching uses cached answers and stops at the first
   Track it has none for.

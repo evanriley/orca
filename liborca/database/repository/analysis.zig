@@ -29,18 +29,23 @@ pub const AnalysisSelector = struct {
     parameter_hash: [32]u8,
 };
 
-/// The measurements a library-wide analysis takes together. A file owes the
-/// analysis while either is missing, so bumping either algorithm's version
-/// re-selects every file.
-pub const AnalysisSelectors = [2]AnalysisSelector;
+/// The measurements a library-wide analysis takes together, and the verdict
+/// that excuses a file from them. A file owes the analysis while either
+/// measurement is missing, so bumping either algorithm's version re-selects
+/// every file, unless the decoders it would run have already refused its
+/// bytes.
+pub const AnalysisSelectors = struct {
+    measurements: [2]AnalysisSelector,
+    undecodable: AnalysisSelector,
+};
 
 /// The `files` rows that still owe a library-wide analysis.
 ///
 /// One string, shared by `FileRepository.unanalyzedPage`, `unanalyzedCount`
 /// and the plan test that proves neither is a table scan. Parameters ?3 to ?6
-/// are the first `AnalysisSelector` and ?7 to ?10 the second; ?1 and ?2 stay
-/// the caller's cursor and limit, as they are for every other page in this
-/// file.
+/// and ?7 to ?10 are the two measurements and ?11 to ?14 the undecodable
+/// verdict; ?1 and ?2 stay the caller's cursor and limit, as they are for
+/// every other page in this file.
 ///
 /// This is an anti-join against `analysis_results`' own primary key rather
 /// than a flag on `files`, because that key *is* the answer. It already
@@ -64,12 +69,18 @@ pub const AnalysisSelectors = [2]AnalysisSelector;
 /// that still holds any result is selected too, so the pass discards results
 /// stored before such files were refused and records a count it did not know.
 ///
+/// A file whose recorded bytes the decoders refused, or analysis refused for
+/// their channel count, is not selected while the verdict is keyed as a
+/// measurement is: on those bytes, that decoder set and
+/// that verdict version. A file nothing can decode is otherwise read again on
+/// every run, for an answer that cannot change.
+///
 /// The *playback* lookup is stricter, and deliberately asymmetric: it keys on
 /// the identity of the bytes it just opened, because adopting a correction for
 /// audio a file no longer contains is a wrong answer, while re-selecting a
 /// file for measurement is only wasted work.
 pub const unanalyzed_predicate =
-    \\NOT EXISTS (SELECT 1 FROM analysis_results
+    \\(NOT EXISTS (SELECT 1 FROM analysis_results
     \\    WHERE analysis_results.file_id = files.id
     \\      AND analysis_results.kind = ?3
     \\      AND analysis_results.algorithm_id = ?4
@@ -87,7 +98,15 @@ pub const unanalyzed_predicate =
     \\      AND files.content_hash_algorithm = 1)
     \\OR ((files.channels IS NULL OR files.channels >
 ++ max_supported_channels_sql ++
-    \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id))
+    \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id)))
+    \\AND NOT EXISTS (SELECT 1 FROM analysis_results
+    \\    WHERE analysis_results.file_id = files.id
+    \\      AND analysis_results.kind = ?11
+    \\      AND analysis_results.algorithm_id = ?12
+    \\      AND analysis_results.algorithm_version = ?13
+    \\      AND analysis_results.parameter_hash = ?14
+    \\      AND analysis_results.source_identity = files.content_hash
+    \\      AND files.content_hash_algorithm = 1)
 ;
 
 /// One file that still owes an analysis, where to read it, and what the
@@ -334,10 +353,11 @@ pub fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const Analys
     try bindAnalysisSelectorAt(statement, 3, selector);
 }
 
-/// Binds ?3 to ?10 of `unanalyzed_predicate`.
+/// Binds ?3 to ?14 of `unanalyzed_predicate`.
 pub fn bindAnalysisSelectors(statement: sqlite.Statement, selectors: *const AnalysisSelectors) !void {
-    try bindAnalysisSelectorAt(statement, 3, &selectors[0]);
-    try bindAnalysisSelectorAt(statement, 7, &selectors[1]);
+    try bindAnalysisSelectorAt(statement, 3, &selectors.measurements[0]);
+    try bindAnalysisSelectorAt(statement, 7, &selectors.measurements[1]);
+    try bindAnalysisSelectorAt(statement, 11, &selectors.undecodable);
 }
 
 fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {

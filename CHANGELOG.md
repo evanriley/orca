@@ -192,6 +192,13 @@
   cover cache drops the cover before the backdrop is composed, which a large
   library could do at start-up, and redraws a backdrop dropped from the cache
   when its page is shown again.
+- Library analysis no longer reads a file no decoder can decode, such as
+  WavPack or APE, a damaged file, or a file with more than two channels, on
+  every run. The verdict is stored against the file's content hash and the
+  decoders that refused it, so the file is examined again only when its bytes
+  change or a decoder for it is added. Such files no longer count towards the
+  files left to analyze. A file that could not be read is still examined again
+  on the next run.
 
 ## 0.1.0 - 2026-10-06
 
