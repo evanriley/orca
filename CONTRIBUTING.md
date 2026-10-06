@@ -1,9 +1,7 @@
 # Contributing
 
-Orca is a 0.x preview. Features are frozen until 1.0, so fixes and
-documentation are what is accepted now. The work in progress is the
-[release gates](docs/roadmap.md#release-gates). Open an issue before starting
-anything larger than a fix.
+Orca is a 0.x preview. The [roadmap](docs/roadmap.md) lists its known issues
+and planned work. Open an issue before starting anything larger than a fix.
 
 ## Development environment
 

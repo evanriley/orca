@@ -1,6 +1,7 @@
 # Roadmap
 
-What Orca does today, what must hold before 1.0, and what is deferred.
+What Orca does today, its known issues, what 1.0 requires, and what is
+deferred.
 "Works" means reachable from `orca-cli` or `orca-gtk` through the public
 runtime path, per the rule in [architecture.md](architecture.md).
 
@@ -17,9 +18,6 @@ AcoustID submission and verification, actionable Health, idle maintenance, and
 watching of the music folders, so new, changed and removed files show up
 without a rescan. `liborca` builds for aarch64
 macOS; there is no macOS app, audio output or filesystem watcher.
-
-Features are frozen until 1.0. The work is the [release gates](#release-gates)
-below.
 
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`
 versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
@@ -357,35 +355,6 @@ removed.
   display in CI. A release candidate passes an acceptance period with no open
   data-loss, memory-corruption, wrong-song or unintended-output defect.
 
-### Defects to fix before 1.0
-
-Fixed before 1.0. Each fix adds a test that fails without it, or a headless
-screenshot for a display-only defect, and removes its entry.
-
-- Matching has no offline setting, and `orca-gtk` has none for scrobbling.
-  Without a network, matching uses cached answers and stops at the first
-  Track it has none for.
-- An AcoustID candidate without a title is scored on length and fingerprint
-  alone, so for a tagged Track it can rank level with a candidate whose title
-  and artist match. Several recording IDs sharing one AcoustID fingerprint
-  rank by how closely their artist credit matches the Track's.
-- Re-identifying a Release turns its pending album correction into
-  single-file corrections, which can then be accepted one at a time and
-  leave the album's positions half-moved until the rest are accepted.
-- In a Release of more than 512 Tracks, verified a page at a time, a file
-  that still disagrees is checked again only while the Release has a stale
-  file left when its page is reached, though the job's total counted it.
-- Not checked on screen: the Player paused after every output failed, the
-  match result toasts and the read-only tag write dialogs in `orca-gtk`.
-- A pause resets an output's stall count, so a stuck output can cost the
-  other outputs up to 128 ms after resume.
-- Recovery that finishes an interrupted undo does not check that the files it
-  restores are writable.
-- The check for SQLite connections open before the lock replacement is
-  installed reads SQLite's memory accounting. It sees nothing when SQLite is
-  built without memory statistics, and refuses a host that holds SQLite
-  memory with no connection open.
-
 ## Releases
 
 Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
@@ -421,8 +390,32 @@ To release:
 
 ## Known issues
 
-Small defects that are not yet scheduled:
+Each fix adds a test that fails without it, or a headless screenshot for a
+display-only defect, and removes its entry.
 
+- Matching has no offline setting, and `orca-gtk` has none for scrobbling.
+  Without a network, matching uses cached answers and stops at the first
+  Track it has none for.
+- An AcoustID candidate without a title is scored on length and fingerprint
+  alone, so for a tagged Track it can rank level with a candidate whose title
+  and artist match. Several recording IDs sharing one AcoustID fingerprint
+  rank by how closely their artist credit matches the Track's.
+- Re-identifying a Release turns its pending album correction into
+  single-file corrections, which can then be accepted one at a time and
+  leave the album's positions half-moved until the rest are accepted.
+- In a Release of more than 512 Tracks, verified a page at a time, a file
+  that still disagrees is checked again only while the Release has a stale
+  file left when its page is reached, though the job's total counted it.
+- Not checked on screen: the Player paused after every output failed, the
+  match result toasts and the read-only tag write dialogs in `orca-gtk`.
+- A pause resets an output's stall count, so a stuck output can cost the
+  other outputs up to 128 ms after resume.
+- Recovery that finishes an interrupted undo does not check that the files it
+  restores are writable.
+- The check for SQLite connections open before the lock replacement is
+  installed reads SQLite's memory accounting. It sees nothing when SQLite is
+  built without memory statistics, and refuses a host that holds SQLite
+  memory with no connection open.
 - On macOS, which has no OFD locks, opening and closing a Library's
   database, `-wal` or `-shm` file from another part of the same process
   drops SQLite's POSIX locks on it. A second Orca process can then
@@ -432,8 +425,8 @@ Small defects that are not yet scheduled:
 
 ## Deferred formats
 
-The formats above cover nearly every library. These wait until after 1.0, and
-are sniffed or not recognized until then:
+The formats above cover nearly every library. These are deferred, and are
+sniffed or not recognized until they are supported:
 
 - WavPack, Monkey's Audio (APE), TTA and Musepack.
 - DSD (DSF and DFF), which also needs DSD-to-PCM conversion or native DSD
