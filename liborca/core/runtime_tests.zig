@@ -4216,6 +4216,101 @@ test "a failed tag write reports its file and reason" {
     try std.testing.expectError(error.NotATagWriteJob, runtime.jobTagWriteFailure(scan));
 }
 
+fn expectFileMode(dir: std.Io.Dir, name: []const u8, expected: std.posix.mode_t) !void {
+    const stat = try dir.statFile(std.testing.io, name, .{});
+    try std.testing.expectEqual(expected, stat.permissions.toMode() & 0o7777);
+}
+
+test "a read-only file is skipped before writing and the plan's other file is written" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const other_original = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_original);
+    try temporary.dir.setFilePermissions(std.testing.io, "b.flac", .fromMode(0o444), .{});
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+    try std.testing.expect(std.mem.endsWith(u8, preview.files[0].path, "/a.mp3"));
+    var read_only_skips: usize = 0;
+    for (preview.skipped) |skip| if (skip.reason == .file_read_only) {
+        read_only_skips += 1;
+        try std.testing.expect(std.mem.endsWith(u8, skip.path, "/b.flac"));
+    };
+    try std.testing.expectEqual(@as(usize, 1), read_only_skips);
+
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations WHERE source_path LIKE '%/b.flac';"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectFileMode(temporary.dir, "b.flac", 0o444);
+    const other_after = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_after);
+    try std.testing.expect(!std.mem.eql(u8, other_original, other_after));
+    try expectOnlyFixtureFiles(temporary.dir);
+}
+
+test "a file made read-only after planning fails the tag write job as read-only and is left unchanged" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const read_only_index: u32 = for (preview.files, 0..) |file, index| {
+        if (std.mem.endsWith(u8, file.path, "/b.flac")) break @intCast(index);
+    } else return error.TestUnexpectedResult;
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const other_original = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_original);
+    try temporary.dir.setFilePermissions(std.testing.io, "b.flac", .fromMode(0o444), .{});
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(preview.files[read_only_index].file_id, failure.file_id);
+    try std.testing.expectEqual(read_only_index, failure.action_index);
+    try std.testing.expectEqual(TagWriteFailureReason.file_read_only, failure.reason);
+    const library_database = try libraryDatabase(&runtime, library);
+    try expectJournaledError(library_database, preview.plan_id, read_only_index, "FileReadOnly");
+
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectFileMode(temporary.dir, "b.flac", 0o444);
+    const other_after = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_after);
+    try std.testing.expectEqualSlices(u8, other_original, other_after);
+    try expectOnlyFixtureFiles(temporary.dir);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, library_database.backup_directory.?, .{}));
+}
+
 test "writing tags to one copy of a shared file splits that copy off and marks the written value on the file that holds it" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

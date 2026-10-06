@@ -49,6 +49,7 @@ pub fn undoWrite(self: *App, group: u64) bool {
                 error.TagWriteBackupPruned => "The backups for that write were pruned, so it can't be undone",
                 error.MutationInProgress => "Another Orca is writing tags",
                 error.MutationNeedsReconciliation => "Some files changed after the write, so Orca left them as they are",
+                error.FileReadOnly => "A file of that write is read-only, so Orca left the files as they are",
                 else => "Could not undo that write",
             });
             return false;

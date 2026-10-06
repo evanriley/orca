@@ -119,7 +119,9 @@ names each `Runtime` method the C ABI does not reach and why.
 - Tag write-back for FLAC, MP3 and ADTS from an approved plan, with undo.
   One process at a time owns a Library's mutation journal through a lock
   file; an undo interrupted by a crash is finished by the next open, and
-  recovery never touches another process's write in progress.
+  recovery never touches another process's write in progress. A read-only
+  file is never written or restored over, and a rewritten file keeps its
+  permission bits.
 - Track details: format, file, loudness, tags and MusicBrainz recording ID
   with its source for one Track (`orca-cli track`), and the inspector in
   `orca-gtk`.
@@ -375,9 +377,6 @@ removed.
   Music Folder answers with the toast "No library is open". The window must
   state the failure and offer to choose or create a Library. Checked by
   launching against such a Library.
-- `write-tags` on a read-only file follows a stated policy. It rewrites a file
-  whose permissions make it read-only. Checked by a test of the stated
-  policy.
 - Queue pages keep queue positions. `playerQueueTracks` and
   `orca_player_query_queue_tracks` skip a queue entry whose Track was removed
   from the Library, contrary to the comment in `core/runtime_status.zig` that

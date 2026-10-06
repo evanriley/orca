@@ -662,11 +662,38 @@ or a durable, verified copy of it exists:
 3. Revalidate the file's full identity, rename the stage onto it, and fsync the
    directory.
 
+The stage and the backup get the file's exact permission bits, set after
+creation so the umask does not narrow them; the rewritten file keeps its mode,
+and an undo puts back the original's. Both are created by the writing process,
+so the rewritten file belongs to that process's user and group and does not
+keep the original's extended attributes or ACL entries.
+
 The journal records the stage's identity before step 2 and the file's identity
 after step 3; undo and recovery compare the file against that record. The backup
 is a copy, so it may sit on another disk and uses its space until undone or
 pruned. A disk that fills during the copy fails the write at step 2 with the
 file untouched.
+
+### Read-only files
+
+Orca does not change a file the person has made read-only, although the rename
+that replaces it needs only the folder's permission. A file is read-only when
+no write permission bit is set, or when the process may not write it
+(`access(W_OK)` fails, as for another user's file, an ACL or an immutable
+file). `metadata.executor.requireWritableFile` decides it, and Orca never
+changes the file's permissions.
+
+- `planTagWrite` skips the file with `file_read_only`; the plan's other files
+  are written.
+- `executePlan` checks every file to write after journaling the group and
+  before any filesystem change, and again before each backup copy. A read-only
+  file fails its operation with `error.FileReadOnly`, journaled as
+  `FileReadOnly`; it is not staged, copied or backed up, and the group rolls
+  back as any failed write does. The Job's `TagWriteFailure` reason is
+  `file_read_only`.
+- An undo refuses with `error.FileReadOnly` while a file it would restore is
+  read-only. It changes no file and no journal row, and runs once the file is
+  writable again.
 
 ### Undo
 
@@ -681,7 +708,8 @@ of the group's operations:
   `needs_reconciliation`, else `error.MutationGroupNotCommitted`.
 
 Before a fresh undo changes any file it checks every operation. A write whose
-backup was pruned returns `error.TagWriteBackupPruned`. A file that changed
+backup was pruned returns `error.TagWriteBackupPruned`, and a
+[read-only](#read-only-files) file returns `error.FileReadOnly`. A file that changed
 since the write, or a backup that is missing or no longer has the original's
 identity, records `needs_reconciliation` and returns
 `error.MutationNeedsReconciliation`; both are compared by content hash, so an
@@ -851,9 +879,9 @@ file whose only change is its genres has a `change_count` of 0 in
 - `changed_since_scan`: the file's identity no longer matches the last scan.
   Rescan first.
 - `folder_not_writable`: Orca cannot create files in the file's folder, which
-  the staged copy needs. The file's own permissions do not matter, since the
-  copy replaces it by a rename. C value
-  `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE` (3).
+  the staged copy needs. C value `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE` (3).
+- `file_read_only`: the file is [read-only](#read-only-files). C value
+  `ORCA_TAG_WRITE_SKIP_FILE_READ_ONLY` (4).
 
 The runtime holds at most eight plans awaiting approval. `Runtime.startTagWrite`
 approves one by its ID and digest and executes it as a `mutation` Job; a digest
@@ -872,7 +900,8 @@ A write that fails rolls its group back as recovery does and ends the Job
 `failed`. `Runtime.jobTagWriteFailure(job)` returns a `TagWriteFailure`: the
 file it stopped at, its index in the plan's actions, and a
 `TagWriteFailureReason` (`permission_denied`, `read_only_file_system`,
-`no_space`, `changed_since_plan` or `other`). It returns null while the Job
+`no_space`, `changed_since_plan`, `other` or `file_read_only`, C value
+`ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY` (5)). It returns null while the Job
 runs, after success, or when the write failed before reaching a file;
 `error.NotATagWriteJob` for another kind of Job. The C ABI's
 `orca_job_tag_write_failure` fills an `orca_tag_write_failure` and returns

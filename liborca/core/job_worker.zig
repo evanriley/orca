@@ -249,6 +249,9 @@ pub const TagWriteFailureReason = enum {
     /// describes it.
     changed_since_plan,
     other,
+    /// The file is read-only: no write permission bit is set, or the process
+    /// may not write it. Orca does not change a file made read-only.
+    file_read_only,
 };
 
 fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
@@ -257,6 +260,7 @@ fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
         error.ReadOnlyFileSystem => .read_only_file_system,
         error.NoSpaceLeft => .no_space,
         error.FileIdentityChanged => .changed_since_plan,
+        error.FileReadOnly => .file_read_only,
         else => .other,
     };
 }

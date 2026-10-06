@@ -90,8 +90,8 @@ zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers v
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--album=…] [--album-artist=…] [--date=…] [--track=N] [--disc=N] [--compilation=0|1] [--recording-id=MBID] [--composer=…] [--comment=…] [--explicit=yes|no|clean] [--genre=A;B] [--clear=FIELD]…   # library only; no edits lists the values held; FIELD is a metadata field name such as album_artist or musicbrainz_recording_id, or genre
 zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|chosen|embedded|folder|fetched file= mime= tracks=N/M`
-zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
-zig build run -- undo-tags DATABASE GROUP
+zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS; `skip FILE_ID REASON PATH` for each file left out, `failed FILE_ID REASON PATH` for the file a failed write stopped at; a read-only file is never changed (file_read_only)
+zig build run -- undo-tags DATABASE GROUP   # refuses, changing nothing, while a file to restore is read-only
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes cannot be undone
 zig build run -- changes DATABASE [--limit N] [--offset N]   # tag writes newest first: group= written_at= files= state=applied|undoing|undone|rolled_back|failed|needs_reconciliation can_undo=yes|no expired=yes|no title=; reads the journal only
 zig build run -- changes DATABASE GROUP   # the same line with fields= more_files=, then FILE<TAB>FIELD<TAB>RESTORES<TAB>CURRENT per changed tag; unknown when a backup is gone

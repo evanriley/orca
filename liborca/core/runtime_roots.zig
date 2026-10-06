@@ -97,6 +97,11 @@ fn tagWriteRefusal(
         error.FileNotFound => return .missing,
         else => return err,
     };
+    metadata.executor.requireWritableFile(io, location.uri) catch |err| switch (err) {
+        error.FileReadOnly => return .file_read_only,
+        error.FileNotFound => return .missing,
+        else => return err,
+    };
     var local = storage.LocalFileSource.open(io, location.uri) catch return .missing;
     const observed = local.readable().identity();
     local.close();

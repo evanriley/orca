@@ -3774,6 +3774,9 @@ typedef enum orca_tag_write_skip_reason {
     /* Orca cannot create files in the file's folder, which a write needs for
      * its staged copy. Check the folder's permissions. */
     ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE = 3,
+    /* The file is read-only: no write permission bit is set, or the process
+     * may not write it. Orca does not change a file made read-only. */
+    ORCA_TAG_WRITE_SKIP_FILE_READ_ONLY = 4,
 } orca_tag_write_skip_reason;
 
 /* A file the plan leaves out. `reason` is an orca_tag_write_skip_reason;
@@ -3873,6 +3876,9 @@ typedef enum orca_tag_write_failure_reason {
      * describes it. Plan the write again. */
     ORCA_TAG_WRITE_FAILURE_CHANGED_SINCE_PLAN = 3,
     ORCA_TAG_WRITE_FAILURE_OTHER = 4,
+    /* The file is read-only: no write permission bit is set, or the process
+     * may not write it. Orca does not change a file made read-only. */
+    ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY = 5,
 } orca_tag_write_failure_reason;
 
 /* The file a failed tag write stopped at: `action_index` is its position

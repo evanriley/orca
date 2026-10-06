@@ -81,6 +81,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidProposalPayload => "that match cannot be read; dismiss it",
         error.InvalidMinimumConfidence => "--min-score must be above 0 and at most 1",
         error.TagWriteBackupPruned => "the backups for this write were pruned, so it cannot be undone",
+        error.FileReadOnly => "a file of this write is read-only, and Orca does not change a file made read-only; nothing was restored. Make it writable and run undo-tags again",
         error.UnknownTagWriteGroup => "no finished tag write with that group",
         error.TagTargetUnavailable => "a file an interrupted tag write changed is in a folder that is not there; mount it and try again",
         error.NoBackupDirectory => "this library has no database file, so a tag write has nowhere to keep the originals",

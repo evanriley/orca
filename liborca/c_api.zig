@@ -8041,6 +8041,7 @@ pub fn exportTagWriteSkipReason(reason: core.runtime.TagWriteSkipReason) u8 {
         .format_not_writable => 1,
         .changed_since_scan => 2,
         .folder_not_writable => 3,
+        .file_read_only => 4,
     };
 }
 
@@ -8051,6 +8052,7 @@ pub fn exportTagWriteFailureReason(reason: core.runtime.TagWriteFailureReason) u
         .no_space => 2,
         .changed_since_plan => 3,
         .other => 4,
+        .file_read_only => 5,
     };
 }
 

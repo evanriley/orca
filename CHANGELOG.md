@@ -54,6 +54,13 @@
 - An output that stops consuming while its Player plays leaves the shared
   decoder after 64 engine passes, and after 2 s is lost and goes through the
   same bounded recovery as any other lost output.
+- A tag write no longer replaces a read-only file. `planTagWrite` skips it
+  with `file_read_only` (`ORCA_TAG_WRITE_SKIP_FILE_READ_ONLY`); a file made
+  read-only after planning fails the write with `FileReadOnly`, reported as
+  `file_read_only` (`ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY`), before any file
+  changes; and undo refuses, changing nothing, while a file to restore is
+  read-only. A rewritten or restored file keeps its exact permission bits
+  instead of losing those the umask removes, such as group write.
 
 ## 0.1.0 - 2026-10-06
 

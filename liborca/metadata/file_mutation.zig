@@ -101,6 +101,7 @@ pub fn stageFlac(
         stage.close(io);
         std.Io.Dir.cwd().deleteFile(io, stage_path) catch {};
     }
+    try stage.setPermissions(io, stat.permissions);
     try stage.writeStreamingAll(io, &magic);
     var offset: u64 = magic.len;
     var block_index: usize = 0;
@@ -184,6 +185,7 @@ pub fn stageMpeg(
         stage.close(io);
         std.Io.Dir.cwd().deleteFile(io, stage_path) catch {};
     }
+    try stage.setPermissions(io, stat.permissions);
     try stage.writeStreamingAll(io, planned.tag);
     try copyRange(source, stage, io, planned.audio_start, planned.audio_end - planned.audio_start, null);
     if (planned.trailer) |trailer| try stage.writeStreamingAll(io, &trailer);
@@ -288,6 +290,7 @@ pub fn copyVerified(
         if (copy_open) copy.close(io);
         cwd.deleteFile(io, copy_path) catch {};
     }
+    try copy.setPermissions(io, stat.permissions);
     var hasher = std.crypto.hash.Blake3.init(.{});
     try copyRange(source, copy, io, 0, stat.size, &hasher);
     try copy.setTimestamps(io, .{

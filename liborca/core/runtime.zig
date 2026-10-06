@@ -339,6 +339,9 @@ pub const TagWriteSkipReason = enum {
     /// Orca cannot create files in the file's folder, which a write needs for
     /// its staged copy.
     folder_not_writable,
+    /// The file is read-only: no write permission bit is set, or the process
+    /// may not write it. Orca does not change a file made read-only.
+    file_read_only,
 };
 
 /// What `pruneTagWriteBackups` deleted: how many backups, and their bytes.

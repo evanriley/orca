@@ -773,6 +773,7 @@ fn tagWriteFailedText(failure: ?liborca.TagWriteFailure) [:0]const u8 {
         .no_space => "Writing tags failed: the drive is full. The files were left as they were.",
         .changed_since_plan => "Writing tags failed: a file changed after the write was planned. The files were left as they were.",
         .other => "Writing tags failed; the files were left as they were",
+        .file_read_only => "Writing tags failed: a file is read-only. The files were left as they were.",
     };
 }
 

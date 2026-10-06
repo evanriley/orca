@@ -175,6 +175,15 @@ pub const Executor = struct {
         try self.interrupt(.after_journal_prepare, 0);
 
         for (plan.actions, 0..) |action, action_index| switch (action) {
+            .write_tags => |write| requireWritableFile(self.io, write.path) catch |err| {
+                self.failed_action_index = @intCast(action_index);
+                self.transition(prepared.items[action_index].id, .planned, .failed, @errorName(err)) catch {};
+                return err;
+            },
+            .move => {},
+        };
+
+        for (plan.actions, 0..) |action, action_index| switch (action) {
             .write_tags => |write| {
                 self.failed_action_index = @intCast(action_index);
                 const operation = prepared.items[action_index].id;
@@ -274,6 +283,7 @@ pub const Executor = struct {
         expected: mutation.FileIdentity,
         commit_interrupt: ?file_mutation.Interrupt,
     ) !void {
+        try requireWritableFile(self.io, source_path);
         try file_mutation.createDirectoryDurably(self.io, self.backup_directory.?);
         try file_mutation.createDirectoryDurably(self.io, std.Io.Dir.path.dirname(backup_path).?);
         try file_mutation.commitReplacementInterrupted(
@@ -401,6 +411,7 @@ pub const Executor = struct {
             try self.reconcile(operation_id, .committed, "tag write backup is missing or damaged");
             return error.MutationNeedsReconciliation;
         }
+        if (operation.kind == .write_tags) try requireWritableFile(self.io, current_path);
         try self.rollbackOperation(operation_id, null);
     }
 
@@ -468,6 +479,7 @@ pub const Executor = struct {
                 try self.reconcile(operation.id, operation.state, "tag write backup is missing or damaged");
                 return error.MutationNeedsReconciliation;
             }
+            if (operation.kind == .write_tags) try requireWritableFile(self.io, current_path);
         }
         try self.journal.beginUndo(group_id);
         try self.interrupt(.undo_after_intent, 0);
@@ -851,6 +863,18 @@ pub fn isOrcaTemporaryName(name: []const u8) bool {
     if (std.mem.indexOf(u8, name, ".orca-backup-") != null) return true;
     if (std.mem.endsWith(u8, name, ".recovery-displaced")) return true;
     return std.mem.startsWith(u8, name, ".") and std.mem.indexOf(u8, name, ".orca-restore-") != null;
+}
+
+/// Fails with `error.FileReadOnly` when the file at `path` has no write
+/// permission bit, or the process may not write it. Orca never replaces such a
+/// file, even though its folder would allow the rename.
+pub fn requireWritableFile(io: std.Io, path: []const u8) !void {
+    const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
+    if (stat.permissions.readOnly()) return error.FileReadOnly;
+    std.Io.Dir.cwd().access(io, path, .{ .write = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.FileReadOnly,
+        else => return err,
+    };
 }
 
 /// Whether Orca can write tags into the file at `path`.
@@ -1639,6 +1663,15 @@ const WriteFixture = struct {
         try std.testing.expectEqualStrings(expected, recorded);
     }
 
+    fn setMode(self: *WriteFixture, name: []const u8, mode: std.posix.mode_t) !void {
+        try self.music.dir.setFilePermissions(std.testing.io, name, .fromMode(mode), .{});
+    }
+
+    fn expectMode(path: []const u8, expected: std.posix.mode_t) !void {
+        const stat = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{});
+        try std.testing.expectEqual(expected, stat.permissions.toMode() & 0o7777);
+    }
+
     fn expectMusicFolderUntouched(self: *WriteFixture) !void {
         var iterator = self.music.dir.iterate();
         var count: usize = 0;
@@ -2078,4 +2111,112 @@ test "undo of a write journaled without content hashes compares the other three 
     try std.testing.expect(fixture.original.eql(try fixture.current()));
     try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
     try fixture.expectMusicFolderUntouched();
+}
+
+test "a tag write refuses a read-only file before writing any file of its plan" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.setMode("second.mp3", 0o444);
+    var lock = try fixture.acquireLock();
+    defer lock.release(std.testing.io);
+    var executor = fixture.executorWith(&lock);
+    const actions = [_]mutation.Action{
+        .{ .write_tags = .{
+            .path = fixture.source,
+            .expected = fixture.original,
+            .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+        } },
+        .{ .write_tags = .{
+            .path = fixture.second,
+            .expected = fixture.second_original,
+            .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+        } },
+    };
+    var plan = try mutation.Plan.init(std.testing.allocator, 7, &actions);
+    defer plan.deinit();
+    try plan.approve(plan.approval());
+
+    try std.testing.expectError(error.FileReadOnly, executor.executePlan(&plan, 7));
+    try std.testing.expectEqual(@as(?u32, 1), executor.failed_action_index);
+    try std.testing.expect(fixture.second_original.eql(try fixture.currentSecond()));
+    try WriteFixture.expectMode(fixture.second, 0o444);
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(2));
+    try fixture.expectJournaledError(2, "FileReadOnly");
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
+}
+
+test "a tag write refuses a file made read-only after its stage was built, and makes no backup" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    var lock = try fixture.acquireLock();
+    defer lock.release(std.testing.io);
+    var executor = fixture.executorWith(&lock);
+    const stage_path = try siblingPath(std.testing.allocator, fixture.source, "stage", 7, 0);
+    defer std.testing.allocator.free(stage_path);
+    try file_mutation.stageMpeg(
+        std.testing.allocator,
+        std.testing.io,
+        fixture.source,
+        stage_path,
+        fixture.original,
+        &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+        null,
+    );
+    try fixture.setMode("source.mp3", 0o444);
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+
+    try std.testing.expectError(
+        error.FileReadOnly,
+        executor.commitWrite(fixture.source, stage_path, backup, fixture.original, null),
+    );
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try WriteFixture.expectMode(fixture.source, 0o444);
+    try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
+}
+
+test "a tag write keeps the exact permission bits of the file it rewrites" {
+    for ([_]std.posix.mode_t{ 0o644, 0o640, 0o664, 0o600 }) |mode| {
+        var fixture = try WriteFixture.init(null);
+        defer fixture.deinit();
+        try fixture.setMode("source.mp3", mode);
+        try fixture.setMode("second.mp3", 0o640);
+        try fixture.writeBoth(7);
+        try expectTitle(fixture.source, "After write");
+        try expectTitle(fixture.second, "After write");
+        try WriteFixture.expectMode(fixture.source, mode);
+        try WriteFixture.expectMode(fixture.second, 0o640);
+
+        try fixture.undo(7);
+        try std.testing.expect(fixture.original.eql(try fixture.current()));
+        try WriteFixture.expectMode(fixture.source, mode);
+        try WriteFixture.expectMode(fixture.second, 0o640);
+    }
+}
+
+test "undo refuses a written file made read-only since and changes nothing" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.writeBoth(7);
+    const written = try fixture.current();
+    const second_written = try fixture.currentSecond();
+    try fixture.setMode("source.mp3", 0o444);
+
+    try std.testing.expectError(error.FileReadOnly, fixture.undo(7));
+    try std.testing.expect(written.eql(try fixture.current()));
+    try std.testing.expect(second_written.eql(try fixture.currentSecond()));
+    try WriteFixture.expectMode(fixture.source, 0o444);
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(2));
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    try std.testing.expect(fixture.original.eql(try file_mutation.identity(std.testing.io, backup)));
+    try fixture.expectMusicFolderUntouched();
+
+    try fixture.setMode("source.mp3", 0o644);
+    try fixture.undo(7);
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
 }
