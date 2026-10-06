@@ -38,7 +38,7 @@ pub const Database = struct {
         }
         const db = Database{ .handle = raw.? };
         errdefer db.close();
-        try db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+        try db.exec("PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=OFF; PRAGMA busy_timeout=5000;");
         return db;
     }
 
@@ -189,6 +189,17 @@ pub const Statement = struct {
 };
 
 pub const Step = enum { row, done };
+
+test "a connection enforces foreign keys and keeps triggers non-recursive whatever SQLite's build defaults" {
+    const db = try Database.open(":memory:");
+    defer db.close();
+    inline for (.{ .{ "PRAGMA foreign_keys;", 1 }, .{ "PRAGMA recursive_triggers;", 0 } }) |pragma| {
+        var statement = try db.prepare(pragma[0]);
+        defer statement.deinit();
+        try std.testing.expectEqual(Step.row, try statement.step());
+        try std.testing.expectEqual(@as(i64, pragma[1]), statement.columnInt64(0));
+    }
+}
 
 test "an interrupt from another thread ends a statement that would never finish" {
     const db = try Database.open(":memory:");
