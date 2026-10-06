@@ -2,7 +2,7 @@ const std = @import("std");
 const released = @import("orca_h_released");
 const current = @import("orca_h");
 
-const released_header = "tests/abi/orca-0.8.1.h";
+const released_header = "tests/abi/orca-0.1.0.h";
 
 fn isOrcaName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "orca_") or std.mem.startsWith(u8, name, "ORCA_");
