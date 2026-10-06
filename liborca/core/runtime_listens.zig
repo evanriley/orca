@@ -526,10 +526,11 @@ pub fn libraryMatchReviewCount(self: *OrcaRuntime, library: LibraryHandle) !u64 
 }
 
 pub fn libraryUnidentifiedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+    const failures = runtime_jobs.fingerprintFailures(self, true);
     return (try runtime.libraryDatabase(self, library)).identification_proposals.unidentifiedCount(
         .library,
         .unidentified,
-        runtime_jobs.acoustIdInScope(self, true),
+        if (failures) |*selector| selector else null,
         null,
     );
 }

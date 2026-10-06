@@ -20,6 +20,8 @@ const health = @import("health.zig");
 const release_tracklists = @import("release_tracklists.zig");
 const release_track_pairings = @import("release_track_pairings.zig");
 const reviewed_releases = @import("reviewed_releases.zig");
+const AnalysisSelector = @import("analysis.zig").AnalysisSelector;
+const bindAnalysisSelectorAt = @import("analysis.zig").bindAnalysisSelectorAt;
 const release_alignment = @import("../../library/release_alignment.zig");
 
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
@@ -832,6 +834,10 @@ pub const MatchScope = union(enum) {
             .unidentified => if (self == .release) unidentified_release_count_sql else unidentified_count_sql,
             .every => if (self == .release) reidentify_release_count_sql else reidentify_count_sql,
         };
+    }
+
+    fn unsearchableSql(self: MatchScope) [:0]const u8 {
+        return if (self == .release) unsearchable_release_count_sql else unsearchable_count_sql;
     }
 
     fn bindRelease(self: MatchScope, statement: sqlite.Statement) !void {
@@ -3045,13 +3051,14 @@ pub const IdentificationProposalRepository = struct {
     }
 
     /// Tracks a matching job has to search, as `selection` picks them.
-    /// MusicBrainz is always in scope; AcoustID only when `acoustid` is set.
+    /// MusicBrainz is always in scope; AcoustID only when `acoustid` is set,
+    /// to the rows that record bytes its fingerprinter could not fingerprint.
     pub fn unidentifiedPage(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         scope: MatchScope,
         selection: MatchSelection,
-        acoustid: bool,
+        acoustid: ?*const AnalysisSelector,
         cursor: i64,
         limit: u32,
     ) !MatchCandidatePage {
@@ -3060,7 +3067,7 @@ pub const IdentificationProposalRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, scope.lowerBound(cursor));
         try statement.bindInt64(2, limit);
-        try statement.bindInt64(3, @intFromBool(acoustid));
+        try bindAcoustId(statement, selection, acoustid);
         try statement.bindInt64(4, scope.upperBound());
         try scope.bindRelease(statement);
         var items: std.ArrayList(MatchCandidate) = .empty;
@@ -3103,14 +3110,32 @@ pub const IdentificationProposalRepository = struct {
         self: *const IdentificationProposalRepository,
         scope: MatchScope,
         selection: MatchSelection,
-        acoustid: bool,
+        acoustid: ?*const AnalysisSelector,
         limit: ?u32,
     ) !u64 {
         var statement = try self.db.prepare(scope.countSql(selection));
         defer statement.deinit();
         try statement.bindInt64(1, scope.lowerBound(0));
         try statement.bindInt64(2, if (limit) |bound| bound else -1);
-        try statement.bindInt64(3, @intFromBool(acoustid));
+        try bindAcoustId(statement, selection, acoustid);
+        try statement.bindInt64(4, scope.upperBound());
+        try scope.bindRelease(statement);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// Tracks in scope with no recording id that `.unidentified` does not
+    /// select because they have no title or no artist to search MusicBrainz
+    /// with, and AcoustID is out of scope or cannot hear their file.
+    pub fn unsearchableCount(
+        self: *const IdentificationProposalRepository,
+        scope: MatchScope,
+        acoustid: ?*const AnalysisSelector,
+    ) !u64 {
+        var statement = try self.db.prepare(scope.unsearchableSql());
+        defer statement.deinit();
+        try statement.bindInt64(1, scope.lowerBound(0));
+        try bindAcoustId(statement, .unidentified, acoustid);
         try statement.bindInt64(4, scope.upperBound());
         try scope.bindRelease(statement);
         if (try statement.step() != .row) return error.SqlFailed;
@@ -3218,26 +3243,62 @@ fn searched(comptime provider: IdentificationProvider) []const u8 {
         "      AND identification_searches.provider = '" ++ provider.text() ++ "')";
 }
 
-const needs_musicbrainz = "NOT " ++ searched(.musicbrainz);
+/// The test MusicBrainz search applies before it sends a query.
+const searchable =
+    "trim(track.title, ' ' || char(9)) <> '' AND trim(track.artist, ' ' || char(9)) <> ''";
+
+/// ?6 to ?9 select the rows that record the play file's present bytes, by
+/// quick hash, as ones that could not be fingerprinted.
+const fingerprint_failed =
+    "EXISTS (SELECT 1 FROM analysis_results\n" ++
+    "    WHERE analysis_results.file_id = track.file_id\n" ++
+    "      AND analysis_results.kind = ?6\n" ++
+    "      AND analysis_results.algorithm_id = ?7\n" ++
+    "      AND analysis_results.algorithm_version = ?8\n" ++
+    "      AND analysis_results.parameter_hash = ?9\n" ++
+    "      AND analysis_results.source_identity =\n" ++
+    "          (SELECT files.quick_hash FROM files WHERE files.id = track.file_id))";
+
+const needs_musicbrainz = "(NOT " ++ searched(.musicbrainz) ++ " AND " ++ searchable ++ ")";
 /// ?3 is whether AcoustID is in scope.
-const needs_acoustid = "(?3 AND NOT " ++ searched(.acoustid) ++ ")";
+const needs_acoustid = "(?3 AND NOT " ++ searched(.acoustid) ++ " AND NOT " ++ fingerprint_failed ++ ")";
 
 /// Tracks with ids in (?1, ?4], and with `in_release` of Release ?5 only,
 /// that have a play file. With `.unidentified`, only those whose play file
-/// has no recording id and has not been answered for by MusicBrainz, or by
-/// AcoustID when ?3 is set. The matching job's page and its count share it so
-/// they agree.
+/// has no recording id and still owes a search: by MusicBrainz when the Track
+/// has a title and an artist, or by AcoustID when ?3 is set and the file's
+/// present bytes have not failed to fingerprint. The matching job's page and
+/// its count share it so they agree.
 fn unidentifiedTracks(comptime in_release: bool, comptime selection: MatchSelection) []const u8 {
-    return "(SELECT tracks.id, " ++ track_play_file ++ " AS file_id,\n" ++
-        "        tracks.title, tracks.artist, tracks.album, tracks.duration_ms\n" ++
-        "    FROM tracks WHERE " ++ (if (in_release) "tracks.release_id = ?5 AND " else "") ++
-        "tracks.id > ?1 AND tracks.id <= ?4) AS track\n" ++
-        "WHERE track.file_id IS NOT NULL" ++ switch (selection) {
+    return tracksWithPlayFile(in_release) ++ switch (selection) {
         .unidentified => "\n" ++
             "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
             "  AND (" ++ needs_musicbrainz ++ " OR " ++ needs_acoustid ++ ")",
         .every => "",
     };
+}
+
+fn tracksWithPlayFile(comptime in_release: bool) []const u8 {
+    return "(SELECT tracks.id, " ++ track_play_file ++ " AS file_id,\n" ++
+        "        tracks.title, tracks.artist, tracks.album, tracks.duration_ms\n" ++
+        "    FROM tracks WHERE " ++ (if (in_release) "tracks.release_id = ?5 AND " else "") ++
+        "tracks.id > ?1 AND tracks.id <= ?4) AS track\n" ++
+        "WHERE track.file_id IS NOT NULL";
+}
+
+/// Tracks `unidentifiedTracks(in_release, .unidentified)` leaves out only
+/// because MusicBrainz cannot be asked about them.
+fn unsearchableCountSql(comptime in_release: bool) [:0]const u8 {
+    return "SELECT count(*) FROM " ++ tracksWithPlayFile(in_release) ++ "\n" ++
+        "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
+        "  AND NOT " ++ searched(.musicbrainz) ++ "\n" ++
+        "  AND NOT (" ++ searchable ++ ")\n" ++
+        "  AND NOT " ++ needs_acoustid ++ ";";
+}
+
+fn bindAcoustId(statement: sqlite.Statement, selection: MatchSelection, acoustid: ?*const AnalysisSelector) !void {
+    try statement.bindInt64(3, @intFromBool(acoustid != null));
+    if (selection == .unidentified) if (acoustid) |selector| try bindAnalysisSelectorAt(statement, 6, selector);
 }
 
 fn unidentifiedPageSql(comptime in_release: bool, comptime selection: MatchSelection) [:0]const u8 {
@@ -3270,6 +3331,8 @@ pub const reidentify_page_sql = unidentifiedPageSql(false, .every);
 pub const reidentify_count_sql = unidentifiedCountSql(false, .every);
 pub const reidentify_release_page_sql = unidentifiedPageSql(true, .every);
 pub const reidentify_release_count_sql = unidentifiedCountSql(true, .every);
+pub const unsearchable_count_sql = unsearchableCountSql(false);
+pub const unsearchable_release_count_sql = unsearchableCountSql(true);
 
 const testing = std.testing;
 const mbid_a = "aaaaaaaa-0000-4000-8000-000000000000";

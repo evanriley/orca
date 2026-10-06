@@ -73,6 +73,8 @@ pub const Result = struct {
     unmatched: u64 = 0,
     /// Tracks found again as the recording they are identified as.
     confirmed: u64 = 0,
+    /// Tracks with no title or no artist to search MusicBrainz with, whether
+    /// examined or passed over.
     insufficient: u64 = 0,
     refused: u64 = 0,
     proposals_stored: u64 = 0,
@@ -193,13 +195,17 @@ pub const LibraryMatching = struct {
             try self.verify(&result, page_limit);
             return self.finish(result, acoustid_service);
         };
+        const fingerprint_failures = analysis.chromaprint.failureSelector(
+            if (self.fingerprinter) |fingerprinter| fingerprinter.parameters else .{},
+        );
+        const acoustid_selection: ?*const database.AnalysisSelector = if (self.acoustid != null) &fingerprint_failures else null;
         var cursor: i64 = 0;
         walk: while (true) {
             var page = try self.proposals.unidentifiedPage(
                 self.allocator,
                 self.scope,
                 selection,
-                self.acoustid != null,
+                acoustid_selection,
                 cursor,
                 page_limit,
             );
@@ -222,6 +228,8 @@ pub const LibraryMatching = struct {
                 if (!try self.matchGroup(group, &result)) break :walk;
             }
         }
+        if (selection == .unidentified)
+            result.insufficient += try self.proposals.unsearchableCount(self.scope, acoustid_selection);
         const stopped = result.cancelled or result.unavailable or result.busy != .none;
         const limited = if (self.limit) |limit| result.tracks_seen >= limit else false;
         if (!stopped) switch (self.scope) {

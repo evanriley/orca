@@ -1669,10 +1669,10 @@ test "a matching job proposes recordings for the Tracks without one, one search 
 
     const job_handle = try runtime.startLibraryMatching(library, .{ .batch_size = 2 });
 
-    try std.testing.expectEqual(@as(?u64, 4), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(@as(?u64, 3), (try runtime.jobSnapshotSynced(job_handle)).total_units);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
     const stats = try runtime.jobMatchStats(job_handle);
-    try std.testing.expectEqual(@as(u64, 4), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 3), stats.tracks_examined);
     try std.testing.expectEqual(@as(u64, 2), stats.matched);
     try std.testing.expectEqual(@as(u64, 1), stats.unmatched);
     try std.testing.expectEqual(@as(u64, 1), stats.insufficient_evidence);
@@ -1703,12 +1703,21 @@ test "a matching job proposes recordings for the Tracks without one, one search 
     const rerun = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, rerun));
     const rerun_stats = try runtime.jobMatchStats(rerun);
-    try std.testing.expectEqual(@as(u64, 1), rerun_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.tracks_examined);
     try std.testing.expectEqual(@as(u64, 1), rerun_stats.insufficient_evidence);
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests);
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.cache_hits);
     try std.testing.expectEqual(AcoustIdUse.no_client_key, rerun_stats.acoustid);
     try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
+
+    try library_database.database.exec("UPDATE tracks SET artist = 'Nick Drake' WHERE title = 'Untitled';");
+    runtime.reapFinishedJobs();
+    const retagged = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, retagged));
+    const retagged_stats = try runtime.jobMatchStats(retagged);
+    try std.testing.expectEqual(@as(u64, 1), retagged_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 0), retagged_stats.insufficient_evidence);
+    try std.testing.expectEqual(@as(u32, 5), fake.requestCount());
 }
 
 test "an accepted match gives the Track a recording id, which its love is sent to ListenBrainz under" {
@@ -1803,7 +1812,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer proposals.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
-    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
+    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, null, null));
 
     fake.hang_from = null;
     const resumed = try runtime.startLibraryMatching(library, .{});
@@ -1892,7 +1901,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     const unreachable_job = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, unreachable_job));
     try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unreachable_job)).tracks_examined);
-    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, null, null));
 
     fake.failure = null;
     const retried = try runtime.startLibraryMatching(library, .{});
@@ -1922,7 +1931,7 @@ fn matchAfterOutages(fake: *FakeMusicBrainz, name: [:0]const u8) !job.State {
     _ = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
     const state = try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{}));
     const unmarked: u64 = if (state == .succeeded) 0 else 1;
-    try std.testing.expectEqual(unmarked, try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
+    try std.testing.expectEqual(unmarked, try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, null, null));
     return state;
 }
 
@@ -2742,6 +2751,72 @@ test "a file that fails to decode is not fingerprinted and its Track is still se
     try std.testing.expectEqual(@as(u64, 1), stats.matched);
     try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM analysis_results WHERE kind = 3;"));
     try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM identification_searches WHERE provider = 'acoustid';"));
+}
+
+fn rescanAudioFile(library_database: *database.LibraryDatabase, temporary: *std.testing.TmpDir, name: []const u8) !void {
+    const path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+    defer std.testing.allocator.free(path);
+    _ = try library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:acoustid" });
+}
+
+test "bytes that failed to fingerprint are not decoded again until they change or the Track is re-identified, and a file that could not be opened is tried again" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeDamagedFlac(temporary.dir, "damaged.flac", 1_000_000);
+    try writeToneWave(temporary.dir, "away.wav", 440);
+    var musicbrainz: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
+    var acoustid: FakeAcoustId = .{ .lookup_body = "{\"status\":\"ok\",\"fingerprints\":[{\"index\":0,\"results\":[]}]}" };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("test-client");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-fingerprint-failures?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const damaged = try addAudioTrack(library_database, &temporary, "damaged.flac", "Northern Sky", "Nick Drake");
+    _ = try addAudioTrack(library_database, &temporary, "away.wav", "Pink Moon", "Nick Drake");
+    try temporary.dir.deleteFile(std.testing.io, "away.wav");
+    const failure_rows = "SELECT count(*) FROM analysis_results WHERE kind = 5;";
+
+    const first = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, first));
+    const first_stats = try runtime.jobMatchStats(first);
+    try std.testing.expectEqual(@as(u64, 2), first_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 2), first_stats.fingerprint_failures);
+    try std.testing.expectEqual(@as(u32, 0), acoustid.lookups.load(.acquire));
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, failure_rows));
+
+    try writeToneWave(temporary.dir, "away.wav", 440);
+    runtime.reapFinishedJobs();
+    const second = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(@as(?u64, 1), (try runtime.jobSnapshotSynced(second)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, second));
+    const second_stats = try runtime.jobMatchStats(second);
+    try std.testing.expectEqual(@as(u64, 1), second_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), second_stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 0), second_stats.fingerprint_failures);
+    try std.testing.expectEqual(@as(u32, 1), acoustid.lookups.load(.acquire));
+
+    runtime.reapFinishedJobs();
+    const unchanged = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, unchanged));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unchanged)).tracks_examined);
+
+    try writeDamagedFlac(temporary.dir, "damaged.flac", 2_000_000);
+    try rescanAudioFile(library_database, &temporary, "damaged.flac");
+    runtime.reapFinishedJobs();
+    const changed = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, changed));
+    const changed_stats = try runtime.jobMatchStats(changed);
+    try std.testing.expectEqual(@as(u64, 1), changed_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), changed_stats.fingerprint_failures);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, failure_rows));
+
+    runtime.reapFinishedJobs();
+    const reidentified = try runtime.startLibraryMatching(library, .{ .track_id = damaged, .mode = .reidentify });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, reidentified));
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(reidentified)).fingerprint_failures);
 }
 
 const AcoustIdClientKeys = struct {
@@ -3802,7 +3877,7 @@ test "library matching looks the best release up before storing a search, asks n
     try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, unreachable_job));
     try std.testing.expectEqual(@as(u32, 2 + 1 + 3), fake.requestCount());
     try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, pink_moon));
-    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, null, null));
 
     fake.release_status = 404;
     fake.release_body = "{\"error\":\"Not Found\"}";
@@ -4445,11 +4520,11 @@ const VerifyRig = struct {
     }
 };
 
-fn writeDamagedFlac(dir: std.Io.Dir, name: []const u8) !void {
+fn writeDamagedFlac(dir: std.Io.Dir, name: []const u8, extra_samples: u64) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/tagged-reference.flac", std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(bytes);
     const packed_bits = std.mem.readInt(u64, bytes[18..26], .big);
-    std.mem.writeInt(u64, bytes[18..26], packed_bits + 1_000_000, .big);
+    std.mem.writeInt(u64, bytes[18..26], packed_bits + extra_samples, .big);
     try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 }
 
@@ -4461,7 +4536,7 @@ test "verification stores what AcoustID hears of each file's recording ID and pr
     const disagrees = try rig.addTone("disagrees.wav", 420, "Northern Sky", northern_sky_mbid, null);
     const weak = try rig.addTone("weak.wav", 540, "Northern Sky", northern_sky_mbid, null);
     const empty = try rig.addTone("empty.wav", 660, "Northern Sky", northern_sky_mbid, null);
-    try writeDamagedFlac(rig.temporary.dir, "damaged.flac");
+    try writeDamagedFlac(rig.temporary.dir, "damaged.flac", 1_000_000);
     const damaged = try rig.addFile("damaged.flac", "Northern Sky", northern_sky_mbid, null);
     const refused = try rig.addTone("refused.wav", 780, "Northern Sky", northern_sky_mbid, null);
     rig.acoustid.lookup_body = acoustIdAnswer(

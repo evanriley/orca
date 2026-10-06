@@ -337,7 +337,10 @@ The tables by purpose; keys are those that carry identity or a contract.
   has the read location still recording the identity read. Kind 4 holds no
   measurement: it records that the registered decoders refused the bytes with
   that content hash, keyed on a hash of the decoder set, so the pass skips the
-  file until its bytes or the decoders change.
+  file until its bytes or the decoders change. Kind 5 holds no measurement
+  either: it records bytes that could not be fingerprinted, its
+  `source_identity` is the file's quick hash, and it counts only while it equals
+  `files.quick_hash` ([analysis.md](analysis.md#acoustid-fingerprints)).
 - `file_loudness`: integrated loudness of the default `orca.audio-diagnostics`
   result, kept by triggers on `analysis_results` and counted only while its
   `source_identity` equals the file's content hash and the file records at most

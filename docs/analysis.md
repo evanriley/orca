@@ -26,10 +26,17 @@ mono, resampled to 11,025 Hz by libsamplerate (`resampler.SampleRate`,
 base64 fingerprint and the whole file's length; a shorter file is fingerprinted
 whole. Chromaprint is built without its own LGPL resampler; see
 [architecture.md](architecture.md#dependencies-and-licences). A decode error
-while reading the window fails the fingerprint; nothing is cached or sent and
-it is tried again next time. A unit test holds Orca's fingerprint of
-`fixtures/audio/fingerprint-reference.mp3` to at least 95 % bit agreement with
-`fpcalc`'s.
+while reading the window fails the fingerprint and nothing is sent. When every
+read of the file succeeded, the file did not change during the decode, and the
+error is the bytes' own rather than cancellation, memory or a missing codec or
+fingerprinter, the failure is recorded as kind 5 under the same algorithm,
+version and parameter hash, keyed by the file's quick hash, with the error name
+as its result. Matching does not offer AcoustID a file whose recorded quick hash
+has such a row ([providers.md](providers.md#what-is-searched)); a file that
+could not be opened or read is tried again next time. A later fingerprint of
+the file deletes the row, and a new failure replaces it. A unit test holds
+Orca's fingerprint of `fixtures/audio/fingerprint-reference.mp3` to at least
+95 % bit agreement with `fpcalc`'s.
 
 A fingerprint is stored in `analysis_results` as kind 3, `orca.chromaprint`
 version 1, under a parameter hash of the algorithm, the converter and the window

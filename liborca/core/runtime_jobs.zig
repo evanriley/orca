@@ -1,5 +1,6 @@
 const std = @import("std");
 const analysis_service = @import("../analysis/service.zig");
+const analysis_chromaprint = @import("../analysis/chromaprint.zig");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const library_pass = @import("../library/root.zig");
@@ -834,6 +835,12 @@ pub fn acoustIdInScope(self: *const OrcaRuntime, fingerprints: bool) bool {
     return fingerprints and (self.acoustid_client_key != null or self.credential_store != null);
 }
 
+/// What a matching selection is given for AcoustID: null when AcoustID is out
+/// of scope, otherwise the record of files the job's fingerprinter failed on.
+pub fn fingerprintFailures(self: *const OrcaRuntime, fingerprints: bool) ?database.AnalysisSelector {
+    return if (acoustIdInScope(self, fingerprints)) analysis_chromaprint.failureSelector(.{}) else null;
+}
+
 pub fn startJobWorker(
     self: *OrcaRuntime,
     library: LibraryHandle,
@@ -896,15 +903,15 @@ fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDat
         .mutation => |pending| pending.plan.actions.len,
         .metadata_lookup => |matching| if (!matching.lookups)
             0
-        else if (matching.setup.mode.selection()) |selection|
-            try library_database.identification_proposals.unidentifiedCount(
+        else if (matching.setup.mode.selection()) |selection| count: {
+            const failures = fingerprintFailures(self, matching.setup.acoustid != null);
+            break :count try library_database.identification_proposals.unidentifiedCount(
                 matching.setup.scope,
                 selection,
-                matching.setup.acoustid != null and acoustIdInScope(self, true),
+                if (failures) |*selector| selector else null,
                 matching.limit,
-            )
-        else
-            try library_database.recording_verifications.verifiableCount(matching.setup.scope, matching.limit),
+            );
+        } else try library_database.recording_verifications.verifiableCount(matching.setup.scope, matching.limit),
         .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
         .scan, .reconcile, .projection, .lyrics, .artist_info, .release_info => null,
     };

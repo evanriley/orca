@@ -300,6 +300,13 @@ and is repeated on the next run. One Track is one search however many files back
 it. `MatchRequest.limit` bounds the Tracks one run examines and
 `MatchRequest.track_id` limits it to one Track.
 
+Two kinds of Track are passed over without a request or a decode. A Track
+without a title or an artist is not offered to MusicBrainz until its title and
+artist are both set, and is counted in `insufficient_evidence` on every run. A
+file whose present bytes could not be fingerprinted is not offered to AcoustID
+until its bytes change ([analysis.md](analysis.md#acoustid-fingerprints)). A
+Track passed over by every service in scope is not examined at all.
+
 ### Proposals and confidence
 
 Candidates from both services are merged by recording ID into one proposal that
@@ -361,7 +368,8 @@ next request slot and while backing off.
 
 `MatchRequest.mode = .reidentify` searches one Track (`track_id`) or one
 Release's Tracks (`release_id`) again: every one with a playing file, whatever
-recording ID is in effect and whatever services answered before. Without either,
+recording ID is in effect and whatever services answered before, and its file
+is fingerprinted again even when its bytes failed before. Without either,
 or with `accept_minimum_confidence`, it returns `error.InvalidMatchRequest`, so
 no correction is accepted in bulk. A candidate for the recording ID already in
 effect is not proposed and counts as `confirmed` in `jobMatchStats`, once per
@@ -392,8 +400,9 @@ action, never run by a job.
 `GET /ws/2/recording?fmt=json&limit=10&query=` with `recording:"TITLE" AND
 artist:"ARTIST" release:"ALBUM"`. The release term is optional, so it raises
 matching releases without excluding the others. Lucene syntax characters in the
-values are escaped with a backslash. A Track without a title or an artist is
-counted and not searched.
+values are escaped with a backslash. A Track whose title or artist is empty or
+only spaces and tabs is counted and not searched, and is not examined again
+until both are set.
 
 When the answer is empty and the artist splits at commas into two or more
 names, one more query is sent with the artist term replaced by
@@ -467,7 +476,10 @@ The first 120 s of the playing file are decoded by Orca, resampled to 11,025 Hz
 and fingerprinted by Chromaprint
 ([analysis.md](analysis.md#acoustid-fingerprints)). A file that does not decode
 cleanly has no fingerprint, is counted in `fingerprint_failures`, and its Track
-is still searched on MusicBrainz.
+is still searched on MusicBrainz. Later runs do not decode those bytes again
+until they change or the Track is re-identified. A file that could not be
+opened or read, or a fingerprint that was cancelled, is tried again on the
+next run.
 
 `POST /v2/lookup`, a gzip-compressed form (`Content-Encoding: gzip`) with
 `client`, `clientversion`, `format=json`, `meta=recordings releasegroups

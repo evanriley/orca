@@ -324,6 +324,43 @@ pub const AnalysisCacheRepository = struct {
         return self.putLocked(key, result);
     }
 
+    /// Stores `result` under `key` as the file's only row of the selector the
+    /// key names.
+    pub fn replace(self: *AnalysisCacheRepository, key: AnalysisCacheKey, result: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const selector: AnalysisSelector = .{
+            .kind = key.kind,
+            .algorithm_id = key.algorithm_id,
+            .algorithm_version = key.algorithm_version,
+            .parameter_hash = key.parameter_hash,
+        };
+        try self.forgetLocked(key.file_id, &selector);
+        try self.putLocked(key, result);
+        try self.db.exec("COMMIT;");
+    }
+
+    /// Removes the file's rows of `selector`, whatever bytes they describe.
+    pub fn forget(self: *AnalysisCacheRepository, file_id: i64, selector: *const AnalysisSelector) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.forgetLocked(file_id, selector);
+    }
+
+    fn forgetLocked(self: *AnalysisCacheRepository, file_id: i64, selector: *const AnalysisSelector) !void {
+        var statement = try self.db.prepare(
+            \\DELETE FROM analysis_results
+            \\WHERE file_id = ?1 AND kind = ?2 AND algorithm_id = ?3
+            \\  AND algorithm_version = ?4 AND parameter_hash = ?5;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try bindAnalysisSelectorAt(statement, 2, selector);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
     /// The same write from inside a caller's transaction. A library-wide
     /// analysis commits a whole batch of files at once — results, identity and
     /// health together — so it holds the lane itself rather than taking it once
@@ -360,7 +397,7 @@ pub fn bindAnalysisSelectors(statement: sqlite.Statement, selectors: *const Anal
     try bindAnalysisSelectorAt(statement, 11, &selectors.undecodable);
 }
 
-fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {
+pub fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {
     try statement.bindInt64(first, selector.kind);
     try statement.bindText(first + 1, selector.algorithm_id);
     try statement.bindInt64(first + 2, selector.algorithm_version);

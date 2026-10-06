@@ -205,6 +205,13 @@
   `symlinks_skipped=N` and the Job's Activity summary reads "N symbolic links
   skipped" when it is not zero. C hosts read it through
   `orca_library_scan_stats_v3`.
+- Matching no longer examines a Track without a title or an artist again on
+  every run, or decodes again a file whose bytes could not be fingerprinted.
+  The Track is passed over until its title and artist are both set, and is
+  still counted in `insufficient_evidence`. The file is not offered to
+  AcoustID until its bytes change. Re-identify searches and fingerprints both
+  again. A file that could not be opened or read is still tried on the next
+  run.
 
 ## 0.1.0 - 2026-10-06
 

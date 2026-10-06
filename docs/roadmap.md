@@ -366,9 +366,6 @@ screenshot for a display-only defect, and removes its entry.
   looked up again on every match run of the Library.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
-- A file whose fingerprint fails, and a Track without a title or artist that
-  MusicBrainz cannot search, are examined again by every matching run. A
-  failed fingerprint is decoded again.
 - Matching has no offline setting, and `orca-gtk` has none for scrobbling.
   Without a network, matching uses cached answers and stops at the first
   Track it has none for.
