@@ -384,6 +384,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.match_fingerprints = isEnabled(std.mem.span(value));
     }
+    if (getString(keys, "matching", "contribute")) |value| {
+        defer gtk.g_free(value);
+        self.contribute_acoustid = isEnabled(std.mem.span(value));
+    }
     if (getString(keys, "library", "watch")) |value| {
         defer gtk.g_free(value);
         self.watch_folders = isEnabled(std.mem.span(value));
@@ -596,6 +600,7 @@ pub fn save(self: *App) void {
     var threshold_buffer: [8]u8 = undefined;
     gtk.g_key_file_set_string(keys, "matching", "accept_confidence", strings.format(&threshold_buffer, "{d}", .{self.match_threshold_percent}).ptr);
     gtk.g_key_file_set_string(keys, "matching", "fingerprints", if (self.match_fingerprints) "true" else "false");
+    gtk.g_key_file_set_string(keys, "matching", "contribute", if (self.contribute_acoustid) "true" else "false");
     gtk.g_key_file_set_string(keys, "library", "watch", if (self.watch_folders) "true" else "false");
     if (self.analysis_threads) |threads| {
         var threads_buffer: [8]u8 = undefined;

@@ -240,8 +240,11 @@ names each `Runtime` method the C ABI does not reach and why.
 - AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
   files whose recording ID came from an edit or from a match accepted one at
   a time that AcoustID did not propose, once per file and ID, with the user
-  key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk` sends them from the Matches
-  page's Submit to AcoustID, with the key saved in Settings > Library. See
+  key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk` sends them from Settings >
+  Library > Identification, with the key saved there: Submit Now, or by
+  itself after each confirmation and every 15 minutes with Contribute to
+  AcoustID on, which is off by default. The command palette's Submit to
+  AcoustID does the same as Submit Now. See
   [providers.md](providers.md#acoustid-submission).
 - Provider sources: a fixed list of the services Orca takes data from, each
   with its URL, what it supplies and its licence, so every frontend credits

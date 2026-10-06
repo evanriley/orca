@@ -38,6 +38,7 @@ const art = @import("art.zig");
 const secret = @import("secret.zig");
 const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
+const submissions = @import("submissions.zig");
 const playlists = @import("playlists.zig");
 const appearance = @import("appearance.zig");
 const first_run = @import("first_run.zig");
@@ -98,6 +99,7 @@ fn tick(self: *App) void {
         first_run.tick(self);
         offline.tick(self);
         maintenance.tick(self);
+        submissions.tick(self);
         preferences.tick(self);
         details.tick(self);
         lyrics.tick(self);
@@ -121,6 +123,8 @@ fn armTimeout(self: *App) void {
     var next_ms = self.runtime.nextPumpTimeoutMs();
     if (self.maintenance_row != null and self.idle_maintenance)
         next_ms = @min(next_ms orelse maintenance.refresh_ms, maintenance.refresh_ms);
+    if (self.contribute_acoustid)
+        next_ms = @min(next_ms orelse submissions.refresh_ms, submissions.refresh_ms);
     const timeout_ms = next_ms orelse return;
     const interval = std.math.cast(c_uint, timeout_ms) orelse std.math.maxInt(c_uint);
     self.timeout_source = gtk.g_timeout_add(interval, timeoutFired, self);

@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Contribute to AcoustID in Settings.** `orca-gtk`'s Settings › Library ›
+  Identification gains a Contribute to AcoustID switch, off by default and
+  available once an AcoustID key is saved, and a "N files waiting" row with
+  Submit Now. With the switch on, the app sends confirmed recording IDs by
+  itself after each confirmation and every 15 minutes while files wait; a
+  rejected key is reported.
 - **Match Review shows the release beside your files.** In `orca-gtk`, Match
   Review lists the release tracklist next to the album's files: confirm a
   suggested pairing, pair or unpair a track, and see which files are not on

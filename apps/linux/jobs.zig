@@ -299,12 +299,16 @@ fn matchingRefusal(err: anyerror) [:0]const u8 {
 }
 
 pub fn startSubmission(self: *App) void {
-    const library = self.library orelse return;
-    const job = self.runtime.startAcoustIdSubmission(library) catch |err| return self.toast(switch (err) {
+    requestSubmission(self, false) catch |err| self.toast(switch (err) {
         error.AcoustIdBusy => "Already finding matches",
         else => queueRefusal(err, "Could not start submitting to AcoustID"),
     });
-    begin(self, .{ .task = .submission, .job = job });
+}
+
+pub fn requestSubmission(self: *App, quiet: bool) !void {
+    const library = self.library orelse return;
+    const job = try self.runtime.startAcoustIdSubmission(library);
+    begin(self, .{ .task = .submission, .job = job, .quiet = quiet });
 }
 
 /// Writes an approved plan. The plan id is its undo group. False when the
@@ -579,11 +583,12 @@ fn matchingFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.J
         strings.printZ(&buffer, "Found matches for {f} {s}", .{ strings.grouped(matched), if (matched == 1) "track" else "tracks" }) catch "Found matches");
 }
 
-fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.SubmissionStats) void {
+fn submissionFinished(self: *App, quiet: bool, state_value: liborca.JobState, stats: ?liborca.SubmissionStats) void {
     matches.invalidate(self);
+    preferences.showSubmission(self);
     if (state_value == .cancelled) return self.toast("Stopped");
-    const result = stats orelse return self.toast("AcoustID could not be reached; try again later");
-    if (state_value != .succeeded) return self.toast(switch (result.outcome) {
+    const result = stats orelse return if (!quiet) self.toast("AcoustID could not be reached; try again later");
+    if (state_value != .succeeded) return if (!quiet or result.outcome == .invalid_user_key) self.toast(switch (result.outcome) {
         .needs_user_key => "Save your AcoustID key in Settings first",
         .invalid_user_key => "AcoustID did not accept your key",
         .cancelled => "Stopped",
@@ -633,7 +638,7 @@ fn finished(
     const task = tracked.task;
     if (task == .tag_write) self.tag_write_group = tracked.tag_write_group;
     if (task == .matching) return matchingFinished(self, tracked, state_value, match_stats, match_release);
-    if (task == .submission) return submissionFinished(self, state_value, submission_stats);
+    if (task == .submission) return submissionFinished(self, tracked.quiet, state_value, submission_stats);
     if (task == .backfill) return backfillFinished(self, state_value, stats);
     if (task == .consistency) return consistencyFinished(self, state_value, stats);
     var buffer: [160]u8 = undefined;

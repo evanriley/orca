@@ -1723,7 +1723,8 @@ again at launch.
     to the available threads, saved as `[library] analysis_threads`), Find duplicates
     (with when the last search ran) and Idle maintenance.
   - Identification: MusicBrainz, always on; Match by audio fingerprint; the
-    AcoustID key; Accept confident matches at, a stepper from 50% to 100%
+    AcoustID key; Contribute to AcoustID with its Submit Now row; Accept
+    confident matches at, a stepper from 50% to 100%
     saved as `[matching] accept_confidence`.
   - Writing to Files: Always preview before writing tags, always on.
 - Playback, saved in `[playback]`:
@@ -1944,9 +1945,26 @@ clears the field, turns the toggle off and hides it again. It has the same
 Unlock and storage rules as the ListenBrainz token below, stored under
 `acoustid_credential_service` / `acoustid_user_key_account`. Its stored state
 is found without unlocking the keyring, so opening Settings never prompts; a
-locked keyring reads "Keyring locked" until Unlock is chosen. The Matches page
-finds whether a key is saved the same way at startup, and again after each
-save and remove.
+locked keyring reads "Keyring locked" until Unlock is chosen. Whether a key is
+saved is found the same way when Settings is shown and after each save and
+remove, and once when the app first needs it to contribute.
+
+Below the key row, **Contribute to AcoustID** ("Sends the recording IDs you
+confirm, with their fingerprints") is off by default and saved as
+`[matching] contribute=true|false`. It is insensitive, with the subtitle
+"Needs your AcoustID key", while no key is saved. The row below it reads
+"N files waiting", from `Runtime.libraryAcoustIdSubmittableCount`, with Submit
+Now, which is the command palette's Submit to AcoustID and starts
+`Runtime.startAcoustIdSubmission`; with nothing waiting it reads "Nothing
+waiting" and has no button. It is insensitive without a key, and is refreshed
+when Settings is shown, after a submission Job ends and after the starts
+below. With the switch on and a key saved, the app starts that Job itself,
+with no toast when it is refused or the Job fails, except "AcoustID did not
+accept your key", after a match or release
+is accepted or a release track is paired, once when the switch is turned on,
+and from the tick at most every 15 minutes while no frontend Job runs, in
+each case only while files are waiting. A Job that is running, waiting or
+refused as busy is tried again at the next start. Pacing is liborca's.
 
 The **Listening** tab's ListenBrainz card starts with Account: Connect…
 shows the token field, titled Paste your user token, with a show-token toggle

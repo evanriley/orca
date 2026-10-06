@@ -11,6 +11,7 @@ const app = @import("app.zig");
 const art = @import("art.zig");
 const jobs = @import("jobs.zig");
 const matches = @import("matches.zig");
+const submissions = @import("submissions.zig");
 const window = @import("window.zig");
 const page_ui = @import("page.zig");
 
@@ -516,6 +517,7 @@ fn pairClicked(source: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     var buffer: [48]u8 = undefined;
     self.toast(strings.format(&buffer, "Paired with track {s}", .{choice.number[0..choice.number_len]}));
     matches.invalidate(self);
+    submissions.autoStart(self);
 }
 
 fn unpairClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

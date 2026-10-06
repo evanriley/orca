@@ -14,7 +14,7 @@ const jobs = @import("jobs.zig");
 const details = @import("details.zig");
 const health = @import("health.zig");
 const window = @import("window.zig");
-const secret = @import("secret.zig");
+const submissions = @import("submissions.zig");
 const tags = @import("tags.zig");
 const page_ui = @import("page.zig");
 const match_review = @import("match_review.zig");
@@ -262,6 +262,7 @@ pub fn accepted(self: *App) void {
     jobs.reloadLibraryViews(self);
     tags.popPages(self);
     details.invalidate(self);
+    submissions.autoStart(self);
     self.requestTick();
 }
 
@@ -320,10 +321,6 @@ pub fn setRecording(button: *gtk.Widget, recording_mbid: []const u8) void {
 pub fn recordingOf(button: ?*anyopaque) ?[]const u8 {
     const text: [*:0]const u8 = @ptrCast(gtk.g_object_get_data(button.?, "orca-recording") orelse return null);
     return std.mem.span(text);
-}
-
-pub fn showAcoustIdKey(self: *App, presence: secret.Presence) void {
-    self.acoustid_key_stored = presence == .stored;
 }
 
 fn groupOf(button: ?*anyopaque) ?i64 {

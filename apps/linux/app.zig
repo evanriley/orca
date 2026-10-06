@@ -309,6 +309,7 @@ pub const TrackedTask = struct {
     tag_write_group: u64 = 0,
     /// Tracks a `.matching` task had matched when the badge was last counted.
     shown_matched: u64 = 0,
+    quiet: bool = false,
 };
 
 pub const default_match_threshold_percent: u8 = 90;
@@ -506,6 +507,13 @@ pub const App = struct {
     match_threshold_percent: u8 = default_match_threshold_percent,
     match_fingerprints: bool = true,
     acoustid_key_stored: bool = false,
+    acoustid_key_known: bool = false,
+    acoustid_key_checking: bool = false,
+    contribute_acoustid: bool = false,
+    contribute_row: ?*gtk.Widget = null,
+    submission_row: ?*gtk.Widget = null,
+    submission_button: ?*gtk.Widget = null,
+    submission_checked_ms: ?i64 = null,
     acoustid_controls: CredentialControls = .{},
 
     settings_page: SettingsPage = .{},

@@ -96,8 +96,9 @@ Server: `api.acoustid.org`.
   matching. While nothing plays, it verifies one album at a time in the
   background with the same lookups, and the MusicBrainz release lookups they
   lead to.
-- Submission. You start it with the AcoustID submission action or
-  `orca-cli submit-acoustid`. It sends the fingerprints of files whose
+- Submission. You start it with the AcoustID submission action,
+  `orca-cli submit-acoustid` or, in `orca-gtk`, by turning on Contribute to
+  AcoustID, which is off by default. It sends the fingerprints of files whose
   recording ID you chose, so others can find them. Sent: the application key,
   your AcoustID user key, the length, the fingerprint, the file format and
   bitrate, and either the recording ID or, when the file's length differs much

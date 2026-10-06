@@ -567,7 +567,9 @@ pending proposal; `libraryMatchReviewPage` leaves their proposals out.
 
 `Runtime.startAcoustIdSubmission` sends AcoustID the fingerprints of files
 whose recording ID Orca chose, so other people's copies of the recording can
-be identified. It is started only by a person; no job starts it.
+be identified. liborca never starts it by itself; a frontend starts it on a
+person's request or, with their consent, on its own (`orca-gtk`'s Contribute to
+AcoustID).
 
 - **What is sent.** Files whose recording ID in effect is an Orca value from
   an accepted match or an edit, differs from the file's own tag or was written

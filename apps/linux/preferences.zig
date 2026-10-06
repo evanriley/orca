@@ -23,6 +23,7 @@ const transport = @import("transport.zig");
 const matches = @import("matches.zig");
 const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
+const submissions = @import("submissions.zig");
 const lyrics = @import("lyrics.zig");
 const page_ui = @import("page.zig");
 const main_window = @import("window.zig");
@@ -388,6 +389,51 @@ fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
     self.requestTick();
 }
 
+fn contributeSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    if (enabled == self.contribute_acoustid) return;
+    self.contribute_acoustid = enabled;
+    settings.save(self);
+    submissions.autoStart(self);
+    self.requestTick();
+}
+
+fn submitNowClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    jobs.startSubmission(state(data));
+}
+
+const contribute_subtitle = "Sends the recording IDs you confirm, with their fingerprints";
+const contribute_needs_key = "Needs your AcoustID key";
+
+pub fn showSubmission(self: *App) void {
+    const keyed: gtk.gboolean = if (self.acoustid_key_stored) gtk.true_ else gtk.false_;
+    if (self.contribute_row) |row| {
+        gtk.gtk_widget_set_sensitive(row, keyed);
+        adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), if (self.acoustid_key_stored) contribute_subtitle else contribute_needs_key);
+    }
+    const row = self.submission_row orelse return;
+    gtk.gtk_widget_set_sensitive(row, keyed);
+    const count = submissions.waiting(self);
+    var buffer: [48]u8 = undefined;
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), if (count == 0)
+        "Nothing waiting"
+    else
+        strings.format(&buffer, "{f} {s} waiting", .{ strings.grouped(count), if (count == 1) "file" else "files" }));
+    if (self.submission_button) |button| gtk.gtk_widget_set_visible(button, @intFromBool(count != 0));
+}
+
+fn submissionRows(self: *App, target: Card) void {
+    const contribute = switchRow("Contribute to AcoustID", contribute_subtitle, self.contribute_acoustid, gtk.callback(contributeSwitched), self);
+    self.contribute_row = contribute;
+    target.add(contribute);
+    const status = actionRow("Nothing waiting", "");
+    self.submission_button = suffixButton(status, "Submit Now", null, gtk.callback(submitNowClicked), self);
+    self.submission_row = status;
+    target.add(status);
+    showSubmission(self);
+}
+
 const acoustid_key_url = "https://acoustid.org/api-key";
 const acoustid_key_link = "<a href=\"" ++ acoustid_key_url ++ "\">acoustid.org↗</a>";
 
@@ -413,6 +459,7 @@ fn identificationCard(self: *App) *gtk.Widget {
     identification.add(fixedRow("MusicBrainz", "Look up release metadata"));
     identification.add(switchRow("Match by audio fingerprint", "Sends fingerprints to AcoustID", self.match_fingerprints, gtk.callback(fingerprintsSwitched), self));
     AcoustIdKey.add(self, identification);
+    submissionRows(self, identification);
     identification.add(stepperRow(
         &self.settings_page.threshold,
         "Accept confident matches at",
@@ -1720,7 +1767,7 @@ const acoustid_user_key: Credential = .{
     .first_check = .report,
     .controls = acoustIdControls,
     .changed = acoustIdKeyChanged,
-    .checked = matches.showAcoustIdKey,
+    .checked = submissions.keyChecked,
 };
 
 fn CredentialRows(comptime credential: Credential) type {
@@ -3222,6 +3269,7 @@ fn refreshTab(self: *App, which: app.SettingsTab) void {
             showDuplicates(self);
             if (self.watch_row) |row| adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), @intFromBool(self.watch_folders));
             AcoustIdKey.checkOnce(self);
+            showSubmission(self);
         },
         .playback => transport.refreshDevices(self),
         .advanced => {
@@ -3305,6 +3353,9 @@ fn teardown(self: *App) void {
     self.listening_controls = .{};
     self.acoustid_controls = .{};
     self.watch_row = null;
+    self.contribute_row = null;
+    self.submission_row = null;
+    self.submission_button = null;
     self.maintenance_row = null;
     if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
     parametric.leave(self);
