@@ -197,6 +197,7 @@ pub const TagWriteConflict = runtime.TagWriteConflict;
 pub const TagWriteSkip = runtime.TagWriteSkip;
 pub const TagWriteSkipReason = runtime.TagWriteSkipReason;
 pub const TagWriteFailure = runtime.TagWriteFailure;
+pub const TagWriteFailureFile = runtime.TagWriteFailureFile;
 pub const TagWriteFailureReason = runtime.TagWriteFailureReason;
 pub const TagWriteGroupState = runtime.TagWriteGroupState;
 pub const TagWriteGroup = runtime.TagWriteGroup;

@@ -3847,8 +3847,8 @@ orca_status orca_library_plan_tag_write(
  * the Library or destroying the runtime waits for it. It SUCCEEDS when every
  * file was written. It FAILS when the write did not complete, or an earlier
  * interrupted write could not be recovered first; what it had written is then
- * rolled back as recovery does, and orca_job_tag_write_failure says which
- * file it stopped at and why. Either way the files are read again and
+ * rolled back as recovery does, and orca_job_tag_write_failure says why and
+ * which file, if any, it stopped at. Either way the files are read again and
  * reprojected afterwards. Its
  * orca_scan_stats has `files_seen` the files planned, `changed` those
  * written, and `errors` nonzero when it failed or a file could not be read
@@ -3869,7 +3869,7 @@ orca_status orca_library_start_tag_write(
     orca_handle *job
 );
 
-/* Why a tag write failed at a file. */
+/* Why a tag write failed. */
 typedef enum orca_tag_write_failure_reason {
     /* Orca may not create or replace files in the file's folder or in the
      * Library's backup directory. */
@@ -3886,10 +3886,19 @@ typedef enum orca_tag_write_failure_reason {
     /* The file is read-only: no write permission bit is set, or the process
      * may not write it. Orca does not change a file made read-only. */
     ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY = 5,
+    /* The Library's backup directory already holds backups under the plan's
+     * id, made by another write after this plan was made. Plan the write
+     * again. */
+    ORCA_TAG_WRITE_FAILURE_BACKUP_EXISTS = 6,
+    /* An interrupted earlier write or undo could not be finished first, as
+     * when the folder of a file it changed is missing. */
+    ORCA_TAG_WRITE_FAILURE_RECOVERY_FAILED = 7,
 } orca_tag_write_failure_reason;
 
-/* The file a failed tag write stopped at: `action_index` is its position
- * among the plan's files, and `reason` an orca_tag_write_failure_reason. */
+/* Why a tag write failed, as an orca_tag_write_failure_reason in `reason`,
+ * and the file it stopped at: `action_index` is its position among the
+ * plan's files. `file_id` and `action_index` are 0 when the write failed
+ * before reaching a file. */
 typedef struct orca_tag_write_failure {
     int64_t file_id;
     uint32_t action_index;
@@ -3897,11 +3906,10 @@ typedef struct orca_tag_write_failure {
     uint8_t reserved[3];
 } orca_tag_write_failure;
 
-/* Fills `out` with the file a finished, failed tag write job stopped at and
- * why. NOT_FOUND while the job runs, after it succeeded, or when it failed
- * before reaching a file, such as when an earlier interrupted write could
- * not be recovered. INVALID_ARGUMENT for a NULL `out` or a job that is not
- * an ORCA_JOB_KIND_MUTATION job. */
+/* Fills `out` with why a finished tag write job failed and the file it
+ * stopped at. NOT_FOUND while the job runs or after it succeeded.
+ * INVALID_ARGUMENT for a NULL `out` or a job that is not an
+ * ORCA_JOB_KIND_MUTATION job. */
 orca_status orca_job_tag_write_failure(
     orca_runtime *runtime,
     orca_handle job,

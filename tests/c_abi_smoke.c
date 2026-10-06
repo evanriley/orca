@@ -4338,6 +4338,30 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
                 ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(file_is(song, original, original_length) == 1);
 
+    struct tag_plan_capture blocked;
+    if (plan_tags(runtime, *library, track_id, &blocked) != 0) return 1;
+    char backup_root[1024];
+    char blocked_backup[1024];
+    SMOKE_CHECK(snprintf(backup_root, sizeof backup_root, "%s.orca-backups", database) <
+                (int)sizeof backup_root);
+    SMOKE_CHECK(snprintf(blocked_backup, sizeof blocked_backup, "%s/%llu", backup_root,
+                         (unsigned long long)blocked.plan_id) < (int)sizeof blocked_backup);
+    SMOKE_CHECK(mkdir(backup_root, 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(mkdir(blocked_backup, 0700) == 0);
+    orca_handle blocked_job;
+    SMOKE_CHECK(orca_library_start_tag_write(runtime, *library, blocked.plan_id, &blocked.digest,
+                                             &blocked_job) == ORCA_STATUS_OK);
+    uint8_t blocked_state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, blocked_job, &blocked_state, 1, 60000) == 1);
+    SMOKE_CHECK(blocked_state == ORCA_JOB_FAILED);
+    orca_tag_write_failure failure;
+    memset(&failure, 0xff, sizeof failure);
+    SMOKE_CHECK(orca_job_tag_write_failure(runtime, blocked_job, &failure) == ORCA_STATUS_OK);
+    SMOKE_CHECK(failure.reason == ORCA_TAG_WRITE_FAILURE_BACKUP_EXISTS);
+    SMOKE_CHECK(failure.file_id == 0 && failure.action_index == 0);
+    SMOKE_CHECK(file_is(song, original, original_length) == 1);
+    SMOKE_CHECK(rmdir(blocked_backup) == 0);
+
     if (write_tags(runtime, *library, &plan) != 0) return 1;
     SMOKE_CHECK(file_is(song, original, original_length) == 0);
     struct tag_plan_capture written;

@@ -4334,8 +4334,8 @@ test "a failed tag write reports its file and reason" {
     const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
     try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
     const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
-    try std.testing.expectEqual(preview.files[0].file_id, failure.file_id);
-    try std.testing.expectEqual(@as(u32, 0), failure.action_index);
+    try std.testing.expectEqual(preview.files[0].file_id, failure.file.?.file_id);
+    try std.testing.expectEqual(@as(u32, 0), failure.file.?.action_index);
     try std.testing.expectEqual(TagWriteFailureReason.permission_denied, failure.reason);
 
     const library_database = try libraryDatabase(&runtime, library);
@@ -4430,8 +4430,8 @@ test "a file made read-only after planning fails the tag write job as read-only 
     const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
     try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
     const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
-    try std.testing.expectEqual(preview.files[read_only_index].file_id, failure.file_id);
-    try std.testing.expectEqual(read_only_index, failure.action_index);
+    try std.testing.expectEqual(preview.files[read_only_index].file_id, failure.file.?.file_id);
+    try std.testing.expectEqual(read_only_index, failure.file.?.action_index);
     try std.testing.expectEqual(TagWriteFailureReason.file_read_only, failure.reason);
     const library_database = try libraryDatabase(&runtime, library);
     try expectJournaledError(library_database, preview.plan_id, read_only_index, "FileReadOnly");
@@ -4445,6 +4445,151 @@ test "a file made read-only after planning fails the tag write job as read-only 
     try std.testing.expectEqualSlices(u8, other_original, other_after);
     try expectOnlyFixtureFiles(temporary.dir);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, library_database.backup_directory.?, .{}));
+}
+
+test "a tag write whose backup directory was created after planning fails as backup_exists with no file and changes nothing" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const library_database = try libraryDatabase(&runtime, library);
+    const plan_backup_directory = try std.fmt.allocPrint(std.testing.allocator, "{s}/{d}", .{ library_database.backup_directory.?, preview.plan_id });
+    defer std.testing.allocator.free(plan_backup_directory);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plan_backup_directory);
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(@as(?runtime_module.TagWriteFailureFile, null), failure.file);
+    try std.testing.expectEqual(TagWriteFailureReason.backup_exists, failure.reason);
+
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectOnlyFixtureFiles(temporary.dir);
+}
+
+test "a tag write that cannot first recover an interrupted write fails as recovery_failed with no file and changes nothing" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+
+    const library_database = try libraryDatabase(&runtime, library);
+    const root = std.Io.Dir.path.dirname(preview.files[0].path).?;
+    const unmounted_source = try std.fmt.allocPrint(std.testing.allocator, "{s}/unmounted/b.flac", .{root});
+    defer std.testing.allocator.free(unmounted_source);
+    const unmounted_stage = try std.fmt.allocPrint(std.testing.allocator, "{s}/unmounted/.b.flac.orca-stage-1-0", .{root});
+    defer std.testing.allocator.free(unmounted_stage);
+    const unmounted_backup = try std.fmt.allocPrint(std.testing.allocator, "{s}/{d}/0-b.flac", .{ library_database.backup_directory.?, preview.plan_id + 1000 });
+    defer std.testing.allocator.free(unmounted_backup);
+    const identity = try metadata.file_mutation.identity(std.testing.io, preview.files[0].path);
+    const interrupted = try library_database.mutation_journal.prepare(.{
+        .plan_id = preview.plan_id + 1000,
+        .group_id = preview.plan_id + 1000,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = unmounted_source,
+        .stage_path = unmounted_stage,
+        .backup_path = unmounted_backup,
+        .expected_size = identity.size_bytes,
+        .expected_modified_ns = identity.modified_ns,
+        .expected_quick_hash = identity.quick_hash,
+        .expected_content_hash = identity.content_hash,
+    });
+    try library_database.mutation_journal.recordResultIdentity(
+        interrupted,
+        .planned,
+        identity.size_bytes,
+        identity.modified_ns,
+        identity.quick_hash,
+        identity.content_hash.?,
+    );
+    try library_database.mutation_journal.transition(interrupted, .planned, .staged, null);
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(@as(?runtime_module.TagWriteFailureFile, null), failure.file);
+    try std.testing.expectEqual(TagWriteFailureReason.recovery_failed, failure.reason);
+
+    try std.testing.expectEqual(database.MutationState.staged, try library_database.mutation_journal.state(interrupted));
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectOnlyFixtureFiles(temporary.dir);
+}
+
+test "a tag write whose file no longer has a writable format fails as changed_since_plan at that file and changes nothing" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const replaced_index: u32 = for (preview.files, 0..) |file, index| {
+        if (std.mem.endsWith(u8, file.path, "/b.flac")) break @intCast(index);
+    } else return error.TestUnexpectedResult;
+    const other_original = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_original);
+    const replacement = "not an audio file";
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "b.flac", .data = replacement });
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(preview.files[replaced_index].file_id, failure.file.?.file_id);
+    try std.testing.expectEqual(replaced_index, failure.file.?.action_index);
+    try std.testing.expectEqual(TagWriteFailureReason.changed_since_plan, failure.reason);
+
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(replacement, after);
+    const other_after = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_after);
+    try std.testing.expectEqualSlices(u8, other_original, other_after);
+    try expectOnlyFixtureFiles(temporary.dir);
 }
 
 test "writing tags to one copy of a shared file splits that copy off and marks the written value on the file that holds it" {

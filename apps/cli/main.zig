@@ -3668,7 +3668,11 @@ fn writeTags(context: Context) !void {
     const job_handle = try runtime.startTagWrite(library, plan.plan_id, digest);
     awaitJob(&runtime, stdout, job_handle, null) catch |err| {
         if (err == error.JobFailed) if (try runtime.jobTagWriteFailure(job_handle)) |failure| {
-            try stdout.print("failed\t{d}\t{t}\t{s}\n", .{ failure.file_id, failure.reason, plan.files[failure.action_index].path });
+            if (failure.file) |file| {
+                try stdout.print("failed\t{d}\t{t}\t{s}\n", .{ file.file_id, failure.reason, plan.files[file.action_index].path });
+            } else {
+                try stdout.print("failed\t-\t{t}\t-\n", .{failure.reason});
+            }
             try stdout.flush();
         };
         return err;

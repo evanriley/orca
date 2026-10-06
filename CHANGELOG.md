@@ -124,6 +124,16 @@
   instead of the process arena, so a cold scan no longer holds memory for
   every file until it exits. In a Debug build the allocator reports leaks at
   exit.
+- Every failed tag write reports a `TagWriteFailure`, including one that fails
+  before reaching a file. `TagWriteFailure.file` (a `TagWriteFailureFile`) is
+  null then, and `orca_tag_write_failure` has `file_id` and `action_index` 0.
+  New reasons `backup_exists` (`ORCA_TAG_WRITE_FAILURE_BACKUP_EXISTS`) for a
+  backup directory another write created after planning, and
+  `recovery_failed` (`ORCA_TAG_WRITE_FAILURE_RECOVERY_FAILED`) for an earlier
+  interrupted write that could not be finished first; a file whose format
+  stopped being writable after planning reports `changed_since_plan` at that
+  file. `orca-cli write-tags` prints `failed - REASON -` and `orca-gtk` names
+  the reason.
 
 ## 0.1.0 - 2026-10-06
 

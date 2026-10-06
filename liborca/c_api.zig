@@ -4321,9 +4321,10 @@ pub export fn orca_job_tag_write_failure(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const found = box.runtime.jobTagWriteFailure(importJob(job_handle)) catch |err| return box.fail(@src(), err);
     const failure = found orelse return box.reject(@src(), .not_found, "the job recorded no failure");
+    const file = failure.file orelse core.runtime.TagWriteFailureFile{ .file_id = 0, .action_index = 0 };
     destination.* = .{
-        .file_id = failure.file_id,
-        .action_index = failure.action_index,
+        .file_id = file.file_id,
+        .action_index = file.action_index,
         .reason = exportTagWriteFailureReason(failure.reason),
     };
     return .ok;
@@ -8064,6 +8065,8 @@ pub fn exportTagWriteFailureReason(reason: core.runtime.TagWriteFailureReason) u
         .changed_since_plan => 3,
         .other => 4,
         .file_read_only => 5,
+        .backup_exists => 6,
+        .recovery_failed => 7,
     };
 }
 

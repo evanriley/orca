@@ -774,6 +774,8 @@ fn tagWriteFailedText(failure: ?liborca.TagWriteFailure) [:0]const u8 {
         .changed_since_plan => "Writing tags failed: a file changed after the write was planned. The files were left as they were.",
         .other => "Writing tags failed; the files were left as they were",
         .file_read_only => "Writing tags failed: a file is read-only. The files were left as they were.",
+        .backup_exists => "Writing tags failed: another write took its backup folder. Try again. The files were left as they were.",
+        .recovery_failed => "Writing tags failed: an earlier interrupted write could not be finished, as when its drive is not connected. The files were left as they were.",
     };
 }
 

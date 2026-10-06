@@ -85,13 +85,15 @@ pub const Executor = struct {
         self.failed_action_index = null;
         if (group_id == 0) return error.InvalidMutationGroup;
         var writes_tags = false;
-        for (plan.actions) |action| switch (action) {
+        for (plan.actions, 0..) |action, action_index| switch (action) {
             .write_tags => |write| {
                 writes_tags = true;
+                self.failed_action_index = @intCast(action_index);
                 _ = try tagFormat(self.io, write.path) orelse return error.UnsupportedTagWriter;
             },
             .move => {},
         };
+        self.failed_action_index = null;
         const plan_backup_directory: ?[]u8 = if (writes_tags) try self.planBackupDirectory(plan.id) else null;
         defer if (plan_backup_directory) |path| self.allocator.free(path);
         if (plan_backup_directory) |path| {

@@ -228,12 +228,17 @@ pub const SubmissionStats = struct {
     outcome: SubmissionOutcome = .completed,
 };
 
-/// The file a failed tag write stopped at, and why.
+/// Why a tag write failed, and the file it stopped at.
 pub const TagWriteFailure = struct {
+    /// Null when the write failed before reaching a file.
+    file: ?TagWriteFailureFile,
+    reason: TagWriteFailureReason,
+};
+
+pub const TagWriteFailureFile = struct {
     file_id: i64,
     /// The plan's action for the file, in the order the plan lists its files.
     action_index: u32,
-    reason: TagWriteFailureReason,
 };
 
 pub const TagWriteFailureReason = enum {
@@ -252,6 +257,13 @@ pub const TagWriteFailureReason = enum {
     /// The file is read-only: no write permission bit is set, or the process
     /// may not write it. Orca does not change a file made read-only.
     file_read_only,
+    /// The Library's backup directory already holds backups under the plan's
+    /// ID, made by another write after this plan was made. Plan the write
+    /// again.
+    backup_exists,
+    /// An interrupted earlier write or undo could not be finished first, as
+    /// when the folder of a file it changed is missing.
+    recovery_failed,
 };
 
 fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
@@ -259,8 +271,9 @@ fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
         error.AccessDenied, error.PermissionDenied => .permission_denied,
         error.ReadOnlyFileSystem => .read_only_file_system,
         error.NoSpaceLeft => .no_space,
-        error.FileIdentityChanged => .changed_since_plan,
+        error.FileIdentityChanged, error.UnsupportedTagWriter => .changed_since_plan,
         error.FileReadOnly => .file_read_only,
+        error.TagWriteBackupExists => .backup_exists,
         else => .other,
     };
 }
@@ -1904,7 +1917,10 @@ pub const JobWorker = struct {
                 pending.journal_lock = null;
             }
             const lock = &pending.journal_lock.?;
-            self.database.recoverPendingMutations(io, lock) catch break :written false;
+            self.database.recoverPendingMutations(io, lock) catch {
+                self.tag_write_failure = .{ .file = null, .reason = .recovery_failed };
+                break :written false;
+            };
             var executor: metadata.executor.Executor = .{
                 .allocator = self.allocator,
                 .io = io,
@@ -1913,9 +1929,11 @@ pub const JobWorker = struct {
                 .backup_directory = self.database.backup_directory,
             };
             executor.executePlan(&pending.plan, pending.plan.id) catch |err| {
-                if (executor.failed_action_index) |index| self.tag_write_failure = .{
-                    .file_id = pending.file_ids[index],
-                    .action_index = index,
+                self.tag_write_failure = .{
+                    .file = if (executor.failed_action_index) |index| .{
+                        .file_id = pending.file_ids[index],
+                        .action_index = index,
+                    } else null,
                     .reason = tagWriteFailureReason(err),
                 };
                 break :written false;

@@ -461,6 +461,7 @@ pub const SubmissionOutcome = library_pass.acoustid_submission.Outcome;
 
 pub const SubmissionStats = job_worker.SubmissionStats;
 pub const TagWriteFailure = job_worker.TagWriteFailure;
+pub const TagWriteFailureFile = job_worker.TagWriteFailureFile;
 pub const TagWriteFailureReason = job_worker.TagWriteFailureReason;
 pub const ScanStats = job_worker.ScanStats;
 pub const ScanStage = job_worker.ScanStage;
@@ -3380,10 +3381,9 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.jobReconcileRoot(self, job_handle);
     }
 
-    /// Which file a failed tag write stopped at and why, once the job has
-    /// finished; null while it runs, after it succeeded, or when it failed
-    /// before reaching a file. `error.NotATagWriteJob` for a job of another
-    /// kind.
+    /// Why a failed tag write failed and the file it stopped at, if any, once
+    /// the job has finished; null while it runs or after it succeeded.
+    /// `error.NotATagWriteJob` for a job of another kind.
     pub fn jobTagWriteFailure(self: *OrcaRuntime, job_handle: JobHandle) !?TagWriteFailure {
         return runtime_jobs.jobTagWriteFailure(self, job_handle);
     }
