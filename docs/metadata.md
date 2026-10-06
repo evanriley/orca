@@ -1,579 +1,468 @@
-# Metadata layers
+# Metadata
 
-Orca keeps three concepts separate:
+This file covers how Orca models, edits, matches, reads and writes track
+metadata: the metadata layers, Library edits, match acceptance, cover art,
+lyrics, and the journaled mutation of media files.
+
+## Layers
 
 - `ObservedFileMetadata` records what a source file currently says.
-- `OrcaMetadata` records preferred values, user edits, locks, and accepted
-  provider matches without mutating that file.
+- `OrcaMetadata` records preferred values, user edits, locks and accepted
+  provider matches without mutating the file.
 - `EffectiveMetadata` is a resolved view under an explicit preference policy.
 
 Every value carries provenance. A user-locked Orca value outranks automatic
-resolution even when the general policy prefers file tags.
+resolution even when the policy prefers file tags.
 
-Format readers and writers terminate at this boundary. The ID3v1/v1.1 mapping
-is deliberately conservative: text that cannot be represented without loss is
-rejected. The native FLAC writer maps canonical fields to Vorbis comments,
-preserves unknown comments and metadata blocks, and leaves audio frames
-byte-for-byte unchanged. Format-specific genre numbers, fixed-width storage,
-and comment keys do not define the canonical metadata model.
+Format readers and writers terminate at this boundary: format-specific genre
+numbers, fixed-width storage and comment keys do not define the canonical model.
+The ID3v1/v1.1 mapping rejects text it cannot represent without loss.
 
-Scanner observations are persisted in `observed_file_tags`, one row per
-`files` row, with genres in `observed_file_genres`, and are updated in the same
-bounded transaction as the file row. They do not update Track metadata and
-never cause a source-file write.
+The scanner persists observations in `observed_file_tags` (genres in
+`observed_file_genres`), one row per `files` row, in the same bounded
+transaction as the file row. Observations never update Track metadata and never
+cause a write to a source file.
 
 ## Library edits
 
 `Runtime.libraryEditTracks` sets or clears Orca's own values for Tracks without
 touching their files. A set value is a locked `user` value in
-`orca_metadata_values` on every file the Track resolves to (its preferred file
-and every other encoding of its recording), so it outranks the files' tags and
-survives rescans; a cleared value lets the tags apply again. The edited files
-are reprojected before the call returns, which moves a Track to another Release
-or Artist when the edit says so. Editable fields are title, artist, album, album
-artist, track number, disc number, date and compilation, the fields the
-projection groups and orders by, and the MusicBrainz recording, release,
-release-group, release-track and album-artist IDs, which must be lowercase
-UUIDs, the parental advisory (`0`, `1` or `2`; see
-[Parental advisory](#parental-advisory)), and the composer and comment (see
-[Composer and comment](#composer-and-comment)); `metadata.Field` appends new ones, because
-`orca_metadata_values.field` stores them by number. `orca-cli edit` and the
-`orca-gtk` tag editor drive it; the recording ID is `--recording-id` there,
-and the editor's MusicBrainz Recording field for a single track.
+`orca_metadata_values` on every file the Track resolves to, so it outranks the
+files' tags and survives rescans; a cleared value lets the tags apply again. The
+edited files are reprojected before the call returns, which moves a Track to
+another Release or Artist when the edit says so.
 
-Writing those values back into the files is a separate, explicit mutation; see
-below.
+Editable fields are title, artist, album, album artist, track number, disc
+number, date, compilation, the MusicBrainz recording, release, release-group,
+release-track and album-artist IDs (lowercase UUIDs), the
+[parental advisory](#parental-advisory), the
+[composer and comment](#composer-and-comment), and genres (see
+[Genres](#genres)). `metadata.Field` only appends, because
+`orca_metadata_values.field` stores fields by number. `orca-cli edit` and the
+`orca-gtk` tag editor drive it.
+
+Writing the values into the files is a separate, explicit mutation; see
+[Writing tags back](#writing-tags-back).
 
 ## MusicBrainz recording IDs
 
 A file's MusicBrainz recording ID is what its listens and its recording's love
-and hate are sent to ListenBrainz under. Orca can hold one of its own in
-`orca_metadata_values` (`metadata.Field.musicbrainz_recording_id`), beside the
-one the file's tag carries. The ID in effect is:
+and hate are sent to ListenBrainz under. The ID in effect is:
 
-1. a locked Orca value: a user's own edit, or an accepted correction;
-2. else the file's tag, when it is not empty;
+1. a locked Orca value: a user's edit or an accepted correction;
+2. else the file's tag, when not empty;
 3. else an unlocked Orca value, which is an accepted match.
 
-`repository.effectiveRecordingMbid` states that order once in SQL, and the
-listen subject and the three feedback queries all use it.
-`TrackRepository.recordingMbid` applies `metadata.resolveValue` under
-`prefer_file` to the same values, which is the same order, for
-`TrackDetails.musicbrainz_recording_id` and its source: `tag`, `match` or
-`edit`. `orca-cli track` prints both. A file that gains a tag on a rescan
-therefore uses the tag at once, and matching does not search for it. A
-recording ID from an accepted match or an edit may be sent to AcoustID with
-the file's fingerprint, and a tag Orca did not write never is; see
-[providers.md](providers.md#acoustid-submission).
+`repository.effectiveRecordingMbid` states this order once in SQL, and the
+listen subject and the feedback queries use it. `TrackRepository.recordingMbid`
+applies `metadata.resolveValue` under `prefer_file` to the same values for
+`TrackDetails.musicbrainz_recording_id` and its source (`tag`, `match` or
+`edit`). A file that gains a tag on a rescan uses the tag at once, and matching
+does not search for it.
 
-The projection does not read the recording ID. A tag write stores it under
-the write rule in
-[Writing tags back](#writing-tags-back): FLAC as `MUSICBRAINZ_TRACKID`, MP3
-and ADTS as a `UFID` frame owned by `http://musicbrainz.org`, as Picard does.
+The projection does not read the recording ID. A tag write stores it as
+`MUSICBRAINZ_TRACKID` in FLAC, and as a `UFID` frame owned by
+`http://musicbrainz.org` in MP3 and ADTS, as Picard does. Which IDs reach
+AcoustID is in [providers.md](providers.md#acoustid-submission).
 
 ### Accepting a match
 
-A match is an `identification_proposals` row from the matching job described
-in [providers.md](providers.md#matching).
-`IdentificationProposalRepository.acceptProposal` does all of this in one
+A match is an `identification_proposals` row from the matching job
+([providers.md](providers.md#matching)). Nothing takes effect until a person
+accepts one. `IdentificationProposalRepository.acceptProposal` runs in one
 transaction:
 
-1. Reads the proposal. One that no longer exists is refused with
-   `error.UnknownIdentificationProposal`, and one that is not pending with
-   `error.StaleIdentificationProposal`.
-2. Parses its payload and checks its recording ID. Either failing is
-   `error.InvalidProposalPayload`, and nothing is written.
+1. Reads the proposal: `error.UnknownIdentificationProposal` when it does not
+   exist, `error.StaleIdentificationProposal` when it is not pending.
+2. Parses its payload and checks its recording ID:
+   `error.InvalidProposalPayload`, with nothing written, on failure.
 3. Refuses a proposal in an album group with `error.ProposalInGroup`.
-4. Stores the recording ID as an unlocked `provider` value for the file,
-   and the title and artist, the release track's when the proposal was
-   looked up on its release, else the recording's, on every file of the
-   Track (`tracks.fileIds`), as edits do. A correction stores them locked;
-   see [Corrections](#corrections).
-5. Marks the proposal accepted and dismisses the file's other pending
-   proposals.
-6. Applies the consensus of the Release the Track belongs to, below.
+4. Stores the recording ID as an unlocked `provider` value for the file, and the
+   title and artist (the release track's when the proposal was looked up on its
+   release, else the recording's) on every file of the Track. A correction
+   stores them locked; see [Corrections](#corrections).
+5. Marks the proposal accepted and dismisses the file's other pending proposals.
+6. Applies the consensus of the Release the Track belongs to.
 
-Every value goes through the same upsert: a locked value is kept, a value
-equal to the stored one keeps its `written_at` and is not counted, an empty
-value is never stored, a MusicBrainz ID must be a lowercase UUID, and a value
-is cut to 4096 bytes on a character boundary. `values_written` counts every
-value stored on any file, the Release's other files included. No media file
-is written.
+Every value goes through one upsert: a locked value is kept, a value equal to
+the stored one keeps its `written_at` and is not counted, an empty value is
+never stored, a MusicBrainz ID must be a lowercase UUID, and a value is cut to
+4096 bytes on a character boundary. `values_written` counts every value stored,
+the Release's other files included. No media file is written.
 
-`Runtime.libraryAcceptMatch` and `libraryAcceptConfidentMatches` then
-reproject the files given values before they return, as edits do, so a Track
-can move to another Release. A Release all of whose Tracks move together to
-a key no Release holds keeps its id (see
-[Release identity](#release-identity)); otherwise the Tracks land on another
-id. A frontend holding a Release id reloads it after an accept.
+`Runtime.libraryAcceptMatch` and `libraryAcceptConfidentMatches` reproject the
+files given values before they return, so a Track can move to another Release. A
+frontend holding a Release id reloads it after an accept; see
+[Release identity](#release-identity).
 
 #### Release consensus
 
-`IdentificationProposalRepository.applyReleaseConsensus(release_id)` stores
-a MusicBrainz release's album-level values once the whole Orca Release
-agrees on it. It holds when every Track of the Release has a play file that
-names the same release R, either by an accepted proposal looked up on R or
-by an observed `MUSICBRAINZ_ALBUMID` of R; a file whose location is missing
-counts. A Release of more than 512 Tracks never reaches consensus. When it
-holds, every file of every Track accepted on R gets R's album, album artist,
-date, disc and track numbers (positions on R), and the release,
-release-group, release-track and album-artist IDs, the last only when the
-release credits one artist; a release credited to Various Artists
-(`89ad4ac3-39f7-470e-963a-56509c546377`) adds `compilation=1`. A Track that
-names R only by its tag gets nothing new. Running it again stores nothing.
+`IdentificationProposalRepository.applyReleaseConsensus(release_id)` stores a
+MusicBrainz release's album-level values once the whole Orca Release agrees on
+it. It holds when every Track of the Release has a play file that names the same
+release R, by an accepted proposal looked up on R or by an observed
+`MUSICBRAINZ_ALBUMID` of R; a file whose location is missing counts. A Release
+of more than 512 Tracks never reaches consensus.
 
-An accept applies it in its own transaction; bulk acceptance applies it once
-per Release it touched before each commit; Match Album applies it at its
-end.
+When it holds, every file of every Track accepted on R gets R's album, album
+artist, date, disc and track numbers (positions on R) and the release,
+release-group, release-track and album-artist IDs, the last only when R credits
+one artist. A release credited to Various Artists
+(`89ad4ac3-39f7-470e-963a-56509c546377`) adds `compilation=1`. A Track that
+names R only by its tag gets nothing. Applying it again stores nothing.
+
+An accept applies it in its own transaction, bulk acceptance once per Release it
+touched before each commit, and Match Album at its end.
 
 #### Applying a release
 
-`Runtime.libraryApplyRelease(library, allocator, release_id, fields)`,
-`orca-cli apply-release --fields=` and
-`orca_library_apply_matched_release_fields` store the `ReleaseFieldSet` a
-person chose of the Release's best candidate (see [api.md](api.md)) after
-reviewing it, locked under the `.release` write, and return a
-`ReleaseApplyOutcome`. `Runtime.libraryApplyMatchedRelease(library,
-release_id, fields)` does the same with a non-null `fields` and returns only
-the number of values stored.
+`Runtime.libraryApplyRelease(library, allocator, release_id, fields)`, `orca-cli
+apply-release --fields=` and `orca_library_apply_matched_release_fields` store
+the `ReleaseFieldSet` a person chose of the Release's best candidate
+([api.md](api.md)), locked, and return a `ReleaseApplyOutcome`.
+`Runtime.libraryApplyMatchedRelease(library, release_id, fields)` does the same
+with a non-null `fields` and returns only the number of values stored.
 
-`libraryApplyMatchedRelease` with `fields` null (`apply-release` without
-`--fields`, or `orca_library_apply_matched_release`) instead stores every
+With `fields` null (`apply-release` without `--fields`,
+`orca_library_apply_matched_release`), `libraryApplyMatchedRelease` stores every
 value of the release that every Track names by tag or accepted match, as
-unlocked provider values under the `.match` write, and accepts no proposal.
-A Release whose Tracks do not all name one release stores nothing.
+unlocked provider values, and accepts no proposal. A Release whose Tracks do not
+all name one release stores nothing.
 
-An Apply with fields works as follows. Values come from the
-candidate's tracklist snapshot laid against the Release as
-[Release alignment](#release-alignment) describes, not from proposals.
-Without a snapshot it is `error.NoReleaseTracklist`, without a candidate
-`error.NoReleaseCandidate`, and a Release of more than 512 Tracks is
-`error.ReleaseTooLarge`; the count-only API returns 0 for those. Tracks the
-alignment does not place never refuse an Apply. On every file of each
-Track with a play file:
+An Apply with fields takes its values from the candidate's tracklist snapshot
+laid against the Release by the [alignment](#release-alignment), not from
+proposals. It fails with `error.NoReleaseTracklist` without a snapshot,
+`error.NoReleaseCandidate` without a candidate and `error.ReleaseTooLarge` over
+512 Tracks (the count-only API returns 0). Tracks the alignment does not place
+never refuse an Apply. On every file of each Track with a play file it stores:
 
 - `album`: the release title;
 - `album_artist`: the release artist credit, plus `compilation=1` when the
   credit is the Various Artists artist alone;
 - `release_date`: the release date;
-- `release_id`: the release and release-group IDs, and the album-artist ID
-  when the credit names one artist.
+- `release_id`: the release and release-group IDs, and the album-artist ID when
+  the credit names one artist.
 
-A Track the alignment places `automatic` or `paired` also takes its
-release track's values:
+A Track the alignment places `automatic` or `paired` also takes its release
+track's values:
 
-- `release_id`: disc and track numbers and the release-track and recording
-  IDs; the pending proposal that placed it automatically (one for that
-  recording, enriched for this release first, never a correction or one in
-  an album group) is accepted;
-- `track_titles`: the title and artist credit the release track carries.
+- `release_id`: disc and track numbers, and the release-track and recording IDs;
+  the pending proposal that placed it automatically (never a correction or one
+  in an album group) is accepted;
+- `track_titles`: the title and artist credit.
 
-A snapshot that does not hold the release's artist IDs leaves the
-album-artist ID and compilation flag alone; the next lookup of the release,
-which a matching run makes once the 30-day cache
-expires, replaces the snapshot. `release_type`, `genre` and `artwork` are
-compared by Match Review but never stored. A user's locked value wins,
-including a value a pairing set, and `paired_metadata_values` is left as it
-is; a locked provider value is replaced. An equal value is not counted, and
-fields not selected keep their values and provenance. Without `release_id`
-pending proposals stay pending. Being locked, the stored values outrank the
-files' own tags under the projection's `prefer_file` policy, and a later
-user edit replaces them. Nothing is written to a file; the Release is
-reprojected.
+A snapshot without the release's artist IDs leaves the album-artist ID and
+compilation flag alone. `release_type`, `genre` and `artwork` are compared by
+Match Review but never stored. A user's locked value wins, including a value a
+pairing set; a locked provider value is replaced. An equal value is not counted,
+and fields not selected keep their values and provenance. Without `release_id`
+pending proposals stay pending. The stored values are locked, so they outrank
+the files' tags under `prefer_file`, and a later user edit replaces them. No
+file is written; the Release is reprojected.
 
-`libraryApplyRelease` returns a `ReleaseApplyOutcome`: the release ID, the
-values stored, how many Tracks took release-track values
-(`track_values`) and how many only the release's (`release_values_only`),
-`artist_ids_unknown`, a `LeftAloneTrack` for each Track given no
-release-track values, with the reason `not_placed` or `no_play_file`, and
-`reviewed_release_id`. An Apply that left no Track alone then marks the
-reprojected Release as reviewed against the release, as
-[below](#marking-a-release-as-reviewed), so a finished Release leaves the
-Confident and Needs Review lists; `reviewed_release_id` is its ID after the
-reprojection, the Release's own ID when all its Tracks moved together, or
-null when marking was refused or the written files lie on several
-Releases. An Apply that left a Track alone keeps the Release listed
-with its `needs_pairing` count. The release ID an Apply stores keeps the
-release a candidate of the Release, since candidates come from each play
-file's release ID in effect.
+`ReleaseApplyOutcome` carries the release ID, the values stored, `track_values`
+and `release_values_only` (Tracks that took release-track values, and Tracks
+that took only the release's), `artist_ids_unknown`, a `LeftAloneTrack` per
+Track given no release-track values (reason `not_placed` or `no_play_file`), and
+`reviewed_release_id`. An Apply that left no Track alone marks the reprojected
+Release as [reviewed](#marking-a-release-as-reviewed), so a finished Release
+leaves the Confident and Needs Review lists; `reviewed_release_id` is its ID
+after the reprojection, or null when marking was refused or the written files
+lie on several Releases. An Apply that left a Track alone keeps the Release
+listed with its `needs_pairing` count.
 
 #### Marking a release as reviewed
 
-`Runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid)`
-and `orca-cli mark-release-reviewed` record that a person found the
-Release equal to `release_mbid`, or its best candidate when null. It is
-refused with `error.ReleaseNotPlaced` unless the Release has Tracks and
-every Track has a play file and is placed `automatic` or `paired`, and
-with `error.ReleaseDiffers` when an Apply of every field would change a
-value in effect (a user's locked value counts as unchanged). The review is
-stored in `reviewed_releases` with a SHA-256 digest of the snapshot's
-header and tracks, the Release's Track IDs, and each of their files'
-observed tags and Orca values of the fields an Apply stores. It holds
-while that release is the best candidate and the digest is unchanged; a
-Release whose review holds is listed only in the `reviewed` bucket of the
-release-match page, and `ReleaseMatchCounts.reviewed` counts it. A change
-to the Tracks, a value, the best candidate or the snapshot brings the
-Release back; the stale row is left in place and replaced by the next
-review.
+`Runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid)` and
+`orca-cli mark-release-reviewed` record that a person found the Release equal to
+`release_mbid`, or its best candidate when null. It is refused with
+`error.ReleaseNotPlaced` unless the Release has Tracks and every Track has a
+play file and is placed `automatic` or `paired`, and with `error.ReleaseDiffers`
+when an Apply of every field would change a value in effect (a user's locked
+value counts as unchanged).
 
-Since a complete Apply marks a Release reviewed on its own, the `reviewed`
-bucket is where a person finds what a review hid.
-`Runtime.libraryUnmarkReleaseReviewed(library, release_id)` and
-`orca-cli unmark-release-reviewed` delete the Release's review, held or
-stale, and the Release returns to the bucket its candidates put it in. It
-changes no value; `error.ReleaseNotReviewed` when there is no review.
+The review is stored in `reviewed_releases` with a SHA-256 digest of the
+snapshot's header and tracks, the Release's Track IDs, and each file's observed
+tags and Orca values of the fields an Apply stores. It holds while that release
+is the best candidate and the digest is unchanged. A Release whose review holds
+is listed only in the `reviewed` bucket of the release-match page, and
+`ReleaseMatchCounts.reviewed` counts it. A change to the Tracks, a value, the
+best candidate or the snapshot brings the Release back; the stale row stays
+until the next review replaces it.
 
-`libraryDismissReleaseCandidate` removes a release from the candidates.
+`Runtime.libraryUnmarkReleaseReviewed(library, release_id)` and `orca-cli
+unmark-release-reviewed` delete the review, held or stale, and change no value:
+`error.ReleaseNotReviewed` when there is none. `libraryDismissReleaseCandidate`
+removes a release from the candidates.
 
 #### Release identity
 
-The projection resolves a Release's MusicBrainz release ID from the Orca
-value and the tag under `prefer_file`, so an accepted release ID keys the
-Release. An Apply, accept or edit that changes the album, album artist or
-release ID of every Track of a Release, when no Release holds the new key,
-re-keys that Release row in place: it keeps its id, and with it its
-pairings, review, love, dismissed candidates and covers, so a frontend
-holding the id follows it. Its release info and stored release-level
-proposals are deleted, as a new row would not have them. When the Tracks
-instead join a Release that exists, split, or share the Release with files
-outside the reprojected folder, they move to another row; a Release left
-without Tracks hands its fetched cover, cover candidates, love, dismissed
-candidates and review to the Release that took most of them, each unless
-that one has its own.
+The projection resolves a Release's MusicBrainz release ID from the Orca value
+and the tag under `prefer_file`, so an accepted release ID keys the Release. An
+Apply, accept or edit that changes the album, album artist or release ID of
+every Track of a Release, when no Release holds the new key, re-keys that row in
+place. It keeps its id and with it its pairings, review, love, dismissed
+candidates and covers, so a frontend holding the id follows it. Its release info
+and stored release-level proposals are deleted.
+
+When the Tracks instead join an existing Release, split, or share the Release
+with files outside the reprojected folder, they move to another row. A Release
+left without Tracks hands its fetched cover, cover candidates, love, dismissed
+candidates and review to the Release that took most of them, each unless that
+one has its own.
 
 #### Match Review diff
 
-`Runtime.libraryReleaseMatchDiff` compares the Release with a candidate
-release. When the candidate has a tracklist snapshot, the candidate side is
-what an Apply of it would store: album, album artist, date and release ID
-from the snapshot, and for each Track the alignment places, its release
-track's position, title and length; Tracks it does not place show no
-candidate title. A field among `album`, `album_artist`, `release_date`,
-`release_id` and `track_titles` differs exactly when an Apply of that field
-alone would change a value in effect, computed by the same dry run the
-Apply uses, so a Release with every Track placed and no such field
-differing is one `libraryMarkReleaseReviewed` accepts. `track_titles`
-reads "N of M differ" against "P of M on the release", N counting the
-placed Tracks an Apply would retitle. Without a snapshot, the candidate
-side comes from the Tracks' proposals. `release_type`, `genre` and
-`artwork` come from proposals and stored covers either way. The release
-match page names a best candidate that has a snapshot by the snapshot's
-title and date.
+`Runtime.libraryReleaseMatchDiff` compares the Release with a candidate release.
+With a tracklist snapshot, the candidate side is what an Apply of it would
+store; Tracks the alignment does not place show no candidate title. Without one,
+it comes from the Tracks' proposals. A field among `album`, `album_artist`,
+`release_date`, `release_id` and `track_titles` differs exactly when an Apply of
+that field alone would change a value in effect, computed by the dry run the
+Apply uses. A Release with every Track placed and no field differing is
+therefore one `libraryMarkReleaseReviewed` accepts. `release_type`, `genre` and
+`artwork` come from proposals and stored covers.
 
 #### Release alignment
 
-Match Review compares a Release with one MusicBrainz release's own
-tracklist, the snapshot every matching lookup of that release stores (see
-[providers.md](providers.md#musicbrainz-release-lookup)), not only with
-what the Tracks' proposals say. `Runtime.libraryReleaseAlignment` and
-`orca-cli release-alignment` compute it on each call; only a person's
-pairings are stored.
+Match Review compares a Release with one MusicBrainz release's own tracklist,
+the snapshot every matching lookup stores
+([providers.md](providers.md#musicbrainz-release-lookup)).
+`Runtime.libraryReleaseAlignment` and `orca-cli release-alignment` compute it on
+each call; only a person's pairings are stored. Each release track, in disc and
+position order, gets at most one Track and a status:
 
-Each release track, in disc and position order, gets at most one Track and
-a status:
-
-- `paired`: a person paired the Track with the release track (see
-  [Pairing a Track](#pairing-a-track)).
-- `automatic`: the release track lists a recording ID the Track holds,
-  from the play file's recording ID in effect (tag or user edit), an
-  accepted match, or a pending match. `recording_source` says which.
-- `suggested`: no recording ID places them, but at least two of three
-  agree: the titles are equal after `text_key` normalization, the lengths
-  are within 2000 ms, and the Track's disc (1 when unset) and track number
-  are the release track's. The pair is suggested only when the release
-  track is the Track's single best by that count and the Track the release
-  track's single best; any tie suggests nothing. A person confirms it.
+- `paired`: a person paired the Track with it ([Pairing a
+  Track](#pairing-a-track)).
+- `automatic`: the release track lists a recording ID the Track holds, from the
+  play file's recording ID in effect, an accepted match or a pending match
+  (`recording_source` says which).
+- `suggested`: no recording ID places them, but at least two of three agree:
+  titles equal after `text_key` normalization, lengths within 2000 ms, and the
+  Track's disc (1 when unset) and track number equal the release track's. The
+  pair is suggested only when each is the other's single best by that count; any
+  tie suggests nothing. A person confirms it.
 - `not_in_files`: no Track is on it.
 
-Tracks placed on no release track are listed as not on the release. Every
-row carries its evidence flags and the length delta, automatic ones
-included.
+Tracks placed on no release track are listed as not on the release. Every row
+carries its evidence flags and the length delta.
 
-Pairings place their Tracks first. Automatic placement then runs in four
-passes: recording IDs in effect and
-accepted first, then pending ones; within each, a Track first takes a free
-release track listing its recording at its own disc and track number, then
-the first free one listing it. Tracks go in disc, track number (unset
-last), then Track ID order, so:
-
-- a recording the release lists twice places a Track at its own track
-  number, else on the first listing;
-- of two Tracks holding a recording listed once, the one at that track
-  number wins, else the earlier by track number, then by lower Track ID;
-  the other is suggested elsewhere or not on the release;
-- a recording ID in effect or accepted outranks another Track's pending
-  match for the same release track.
-
-The alignment reads only. An Apply with fields stores values from it, as
-[Applying a release](#applying-a-release) describes.
+Pairings place their Tracks first. Automatic placement then runs in four passes:
+recording IDs in effect and accepted, then pending ones; within each, a Track
+first takes a free release track listing its recording at its own disc and track
+number, then the first free one listing it. Tracks go in disc, track number
+(unset last), then Track ID order. A recording the release lists twice therefore
+places a Track at its own track number, else on the first listing; of two Tracks
+holding a recording listed once, the one at that track number wins, else the
+earlier by track number, then lower Track ID; and a recording ID in effect or
+accepted outranks another Track's pending match.
 
 #### Pairing a Track
 
-A person pairs a Track of a Release with one release track of one
-MusicBrainz release that has a snapshot, by confirming a suggestion or by
-hand (`Runtime.libraryPairReleaseTrack`, `orca-cli pair-track`). The
-pairing is stored in `release_track_pairings` with the release track's
-recording ID and whether it confirmed the suggestion the alignment showed
-for that Track at that moment (`confirmed_suggestion`) or not (`by_hand`).
+A person pairs a Track of a Release with one release track of one MusicBrainz
+release that has a snapshot (`Runtime.libraryPairReleaseTrack`, `orca-cli
+pair-track`). `release_track_pairings` stores the release track's recording ID
+and whether it confirmed the suggestion shown at that moment
+(`confirmed_suggestion`) or not (`by_hand`).
 
 - Every file of the Track takes the release track's recording ID and
-  release-track ID as user values, locked, as an edit stores them, and
-  Orca keeps the value each replaced (an accepted match's, an edit's, or
-  none). No media file is written; a tag write writes them like any
-  edit. The Track's files are reprojected.
-- A Track has one pairing. Pairing it again, on the same or another
-  release, undoes the earlier pairing first, as unpairing does.
-- A Track not on the Release is `error.TrackNotOnRelease`; a release
-  without a snapshot `error.NoReleaseTracklist`; a release-track ID the
-  snapshot does not list `error.UnknownReleaseTrack`; a release track
-  another Track of the Release is paired with
-  `error.ReleaseTrackAlreadyPaired`, until that one is unpaired.
-- A pairing outranks automatic placement: a Track that held the release
-  track's recording ID is placed elsewhere, suggested, or listed as not on
-  the release.
-- A pairing whose release track a newer snapshot no longer lists stays
-  stored, is ignored by the alignment, and is listed by
+  release-track ID as locked user values, and Orca keeps the value each
+  replaced. No media file is written. The Track's files are reprojected.
+- A Track has one pairing. Pairing it again undoes the earlier one first.
+- Errors: `error.TrackNotOnRelease`, `error.NoReleaseTracklist`,
+  `error.UnknownReleaseTrack` (not in the snapshot) and
+  `error.ReleaseTrackAlreadyPaired` (another Track holds it, until unpaired).
+- A pairing outranks automatic placement.
+- A pairing whose release track a newer snapshot no longer lists stays stored,
+  is ignored by the alignment, and is listed by
   `Runtime.libraryReleaseTrackPairings` with `in_snapshot` false.
-- Unpairing (`Runtime.libraryUnpairReleaseTrack`, `orca-cli
-  unpair-track`) removes the pairing and, where a file still holds the
-  value the pairing set, puts back the value it replaced with its
-  provenance and lock, or removes it when there was none, so the file's
-  tag applies again.
-- Editing either field in the metadata editor makes the value the
-  person's own: unpairing leaves it, and AcoustID treats it as an edit.
+- Unpairing (`Runtime.libraryUnpairReleaseTrack`, `orca-cli unpair-track`)
+  removes the pairing and, where a file still holds the value the pairing set,
+  restores the value it replaced with its provenance and lock, or removes it
+  when there was none.
+- Editing either field in the metadata editor makes the value the person's own:
+  unpairing leaves it.
 - A pairing is deleted with its Track or Release. When its Track moves to
-  another Release, the pairing moves with it; a pairing of the same release
-  track by another Track of that Release is then deleted, and the values it
-  set on that Track's files stay, as an edit's would.
-- An ID a pairing set reaches AcoustID only where the file's fingerprint
-  agreed; see [providers.md](providers.md#acoustid-submission).
+  another Release the pairing moves with it; another Track's pairing of the same
+  release track there is deleted, and the values it set stay.
 
 #### Corrections
 
-A pending proposal is a correction when its file has a recording ID in
-effect and the proposal names another. It is computed, never stored:
-`MatchProposal.corrects` is the ID it would replace. A
-[verification](providers.md#verification) proposes corrections, and so can a
-re-identify. Accepting one stores its values as locked `provider` values, so
-they outrank the file's tags, a tag write writes them over the tags, and
-`TrackDetails` still names their source `match`:
+A pending proposal is a correction when its file has a recording ID in effect
+and the proposal names another. It is computed, never stored:
+`MatchProposal.corrects` is the ID it would replace.
+[Verification](providers.md#verification) proposes corrections, and so can a
+re-identify. Accepting one stores locked `provider` values, so they outrank the
+file's tags, a tag write writes them over the tags, and `TrackDetails` still
+names their source `match`:
 
-- the recording ID on the file, over any value, a user's own locked edit
-  included, since accepting it is the user's explicit choice;
-- the title and artist on every file of the Track, over an unlocked value or
-  a locked `provider` value, so a title or artist the user set is kept;
+- the recording ID on the file, over any value, a user's locked edit included,
+  since accepting is the user's explicit choice;
+- the title and artist on every file of the Track, over an unlocked value or a
+  locked `provider` value, so a title or artist the user set is kept;
 - for a proposal in an album group, also the track and disc numbers and the
   release-track ID, under the same rule.
 
-No album, release or release-group ID is written. The same equality,
-empty-value, ID and length rules as an accept apply. Bulk acceptance never
-takes a correction. A group is accepted only whole,
-`IdentificationProposalRepository.acceptCorrectionGroup` accepting every
-pending member in one transaction and applying the consensus of each Release
-it touched, because the projection re-seats a file whose track number
-another holds, so half a swap of positions would scramble the album.
+No album, release or release-group ID is written. The accept rules for equality,
+empty values, IDs and length apply. Bulk acceptance never takes a correction.
+
+A group is accepted only whole, because the projection re-seats a file whose
+track number another holds, so half a swap would scramble the album.
+`IdentificationProposalRepository.acceptCorrectionGroup` accepts every pending
+member in one transaction and applies the consensus of each Release it touched;
 `dismissCorrectionGroup` dismisses every pending member. An unknown group is
 `error.UnknownCorrectionGroup`, one with no pending member
-`error.StaleCorrectionGroup`. A correction is undone by clearing the fields
-it set, as Clear in Edit Tags and `orca-cli edit --clear=FIELD` do.
+`error.StaleCorrectionGroup`. A correction is undone by clearing the fields it
+set (Clear in Edit Tags, `orca-cli edit --clear=FIELD`).
 
 #### Bulk acceptance
 
-`acceptConfident` accepts at most one pending proposal per file, in commits
-of at most 512, and passes over a proposal whose payload or recording ID it
-cannot read or that is in an album group. A file with a recording ID in
-effect is left out, since its proposals are corrections. It returns the number accepted, the values stored, and the
-files accepted or given a value. Of the file's proposals that reach the given confidence, those
-found by AcoustID with a fingerprint score of at least 0.9 are backed by the
-file's own audio. When any is, the first of them in this order is accepted:
+`acceptConfident` accepts at most one pending proposal per file, in commits of
+at most 512, and passes over a proposal whose payload or recording ID it cannot
+read or that is in an album group. A file with a recording ID in effect is left
+out, since its proposals are corrections. It returns the proposals accepted, the
+values stored and the files accepted or given a value.
 
-1. the higher percent, `floor(confidence × 100)` as the Matches page shows it;
+Of a file's proposals that reach the given confidence, those found by AcoustID
+with a fingerprint score of at least 0.9 are backed by the file's own audio.
+When any is, the first of them in this order is accepted:
+
+1. the higher percent, `floor(confidence × 100)`;
 2. the track number of the Track that plays the file, when both are known;
 3. found by MusicBrainz too;
-4. the higher MusicBrainz score, an unknown one lowest;
-5. the length closest to the Track's, when known, an unknown one last;
+4. the higher MusicBrainz score, unknown lowest;
+5. the length closest to the Track's, unknown last;
 6. the lowest recording ID.
 
-A text-only rival, such as a live version of the song, never blocks such a
-match, and AcoustID naming several MusicBrainz recordings of the same audio
-still yields one. When none is backed, the file's most confident proposal is
-accepted only when it reaches the given confidence and shows a higher percent
-than every other pending proposal of the file. A file accepted at one
-confidence is therefore accepted at every lower one. `confidentCount` runs
-the same selection, so it is what `acceptConfident` accepts.
+A text-only rival never blocks such a match. When none is backed, the file's
+most confident proposal is accepted only when it reaches the confidence and
+shows a higher percent than every other pending proposal. A file accepted at one
+confidence is therefore accepted at every lower one, and `confidentCount` runs
+the same selection.
 
 ## Parental advisory
 
-`metadata.Explicit` is a Track's parental advisory: `unknown` when no file
-states one, `none`, `explicit`, or `clean` for an edited version. The readers
-map the iTunes advisory number, 0 none, 1 or 4 explicit, 2 clean, from:
+`metadata.Explicit` is a Track's advisory: `unknown` when no file states one,
+`none`, `explicit`, or `clean`. The readers map the iTunes advisory number (0
+none, 1 or 4 explicit, 2 clean) from the MP4 `rtng` atom or an `ITUNESADVISORY`
+freeform atom, an ID3v2 `TXXX` frame described `ITUNESADVISORY`, and a Vorbis
+`ITUNESADVISORY` comment in any case. Any other value states nothing.
 
-- MP4: the `rtng` atom, or an `ITUNESADVISORY` freeform atom;
-- ID3v2: a `TXXX` frame described `ITUNESADVISORY`;
-- Vorbis comments: an `ITUNESADVISORY` comment, in any case.
-
-Any other value states nothing. The projection takes the preferred file's
-advisory, else the first member file's that states one. A user edit
-(`metadata.Field.explicit`, `orca-cli edit --explicit=yes|no|clean`) stores
-`1`, `0` or `2` and outranks the files; `write-tags` writes it back as the same
-`TXXX` frame or Vorbis comment. `Explicit.advisoryText` and
-`fromAdvisoryText` convert between the enum and that text, and are the only
-place the numbers are spelled.
+The projection takes the preferred file's advisory, else the first member file's
+that states one. A user edit (`metadata.Field.explicit`, `orca-cli edit
+--explicit=yes|no|clean`) stores `1`, `0` or `2` and outranks the files;
+`write-tags` writes it back as the same `TXXX` frame or Vorbis comment.
+`Explicit.advisoryText` and `fromAdvisoryText` are the only place the numbers
+are spelled.
 
 ## Composer and comment
 
 `metadata.Field.composer` and `metadata.Field.comment` are free text, observed
 into `observed_file_tags.composer` and `.comment`. The readers take them from:
 
-- ID3v2: `TCOM`, and the first `COMM` frame with an empty description, in any
-  language. A described `COMM`, such as iTunes' `iTunNORM`, is other data and
-  is never the comment. With no such `COMM`, the comment is the first
-  `TXXX` described `comment`, in any case, as ffmpeg writes it. An ID3v2 tag
-  that holds only a cover, a comment or both reads the ID3v1 trailer's values
-  beside them. The ID3v1 comment is neither read nor written.
-- Vorbis comments: `COMPOSER` and `COMMENT`, in any case; `DESCRIPTION` is the
+- ID3v2: `TCOM`, and the first `COMM` frame with an empty description in any
+  language. A described `COMM` (such as iTunes' `iTunNORM`) is other data. With
+  no such `COMM`, the comment is the first `TXXX` described `comment`, in any
+  case. An ID3v2 tag holding only a cover, a comment or both reads the ID3v1
+  trailer's values beside them. The ID3v1 comment is neither read nor written.
+- Vorbis comments: `COMPOSER` and `COMMENT` in any case; `DESCRIPTION` is the
   comment only when no `COMMENT` has text.
-- MP4: the `©wrt` and `©cmt` atoms.
+- MP4: `©wrt` and `©cmt`.
 
-WAV and AIFF `INFO` chunks state neither. `TrackDetails.composer` and
-`.comment` are a locked edit, else the preferred file's tag, else an unlocked
-edit (`TracksRepository.resolvedField` under `prefer_file`), and null when
-none states one. `orca-cli edit --composer= --comment=` sets them,
-`--clear=composer` and `--clear=comment` drop Orca's value, and
-`orca-cli track` prints them. Neither enters the projection, grouping or
-search.
+WAV and AIFF `INFO` chunks state neither. `TrackDetails.composer` and `.comment`
+are a locked edit, else the preferred file's tag, else an unlocked edit
+(`TrackRepository.resolvedField` under `prefer_file`), null when none states
+one. Neither enters the projection, grouping or search. `orca-cli edit
+--composer= --comment=` sets them and `--clear=composer|comment` drops Orca's
+value.
 
 ## Genres
 
-A Track's genres are kept in order in `track_genres` with their
-`Provenance`: every genre its file's tags give, or up to 16 the user set. The
-readers report each genre value as the file stores it: repeated `GENRE`
-comments, ID3v2 `TCON` values split on NUL, MP4 `©gen` and `gnre`.
-`observed_file_genres` keeps those values whole.
-
-`metadata/genre_alias.zig` turns the values into genres. A value that lists
-several genres with commas or semicolons (`Indie Rock, Rock, Alternative
-Rock`, `Rock; Pop`) is split into them, and a slash never splits, so
-`R&B/Soul` and `Hip-Hop/Rap` stay one value each. A genre whose name contains
-a comma, such as Discogs' `Folk, World, & Country`, is matched whole before
-splitting. Each part is folded to a key, so spellings of one genre
-(`Hip-Hop`, `hip hop`, `Hip-Hop/Rap`) become one genre with one name, and a
-genre listed twice keeps its first place. The rules are in
-[database.md](database.md#genres).
+A Track's genres are kept in order in `track_genres` with their `Provenance`:
+every genre its file's tags give, or up to 16 the user set. The readers report
+each genre value as the file stores it (repeated `GENRE` comments, ID3v2 `TCON`
+values split on NUL, MP4 `©gen` and `gnre`), and `observed_file_genres` keeps
+those values whole. `metadata/genre_alias.zig` turns them into genres; the
+splitting and folding rules are in [database.md](database.md#genres).
 
 The projection takes genres from the Track's files and does not overwrite a
-Track's `user` genres. `Runtime.librarySetTrackGenres`
-(`orca-cli edit --genre=A;B`) replaces a Track's genres with `user` ones, split
-the same way, which outrank its files until they are cleared with no names
-(`--clear=genre`). `write-tags` writes a Track's `user` genres into its files;
-see [Writing tags back](#writing-tags-back). Genres that came from a file are
-never rewritten.
+Track's `user` genres. `Runtime.librarySetTrackGenres` (`orca-cli edit
+--genre=A;B`) replaces a Track's genres with `user` ones, which outrank its
+files until cleared with no names (`--clear=genre`). `write-tags` writes a
+Track's `user` genres into its files; genres that came from a file are never
+rewritten.
 
 ## Cover art
 
-Artwork is two questions, and they are answered in two places.
+The scanner records `artwork_mime_type`, `artwork_byte_size` and `artwork_kind`
+in `observed_file_tags` from the tag read that produces every other observed
+field. It never reads the image.
 
-*Does this file have a cover, and how big is it* is an **observation**. The
-scanner records `artwork_mime_type`, `artwork_byte_size` and `artwork_kind` in
-`observed_file_tags` from the same tag read that produces every other observed
-field, and it never reads the image.
+### Fetch
 
-*Give me the cover* is a **fetch**. `metadata/artwork.zig` sniffs the container,
-steps over a leading ID3v2 tag through the same `OffsetSource` view the codec
-registry uses, and hands the request to `id3v2.readPicture` or
-`vorbis_comment.readPicture`. `APIC` frame flags and `PICTURE` block layouts
-terminate in those two readers exactly as tag parsing does; what leaves them is
-bytes, a media type and an `ArtworkKind`. Within a file the first front cover
-wins, and with no front cover present the first usable picture is taken — the
-same preference the observation records, so the fetch cannot hand back a
-different picture from the one the scan described.
+`metadata/artwork.zig` reads an image on demand from the file through
+`id3v2.readPicture` or `vorbis_comment.readPicture`, stepping over a leading
+ID3v2 tag. Within a file the first front cover wins, and with no front cover the
+first usable picture is taken, the same preference the observation records. The
+observation row is not consulted, so a Track whose stored observation is stale
+still yields its cover.
 
-Both halves of each reader parse the frame or block through one function, so an
-observation and a fetch cannot disagree about which bytes are the image.
+- The media type comes from the bytes: `EmbeddedImage.mime_type` is what the
+  magic bytes say. A payload that is none of PNG, JPEG, GIF, WebP or BMP is
+  refused as `UnrecognizedArtworkImage`. `Artwork.mime_type`, an observation,
+  records the declaration.
+- `model.max_image_bytes` bounds an image at 12 MiB. The whole image is held in
+  memory, so the bound is compared with the declared length before anything is
+  allocated.
 
-- **The media type comes from the bytes, not from the claim.** Real files
-  declare `image/jpg`, which is not a media type, or nothing at all, or an empty
-  declaration in front of an animated GIF. `EmbeddedImage.mime_type` is what the
-  magic bytes say; a payload that matches none of PNG, JPEG, GIF, WebP or BMP is
-  refused as `UnrecognizedArtworkImage` rather than passed to a platform image
-  decoder. `Artwork.mime_type`, being an observation, still records the claim.
-- **Bounded at 12 MiB, checked against the declaration.** The whole image is
-  held in memory at once, so `model.max_image_bytes` is compared with the length
-  a container declares *before* anything is allocated to honour it. The value
-  sits below both containers' own ceilings — a FLAC `PICTURE` length is 24 bits
-  and `id3v2.max_tag_bytes` is 16 MiB — because a bound above them could never
-  fire, and above every honest cover.
-- **Read from the file, never stored in the Library.** Storing images in the
-  Library would multiply its size by orders of magnitude, for data that already
-  exists on disk and would go stale the moment a file is re-tagged. Reading on
-  demand costs one open and one read, and it is right by construction — a track
-  whose stored observation predates the current reader still yields its cover,
-  because the row is not consulted.
-  The one image the Library does store is a cover fetched from the Cover Art
-  Archive for a Release none of whose files has one (`release_artwork`), since
-  it exists nowhere on disk; an embedded cover always wins over it. See
-  [providers.md](providers.md#cover-art-archive).
-- **liborca keeps no image cache.** `Runtime.libraryRequestArtwork` queues a
-  request on the Library's artwork loader (`core/artwork.zig`), which reads
-  covers on its own thread with at most `artwork.capacity` requests
-  outstanding; the host collects results with `Runtime.libraryTakeArtwork`.
-  Keeping decoded images is the host's concern: `orca-gtk` holds a bounded set
-  of textures in `apps/linux/art.zig`.
+Images are not stored in the Library except one: a cover fetched from the Cover
+Art Archive for a Release none of whose files has one (`release_artwork`; see
+[providers.md](providers.md#cover-art-archive)). A chosen cover wins over an
+embedded one, and an embedded one over a fetched one.
 
-### What a Release's artwork is
+liborca keeps no image cache. `Runtime.libraryRequestArtwork` queues a request
+on the Library's artwork loader (`core/artwork.zig`), which reads covers on its
+own thread with at most `artwork.capacity` requests outstanding;
+`Runtime.libraryTakeArtwork` collects results. Keeping decoded images is the
+host's concern.
 
-**The cover of its first track, in listening order, that has one.** Real tag
-data disagrees within an album, so the rule has to choose, and it is chosen to
-be stable, cheap and unsurprising:
+### Release artwork
 
-- Candidates are ordered by disc, then track number, then `tracks.id` — the
-  unique order `tracks_position` already enforces — so the same Release answers
-  the same way on every run.
-- Candidates are restricted to files the last scan *observed* artwork in, which
-  is what makes a Release with no covers cost one indexed query and zero file
-  opens. The observation selects; it does not decide, because the bytes are
-  still read from the file.
-- At most eight candidates are opened. That bound is only reached when a
-  Release's leading tracks each declare a cover that no longer reads.
-
-A majority vote or "the largest image" would both have to open every file in
-the Release, and both would change their answer when one track is re-tagged.
-
-Reachable as `Runtime.libraryTrackArtwork` and
-`Runtime.libraryReleaseArtwork`, and from `orca-cli artwork DATABASE
-(--track=ID | --release=ID) [--out=PATH]`.
+A Release's artwork is the cover of its first Track, in listening order (disc,
+track number, then `tracks.id`), that has one. Only files the last scan observed
+artwork in are candidates, so a Release with no covers costs one indexed query
+and no file opens, and at most eight candidates are opened
+(`max_release_candidates`). `Runtime.libraryTrackArtwork`,
+`Runtime.libraryReleaseArtwork` and `orca-cli artwork` return it.
 
 ## Lyrics
 
-A Track's lyrics are read on demand from its file and from a sidecar beside
-it, and, when a lyrics job is asked to fetch, from LRCLIB. They are never
-scanned and never written to a file; only LRCLIB's answers are kept in the
-Library ([providers.md](providers.md#lrclib)). `metadata/lyrics.zig` holds
-the model, `metadata/lrc.zig` the one parser every text source goes through,
-`library/lyrics_lookup.zig` the sidecar and the choice between local
-sources, and `core/lyrics_fetch.zig` the choice between those and LRCLIB.
+A Track's lyrics are read on demand from its file and a sidecar beside it, and,
+when a lyrics job is asked to fetch, from LRCLIB. They are never scanned and
+never written to a file; only LRCLIB's answers are kept in the Library
+([providers.md](providers.md#lrclib)). `metadata/lyrics.zig` holds the model,
+`metadata/lrc.zig` the parser every text source goes through,
+`library/lyrics_lookup.zig` the sidecar and the choice between local sources,
+and `core/lyrics_fetch.zig` the choice between those and LRCLIB.
 
 ### Sources
 
-| Source | Where |
-| --- | --- |
-| Sidecar | the file's path with its extension replaced by `.lrc`, case kept |
-| ID3v2 (MP3, ADTS, FLAC behind ID3) | `SYLT`, else the first non-empty `USLT` |
-| Vorbis comment (FLAC, Ogg Vorbis, Opus) | `LYRICS`, else `UNSYNCEDLYRICS` |
-| MP4 | `©lyr` |
+- Sidecar: the file's path with its extension replaced by `.lrc` (appended when
+  there is none), case kept; `Song.LRC` is not found for `Song.flac` on a
+  case-sensitive filesystem.
+- ID3v2 (MP3, ADTS, FLAC behind ID3): `SYLT`, else the first non-empty `USLT`.
+- Vorbis comment (FLAC, Ogg Vorbis, Opus): `LYRICS`, else `UNSYNCEDLYRICS`.
+- MP4: `©lyr`.
+- WAV and AIFF are not read.
 
 `SYLT` is read only with millisecond timestamps (format 2) and content type
-lyrics (1); its own times are used, and one leading newline per entry is
-dropped. `USLT`, comments and `©lyr` are parsed as LRC. ID3v2 text in any of
-its four encodings is read, and the frame's language becomes
-`Lyrics.language`, with `XXX` read as none. WAV and AIFF are not read for
-lyrics. A sidecar named with another case, such as `Song.LRC` for
-`Song.flac`, is not found on a case-sensitive filesystem.
+lyrics (1), using its own times. `USLT`, comments and `©lyr` are parsed as LRC.
+All four ID3v2 text encodings are read, and the frame's language becomes
+`Lyrics.language` (`XXX` is none).
 
-`Lyrics.source_name` says where the text came from: the sidecar's file name
-such as `Song.lrc`, `embedded` or `LRCLIB`. `Lyrics.offset_ms` is the text's
-`[offset:]` tag in milliseconds, 0 without one. Synced line starts already
-include the offset, so it is reported, not left to the caller to apply.
+`Lyrics.source_name` is the sidecar's file name, `embedded` or `LRCLIB`.
+`Lyrics.offset_ms` is the text's `[offset:]` in milliseconds, 0 without one;
+synced line starts already include it.
 
 ### Choice order
 
@@ -585,8 +474,8 @@ include the offset, so it is reported, not left to the caller to apply.
 6. Plain lyrics from LRCLIB.
 7. An instrumental from LRCLIB, with no lines.
 
-LRCLIB's lyrics are the ones fetched or kept for the Track's current title,
-artist, album and duration. A job that does not fetch still uses kept ones.
+LRCLIB's lyrics are those fetched or kept for the Track's current title, artist,
+album and duration. A job that does not fetch still uses kept ones.
 
 ### LRC rules
 
@@ -594,105 +483,101 @@ artist, album and duration. A job that does not fetch still uses kept ones.
   `[mm:ss.fff]` stamps; each stamp makes one line with the same text. A stamp
   with 60 or more seconds drops its line.
 - `<mm:ss.xx>` word stamps are removed from the text.
-- `[offset:N]` shifts every line to `start - N` milliseconds, clamped at 0: a
-  positive offset makes lines show earlier.
+- `[offset:N]` shifts every line to `start - N` milliseconds, clamped at 0.
 - Other `[key:value]` ID tags and lines starting with `#` are skipped.
 - A UTF-8 byte order mark and CRLF line ends are accepted.
-- Text with any stamped line is synced, and its unstamped rows are dropped;
+- Text with any stamped line is synced and its unstamped rows are dropped;
   otherwise every row is a plain line. Text with only tags is no lyrics.
 
-### Bounds
-
-A source over 512 KiB, with more than 4096 lines, or whose text is not UTF-8
-is treated as having no lyrics. A malformed or unreadable tag reads as none;
-only running out of memory is an error.
+A source over 512 KiB, with more than 4096 lines, or not UTF-8 has no lyrics. A
+malformed or unreadable tag reads as none; only running out of memory is an
+error.
 
 ### Reaching it
 
-`Runtime.startTrackLyrics` reads, and with `fetch` asks LRCLIB, on a job
-worker. Once the job finishes, `Runtime.jobLyricsOutcome` says where lyrics
-were found or why none were (see
-[providers.md](providers.md#lrclib)), and `Runtime.jobTakeLyrics` moves the
-`Lyrics` to the caller; lyrics nobody takes are freed with the job.
-`Lyrics.lineAt(position_ms)` is the synced line being heard.
-`orca-cli lyrics DATABASE TRACK_ID [--fetch]` prints them, and
-`orca-cli play-tracks --lyrics` prints each line as playback reaches it.
+`Runtime.startTrackLyrics` reads, and with `fetch` asks LRCLIB, on a job worker.
+`Runtime.jobLyricsOutcome` says where lyrics were found or why none were,
+`Runtime.jobTakeLyrics` moves the `Lyrics` to the caller (untaken lyrics are
+freed with the job), and `Lyrics.lineAt(position_ms)` is the synced line being
+heard. `orca-cli lyrics` and `orca-cli play-tracks --lyrics` print them; see
+[cli.md](cli.md).
 
 ## File mutation
 
-File writes and moves only execute from an explicitly approved immutable
-`MutationPlan`. A plan deep-copies every action, path, change and value into
-plan-owned storage at construction, genres included, and seals that copy with
-a BLAKE3 content digest; approval names the digest as well as the plan ID, and `beginExecution`
-reverifies the seal. A caller therefore cannot preview one plan and execute
-another through an alias it still holds.
+Files are written or moved only from an explicitly approved immutable
+`MutationPlan`. A plan deep-copies every action, path, change and value (genres
+included) into plan-owned storage at construction and seals the copy with a
+BLAKE3 content digest. Approval names the digest as well as the plan ID, and
+`beginExecution` reverifies the seal, so a caller cannot preview one plan and
+execute another through an alias it still holds.
 
 Identity is `(size, modified_ns, quick_hash, content_hash)`. `quick_hash` is
-the storage-wide definition — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size),
-in `storage/quick_hash.zig` — and only nominates a match: an edit confined to
-the middle of a file larger than 128 KiB that keeps its size and modification
-time leaves it unchanged. `content_hash` is BLAKE3-256 over every byte, from
-`storage/content_hash.zig`, and is what proves the file unchanged. A check
-compares size, modification time and quick hash first and reads the whole file
-only when all three match; it streams the file through a fixed buffer and never
-holds it in memory.
+BLAKE3 over (first 64 KiB, last 64 KiB, size) (`storage/quick_hash.zig`) and
+only nominates a match: an edit confined to the middle of a file larger than 128
+KiB that keeps its size and modification time leaves it unchanged.
+`content_hash` is BLAKE3-256 over every byte (`storage/content_hash.zig`) and is
+what proves a file unchanged. A check compares size, modification time and quick
+hash first and reads the whole file, streamed through a fixed buffer, only when
+all three match.
 
 The content hash is computed when the plan is built, as the backup copy is
-written (from the bytes being copied, with no second read), and by every check
-that compares a file with a journaled identity: staging, the revalidation
-before the rename, undo and recovery. The mutation journal persists the full
-identity, so recovery compares the same `FileIdentity` an in-process check
-does; see [database.md](database.md). `Plan.init` refuses an identity without
-a content hash with `error.InvalidMutationPlan`; a journaled operation that
-lacks one is compared by the other three parts. The executor does not write `files.content_hash`.
+written (from the bytes copied, with no second read), and by every check that
+compares a file with a journaled identity: staging, the revalidation before the
+rename, undo and recovery. The journal persists the full identity, so recovery
+compares the same `FileIdentity` an in-process check does
+([database.md](database.md)). `Plan.init` refuses an identity without a content
+hash with `error.InvalidMutationPlan`. The executor does not write
+`files.content_hash`.
 
 Every action of a group is journaled before any filesystem work begins, and
 journal writes raise SQLite durability for their own transaction, so a group is
 always discoverable after a crash. Moves reject collisions and use the same
-operation journal.
+journal.
 
 ### The journal lock
 
 One holder at a time owns a Library's mutation journal: the holder of an
 exclusive advisory lock (`flock`) on `<database>.orca-journal.lock`
-(`metadata.JournalLock`). The operating system releases it when its process
-exits in any way, and a process that is paused, however long, keeps it, which
-a lease in the database could not promise. It is taken without waiting, and
-held only for the duration of one of these:
+(`metadata.JournalLock`). The operating system releases it when the process
+exits in any way, and a paused process keeps it, which a lease in the database
+could not promise. It is taken without waiting and held only for the duration of
+one of:
 
 - `LibraryDatabase.open`, for recovery.
-- A tag write, from `Runtime.startTagWrite` until the plan has executed; the
-  files are re-observed after it is released.
-- `Runtime.undoTagWrite`, until the group is undone; the files are re-observed
-  after it is released.
+- A tag write, from `Runtime.startTagWrite` until the plan has executed.
+- `Runtime.undoTagWrite`, until the group is undone.
 - `Runtime.pruneTagWriteBackups`.
 - `Runtime.libraryRelocateRoot`, while it rewrites the root and the journaled
-  paths under it. It runs no recovery, which would look for the files at the
-  root's old path.
+  paths under it. It runs no recovery, which would look for files at the old
+  path.
 
-A write, undo or prune that finds the lock held returns
-`error.MutationInProgress` and changes nothing; a refused write's plan stays
-pending. Once it holds the lock, it first runs recovery
-(`LibraryDatabase.recoverPendingMutations`), because a holder that exited
-since the Library was opened may have left work unfinished; a write does this
-on its job's thread. If that recovery fails, the operation fails with its error
-and journals nothing of its own. An open that finds the lock held leaves the
-journal alone, because its rows belong to a writer that is still alive: it sets
-`LibraryDatabase.recovery_deferred`, which the next recovery clears. Each acquisition opens the file anew, so two acquisitions in one
-process exclude each other as two processes do. A Library with no database
-file has no lock file: tag writes, undo and pruning return
-`error.NoBackupDirectory`, and its open runs no recovery, since nothing it
-journals can outlive its process.
+Tag writes and undo re-observe the files after releasing it. A write, undo or
+prune that finds the lock held returns `error.MutationInProgress` and changes
+nothing; a refused write's plan stays pending.
+
+Once it holds the lock, the operation first runs recovery
+(`LibraryDatabase.recoverPendingMutations`), because a holder that exited since
+the Library was opened may have left work unfinished; a write does this on its
+job's thread. A failed recovery fails the operation with its error and journals
+nothing of its own. An open that finds the lock held leaves the journal alone,
+since its rows belong to a live writer: it sets
+`LibraryDatabase.recovery_deferred`, which the next recovery clears. Each
+acquisition opens the file anew, so two acquisitions in one process exclude each
+other as two processes do.
+
+A Library with no database file has no lock file and no backup directory: tag
+writes, undo and pruning return `error.NoBackupDirectory`, and its open runs no
+recovery.
 
 **Never delete the lock file.** A process that opened it before the deletion
-still holds its lock, and the next process creates a new file and locks that,
-so both would own the journal.
+still holds its lock, and the next process creates and locks a new file, so both
+own the journal.
 
 ### Tag-write files
 
 A tag write to `Album/01.flac` in plan 7, action 0, uses three files and the
-Library's journal lock. Only the backup outlives the write, and it lives outside
-the music folders:
+journal lock. Only the backup outlives the write, and it lives outside the music
+folders:
 
 | File | Path | Exists |
 | --- | --- | --- |
@@ -701,84 +586,71 @@ the music folders:
 | Restore | `Album/.01.flac.orca-restore-7-0` | during an undo |
 | Journal lock | `<database>.orca-journal.lock` | always; never delete it |
 
-`<database>` is the absolute path of the Library's database file, so the
-journaled backup path does not depend on the working directory. A Library with
-no database file, such as an in-memory one, has no backup directory:
-`Runtime.startTagWrite` returns `error.NoBackupDirectory` and the executor
-refuses before touching any file.
+`<database>` is the absolute path of the database file, so the journaled backup
+path does not depend on the working directory.
 
 A write runs in three steps, and at every point either the original is in place
 or a durable, verified copy of it exists:
 
 1. Build the complete replacement at the stage, and fsync it and its directory.
 2. Copy the original into the backup directory with its modification time, fsync
-   the copy and every directory created for it, and verify that the copy's
-   size, modification time and quick hash, and the content hash of the bytes
-   copied into it, are the identity the plan approved.
+   the copy and every directory created for it, and verify the copy's size,
+   modification time, quick hash and the content hash of the bytes copied
+   against the identity the plan approved.
 3. Revalidate the file's full identity, rename the stage onto it, and fsync the
    directory.
 
 The journal records the stage's identity before step 2 and the file's identity
-after step 3; undo and recovery compare the file against that record. A write
-that succeeds reads a file's full length eight times: the original once when
-the plan is built, twice while staging and three times in steps 2 and 3, and
-the replacement once as the stage and once after the rename. After the first
-read these usually come from the page cache.
-
-The backup is a copy rather than a rename, so it may sit on another disk:
-backups use space on the database's disk until they are undone or pruned. A
-disk that fills during the copy fails the write at step 2 with the file
-untouched.
+after step 3; undo and recovery compare the file against that record. The backup
+is a copy, so it may sit on another disk and uses its space until undone or
+pruned. A disk that fills during the copy fails the write at step 2 with the
+file untouched.
 
 ### Undo
 
-Logical groups undo in reverse action order. `undoGroup` starts from the
-states of the group's operations:
+Logical groups undo in reverse action order. `undoGroup` starts from the states
+of the group's operations:
 
-- Every operation `committed`: a fresh undo, below.
-- Some operation `undoing`, none `planned`, `staged` or `failed`: an undo that
-  was interrupted. It finishes the way recovery does, operation by operation
-  as the [Recovery](#recovery) table decides.
+- Every operation `committed`: a fresh undo.
+- Some `undoing`, none `planned`, `staged` or `failed`: an interrupted undo,
+  finished as recovery does, per the [Recovery](#recovery) tables.
 - Every operation `rolled_back`: `error.MutationGroupAlreadyUndone`.
-- Otherwise, with an operation `needs_reconciliation`:
-  `error.MutationNeedsReconciliation`; with none,
-  `error.MutationGroupNotCommitted`.
+- Otherwise `error.MutationNeedsReconciliation` when an operation is
+  `needs_reconciliation`, else `error.MutationGroupNotCommitted`.
 
-Before a fresh undo changes any file, it checks every operation of the group:
-
-- A write whose backup was pruned returns `error.TagWriteBackupPruned`.
-- A file that changed since the write, or a backup that is missing or no longer
-  has the original's identity, records `needs_reconciliation` and returns
-  `error.MutationNeedsReconciliation`. Both are compared by content hash, so an
-  edit that kept the size, modification time and quick hash is still refused.
+Before a fresh undo changes any file it checks every operation. A write whose
+backup was pruned returns `error.TagWriteBackupPruned`. A file that changed
+since the write, or a backup that is missing or no longer has the original's
+identity, records `needs_reconciliation` and returns
+`error.MutationNeedsReconciliation`; both are compared by content hash, so an
+edit that kept the size, modification time and quick hash is still refused.
 
 It then journals its intent: every operation of the group becomes `undoing` in
-one durable transaction, or none does. A crash or an error from here on leaves
-the group nonterminal, so the next undo or the next open finishes it; an
-operation never returns to `committed`.
+one durable transaction, or none does. A crash or error from here on leaves the
+group nonterminal, so the next undo or open finishes it; an operation never
+returns to `committed`.
 
 Each file is then restored: its backup is copied to the restore file with the
 original's modification time, fsynced and verified, the file is revalidated
-against the write's result, and the restore file is renamed onto it. The
-backup is deleted, the plan directory and the backup directory are removed
-once empty, and the operation becomes `rolled_back`. An undo needs free space
-for one file on the music disk; if the copy fails, the file is untouched and
-the operation stays `undoing`.
+against the write's result, and the restore file is renamed onto it. The backup
+is deleted, the plan and backup directories are removed once empty, and the
+operation becomes `rolled_back`. An undo needs free space for one file on the
+music disk; if the copy fails, the file is untouched and the operation stays
+`undoing`.
 
 ### Recovery
 
-`LibraryDatabase.open` applies the schema and runs journal recovery before
-the Library is returned to the caller, and refuses to open at all if recovery
-cannot reach a terminal state. Recovery runs only under the
-[journal lock](#the-journal-lock).
+`LibraryDatabase.open` applies the schema and runs journal recovery under the
+[journal lock](#the-journal-lock) before returning the Library, and refuses to
+open if recovery cannot reach a terminal state.
 
 Recovery drives every group with a `planned`, `staged`, `failed` or `undoing`
-operation to terminal states. It first marks the group's `committed`
-operations `undoing`, in one transaction, so a crash during recovery leaves
-the group discoverable, then unwinds it in reverse action order. A `failed`
-operation becomes `rolled_back` and keeps the error its write journaled;
-an operation rolled back from any other state records `recovered`. A tag
-write being written or being undone is decided by identity alone:
+operation to terminal states. It first marks the group's `committed` operations
+`undoing` in one transaction, so a crash during recovery leaves the group
+discoverable, then unwinds it in reverse action order. A `failed` operation
+becomes `rolled_back` and keeps the error its write journaled; an operation
+rolled back from any other state records `recovered`. A tag write being written
+or undone is decided by identity alone:
 
 | Found | Action | Result |
 | --- | --- | --- |
@@ -797,48 +669,38 @@ An `undoing` operation reaches those rows from each point an undo can stop at:
 | After the restore rename, or after deleting the backup | file is the original | `rolled_back` |
 | After the file changed externally | file matches neither | `needs_reconciliation`, every file kept |
 
-Journal records from before the backup directory existed name a stage and a
-backup beside the music (`Album/01.flac.orca-stage-7-0`,
-`Album/01.flac.orca-backup-7-0`), and may leave
-`<stage>.recovery-displaced`. Recovery, undo and pruning follow the journaled
-paths, so they handle those records too, and recovery deletes a leftover
-`.recovery-displaced` file. Orca removes directories only inside the backup
-directory, never a music folder.
+Orca removes directories only inside the backup directory, never a music folder.
 
 ### Pruning backups
 
-`Runtime.pruneTagWriteBackups(library, io, older_than_s)` deletes the backups
-of every group whose operations are all `committed` and were last updated at
-least `older_than_s` seconds ago; zero prunes every committed group. A group
-being undone is not all `committed` and keeps its backups. It returns
-a `PruneSummary` with the number of backups pruned and their bytes. Each backup
-file is deleted before its journal path is cleared, so a prune that is
-interrupted finishes on the next run. A pruned write cannot be undone. Groups
-awaiting reconciliation keep their backups, and nothing prunes automatically.
-
-```sh
-orca-cli prune-backups DATABASE [--older-than=DAYS]
-```
+`Runtime.pruneTagWriteBackups(library, io, older_than_s)` deletes the backups of
+every group whose operations are all `committed` and were last updated at least
+`older_than_s` seconds ago; zero prunes every committed group. A group being
+undone or awaiting reconciliation keeps its backups, and nothing prunes
+automatically. It returns a `PruneSummary` (backups pruned, bytes). Each backup
+is deleted before its journal path is cleared, so an interrupted prune finishes
+on the next run. A pruned write cannot be undone. `orca-cli prune-backups
+DATABASE [--older-than=DAYS]` runs it.
 
 ### Change history
 
 `Runtime.libraryTagWriteGroupPage(library, allocator, limit, offset)` lists
 finished tag writes newest first, at most 512 at a time.
-`Runtime.libraryTagWriteGroup(library, allocator, io, group_id)` shows one
-write file by file. Both only read: they never write or move a media file,
-and never change the journal or a backup.
+`Runtime.libraryTagWriteGroup(library, allocator, io, group_id)` shows one write
+file by file. Both only read: they never write or move a media file and never
+change the journal or a backup.
 
-The history is derived from the journal; nothing is stored for it. A
-`TagWriteGroup` is one `group_id`, the plan id `undoTagWrite` takes:
+The history is derived from the journal. A `TagWriteGroup` is one `group_id`,
+the plan id `undoTagWrite` takes:
 
-- A group with a `planned` or `staged` operation is still being written and
-  is left out. `libraryTagWriteGroup` returns `error.UnknownTagWriteGroup`
-  for it, for a group of moves only, and for a group never written.
-- `written_at` is the earliest `created_at` of its operations, in Unix
-  seconds. `file_count` counts its operations.
-- `title` is the Release title every Track of its files shares, through
-  the files' locations; empty when they span several Releases or none.
-- `state` follows from the operations' states, the first row that applies:
+- A group with a `planned` or `staged` operation is still being written and is
+  left out; `libraryTagWriteGroup` returns `error.UnknownTagWriteGroup` for it,
+  for a group of moves only, and for a group never written.
+- `written_at` is the earliest `created_at` of its operations (Unix seconds);
+  `file_count` counts them.
+- `title` is the Release title every Track of its files shares, empty when they
+  span several Releases or none.
+- `state` is the first row that applies:
 
 | Operations | `state` |
 | --- | --- |
@@ -850,187 +712,156 @@ The history is derived from the journal; nothing is stored for it. A
 | One records `recovered` | `rolled_back` |
 | Otherwise, all `rolled_back` | `undone` |
 
-An undo writes no error and recovery writes `recovered`, which is how an
-undo is told from recovery. An undo that was interrupted and then finished
-by recovery, or by the next `undoTagWrite`, records `recovered` too and so
-reads as `rolled_back`.
+An undo writes no error and recovery writes `recovered`, which is how an undo is
+told from recovery. An interrupted undo finished by recovery or by the next
+`undoTagWrite` records `recovered` too and reads as `rolled_back`.
 
-`can_undo` and `expired` come from `undoAvailability`, the function
-`undoGroup` decides by, so the history offers undo exactly when
-`undoTagWrite` would start one:
+`can_undo` and `expired` come from `undoAvailability`, the function `undoGroup`
+decides by, and read no file. `can_undo` means every operation is `committed`
+with every backup path kept, or an interrupted undo is to be finished. `expired`
+means every operation is `committed` and a backup was pruned. An undo still
+checks every file first, so a write whose file changed since shows `can_undo`
+and then returns `error.MutationNeedsReconciliation`.
 
-- `can_undo`: every operation `committed` with every backup path kept, or an
-  interrupted undo to finish.
-- `expired`: every operation `committed` and a backup was pruned.
+`TagWriteGroupDetail` reads each operation's backup and its file through the tag
+reader and compares their tags. Each differing field is a `TagWriteDiff` row:
+`restores` is the backup's value, which an undo puts back, and `current` is the
+file's; genres are one row joined with `; `. A file whose backup or current file
+cannot be read is one `unknown` row with both values empty. `diffs` holds whole
+files only, in action order, at most 512 rows; `more_files` counts the changed
+files left out, and `field_count` counts every differing field of every file,
+those left out included, so it is 0 once the backups are gone.
 
-Neither reads a file. An undo still checks every file first, so a write
-whose file changed since shows `can_undo` and then returns
-`error.MutationNeedsReconciliation`.
-
-`TagWriteGroupDetail` reads each operation's backup and its file as it is
-now through the tag reader and compares their tags. Each differing field is
-a `TagWriteDiff` row: `restores` is the backup's value, which an undo puts
-back, and `current` is the file's; genres are one row, joined with `; `. A
-file whose backup or current file cannot be read, because the backup was
-pruned or consumed by an undo or the file is gone, is one `unknown` row
-with both values empty.
-
-`diffs` holds whole files only, in action order, at most 512 rows;
-`more_files` counts the changed files left out. `field_count` counts every
-differing field of every file, those left out included, so it is 0 once the
-backups are gone.
-
-`Runtime.exportTagWriteHistory(library, io, path, options)` writes every
-group's list line, newest first, to `path` through an atomic replace and
-returns `TagWriteHistoryExport.groups`, the lines written. Without
-`TagWriteHistoryExportOptions.replace` it refuses an existing file with
-`error.PathAlreadyExists` and leaves it as it was. `orca-cli changes
---export` and `orca_library_export_tag_write_history` call it.
-
-```sh
-orca-cli changes DATABASE [--limit N] [--offset N]
-orca-cli changes DATABASE GROUP
-orca-cli changes DATABASE --export=FILE [--force]
-```
+`Runtime.exportTagWriteHistory(library, io, path, options)` writes every group's
+list line, newest first, through an atomic replace and returns
+`TagWriteHistoryExport.groups`. Without `TagWriteHistoryExportOptions.replace`
+it refuses an existing file with `error.PathAlreadyExists` and leaves it as it
+was. `orca-cli changes` and `orca_library_export_tag_write_history` call it; see
+[cli.md](cli.md).
 
 ### Relocated roots
 
 A write stays undoable after its root moves. `libraryRelocateRoot` rewrites
-every journaled source, destination, stage and backup path below the root's
-old path to the same path below the new one, in the transaction that moves
-the root, so the journal and the root never disagree. A path matches only
-below the old path and a `/`, so relocating `/music` leaves `/music2` alone.
-Backups in `<database>.orca-backups` are outside the root and stay where they
-are; a legacy backup beside the music moves with it.
+every journaled source, destination, stage and backup path below the root's old
+path to the same path below the new one, in the transaction that moves the root,
+so the journal and the root never disagree. A path matches only below the old
+path and a `/`, so relocating `/music` leaves `/music2` alone. Backups in
+`<database>.orca-backups` are outside the root and stay.
 
-Only finished operations are rewritten. A relocate that finds an operation
-under the root `planned`, `staged`, `failed` or `undoing` returns
-`error.MutationInProgress`, and one `needs_reconciliation` returns
-`error.MutationNeedsReconciliation`; either way nothing changes.
+Only finished operations are rewritten. An operation under the root `planned`,
+`staged`, `failed` or `undoing` returns `error.MutationInProgress`, and one
+`needs_reconciliation` returns `error.MutationNeedsReconciliation`; either way
+nothing changes.
 
 ## Writing tags back
 
 `Runtime.planTagWrite` compares each Track file's Orca values with its observed
 tags and seals a `MutationPlan` of the values to write. It writes nothing. A
-value is written only when it is the one in effect, so a file's own tag is
-never replaced by an automatic value:
+value is written only when it is the one in effect, so a file's own tag is never
+replaced by an automatic value:
 
-- A locked value, which is a user's edit or an accepted correction, is
-  written when it differs from the file's tag.
-- An unlocked value, such as an accepted match, is written only when the file
+- A locked value (a user's edit or an accepted correction) is written when it
+  differs from the file's tag.
+- An unlocked value (such as an accepted match) is written only when the file
   has no tag for its field.
-- An unlocked value that differs from the file's tag is a conflict. It is
-  listed in `TagWritePlan.conflicts` with both values and not written; the
-  file's other changes are. Editing the field locks the user's choice, which
-  the next write applies.
+- An unlocked value that differs from the file's tag is a conflict: listed in
+  `TagWritePlan.conflicts` with both values and not written, while the file's
+  other changes are. Editing the field locks the user's choice, which the next
+  write applies.
 - A Track's `user` genres replace the file's genres when the two lists differ
-  once split and folded. The genres come from the first selected Track the
-  file backs that has `user` genres. The file's current values are the
-  change's `before`, and the write refuses to start if the file no longer
-  states exactly them.
+  once split and folded, taken from the first selected Track the file backs that
+  has `user` genres. The file's current values are the change's `before`, and
+  the write refuses to start if the file no longer states exactly them.
 
-The returned `TagWritePlan` lists each file's changes with the provenance of
-Orca's value (`user` for an edit, `provider` for a match), its genre change as
-`TagWriteFile.genres` (a `TagWriteGenres` with the file's values before and
-the user's genres after, or null), the conflicts, the files it left out and
-why, and the plan's ID and digest. The digest covers the genre change. The C
-ABI's `orca_tag_write_file_view` does not list a genre change yet, so a file
-whose only change is its genres has a `change_count` of 0 there. The skip
-reasons are:
+`TagWritePlan` lists each file's changes with the provenance of Orca's value
+(`user` for an edit, `provider` for a match), its genre change as
+`TagWriteFile.genres` (a `TagWriteGenres` with the values before and the user's
+genres after, or null), the conflicts, the files left out with the reason, and
+the plan's ID and digest. The digest covers the genre change. The C ABI lists a
+genre change separately, through `orca_library_query_tag_write_genres`, so a
+file whose only change is its genres has a `change_count` of 0 in
+`orca_tag_write_file_view`. The skip reasons are:
 
 - `missing`: no present location to write to.
-- `format_not_writable`: no writer for the sniffed format yet. FLAC, MP3 and
-  ADTS are written; M4A, Ogg, WAV and AIFF are not, and neither is a FLAC
-  stream behind a leading ID3v2 tag.
-- `changed_since_scan`: the file's identity no longer matches the last scan,
-  so the plan would describe tags the file no longer has. Rescan first.
+- `format_not_writable`: no writer for the sniffed format. FLAC, MP3 and ADTS
+  are written; M4A, Ogg, WAV and AIFF are not, nor is a FLAC stream behind a
+  leading ID3v2 tag.
+- `changed_since_scan`: the file's identity no longer matches the last scan.
+  Rescan first.
 - `folder_not_writable`: Orca cannot create files in the file's folder, which
-  the write needs for its staged copy. The file's own permissions do not
-  matter, since the staged copy replaces it by a rename. C value
+  the staged copy needs. The file's own permissions do not matter, since the
+  copy replaces it by a rename. C value
   `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE` (3).
 
-The runtime holds at most eight plans awaiting approval.
-`Runtime.startTagWrite` approves one by its ID and digest and executes it as a
-`mutation` Job; a digest that does not match, or a journal lock held
-elsewhere (`error.MutationInProgress`), leaves the plan unwritten and
-pending.
-`Runtime.discardTagWrite` drops one. The Job cannot be cancelled once started,
-because a journaled group commits or rolls back as a whole. When it ends, every
-file in the plan is re-observed and reprojected, so the library reads what the
-files now say. The plan ID is the journal group, and
-`Runtime.undoTagWrite(group)` restores those files' previous bytes and
-re-observes them; for a group already undone, such as one whose interrupted
-undo recovery finished, it re-observes them and returns
-`error.MutationGroupAlreadyUndone`. Orca's values survive both directions: after a write the
-library still holds the locked edit, and after an undo it still shows it.
+The runtime holds at most eight plans awaiting approval. `Runtime.startTagWrite`
+approves one by its ID and digest and executes it as a `mutation` Job; a digest
+mismatch, or a journal lock held elsewhere (`error.MutationInProgress`), leaves
+the plan unwritten and pending. `Runtime.discardTagWrite` drops one. The Job
+cannot be cancelled once started, because a journaled group commits or rolls
+back as a whole. When it ends, every file in the plan is re-observed and
+reprojected.
+
+The plan ID is the journal group. `Runtime.undoTagWrite(group)` restores the
+files' previous bytes and re-observes them; for a group already undone it
+re-observes them and returns `error.MutationGroupAlreadyUndone`. Orca's values
+survive both directions.
 
 A write that fails rolls its group back as recovery does and ends the Job
-`failed`. `Runtime.jobTagWriteFailure(job)` then returns a `TagWriteFailure`:
-the file it stopped at, that file's index in the plan's actions, and a
+`failed`. `Runtime.jobTagWriteFailure(job)` returns a `TagWriteFailure`: the
+file it stopped at, its index in the plan's actions, and a
 `TagWriteFailureReason` (`permission_denied`, `read_only_file_system`,
-`no_space`, `changed_since_plan` when the file's identity no longer matched
-the plan, or `other`). It returns null while the Job runs, after it
-succeeded, or when it failed before reaching a file, such as in recovery, and
-`error.NotATagWriteJob` for a Job of another kind. The C ABI's
+`no_space`, `changed_since_plan` or `other`). It returns null while the Job
+runs, after success, or when the write failed before reaching a file;
+`error.NotATagWriteJob` for another kind of Job. The C ABI's
 `orca_job_tag_write_failure` fills an `orca_tag_write_failure` and returns
-`ORCA_STATUS_NOT_FOUND` for null and `ORCA_STATUS_INVALID_ARGUMENT` for a Job
-of another kind. `orca-cli write-tags` prints it as
-`failed<TAB>FILE_ID<TAB>REASON<TAB>PATH` before exiting with an error.
-A plan writes one present location of each file. A file held at several
-paths is byte-identical copies, so writing one copy splits it off into a file
-of its own that carries Orca's values, and the copies left behind keep the
-shared file (see [database.md](database.md#identity)).
-When a write commits, each value it wrote is marked with
-`orca_metadata_values.written_at` on the file its path holds after the
-re-observation; changing the value clears the mark. The
-mark keeps a recording ID that Orca wrote into a file eligible for AcoustID
-submission, since the file's tag then holds Orca's choice.
+`ORCA_STATUS_NOT_FOUND` for null and `ORCA_STATUS_INVALID_ARGUMENT` for another
+kind of Job.
 
-Writers keep what they do not understand:
+A plan writes one present location of each file. A file held at several paths is
+byte-identical copies, so writing one copy splits it off into a file of its own
+that carries Orca's values, and the copies left behind keep the shared file
+([database.md](database.md#identity)). When a write commits, each value it wrote
+is marked with `orca_metadata_values.written_at` on the file its path holds
+after the re-observation; changing the value clears the mark. The mark keeps a
+recording ID that Orca wrote eligible for AcoustID submission.
+
+### Format rules
+
+Writers keep what they do not understand, and copy the audio bytes unchanged;
+only the tag region is rewritten.
 
 - ID3v2 keeps the file's version (2.3 or 2.4), copies unchanged frames verbatim,
   keeps a `n/total` total, and updates an existing ID3v1 trailer. A file with no
-  ID3v2 tag gets a 2.4 one. A recording ID replaces only the MusicBrainz `UFID`
-  and the `TXXX` frames the reader takes one from (`MusicBrainz Track Id`,
-  `MUSICBRAINZ_TRACKID`). The release, release-group, release-track and
-  album-artist IDs are written as `TXXX` frames under Picard's descriptions,
-  `MusicBrainz Album Id`, `MusicBrainz Release Group Id`,
-  `MusicBrainz Release Track Id` and `MusicBrainz Album Artist Id`, and each
-  replaces only the `TXXX` frames under that description or its Vorbis
-  spelling, such as `MUSICBRAINZ_ALBUMID`, in any case. Other `UFID` owners
-  and `TXXX` descriptions are kept byte for byte. In 2.3 a `TXXX` frame is
-  UTF-16 with a byte-order mark on each string; in 2.4 it is UTF-8. Genres
-  replace every `TCON` frame with one: in 2.4 it holds each genre as a
-  NUL-separated value, and in 2.3, which has no multi-value text frames, the
-  genres joined with `; `, which canonicalisation splits again. The ID3v1
-  trailer's genre byte is kept. A name that `TCON` reserves is written as
-  given but reads back as something else: digits only as that ID3v1 genre
-  (`80` as `Folk`, or nothing for a number past the table up to 255), a name
-  in parentheses without them (`(Live)` as `Live`), and `RX` and `CR` as
-  `Remix` and `Cover`. This is a known, minor limitation. The composer
-  replaces every `TCOM` frame. The comment replaces every `COMM` frame with an
-  empty description, in any language, and every `TXXX` described `comment`,
-  with one `COMM` in language `eng`; described `COMM` frames are kept byte for
-  byte. The ID3v1 trailer's comment is kept.
-- Vorbis comments in FLAC match fields by the same aliases and canonical values
-  the reader uses, so a write never duplicates a field under another spelling.
-  The release-level IDs are `MUSICBRAINZ_ALBUMID`,
+  ID3v2 tag gets a 2.4 one.
+- A recording ID replaces only the MusicBrainz `UFID` and the `TXXX` frames the
+  reader takes one from (`MusicBrainz Track Id`, `MUSICBRAINZ_TRACKID`). The
+  release, release-group, release-track and album-artist IDs are `TXXX` frames
+  under Picard's descriptions (`MusicBrainz Album Id`, `MusicBrainz Release
+  Group Id`, `MusicBrainz Release Track Id`, `MusicBrainz Album Artist Id`),
+  each replacing only the `TXXX` frames under that description or its Vorbis
+  spelling in any case. Other `UFID` owners and `TXXX` descriptions are kept
+  byte for byte. A `TXXX` frame is UTF-16 with a byte-order mark on each string
+  in 2.3 and UTF-8 in 2.4.
+- Genres replace every `TCON` frame with one: NUL-separated values in 2.4, and
+  in 2.3, which has no multi-value text frames, the genres joined with `; `. The
+  ID3v1 trailer's genre byte is kept. A name that `TCON` reserves is written as
+  given but reads back differently: digits only as that ID3v1 genre (`80` as
+  `Folk`, or nothing past the table up to 255), a name in parentheses without
+  them (`(Live)` as `Live`), and `RX` and `CR` as `Remix` and `Cover`.
+- The composer replaces every `TCOM` frame. The comment replaces every `COMM`
+  frame with an empty description, in any language, and every `TXXX` described
+  `comment`, with one `COMM` in language `eng`; described `COMM` frames are kept
+  byte for byte. The ID3v1 comment is kept.
+- Vorbis comments in FLAC match fields by the reader's aliases and canonical
+  values, so a write never duplicates a field under another spelling. A write
+  replaces every entry under a key, in any case, with one; genres get one entry
+  per genre. The release-level IDs are `MUSICBRAINZ_ALBUMID`,
   `MUSICBRAINZ_RELEASEGROUPID`, `MUSICBRAINZ_RELEASETRACKID` and
-  `MUSICBRAINZ_ALBUMARTISTID`. A write replaces every entry under the key, in
-  any case, with one. Genres replace every `GENRE` entry, in any case, with
-  one entry per genre. The composer is `COMPOSER` and the comment `COMMENT`;
-  a `DESCRIPTION` entry is kept, and a comment the reader took from it is the
-  write's precondition.
-- MP4 has no tag writer, so its genres, composer and comment are not written
-  either.
-- The audio bytes are copied unchanged; only the tag region is rewritten.
+  `MUSICBRAINZ_ALBUMARTISTID`; the composer is `COMPOSER` and the comment
+  `COMMENT`. A `DESCRIPTION` entry is kept, and a comment the reader took from
+  it is the write's precondition.
+- MP4 has no tag writer, so its genres, composer and comment are not written.
+- The FLAC writer preserves unknown comments and metadata blocks.
 
-From the command line, `orca-cli write-tags DATABASE IDS` prints the plan,
-each change labelled `edit` or `match`, a genre change as
-`genres<TAB>BEFORE -> AFTER<TAB>edit` with each list joined by `; `, a
-`conflict` line per conflict, and the digest; `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
-writes it if the digest still matches, `orca-cli undo-tags DATABASE GROUP`
-undoes it or prints `group GROUP was already undone`, and `orca-cli prune-backups DATABASE` deletes the backups that make
-undo possible; see [Pruning backups](#pruning-backups).
-In `orca-gtk`, Write Tags to Files… on a track or album menu, and Save and
-Write to Files… in Edit Tags, show the plan and write it once confirmed.
+`orca-cli write-tags`, `undo-tags` and `prune-backups` and the `orca-gtk` Write
+Tags to Files and Edit Tags actions drive the plan; see [cli.md](cli.md).

@@ -1,533 +1,318 @@
-# Storage capabilities
+# Storage and scanning
 
-Decoders and analyzers consume `ReadableSource`, a small capability interface
-for positional reads, total size, and stable observed identity. It deliberately
-does not expose path strings or filesystem handles.
+This file covers how Orca reads files: the source interface, container sniffing,
+scanning and reconciliation, volume checks, root relocation, property backfill
+and filesystem watching. [database.md](database.md) covers the tables these
+write.
 
-`LocalFileSource` is the desktop implementation. It owns an open file, captures
-size/inode/modification identity at open time, and supports offset reads without
-changing shared stream position. Provider, mobile, and permission-sensitive
-sources can implement the same contract without pretending to be local paths.
+## Sources
 
-Container sniffing uses source bytes rather than filename extensions.
+Decoders and analyzers consume `ReadableSource`, a capability interface for
+positional reads, total size and observed identity. It exposes neither path
+strings nor filesystem handles, so non-local sources can implement it.
+`LocalFileSource` is the desktop implementation: it captures size, inode and
+modification time at open and reads at offsets without moving a shared stream
+position.
+
+## Container sniffing
+
 `storage/format.zig` recognizes WAV, AIFF, FLAC, MPEG audio, MP4, Opus, Vorbis,
-WavPack, QOA and ADTS AAC.
+WavPack, QOA and ADTS AAC from source bytes, never from file extensions.
+`format.detect` returns the container and the offset where its encoded stream
+begins.
 
-## What sniffing guarantees
-
-`format.detect` answers two questions together: **which container** the bytes
-are, and **where its encoded stream begins**. The second is not always zero. An
-ID3v2 tag says nothing about what follows it, and some taggers staple one to the
-front of a FLAC stream. Reading `ID3` as "this is MPEG audio" would hand those
-files to the MPEG decoder, which fails on the magic bytes, so they would neither
-play nor probe.
-
-- **The tag is measured, not guessed.** The declared size is four syncsafe bytes
-  at offset 6, seven significant bits each, and excludes both the ten-byte
-  header and the optional ten-byte footer that flag `0x10` announces. An error
-  of ten bytes still "works" for MPEG audio, which resyncs on the next frame
-  header, and silently breaks every format whose magic must land on an exact
-  byte.
-- **Two reads, not one long one.** Detection reads 64 bytes at zero, and when
-  those are an ID3v2 header, 64 more at the first byte past the tag. A tag
-  carrying artwork routinely runs to hundreds of kilobytes, so the payload check
-  cannot be folded into a longer first read.
-- **MPEG audio stays byte zero.** If the bytes past the tag are unrecognizable,
-  or are an MPEG frame header, detection reports MPEG audio starting at zero.
-  That is what an ID3v2 tag fronts in all but a handful of files, and the MPEG
-  decoder owns tag and frame resync across the whole file, including the
-  trailing ID3v1, APEv2 and Lyrics3 tags it must exclude from the audio region.
-  `sniffBytes`, which is pure over a prefix and often cannot reach past the tag,
-  answers the same way.
-- **Neither does the artwork reader.** `metadata/artwork.zig` resolves the
-  prefix the same way before asking a container for its cover, so an
-  ID3-fronted FLAC gives up its `PICTURE` block like any other. Read from byte
-  zero, such a file looks like an MPEG file with no `APIC` frame.
-- **The decoder never sees the tag.** `CodecRegistry.open` and `openDetected`
-  hand the codec a `source.OffsetSource` view of the suffix when detection
-  reports a non-zero payload offset, and the returned Decoder owns that view for
-  its whole life, releasing it strictly after the codec. `open` resolves the
-  prefix as well as `openDetected` does, because the scanner opens with the
-  container it already sniffed. No codec learns what a tag is.
-- **Offsets do not change identity.** An `OffsetSource` shifts reads and size
-  but forwards `identity` unchanged. Identity answers "which file is this and
-  has it changed", which the scanner compares against the file's `locations`
-  row; a view that reported a shortened size would make every tagged file look
-  modified on every scan.
-- **Seeking is in stream frames.** Because the offset lives in the source view
-  rather than in a codec, every byte position a decoder computes — a FLAC
-  seektable entry, an MPEG frame index — is already relative to the start of the
-  stream, and a seek in a tagged file lands exactly where the same seek in the
-  untagged stream does.
+- The offset is not always zero: an ID3v2 tag may precede any container,
+  including FLAC. Detection reads 64 bytes at offset zero and, when they are an
+  ID3v2 header, 64 more past the tag. The tag size is computed from its header
+  and footer flag, never estimated, because formats whose magic must land on an
+  exact byte fail on a small error.
+- When the bytes past the tag are unrecognizable or an MPEG frame header,
+  detection reports MPEG audio at offset zero and the MPEG decoder owns tag and
+  frame resync.
+- `CodecRegistry.open` and `openDetected` give the codec a `source.OffsetSource`
+  over the suffix when the offset is non-zero. No codec parses tags, and every
+  position a decoder computes is relative to the start of the stream.
+- An `OffsetSource` shifts reads and size but forwards `identity` unchanged. The
+  scanner compares identity with the file's `locations` row, so a shortened
+  identity would make every tagged file look modified on every scan.
 
 ## Incremental scanning
 
-The scanner recursively walks a configured root, opens candidate files through
-`LocalFileSource`, and compares path plus storage identity (inode, size and
-modification time) against the path's `present` row in `locations` under the
-root being scanned (`LocationRepository.unchangedLocationId`). Unchanged files
-avoid format or metadata work. `orca-cli analyze PATH` records a location
-without reading tags: a new one belongs to no root and an existing one keeps
-the identity its scan recorded, so the next scan of the root re-reads the
-path. Changed audio files commit in bounded transactions through the
-Library's shared write lane; unsupported and transiently unreadable files are
-counted without invalidating successful batches.
+The scanner walks a root recursively and compares each file's path and identity
+(inode, size, modification time) with the path's `present` row in `locations`
+under the root (`LocationRepository.unchangedLocationId`). An unchanged file
+costs no format or metadata work. Changed audio files commit in bounded
+transactions (256 rows by default) through the Library's write lane; unsupported
+and transiently unreadable files are counted without invalidating successful
+batches. A cancelled or interrupted scan resumes by restarting, because
+committed unchanged identities are skipped. `orca-cli analyze PATH` records a
+location without reading tags: a new one belongs to no root, and an existing one
+keeps its scan's identity so the next scan re-reads the path.
 
-A changed audio file is also probed through the codec registry for what its
-container declares — the encoding identifier that becomes `files.codec`, plus
-sample rate, channels, sample width and frame count, which becomes
-`files.duration_ms`. Only headers are read, never audio. Probing is on
-the changed path alone: the unchanged skip is what makes a rescan of a large
-library nearly free, and reopening every file would spend that.
-`ScanRequest.reprobe_all` turns the skip off for one scan, so every file is
-read and probed again; Rebuild library database and `orca-cli scan --reprobe`
-use it. A file that
-sniffs as audio and then refuses to open is recorded with no properties and the
-scan continues, exactly as an unreadable tag is handled — malformed and
-truncated audio is normal in a real library. A transform codec such as MPEG has
-no sample width to declare, and that stays unknown rather than being invented.
+A changed file is probed through the codec registry for what its container
+declares (`files.codec`, sample rate, channels, sample width, frame count, which
+becomes `files.duration_ms`); only headers are read. A file that sniffs as audio
+and then refuses to open is recorded with no properties.
+`ScanRequest.reprobe_all` (`orca-cli scan --reprobe`) re-reads and re-probes
+every file. On the same path the scanner records the pixel size and byte hash of
+changed embedded pictures and folder images, so settling `artwork_problem` never
+reads image bytes (see [database.md](database.md#release-artwork)).
 
-Covers are measured on the same changed-bytes path. When the scanner reads a
-changed file's tags it records the embedded picture's pixel size and a hash
-of its bytes, and when it reads a changed folder image it records the same
-for the image; an unchanged file or image is not read again. Settling a
-Release's `artwork_problem` then reads only those columns, never image bytes,
-so a projection costs no I/O for covers. See
-[database.md](database.md#artwork-problems).
+### Skipped names
 
-The walk skips the files a tag write puts beside the music, because each is a
-temporary of Orca's and a scan that recorded one would list a second Track with
-the old tags:
+The walk and the watcher skip Orca's own files by name anywhere under the root:
 
-- hidden names containing `.orca-stage-` or `.orca-restore-`;
-- names from journals that predate the backup directory: those containing
-  `.orca-backup-` or `.orca-stage-`, or ending in `.recovery-displaced`.
+- tag-write temporaries (`isOrcaTemporaryName`): names containing `.orca-stage-`
+  or `.orca-backup-`, names ending in `.recovery-displaced`, and hidden names
+  containing `.orca-restore-`. Recording one would list a second Track with the
+  old tags;
+- the database and its `-wal`, `-shm`, `-journal`, `.orca-journal.lock` and
+  `.orca-scan.lock` files;
+- the volume marker `.orca-volume-id`;
+- the backup directory `<database>.orca-backups`, which is not walked into
+  ([Tag-write files](metadata.md#tag-write-files)).
 
-It also skips the Library's own files, matched by name anywhere under the
-root as the watcher matches them: the database and its `-wal`, `-shm`,
-`-journal`, `.orca-journal.lock` and `.orca-scan.lock` files, the volume marker
-`.orca-volume-id`, and the backup directory `<database>.orca-backups`, which
-it does not walk into. [Tag-write files](metadata.md#tag-write-files) covers
-the backup layout and the disk space backups and undo need.
+Symbolic links are not followed.
 
-Cancellation is checked before filesystem work and between entries. A cancelled
-or interrupted scan is resumable by restarting it: already committed unchanged
-identities are skipped, so no traversal-order checkpoint is required.
-[Watching roots](#watching-roots) drives the same reconciliation from
-filesystem events.
+### Scan runs and sweeps
 
-Each walk of a root opens a scan run (`scan_runs`) with the root's next
-generation and stamps every location and folder image it reaches with it.
-Only a run that ends `completed` sweeps: it marks the locations it did not
-reach `missing` and forgets the folder images it did not reach. A cancelled
-run ends `cancelled`, and a walk that errors, because the root's directory is
-gone or cannot be opened or because listing a directory fails, ends its run
-`failed` and fails the Job; neither sweeps anything. The one exception is a
-subtree reconcile whose walk of one directory fails: its run ends `failed`,
-and it still sweeps the directories whose walks completed (see
-[Folder-scoped reconciliation](#folder-scoped-reconciliation)).
+Each walk of a root opens a `scan_runs` row with the root's next generation and
+stamps every location and folder image it reaches. Only a run that ends
+`completed` sweeps: it marks unreached locations `missing` and deletes unreached
+folder images. A `cancelled` or `failed` run (the root's directory is gone or
+cannot be opened, or listing a directory fails) sweeps nothing; the exception is
+a subtree reconcile that fails on one directory, which still sweeps the
+directories whose walks completed.
 
-A directory that a walk lists but cannot enter, for example because its
-permissions deny it, does not fail the walk. It adds one to the scan's
-`errors` count, and every location and folder image the root has recorded
-under it is stamped with the run's generation, so the sweep keeps everything
-under it. Nothing under it is read, and its folder scan time is unchanged. A
-file count before the walk skips it.
+- A directory that cannot be entered, and a file or image that cannot be read,
+  add one to `ScanStats.errors` and do not fail the walk. Their recorded rows
+  are stamped with the run's generation, so the sweep keeps them.
+- A stamp keeps the higher of its stored generation and the one being written,
+  so an earlier walk cannot lower a stamp and make a later sweep mark a present
+  file `missing`. Generations count per root.
 
-A file or folder image that a walk lists but cannot open or read, for example
-because its permissions deny reading, does not fail the walk. It adds one to
-the scan's `errors` count (`ScanStats.errors`), and its existing location or
-folder image row is stamped with the run's generation and otherwise left
-unchanged, so the sweep neither marks it `missing` nor forgets it. One that was
-never recorded is only counted.
-
-Stamps never go backwards. Within a root, a stamp keeps the higher of its
-stored generation and the one being written, so a walk that began earlier
-cannot lower a stamp a later walk wrote; a lowered stamp would make the later
-walk's sweep mark a present file `missing`. Generations count per root, so a
-location or image that another root's walk reaches, as a nested root's walk
-does, takes that root's generation.
-
-A running scan or reconcile reports where it is through `ScanStats`:
-
-- `stage` is `discover` while the Job counts the files its walks will reach,
-  `read_tags` while it walks, and `done` once the Job's worker has finished.
-  Other Jobs that report `ScanStats` stay `discover` until they are `done`.
-- `current_path` is the file being read during `read_tags`, and empty
-  otherwise.
-- `albums_found` counts the distinct Releases the Job's projection wrote
-  that still exist. `releases_written` counts every Release write, so a
-  Release whose files span two batches counts twice there and once here, and
-  a Release the projection wrote and then pruned, as one a duplicate copy's
-  folder held until its Tracks moved, counts there and not here.
-
-The scanner reads and probes each file as its walk reaches it; there is no
-separate discovery pass inside the walk. So that a host can show a fraction
-and an ETA, a scan or reconcile Job first runs `scanner.countFiles` over every
-root or directory it will walk: the same walk with the same skips, counting
-regular files and opening none. Its Job snapshot then carries that count as
-`total_units` and the files walked so far (`files_seen`, images and files that
-are not audio included) as `completed_units`. The count is of files walked,
-not of audio files, because telling audio apart means opening each file, and
-an unchanged file is otherwise never opened. A file added between the count
-and the walk raises the total to the files walked; a walk that finishes sets
-it to the files it saw. Cancelled during the count, a Job reports no total.
-
-`orca-cli scan` prints these as `progress stage= files= total= albums=
-current=` lines, on each stage change and every half second; `total=-` while
-the files are counted.
+`ScanStats` reports `stage` (`discover`, `read_tags`, `done`), `current_path`,
+`files_seen`, `albums_found`, `marked_missing` and `volume_changed`. Before
+walking, a Job runs `scanner.countFiles` (the same walk and skips, opening no
+file) so `total_units` is files walked, not audio files. `orca-cli scan` prints
+`progress stage= files= total= albums= current=` lines, with `total=-` while
+counting.
 
 ## Estimating a folder before it is a root
 
 `estimateAudioFiles(io, allocator, path, token, limit)` counts the audio files
-under a folder that is not yet a root, so a host can say how large a library
-is before adding it. It walks as a scan does, skipping tag-write temporaries
-and the volume marker, and counts a file when `storage.format.detect` names an
-audio format from its first bytes, the detection the scanner and the codec
-registry use. On a folder that holds no Library database or backups it counts
-the files a first scan records as changed. It reads nothing past a header and
-writes nothing.
-
-- It stops once it has counted `limit` files (`estimate_default_limit`,
-  100000, in `orca-cli` and for a zero limit through the C ABI) and sets
-  `FolderEstimate.truncated`.
-- It polls `token` between entries, so a cancel returns `error.Cancelled`
-  within one entry, or within one 50 ms poll while the token is paused.
-- `orca-cli estimate PATH` prints `audio_files=N truncated=no|yes`.
+under a folder that is not a root, so a host can show a library's size before
+adding it. It walks as a scan does, counts a file when `storage.format.detect`
+names an audio format, reads nothing past a header and writes nothing. It stops
+at `limit` (`estimate_default_limit`, 100,000, also for a zero limit through the
+C ABI) and sets `FolderEstimate.truncated`. It polls `token` between entries and
+returns `error.Cancelled`. `orca-cli estimate PATH` prints `audio_files=N
+truncated=no|yes`.
 
 ## Folder-scoped reconciliation
 
 `Runtime.startLibraryReconcile(library, ReconcileRequest)` starts a `reconcile`
-Job over one registered root. With `.whole_root` it is a scan of that root.
-With `.subtrees`, it walks only the named directories, given relative to the
-root, and marks missing only locations under them. `orca-cli reconcile
-DATABASE ROOT_ID [DIR...]` runs it.
+Job over one registered root: `.whole_root` is a scan of the root; `.subtrees`
+walks only the named directories, relative to the root, and marks missing only
+locations under them. `orca-cli reconcile DATABASE ROOT_ID [DIR...]` runs it.
 
-- Directories are in normal form: not empty, not absolute, and no empty, `.`
-  or `..` component. Anything else is refused with
-  `error.InvalidReconcileDirectory`. A directory inside another listed one is
-  walked once, as part of the outer one.
-- A subtree walk builds each uri as a full scan does, so a file keeps the
-  location a full scan gave it.
-- One scan run, and one generation, covers all of a job's directories.
-- A directory that is gone, or is no longer a directory, counts as a completed
-  walk that found nothing. Everything recorded under it becomes `missing`.
-- A directory is swept only if its recursive walk completed and the job was
-  not cancelled. A directory whose walk failed, for example because the
-  directory itself cannot be opened, keeps every location it holds, and the
-  job ends `failed`. The other directories are still walked and swept. A
-  subdirectory the walk cannot enter does not fail it.
-- The sweep is bounded by `volume_id` and the uri range `[prefix/, prefix0)`
-  on the `(volume_id, uri)` unique index, so a sibling such as `A/Newer` is
-  never swept for `A/New`, and the sweep reads only that directory's rows.
-
-`ScanStats.marked_missing` counts the locations a scan or reconcile marked
-`missing`.
+- A directory must be non-empty, relative, and without empty, `.` or `..`
+  components, or it is refused with `error.InvalidReconcileDirectory`. A
+  directory inside another listed one is walked once.
+- One scan run and generation cover all the directories, and each uri is built
+  as a full scan builds it.
+- A directory that is gone or not a directory is a completed walk that found
+  nothing: everything under it becomes `missing`.
+- A directory is swept only if its recursive walk completed and the Job was not
+  cancelled. A directory whose own listing fails keeps its locations and the Job
+  ends `failed`; the other directories are still walked and swept.
+- The sweep is bounded by `volume_id` and the uri range `[prefix/, prefix0)`, so
+  `A/Newer` is never swept for `A/New`.
 
 ## One walk at a time
 
-A runtime never runs two walks of a Library at once. A host scan or
-reconcile started while another host Job holds the Library's slot waits for
-it (see [control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue)),
-a host walk stops the watcher's reconcile before it starts, and a walk that
-would still run beside another is refused with `error.LibraryScanRunning`
-(`ORCA_STATUS_BUSY` through the C ABI).
+A runtime never runs two walks of a Library at once: a host scan or reconcile
+waits for the Library's Job slot (see
+[control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue)),
+a host walk stops the watcher's reconcile first, and a walk that would still
+overlap another is refused with `error.LibraryScanRunning` (`ORCA_STATUS_BUSY`
+through the C ABI).
 
-The same holds across runtimes and processes that open one database file. A
-scan or reconcile holds an exclusive `flock` on `<database>.orca-scan.lock`
-from before its scan run begins until its sweep and the run's end, and
-releases it however the walk ends: completed, failed or cancelled. The
-operating system drops the lock of a process that exits, crashed or not. The
-control lane takes the lock as it starts the walk's worker, without waiting:
-while another runtime or process holds it, the walk is refused at once with
-`error.LibraryScanRunning`, adds no scan run and changes no location. Walks in
-different processes do not queue for each other. A host Job that waited for
-its Library's slot and then meets a held lock ends `failed`; the watcher keeps
-a refused reconcile's changes and tries again after `WatchOptions.quiet_ms`.
-The walk lock is separate from the
-[journal lock](metadata.md#the-journal-lock), so a walk and a tag write never
-wait for each other.
-
-Holding the lock, a walk first ends every run of its root still `running` as
-`failed`. Such a run belongs to no live walk: its walker ended without
-finishing it, as a crashed process does. A Library with no database file,
-such as an in-memory one, has no lock file; its walks are coordinated only
-within its runtime, and they leave other runs as they are.
+Across runtimes and processes sharing a database file, a walk holds an exclusive
+`flock` on `<database>.orca-scan.lock` from before its scan run begins until its
+sweep ends, however it ends; the operating system drops it when a process exits.
+The control lane takes it without waiting, so a refused walk adds no scan run
+and changes no location. A Job that waited for its slot and then meets a held
+lock ends `failed`; the watcher keeps a refused reconcile's changes and retries
+after `WatchOptions.quiet_ms`. The walk lock is separate from the [journal
+lock](metadata.md#the-journal-lock), so a walk and a tag write never wait for
+each other. A walk holding the lock first ends every run of its root still
+`running` as `failed`, since no live walk owns it. A Library with no database
+file has no lock file and coordinates walks only within its runtime.
 
 ## Volume check before a walk
 
-A drive that is not mounted leaves its mount point as an empty directory on
-the parent filesystem. A walk of it would find nothing and its sweep would
-mark every file on the drive `missing`. So before every scan or reconcile of a
-root, host-started or automatic, the job resolves the volume the root's path
-lies on now and compares it with the volume the root was bound to
-(`library/volume_check.zig`):
+An unmounted drive leaves its mount point as an empty directory, so a walk would
+find nothing and its sweep would mark every file `missing`. Before every scan or
+reconcile of a root, host-started or automatic, the Job resolves the volume the
+root's path lies on as `ensureRoot` does (with `allow_persist` off, so nothing
+is written) and compares it with the volume the root is bound to
+(`library/volume_check.zig`).
 
-- The current volume is resolved as `ensureRoot` resolves it, with
-  `allow_persist` off: nothing is written, and no `volumes` row is created.
-- A root bound to a filesystem UUID (`uuid:`) or a persisted volume marker
-  (`ulid:`, from `.orca-volume-id` at the mount root) passes only when its
-  path resolves to that same key.
-- A root bound to its own `root:<id>` key, because the platform named no
-  volume when it was added, passes while the platform still names none for
-  its path. Such a root on an unmounted drive whose parent filesystem has no
-  UUID either is not caught.
-- A root on the fallback volume (`volumes.id` 1) records no identity and
-  always passes.
+- A root bound to a filesystem UUID (`uuid:`) or a persisted marker (`ulid:`,
+  from `.orca-volume-id` at the mount root) passes only when its path resolves
+  to the same key.
+- A root bound to `root:<id>`, because the platform named no volume, passes
+  while the platform still names none. Such a root on an unmounted drive whose
+  parent filesystem has no UUID either is not caught.
+- A root on the fallback volume (`volumes.id` 1) always passes.
 
-A root that fails the check is neither walked nor swept: the job counts one
-error, ends `failed`, sets `ScanStats.volume_changed`, and marks nothing
-`missing`. Other roots of the same scan are still walked. The check runs for
-`startLibraryScan`, `startLibraryReconcile` and automatic reconciles.
-
-`libraryAddRoot` is the one path that binds an existing root to the volume
-its path is on now, which is how a replacement drive at the same path is
-accepted. `orca-cli scan DATABASE ROOT` therefore scans a registered root by
-its id without adding it again, and fails with a message when the check
-fails; `orca-cli add-root DATABASE ROOT` rebinds it explicitly.
+A root that fails is neither walked nor swept: the Job counts one error, ends
+`failed`, sets `ScanStats.volume_changed` and marks nothing `missing`; other
+roots of the scan are still walked. `libraryAddRoot` is the one path that
+rebinds an existing root to the volume its path is on, which accepts a
+replacement drive at the same path. `orca-cli scan DATABASE ROOT` scans a
+registered root without adding it and fails when the check fails; `orca-cli
+add-root DATABASE ROOT` rebinds it.
 
 ## Unavailable and relocated roots
 
-A root is available when its directory opens for reading and passes the
-volume check above. `libraryRootPage` reports it as `LibraryRoot.available`,
-beside the root's Track count and the Tracks it cannot play. While a root is
-unavailable, every Track under it counts as unavailable.
-`libraryAvailability` gathers the unavailable roots with those Tracks and
-the Releases left with nothing to play, and `libraryReleasesAvailable`
-answers per Release, so a frontend dims what cannot play without deciding
-availability itself (`orca-cli availability DATABASE [RELEASE_ID...]`).
+A root is available when its directory opens for reading and passes the volume
+check; while it is unavailable, every Track under it is. `libraryRootPage`
+reports `LibraryRoot.available`, `libraryAvailability` gathers the unavailable
+roots, their Tracks and the Releases left with nothing to play, and
+`libraryReleasesAvailable` answers per Release (`orca-cli availability DATABASE
+[RELEASE_ID...]`), so a frontend dims what cannot play without deciding
+availability itself.
 
-Playback applies the same test. When a Track's file cannot be found, the
-opener checks the root the location belongs to. An unavailable root fails the
-open with `TrackFolderUnavailable` and leaves the location as it is, so an
-unmounted drive or a renamed music folder does not mark a whole library
-`missing`. Only a missing file under an available root is marked `missing`
+Playback applies the same test. When a Track's file cannot be found, an
+unavailable root fails the open with `TrackFolderUnavailable` and leaves the
+location alone; only a missing file under an available root is marked `missing`
 and fails with `TrackFileMissing`.
 
-`libraryRelocateRoot` (`orca-cli relocate-root DATABASE ID PATH`) is the
-repair for a root that moved. It refuses a path that is not absolute or not
-a readable directory, then binds the path to the volume it is on now, as `libraryAddRoot`
-does, and rewrites the root, its locations and its folder images in one
-`BEGIN IMMEDIATE` transaction, with the tag write journal's paths under it
-(see [metadata.md](metadata.md#relocated-roots)). A crash leaves the root
-wholly at its old path or wholly at its new one. Each location's URI keeps
-its path below the root. Root, file, location and Track ids are kept, so play
-counts, ratings, playlists and edits stay attached.
+`libraryRelocateRoot` (`orca-cli relocate-root DATABASE ID PATH`) repairs a root
+that moved. It refuses a path that is not absolute or not a readable directory,
+binds the path to its volume as `libraryAddRoot` does, and rewrites the root,
+its locations, its folder images and the tag-write journal's paths under it (see
+[metadata.md](metadata.md#relocated-roots)) in one `BEGIN IMMEDIATE`
+transaction, so a crash leaves the root wholly old or wholly new. Root, file,
+location and Track ids survive, so play counts, ratings, playlists and edits
+stay attached. It refuses with `error.RootPathOverlaps`, leaving no new volume
+row, a path that:
 
-Before it changes anything, the relocate refuses with
-`error.RootPathOverlaps`:
+- is another root's, or inside or around one;
+- already holds locations or folder images of another root or of none;
+- is inside or around the old path while the old directory still exists;
+- is nested with the old path so that a moved location or folder image would
+  land on another of the root's.
 
-- a path that is another root's, or inside or around one;
-- a path under which locations or folder images of another root, or of none,
-  already sit;
-- a path inside or around the root's old path while the old directory still
-  exists, since the two would then hold the same files;
-- a path nested with the old one at which a moved location or folder image
-  would land on another of the root's.
-
-A refusal leaves no new volume row behind. Before it changes anything, the
-relocate also takes the Library's [walk lock](#one-walk-at-a-time): while
-another runtime or process walks the Library, it is refused with
-`error.LibraryScanRunning` and changes nothing. The reconcile job it starts
-holds that lock from then on and walks the new path, so files that changed or
-went away while the root was elsewhere are noticed and no other walk runs in
-between. While the Library's jobs are paused, the reconcile waits without the
-lock and takes it again when it starts.
+The relocate takes the [walk lock](#one-walk-at-a-time) and is refused with
+`error.LibraryScanRunning` while another runtime or process walks the Library.
+The reconcile Job it starts holds the lock from then on, so changes made while
+the root was elsewhere are noticed and no other walk runs between.
 
 ## Repairing properties without a walk
 
-The unchanged fast path has a cost, and it is not paid at scan time. A file the
-scanner skips is never probed, so a row written without probing keeps null
-`duration_ms`, `sample_rate` and `channels` for ever — a music collection's
-bytes essentially never change, and only changed bytes are re-read. A Track with
-a null duration has nothing for a transport bar to draw against and shows no
-length in a listing.
+Only changed bytes are probed, so a row written without probing keeps null
+`duration_ms`, `sample_rate` or `channels`. `library/property_backfill.zig`
+repairs those rows by `files.id` without walking a filesystem, as the Job
+`Runtime.startLibraryPropertyBackfill` (`orca_library_start_property_backfill`,
+`orca-cli backfill`).
 
-`library/property_backfill.zig` is the repair, and it is the same shape as the
-projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
-(`Runtime.startLibraryPropertyBackfill`,
-`orca_library_start_property_backfill`, `orca-cli backfill`).
+- Selection is a null `duration_ms`, `sample_rate` or `channels`, or `codec =
+  ''`, served by the partial index `files_incomplete_properties`.
+  `repository.incomplete_properties_predicate` is its one definition, because
+  SQLite matches a partial index by expression. `bit_depth` is not a term: a
+  transform codec has none.
+- It commits one page at a time and checks cancellation between rows. There is
+  no checkpoint: which rows owe a probe is a property of the rows, so a second
+  run resumes by asking again. `--force` re-probes complete rows and is not
+  resumable.
+- A row whose file is gone or is not audio is passed over with no health issue
+  (`locations.state` models absence). A file that opens and then fails to decode
+  raises `unreadable_file`, a kind the backfill owns outright so clearing it
+  cannot erase an analysis finding.
+- Each committed batch is reprojected scoped to its file ids. A FLAC whose
+  STREAMINFO declares `total_samples = 0` keeps a null duration.
+- After the files, the Job runs `library/artwork_backfill.zig` over unmeasured
+  covers ([database.md](database.md#release-artwork)).
 
-- **Selection is one indexed search.** `SELECT ... WHERE files.id > ? AND
-  (duration_ms IS NULL OR sample_rate IS NULL OR channels IS NULL OR codec =
-  '')` is served by the partial index `files_incomplete_properties` over exactly
-  that predicate. The predicate has one definition,
-  `repository.incomplete_properties_predicate`, shared by the index and the
-  query, because SQLite matches a partial index by expression rather than by
-  meaning. The index holds only the broken rows, so it shrinks as the pass
-  works and asking the question on a healthy library costs one B-tree probe
-  rather than 500,000 row reads. `bit_depth` is deliberately not a term: a
-  transform codec has no sample width to declare, so a null there is an answer.
-- **Bounded and resumable.** One page per bounded commit, cancellation checked
-  between rows, and a cancelled run still commits what it already probed. There
-  is no checkpoint of its own: which rows still owe a probe is a property of
-  the rows, so a second run resumes by asking the same question and getting a
-  shorter answer.
-- **A missing file is not a failure.** A row whose file is gone, or is not
-  audio, is counted and passed over with no health issue — `locations.state`
-  already models absence, and filing an issue per file would bury every real
-  finding under an unmounted drive. A file that *opens* and then refuses to
-  decode raises `unreadable_file`, a kind this pass owns outright so that
-  clearing it later cannot erase a finding the analyzer made by decoding audio
-  this pass never looked at.
-- **It reprojects what it repaired.** `tracks.duration_ms` is derived from the
-  file rows, so a backfill that left the Tracks reading zero would have fixed
-  nothing anybody can see. Each committed batch is handed to the projection
-  scoped to its own file ids, exactly as a scan batch is.
-- **`--force` re-probes rows that already answer**, and is not the default. A
-  probe reads what a container declares, so re-running it on a row that has an
-  answer writes the same numbers; force exists for a probe implementation that
-  got *better*, where a stored value is present but no longer what the current
-  build would compute. A forced run is not restart-resumable, because a
-  re-probed row still matches the selection.
-
-A FLAC whose STREAMINFO declares `total_samples = 0` keeps a null duration: the
-length is honestly unknown rather than missing.
-
-Covers have the same hole: an embedded cover or folder image left unmeasured
-stays so, because the scanner will not read its unchanged bytes again. After the files missing properties, the same
-Job runs `library/artwork_backfill.zig`, which pages the partial indexes over
-the unmeasured covers by id, reads each one whose size and modification time
-are those observed, records its size and hash, and settles the Releases of
-each batch in its commit. A cover whose file changed or is unreachable is
-passed over for the next scan to observe; one whose bytes will not read is
-recorded as unreadable and not read again. Covers the Library kept from the
-Cover Art Archive are measured from their stored bytes. The Job's totals
-count the covers with the files, and the Job examines every row its
-predicates select. `Runtime.libraryBackfillPending`
-(`orca_library_backfill_pending`) counts only what it could repair now: it
-leaves out files that are missing, on an offline root, in a format no codec
-decodes, or carry an `unreadable_file` issue, which the scanner settles again
-when their bytes change, and covers of missing files or on an offline root.
-`orca-gtk` starts the Job once per launch when either count is non-zero, so
-a library whose only gaps are files it cannot read starts none.
-
-`library/analysis_pass.zig` is the same shape one level deeper: also keyed on
-`files.id`, also a runtime job with bounded commits and no walk, but decoding
-whole files rather than reading headers, which changes what "bounded" and
-"resumable" have to mean. `docs/analysis.md` covers it.
+`Runtime.libraryBackfillPending` (`orca_library_backfill_pending`) counts only
+what the Job can repair: it leaves out missing files, files on an offline root,
+formats no codec decodes, files with an `unreadable_file` issue, and covers of
+such files. `orca-gtk` starts the Job once per launch when either count is
+non-zero. `library/analysis_pass.zig` is also keyed on `files.id` but decodes
+whole files ([analysis.md](analysis.md#the-pass)).
 
 ## Watching roots
 
 `Runtime.libraryWatch(library, WatchOptions)` watches every enabled root of a
-Library and reconciles what changes under them through the
-[folder-scoped reconcile](#folder-scoped-reconciliation).
-`Runtime.libraryUnwatch` stops it, `Runtime.libraryWatchStatus` reports it,
-and `orca-cli watch DATABASE` runs it. Only Linux has a watcher; elsewhere
-`libraryWatch` returns `error.WatchingUnsupported`.
+Library and reconciles changes through the [folder-scoped
+reconcile](#folder-scoped-reconciliation). `libraryUnwatch` stops it,
+`libraryWatchStatus` reports it, and `orca-cli watch DATABASE` runs it. Only
+Linux has a watcher; elsewhere `libraryWatch` returns
+`error.WatchingUnsupported`. Watching speeds reconciliation up and replaces none
+of it: a scan still finds anything no event reported.
 
-Watching speeds reconciliation up and replaces none of it: a scan or
-reconcile still finds anything no event reported.
-
-### How it works
-
-- Each watched Library has one watcher thread (`library/watch_linux.zig`),
-  registered with the work registry. It blocks in poll(2) on a nonblocking
-  inotify descriptor and an eventfd; cancellation and every command from the
-  control lane write the eventfd.
-- Arming a root walks it on the watcher thread and adds one watch per
-  directory, for `IN_CREATE`, `IN_DELETE`, `IN_MOVED_FROM`, `IN_MOVED_TO`,
-  `IN_CLOSE_WRITE`, `IN_ATTRIB`, `IN_DELETE_SELF` and `IN_MOVE_SELF`, with
-  `IN_ONLYDIR`, `IN_DONT_FOLLOW` and `IN_EXCL_UNLINK`. `IN_MODIFY` is not
-  watched: a file being written is reported once, when it is closed. The walk
-  checks for cancellation between entries.
-- Each event marks a directory, relative to the root, dirty:
-  - a file created, written and closed, changed in metadata, deleted or moved:
-    the directory holding it;
-  - a directory created or moved in: that directory, once it and every
-    directory already inside it are watched;
-  - a directory deleted or moved out: that directory, once its watches and
-    those below it are dropped.
-- A dirty directory is reconciled recursively, so a file created in a new
-  directory before the directory was watched is still found, and a directory
-  that is gone has everything under it marked missing.
-- Arming a root first checks its path against its recorded volume, as a
-  [walk does](#volume-check-before-a-walk); a root on another volume is
-  reported unavailable and not armed.
-- A root's changes are published once the root has been quiet for
-  `WatchOptions.quiet_ms` (default 2000), or `max_delay_ms` (default 30000)
-  after its first unpublished change. A root holds at most 64 dirty
-  directories: a directory inside another is absorbed, and one more makes the
-  whole root dirty.
-- `Runtime.pump` takes what the watchers published, merges it per root under
-  the same rules, and starts a `reconcile` job for one root at a time. The job
-  reports `job_finished` like any other; one that recorded or marked missing
-  a file also publishes `Telemetry.library_changed`.
+Each watched Library has one watcher thread (`library/watch_linux.zig`) blocking
+in poll(2) on a nonblocking inotify descriptor and an eventfd, with one watch
+per directory. `IN_MODIFY` is not watched, so a file being written is reported
+once, on close. An event marks a directory dirty relative to its root. A root's
+dirty set is published after `WatchOptions.quiet_ms` of quiet (default 2000) or
+`max_delay_ms` after its first unpublished change (default 30000); it holds at
+most 64 directories, a directory inside another is absorbed, and one more makes
+the whole root dirty. `Runtime.pump` merges what watchers published per root and
+starts a `reconcile` Job for one root at a time, reconciling each dirty
+directory recursively. One that recorded or marked missing a file publishes
+`Telemetry.library_changed`.
 
 ### Invariants
 
-1. The watcher thread touches only its own state, its two descriptors, the
-   queues between it and the control lane, the host signal, and the
-   directories, mount table and volume markers it reads. It never touches a
-   database, a handle pool or the work registry: the control lane hands it
-   each root's recorded volume key with the root.
-2. Hints are advisory. Only the scanner, run by the reconcile job, writes
-   files and locations.
-3. A Library runs at most one automatic reconcile, and never starts one while
-   a scan, reconcile, projection or tag write of the Library runs. Analysis,
-   duplicate finding, matching and AcoustID submission run for hours without
-   walking or rewriting files, so a reconcile runs beside them. A host's scan, reconcile or tag write
-   first cancels and joins a running automatic reconcile, without a
-   `job_finished` event, and its root waits again as a whole root. A host's
-   scan of a whole root takes over the root's waiting changes, and returns
-   them as the whole root if it does not succeed. A reconcile refused because
-   another runtime or process holds the Library's
-   [walk lock](#one-walk-at-a-time) leaves its root's changes
-   waiting and is tried again after `WatchOptions.quiet_ms`.
-4. Every arm marks its root dirty as a whole and publishes it at once:
-   nothing that changed while the root was unwatched produced an event. This
-   is also how a Library catches up after a drain rebuilds its watcher.
-5. A root that is deleted, moved or unmounted, is on another volume than the
-   one recorded, or cannot be watched when it is armed, is reported
-   unavailable and is never reconciled; its running automatic reconcile is
-   cancelled. Its locations keep their state, so an unmounted drive never
-   empties a library. An automatic reconcile that fails the volume check
-   makes its root unavailable in the same way, rather than being started
-   again by every event.
+1. The watcher thread touches only its own state, its descriptors, the queues to
+   the control lane, the host signal, and the directories, mount table and
+   volume markers it reads. It never touches a database, a handle pool or the
+   work registry; the control lane hands it each root's recorded volume key.
+2. Hints are advisory. Only the scanner, run by the reconcile Job, writes files
+   and locations.
+3. A Library runs at most one automatic reconcile, never while a scan,
+   reconcile, projection or tag write of that Library runs. A host scan,
+   reconcile or tag write first cancels and joins a running automatic reconcile
+   without a `job_finished` event, and its root waits again as a whole root. A
+   host scan of a whole root takes over the root's waiting changes and returns
+   them whole if it does not succeed.
+4. Every arm marks its root dirty as a whole and publishes it at once, because
+   nothing that changed while the root was unwatched produced an event.
+5. A root that is deleted, moved or unmounted, is on another volume than the one
+   recorded, or cannot be watched when armed is unavailable and never
+   reconciled; its automatic reconcile is cancelled and its locations keep their
+   state, so an unmounted drive never empties a library. An automatic reconcile
+   that fails the volume check makes its root unavailable the same way.
 6. Every `WatchOptions.degraded_rescan_ms` (default 15 minutes) the watcher
-   tries each unavailable root again: once its path is a directory on its
-   recorded volume, the root is armed, and so reconciled whole. A root the
-   watch limit left partly unwatched is degraded: on the same interval, and
-   only while it stays degraded, the watcher walks it again, adding the
-   watches it can, and publishes it whole. The timer lives on the watcher
-   thread, in its poll timeout, and raises the host signal only when it
-   publishes; `nextPumpTimeoutMs` does not wake for it.
+   retries each unavailable root, arming and reconciling it whole once its path
+   is a directory on its recorded volume, and walks a degraded root again,
+   adding the watches it can.
 7. Everything is bounded: 16 commands to the watcher, 256 hints from it, 64
-   directories per root and a 64 KiB read buffer.
-8. Orca's own files never dirty anything: tag-write temporaries
-   (`isOrcaTemporaryName`), the volume marker `.orca-volume-id`, the database
-   file and its `-wal`, `-shm`, `-journal`, `.orca-journal.lock` and
-   `.orca-scan.lock` files, and the backup directory,
-   which is neither watched nor walked into. These names are matched anywhere
-   under a root. A tag write still dirties its file's directory once, when the
-   staged copy is renamed over the file; the reconcile that follows finds the
-   file as the write job already recorded it.
+   directories per root, a 64 KiB read buffer.
+8. Orca's own files never dirty anything ([skipped names](#skipped-names)). A
+   tag write still dirties its file's directory once, when the staged copy is
+   renamed over the file.
 
 ### Limits
 
-- Watches are per directory and count against
-  `fs.inotify.max_user_watches`. When `inotify_add_watch` fails with
-  `ENOSPC`, the watcher keeps the watches it has, leaves the rest unwatched,
-  counts the root in `roots_degraded` and reports `watch_limit_reached`, and
-  the Library's state is `degraded`. The root is then reconciled whole every
-  `degraded_rescan_ms` until a walk adds every watch it needs, for example
-  after the limit is raised.
+- Watches count against `fs.inotify.max_user_watches`. On `ENOSPC` the watcher
+  keeps the watches it has, counts the root in `roots_degraded`, reports
+  `watch_limit_reached` and sets the Library's state to `degraded`; the root is
+  reconciled whole every `degraded_rescan_ms` until a walk adds every watch.
 - Each watched Library uses one inotify instance, counted against
   `fs.inotify.max_user_instances`; `libraryWatch` returns
   `error.WatchInstanceLimit` when none is left.
-- A directory the watcher cannot read is not watched.
-- Symbolic links are not followed, as the scan does not follow them. A
-  directory reachable by two paths, through a bind mount, is watched once,
-  under the first path found, and its events are reported under that path
-  only. A root inside another watched root is watched as part of whichever
-  was armed first.
-- An unmount below a root drops the watches on the unmounted filesystem and
-  dirties nothing; those directories are watched again when the Library is.
-- The periodic retry and rescan are at most every `degraded_rescan_ms`: an
-  unavailable root that returns is picked up that late, and a degraded root's
-  changes in unwatched directories are found that late.
-- On `IN_Q_OVERFLOW`, events were lost: every root is walked again for new
-  directories and reconciled whole.
-- When a command cannot be queued to the watcher, because 16 are waiting, the
-  control lane rebuilds the watcher from the Library's roots rather than drop
-  the command, and every root is armed and reconciled again.
+- A directory reachable by two paths (a bind mount) is watched once, under the
+  first path found; a root inside another watched root is watched as part of
+  whichever was armed first. An unmount below a root drops its watches and
+  dirties nothing. A directory the watcher cannot read is not watched.
+- An unavailable root that returns, and changes in a degraded root's unwatched
+  directories, are found at most `degraded_rescan_ms` late.
+- On `IN_Q_OVERFLOW` every root is walked again for new directories and
+  reconciled whole. When 16 commands are already waiting, the control lane
+  rebuilds the watcher from the Library's roots and every root is armed and
+  reconciled again.

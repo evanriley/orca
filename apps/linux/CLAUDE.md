@@ -25,7 +25,7 @@ destroyed. Cancel or discard asynchronous work when its bound row, page, or
 Library is no longer current. Artwork stays on the bounded request, decode,
 and cache path in `art.zig`; do not decode full-size images on the main thread.
 
-Read [the Linux frontend contract](../../docs/frontends.md#linux-gtk4).
+Read [the Linux frontend contract](../../docs/frontends.md#orca-gtk).
 
 ## Rendering and verification
 

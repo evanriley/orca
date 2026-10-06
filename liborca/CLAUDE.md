@@ -13,7 +13,7 @@ block. Add new files to both lists. Interfaces use context-and-vtable structs
 where platform or ABI adapters require them.
 
 Read [the API contract](../docs/api.md),
-[runtime ownership](../docs/ownership.md), and
+[runtime ownership](../docs/api.md#runtime-ownership-and-shutdown), and
 [the control-plane contract](../docs/control-plane.md).
 
 ## Persistence and mutation safety

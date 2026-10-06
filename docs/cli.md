@@ -1,21 +1,26 @@
 # Command-line interface
 
-`orca-cli` is a thin client of liborca's public Zig API. This catalogue is
-the canonical reference for its command surface and end-to-end operation.
+This file covers `orca-cli`, the command-line client of liborca's public Zig
+API: build and verification commands, every `orca-cli` command with its output
+format, environment variables, playlist and rating commands, and how to verify
+playback without real audio hardware. Running `orca-cli` with no command, an
+unknown command or a wrong argument count prints the usage.
 
 ## Build and verification commands
 
 Run these inside the dev shell (`nix develop`, or automatically with direnv).
 
 ```sh
-nix build                     # package: orca-cli, orca-gtk (Linux), liborca, orca.h
+nix build                     # package: orca-cli, orca-gtk, liborca, orca.h
 nix flake check
 nix fmt                       # formats Nix files
 zig fmt --check liborca apps benchmarks tests build build.zig
 
-zig build                     # static + shared liborca, orca-cli, headers; orca-gtk on Linux
+zig build                     # static + shared liborca, orca-cli, headers; orca-gtk
+zig build -Dgtk=false         # the same without orca-gtk and its files
 zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
-zig build test                # unit + integration + C ABI smoke (+ PipeWire link smoke on Linux)
+zig build test                # unit, integration, C ABI smoke and ABI checks and the PipeWire link smoke
+zig build abi-compat          # orca.h keeps the layouts, values and functions of tests/abi/orca-0.1.0.h
 zig build fuzz                # replay the parser fuzz targets' seeds
 zig build fuzz --fuzz[=N]     # fuzz them; N iterations per target, unlimited opens the web UI
 zig build package-check       # build examples/embed and an install from the fetched build.zig.zon package
@@ -36,11 +41,11 @@ zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file a
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
 zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N volume= last_seen_at=
 zig build run -- availability DATABASE [RELEASE_ID...]   # offline_roots= unavailable_tracks= unavailable_releases=, an `offline` line per root, then release= available=yes|no
-zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now; a relative ROOT is made absolute against the working directory
+zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on; a relative ROOT is made absolute against the working directory
 zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks, and the recordings no other file holds with their loves, ratings, play counts and playlist entries; listens stay; nothing on disk
-zig build run -- relocate-root DATABASE ID PATH   # moves a root that moved on disk, keeping its ids; a relative PATH is made absolute; binds the volume PATH is on now, then reconciles
+zig build run -- relocate-root DATABASE ID PATH   # moves a root that moved on disk, keeping its ids; a relative PATH is made absolute; binds the volume PATH is on, then reconciles
 zig build run -- folders DATABASE [ROOT_ID [PATH]]   # roots with totals; or a `folder: release= tracks= images= last_scanned_at=` line, subfolders with recursive counts, files with track ids, then images; entries end kind= status=imported|unreadable, images role=
-zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]] [--pause-after=MS] [--resume-after=MS]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle; --pause-after/--resume-after pause and resume the Library's Jobs, printing `jobs: state=paused|running`
+zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]] [--pause-after=MS] [--resume-after=MS]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle; --pause-after/--resume-after pause and resume the Library's Jobs, printing `jobs: state=paused|running queue=N maintenance=STATE`
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]   # probes files missing properties, then measures covers observed before covers were measured
@@ -83,11 +88,11 @@ zig build run -- genre-fill DATABASE [on|off]   # automatic MusicBrainz genre fi
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH] [--kind=front|back|booklet] [--set=PATH | --clear]   # --kind, --set, --clear with --release; --set keeps a chosen cover, shown before any other
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
-zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--composer=…] [--comment=…] [--genre=A;B] [--clear=FIELD]…   # library only; FIELD includes composer and comment
+zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--album=…] [--album-artist=…] [--date=…] [--track=N] [--disc=N] [--compilation=0|1] [--recording-id=MBID] [--composer=…] [--comment=…] [--explicit=yes|no|clean] [--genre=A;B] [--clear=FIELD]…   # library only; no edits lists the values held; FIELD is a metadata field name such as album_artist or musicbrainz_recording_id, or genre
 zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|chosen|embedded|folder|fetched file= mime= tracks=N/M`
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
-zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone
+zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes cannot be undone
 zig build run -- changes DATABASE [--limit N] [--offset N]   # tag writes newest first: group= written_at= files= state=applied|undoing|undone|rolled_back|failed|needs_reconciliation can_undo=yes|no expired=yes|no title=; reads the journal only
 zig build run -- changes DATABASE GROUP   # the same line with fields= more_files=, then FILE<TAB>FIELD<TAB>RESTORES<TAB>CURRENT per changed tag; unknown when a backup is gone
 zig build run -- changes DATABASE --export=FILE [--force]   # every list line into FILE, atomically; refuses an existing FILE without --force
@@ -107,7 +112,7 @@ zig build run -- playlist-export DATABASE ID FILE [--relative] [--force]   # ato
 zig build run -- playlist-update DATABASE ID [--description=TEXT] [--pin|--unpin] [--love|--unlove] [--tags=A,B]   # at most 8 tags; replaces them
 zig build run -- smart-playlist-create DATABASE NAME RULES_FILE   # version 1 rules JSON, see docs/api.md
 zig build run -- smart-playlist-rules DATABASE ID [RULES_FILE]   # prints the rules, replacing them with RULES_FILE first
-zig build run -- smart-playlist-count DATABASE RULES_FILE [--sample=N]   # count= and duration_ms= the rules match now, then the first N Tracks; stores nothing
+zig build run -- smart-playlist-count DATABASE RULES_FILE [--sample=N]   # count= and duration_ms= the rules match, then the first N Tracks; stores nothing
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
@@ -155,7 +160,7 @@ zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best ma
 zig build run -- apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release
 zig build run -- apply-release DATABASE RELEASE_ID --fields=album,album_artist,date,release_id,track_titles   # those fields of the best candidate's tracklist snapshot, locked: release values on every Track with a file, release-track values on placed Tracks; prints release= values_written= track_values= release_values_only= artist_ids=known|unknown reviewed=ID|- (the Release's ID after reprojection when the Apply left nothing alone or differing and so marked it reviewed), then left_alone track= reason=not_placed|no_play_file title= lines
 zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album; release= is the album's Release afterwards
-zig build run -- release-alignment DATABASE RELEASE_ID [RELEASE_MBID]   # the release's tracklist snapshot (default: the best candidate) against the Tracks: a line per release track, DISC-POSITION status track= source= title_equal= length_close= position_equal= delta_ms=, then not_on_release lines, then unlisted_pairing lines for pairings whose release track the snapshot no longer lists
+zig build run -- release-alignment DATABASE RELEASE_ID [RELEASE_MBID]   # the release's tracklist snapshot (default: the best candidate) against the Tracks: a line per release track, DISC-POSITION status track= source= title_equal= length_close= position_equal= delta_ms=, then not_on_release lines, then unlisted_pairing lines for pairings whose release track the snapshot does not list
 zig build run -- pair-track DATABASE RELEASE_ID TRACK_ID RELEASE_TRACK_MBID [RELEASE_MBID]   # pairs the Track with that release track of the release (default: the best candidate); its recording and release-track IDs become locked user values; prints origin=confirmed_suggestion or by_hand
 zig build run -- unpair-track DATABASE RELEASE_ID TRACK_ID   # removes the Track's pairing and puts back the IDs it replaced where its files still hold the paired ones
 zig build run -- mark-release-reviewed DATABASE RELEASE_ID [RELEASE_MBID]   # moves the Release to matches --releases --bucket=reviewed while it stays as reviewed; refused unless every Track is placed and apply-release --fields would change nothing
@@ -188,64 +193,175 @@ zig build run -- release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline
 zig build run -- submit-acoustid DATABASE [--dry-run]
 ```
 
+## Environment variables
+
+`orca-cli` and `orca-gtk` select provider servers from the environment so
+tests and development runs use local mocks. Each server variable takes an
+`https` URL, or `http` to localhost. `orca-cli` fails with `InvalidServerUrl`
+on any other value; `orca-gtk` ignores it.
+
+| Variable | Effect | Read by |
+| --- | --- | --- |
+| `ORCA_LISTENBRAINZ_URL` | ListenBrainz server | CLI, GTK |
+| `ORCA_MUSICBRAINZ_URL` | MusicBrainz server | CLI, GTK |
+| `ORCA_ACOUSTID_URL` | AcoustID server | CLI, GTK |
+| `ORCA_COVERARTARCHIVE_URL` | Cover Art Archive server | CLI, GTK |
+| `ORCA_LRCLIB_URL` | LRCLIB server | CLI, GTK |
+| `ORCA_WIKIDATA_URL` | Wikidata server | CLI |
+| `ORCA_WIKIMEDIA_URL` | Wikimedia Commons server | CLI |
+| `ORCA_WIKIPEDIA_URL` | Wikipedia server | CLI |
+| `ORCA_LISTENBRAINZ_LABS_URL` | ListenBrainz Labs server | CLI |
+| `ORCA_LISTENBRAINZ_TOKEN` | ListenBrainz user token for `scrobble` | CLI |
+| `ORCA_ACOUSTID_USER_KEY` | AcoustID user key for `submit-acoustid` | CLI |
+| `ORCA_LIBRARY` | Library `orca-gtk` opens | GTK |
+| `ORCA_OUTPUT_DEVICE` | Orca device id that overrides the output menu | GTK |
+| `ORCA_GTK_DEBUG` | Debug topics `art`, `frames` and `reveal`, separated by commas or spaces | GTK |
+
+The AcoustID application key is set at build time with
+`-Dacoustid-key=KEY`; the default is `AqlfLksN1K`.
+
 ## Frontend launch commands
 
 ```sh
 ORCA_LIBRARY=/path/to/library.db zig build run-linux   # GTK4 frontend
 
 # Pin the output so an automated run cannot reach the speakers. Unset, the app
-# uses the output menu, which defaults to the system default -- device 0.
+# uses the output menu, which defaults to the system default (device 0).
 ORCA_LIBRARY=... ORCA_OUTPUT_DEVICE=$(scripts/silent-sink.sh 1) zig build run-linux
-
-# Point ListenBrainz submission at a local mock instead of listenbrainz.org
-ORCA_LISTENBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
-
-# Point MusicBrainz matching at a local mock instead of musicbrainz.org
-ORCA_MUSICBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
-
-# Point AcoustID lookups and submissions at a local mock instead of acoustid.org
-ORCA_ACOUSTID_URL=http://127.0.0.1:PORT zig build run-linux
-
-# Point cover fetches at a local mock instead of coverartarchive.org
-ORCA_COVERARTARCHIVE_URL=http://127.0.0.1:PORT zig build run-linux
-
-# Point lyrics fetches at a local mock instead of lrclib.net
-ORCA_LRCLIB_URL=http://127.0.0.1:PORT zig build run-linux
-
-# Point artist info at local mocks instead of wikidata.org, commons.wikimedia.org
-# and wikipedia.org; orca-cli artist-info and orca-gtk's Artist page read them
-ORCA_WIKIDATA_URL=http://127.0.0.1:PORT ORCA_WIKIMEDIA_URL=http://127.0.0.1:PORT \
-  ORCA_WIKIPEDIA_URL=http://127.0.0.1:PORT zig build run -- artist-info DATABASE ARTIST_ID --fetch
-
-# Point related artists at a local mock instead of labs.api.listenbrainz.org;
-# listeners follow ORCA_LISTENBRAINZ_URL
-ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:PORT ORCA_LISTENBRAINZ_URL=http://127.0.0.1:PORT \
-  zig build run -- artist-info DATABASE ARTIST_ID --fetch
 ```
 
 The app opens an output on first play, not at launch, so an idle window does
-not hold the user's default sink.
+not hold the default sink.
 
-To look at the GUI without putting a window on the user's desktop, run it in a
-headless sway session and screenshot it with `grim`; drive it with `wtype`,
-which reaches GTK where transient virtual pointers do not. Use
-`GSK_RENDERER=cairo` there. Pointer input needs one long-lived virtual pointer
-(`zwlr_virtual_pointer_v1`): GTK does not bind a device that exists only for a
-single command, as `wlrctl`'s do.
+`scripts/headless-gui.sh PAGE OUT.png [STEP...]` runs `orca-gtk` in a private
+headless sway session, drives it and saves screenshots; it never opens a window
+on the desktop.
 
-Live/host-dependent checks, excluded from the normal test run:
+Host-dependent checks excluded from the normal test run:
 
 ```sh
 zig build dependency-smoke      # Linux foreign-library linking pattern
 zig build pipewire-live-smoke   # opens a short silent stream on the user's PipeWire server
 ```
 
-Unit and integration tests require no audio server. The C ABI smoke test (`c-abi-smoke`,
-part of `zig build test`) opens an output, so on Linux `zig build test` needs
-PipeWire: the build creates `scripts/silent-sink.sh`'s sink and passes its
-device id to the test, and fails rather than fall back to the default output.
-On the desktop it plays into that sink; `scripts/headless-audio.sh` gives it a
+Unit and integration tests need no audio server. The C ABI smoke test
+(`c-abi-smoke`, part of `zig build test`) opens an output, so on Linux
+`zig build test` needs PipeWire: the build creates the sink of
+`scripts/silent-sink.sh`, passes its device id to the test and fails rather
+than fall back to the default output. `scripts/headless-audio.sh` provides a
 private PipeWire and WirePlumber where no audio server runs, as in CI.
+
+## Playlists and ratings
+
+Playlists and ratings are kept in the Library and belong to a Recording, not
+to a Track or a file. An edit that gives a Track a new id keeps its Recording,
+so playlist entries and ratings follow it. The Zig and C contracts are in
+[the API reference](api.md#playlists); the tables are in
+[the database reference](database.md#playlists-and-ratings). Nothing here
+writes a file or sends anything to a service.
+
+### Ratings
+
+A rating is 1 to 100; no rating is unrated. `--stars=N` stores `N * 20`.
+`rate` rates or clears the song behind each Track, at most 512 Tracks per call,
+and prints how many Tracks changed and how many were skipped for having no
+Recording. A rating outside 1 to 100 is `InvalidRating`. `tracks --sort rating`
+orders by rating with unrated Tracks last in both directions.
+
+### Playlists
+
+A playlist is a name and an ordered list of entries, each naming a Recording;
+one Recording may appear several times.
+
+- Names are trimmed, not empty (`InvalidPlaylistName`) and unique
+  (`PlaylistNameTaken`).
+- Positions run from 0 to n - 1. `playlist-add`, `playlist-remove` and
+  `playlist-move` renumber the entries after them in one transaction.
+- A playlist holds at most 10,000 entries (`PlaylistFull`, nothing inserted);
+  one call inserts at most 512 Tracks.
+- An entry resolves to the Track of its Recording with the lowest id. An entry
+  whose Recording has no Track is listed as `unavailable` and skipped by
+  playback and export.
+- `play-tracks --playlist=ID` replaces the queue with the available entries
+  and fails with `PlaylistEmpty` when there are none.
+  `play-tracks --save-queue=NAME` saves the current entry and every entry after
+  it as a playlist.
+- A description is at most 4,096 bytes. A playlist has at most eight tags of 1
+  to 64 bytes each after trimming; `--tags` replaces them, keeping the given
+  order and dropping repeats.
+- `playlists` filters by kind, pin, creator and a name substring, and sorts by
+  name, last update, creation or entry count. Smart playlists sort after manual
+  ones by entry count because their count is evaluated, not stored.
+- Removing a root and scanning the folder again creates new Recordings, so the
+  entries of the old ones become unavailable.
+
+### Smart playlists
+
+A smart playlist's entries are the Tracks its rules match when it is read, one
+per Recording, in the rules' order and up to their limit. Adding, removing or
+moving its entries fails with `PlaylistIsSmart`. `RULES_FILE` is version 1
+rules JSON of at most 16 KiB, described in
+[the API reference](api.md#smart-playlist-rules). `smart-playlist-rules` prints
+a smart playlist's rules, or replaces them from `RULES_FILE` first.
+`smart-playlist-count` stores nothing; `--sample=N` prints the first N matches,
+at most 512. Playback and M3U export take the entries as they are at that
+moment.
+
+### M3U import
+
+`playlist-import` reads an `.m3u` or `.m3u8` file and creates a playlist in one
+transaction.
+
+- The file is at most 4 MiB with at most 10,000 entries; a larger one fails
+  with `PlaylistTooLarge` and creates nothing. A file with no entry fails with
+  `PlaylistEmpty`.
+- A leading UTF-8 byte order mark is dropped; CRLF, LF and CR end a line. A
+  file that is not valid UTF-8 is read as Latin-1.
+- Blank lines and `#` lines are skipped, except `#EXTINF:<seconds>,<text>`,
+  which describes the entry on the next line.
+- The playlist is named `--name`, else the file name without its extension; a
+  taken name gets ` (2)`, ` (3)` and so on. It is marked imported.
+
+Each entry is matched in this order:
+
+1. A `file://` URI with an empty host is percent-decoded to a path; any other
+   `scheme://` entry is unmatched. A relative path is resolved against the
+   playlist file's folder. The path is normalised lexically; symbolic links
+   are not followed.
+2. A location whose path equals it, preferring `present`, then `unverified`,
+   then `missing`. Its file gives the Recording.
+3. When no location matched, the `#EXTINF` text split at the first `" - "` into
+   artist and title. It matches when exactly one Recording has a Track with
+   that artist and title, compared after Unicode folding, and a length within
+   2 s of the stated one. An entry stating `-1` seconds matches on artist and
+   title alone.
+4. Otherwise the entry is unmatched and left out.
+
+The command prints the counts matched by path and by `#EXTINF`, the unmatched
+count and the first 50 unmatched lines. Import never scans: a path the Library
+has not seen is unmatched.
+
+### M3U export
+
+`playlist-export` writes an extended M3U file in UTF-8 with LF line endings:
+
+```text
+#EXTM3U
+#EXTINF:226,ABBA - Intermezzo No. 1
+/mnt/Media/Music/ABBA/ABBA (1975)/ABBA - ABBA - 09 - Intermezzo No. 1.flac
+```
+
+- Each available entry is written with its length in whole seconds (`-1` when
+  unknown), `artist - title` (the title alone without an artist) and the path
+  of the location playback would open. Line breaks in tags become spaces.
+- `--relative` writes paths relative to the target's folder. Paths are never
+  URI-encoded.
+- Entries without a Track, and paths containing a line break, are skipped and
+  counted.
+- The file is written beside the target, synced, renamed over it and its folder
+  synced, so a reader sees the old file or the new one. A failed export leaves
+  no temporary file. An existing target fails with `PathAlreadyExists` unless
+  `--force` is given.
 
 ## Playback verification
 

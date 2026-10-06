@@ -1,26 +1,26 @@
 # Roadmap
 
-What Orca does today, what must hold before the public preview and 1.0, and
+What Orca does today, what must hold before 0.1.0 and 1.0, and
 what is deferred. "Works" means reachable from `orca-cli` or `orca-gtk`
 through the public runtime path, per the rule in
 [architecture.md](architecture.md).
 
 ## Status
 
-Released `0.8.1`. `orca-gtk` is a daily-usable player on Linux: a
-designed libadwaita frontend, gapless playback between entries of one format,
-output at each source's sample rate, live equalizer and crossfeed, tag
-editing with undo, track details, lyrics that follow playback, a local
-play history, star ratings, album and artist love, playlists with M3U import
-and export, smart playlists, a command palette, browsing by genre and by
-folder, artist and release info, ListenBrainz scrobbling, MusicBrainz and AcoustID matching with
-review, AcoustID submission and verification, actionable Health, idle
-maintenance, and watching of the music folders, so new, changed and
-removed files show up without a rescan. `liborca` builds for aarch64
+`orca-gtk` is a daily-usable player on Linux: a designed libadwaita frontend,
+gapless playback between entries of one format, output at each source's sample
+rate, live equalizer and crossfeed, tag editing with undo, track details,
+lyrics that follow playback, a local play history, star ratings, album and
+artist love, playlists with M3U import and export, smart playlists, a command
+palette, browsing by genre and by folder, artist and release info,
+ListenBrainz scrobbling, MusicBrainz and AcoustID matching with review,
+AcoustID submission and verification, actionable Health, idle maintenance, and
+watching of the music folders, so new, changed and removed files show up
+without a rescan. `liborca` builds for aarch64
 macOS; there is no macOS app, audio output or filesystem watcher.
 
 Features are frozen until 1.0. The work is the [release gates](#release-gates)
-below: a public preview released as 0.9.0, then 1.0.
+below: the first public release, 0.1.0, then 1.0.
 
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`
 versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
@@ -73,7 +73,7 @@ names each `Runtime` method the C ABI does not reach and why.
   on the same interval. Reachable through `orca-cli reconcile` and `watch`,
   the `orca-gtk` preference "Watch folders for changes" (on by default), and
   the C ABI.
-- No scan or reconcile walks a root whose path now lies on another volume
+- No scan or reconcile walks a root whose path lies on another volume
   than the one recorded, so an unmounted drive's files are never marked
   missing.
 - Byte-identical copies share one File until one of them changes; a changed
@@ -138,11 +138,11 @@ names each `Runtime` method the C ABI does not reach and why.
   `ORCA_LISTENBRAINZ_TOKEN` (`orca-cli scrobble`). See
   [providers.md](providers.md).
 - Provider blocks, backoffs, quota windows and request spacing for
-  ListenBrainz, MusicBrainz and AcoustID are stored in the Library, so they persist across restarts and bind every
-  process using it, and a per-service lease lets one request at a time talk
-  to each service; other jobs and processes wait their turn, and get
-  `ProviderBusy` without sending only when the service stays held past their
-  wait. See
+  ListenBrainz, MusicBrainz and AcoustID are stored in the Library, so they
+  persist across restarts and bind every process using it. A per-service
+  lease lets one request at a time talk to each service; other jobs and
+  processes wait their turn and get `ProviderBusy` without sending only when
+  the service stays held past their wait. See
   [providers.md](providers.md#rules-toward-providers).
 - Love and hate for songs, kept in the Library per recording and sent to
   ListenBrainz while scrobbling for recordings with a MusicBrainz recording
@@ -169,7 +169,7 @@ names each `Runtime` method the C ABI does not reach and why.
   `orca-cli playlist*` and `smart-playlist-*` commands and `play-tracks
   --playlist`, and in `orca-gtk` through the Playlists page, playlist pages,
   the Smart Playlist editor and Add to Playlist on song and album menus. See
-  [playlists.md](playlists.md).
+  [cli.md](cli.md#playlists-and-ratings).
 - Lyrics, plain and synced, from the file's tags (ID3v2 `USLT` and `SYLT`,
   Vorbis comment `LYRICS` and `UNSYNCEDLYRICS`, MP4 `©lyr`) and a sidecar
   `.lrc`, then, opt-in, from LRCLIB by title, artist, album and duration;
@@ -270,7 +270,8 @@ names each `Runtime` method the C ABI does not reach and why.
   unit at a time verifies an album's recording IDs against AcoustID, within
   the provider rate limits and leases; findings land in Health. Off until
   enabled, through `orca-cli watch --maintenance[=MS]` or Settings >
-  Library in `orca-gtk`. See [control-plane.md](control-plane.md#idle-maintenance).
+  Library in `orca-gtk`. See
+  [control-plane.md](control-plane.md#idle-maintenance).
 
 ### Clients
 
@@ -305,24 +306,26 @@ names each `Runtime` method the C ABI does not reach and why.
   crossfeed and the signal path, artwork and cover fetches, lyrics, artist
   and release info, provider sources, library stats,
   library edits, tag writes, undo and backup pruning, love and hate, ratings
-  and album and artist love, playlists and smart playlists with M3U import
-  and export, Health actions,
-  MusicBrainz and AcoustID matching, verification and corrections, AcoustID
-  submission, ListenBrainz scrobbling, idle maintenance, provider servers
-  and a credential callback for the host's secure storage.
+  and album and artist love, playlists and smart playlists with M3U import and
+  export, Health actions, MusicBrainz and AcoustID matching, verification and
+  corrections, AcoustID submission, ListenBrainz scrobbling, idle maintenance,
+  provider servers and a credential callback for the host's secure storage.
   `tests/c_abi_layout.zig` checks every struct and enum value against the
-  Zig side, and `tests/abi/compat.zig` checks `orca.h` against the released
-  0.8.1 header.
+  Zig side, and `tests/abi/compat.zig` checks `orca.h` against the 0.1.0
+  header.
 
 ### Builds
 
 - Linux x86_64, and a static `liborca` for aarch64 macOS (`zig build lib
-  -Dtarget=aarch64-macos`).
+  -Dtarget=aarch64-macos`). `zig build -Dgtk=false` builds without `orca-gtk`
+  where GTK 4.18, libadwaita 1.8 or Pango 1.56 is not available.
 - CI (`.github/workflows/test.yml`): `zig build test` against a private
-  PipeWire and WirePlumber, `zig fmt --check`, the aarch64 macOS
-  cross-build, `nix flake check` (package build, NixOS module and the
-  installed tree), and `zig build package-check` against the fetched Zig
-  package. A `required` job fails when any of them fails.
+  PipeWire and WirePlumber, `zig build fuzz`, `zig fmt --check`, the aarch64
+  macOS cross-build, `nix flake check` (package build, NixOS module and the
+  installed tree), `zig build package-check` against the fetched Zig
+  package, and a build and test run with the official Zig release against the
+  libraries of Debian 13 (with `-Dgtk=false`) and Fedora 43. A `required` job
+  fails when any of them fails.
 
 ## Built but not reachable
 
@@ -338,7 +341,7 @@ Each gate states the defect or requirement, the result that must be observable
 and how it is checked. A gate closes when its check passes and the entry is
 removed.
 
-### Before the public preview
+### Before 0.1.0
 
 - Publication. The GitHub items: the `required` CI job passing on GitHub and
   made required by branch protection, private vulnerability reporting turned
@@ -380,9 +383,14 @@ removed.
   checks the Zone instead. A device-0 output lost after it opened resets its
   recovery count on each reopen and retries without end. Each must have a
   defined result, checked by a test of each.
-- `orca-gtk` shows a Library that fails to open. It ignores one that fails to
-  open, including one with a newer schema, and shows the welcome page.
-  Checked by launching against such a Library.
+- `orca-gtk` shows a Library that fails to open. `libraries.openFailed`
+  logs a warning, leaves no Library active and records a problem ("Could not
+  open NAME", with "was made by a different version of Orca; create a new
+  library" for a newer schema). Only a row in Settings > Library's Libraries
+  card shows it. The Tracks page shows the empty-library welcome, and Add
+  Music Folder answers with the toast "No library is open". The window must
+  state the failure and offer to choose or create a Library. Checked by
+  launching against such a Library.
 - `write-tags` on a read-only file follows a stated policy. It rewrites a file
   whose permissions make it read-only. Checked by a test of the stated
   policy.
@@ -398,7 +406,7 @@ removed.
   is snapshotted per job or per request is specified. Checked by tests and
   by [frontends.md](frontends.md) stating each.
 - Compatibility promises for 1.0 are written separately for the Zig API, the
-  C ABI and the Library schema. Schema upgrades from the public preview are
+  C ABI and the Library schema. Schema upgrades from 0.1.0 are
   tested. A GTK launch, open, play and close smoke test runs on a private
   display in CI. A release candidate passes an acceptance period with no open
   data-loss, memory-corruption, wrong-song or unintended-output defect.
@@ -408,7 +416,7 @@ removed.
 Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
 release bumps the minor version when it contains a breaking change to the
 Zig API, the C ABI or the Library schema, and the patch version otherwise.
-The public preview is released as 0.9.0; 1.0 follows the
+The first public release is 0.1.0; 1.0 follows the
 [Before 1.0](#before-10) gates.
 
 Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
@@ -420,7 +428,18 @@ To release:
 1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
    and state the Library schema version it ships.
 2. Set `.version` in `build.zig.zon`.
-3. Commit, and tag the commit `vX.Y.Z`.
+3. Commit, and tag the commit with a signed, annotated `vX.Y.Z` tag whose
+   message is that version's section of `CHANGELOG.md`:
+
+   ```sh
+   version=X.Y.Z
+   { printf 'Orca %s\n\n' "$version"
+     awk -v v="$version" '$1 == "##" { p = ($2 == v); next } p' CHANGELOG.md
+   } | git tag -s "v$version" --cleanup=whitespace -F -
+   ```
+
+   `--cleanup=whitespace` keeps the `###` headings, which the default
+   cleanup removes as comments.
 4. Update Orca's application entry on the AcoustID website to the new
    version. Every lookup and submission sends the version as
    `clientversion`, and the registered details should match what the
@@ -431,7 +450,7 @@ To release:
 Small defects that are not yet scheduled:
 
 - A file that leaves a Release loses its Track id when another folder on that
-  Release projects first and one of its files now states the old position:
+  Release projects first and one of its files states the old position:
   that folder prunes the Track, and the leaving file gets a new one.
 - A FLAC seek past the end of the stream fails as a decode error, while WAV
   clamps to the last frame; the other decoders are unchecked.
@@ -441,7 +460,6 @@ Small defects that are not yet scheduled:
 - A tag write that fails before it reaches a file, such as when its
   backup directory already exists, records no `TagWriteFailure`, so
   `orca-cli` and `orca-gtk` fall back to a message without a reason.
-
 - `orca-cli` runs every command but `duplicates` and `analyze-library` on an
   arena, so a cold scan holds memory for every file until it exits.
 - The scanner skips symbolic links to files without counting them.
@@ -455,9 +473,8 @@ Small defects that are not yet scheduled:
   [database.md](database.md#concurrency).
 - Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
 - When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
-  sometimes not drawn, and is still missing seconds later; it was missing
-  in 10 of 20 headless starts. The race is likely in `updateBackdrop`
-  and `sourcePainted` in `apps/linux/art.zig`.
+  sometimes not drawn, and stays missing. The race is likely in
+  `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.
@@ -511,181 +528,103 @@ are sniffed or not recognized until then:
 
 ## Later
 
-- More identification sources. ListenBrainz's `/1/metadata/lookup` would
-  match what MusicBrainz and AcoustID miss, 50 songs per request, but needs
-  the user's token and must share the listen worker's gateway.
-- Fewer provider requests. Cover candidates learn an image's dimensions
-  without downloading it in full; matching combines MusicBrainz recording
-  searches instead of one per track; artist information overlaps its
-  requests to different services.
+- More identification sources: ListenBrainz's `/1/metadata/lookup` would match
+  what MusicBrainz and AcoustID miss, but needs the user's token and must share
+  the listen worker's gateway.
+- Fewer provider requests: cover candidates that learn an image's dimensions
+  without downloading it, MusicBrainz recording searches combined across
+  tracks, and artist information that overlaps requests to different services.
 - Tag writers for the remaining formats. FLAC, MP3 and ADTS are written; M4A,
-  Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported as not
-  writable.
+  Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported as not writable.
 - An optional fixed output rate with a band-limited resampler, for devices
-  held at another rate and for gapless playback across sample-rate changes.
-  Output at the source rate stays the default, since it is the only path that
-  can be bit-perfect. A Resampler quality setting (Highest or Fast, used only
-  when the device cannot match the source) arrives with it.
-- Full multichannel support, required eventually. Canonical PCM carries a
-  channel count but no layout: Vorbis and FLAC order multichannel audio
-  differently, the PipeWire stream gets no channel positions, and loudness
-  weights every channel 1.0. The channel layout is carried through decode;
-  analysis applies BS.1770 channel weights and excludes the LFE channel; DSP
-  and PipeWire channel positions follow the layout. Until then more than two
+  held at another rate and for gapless playback across sample-rate changes,
+  with a Resampler quality setting. Output at the source rate stays the
+  default, since only that path can be bit-perfect.
+- Full multichannel support. Canonical PCM carries a channel count but no
+  layout, so decode, loudness analysis (BS.1770 channel weights, LFE excluded),
+  DSP and PipeWire channel positions need one. Until then more than two
   channels are refused (see [Before 1.0](#before-10)).
-- Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files; a
+- Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files. A
   figure comes only from Orca's own analysis.
-- Exact album loudness: the album figure is a duration-weighted energy mean
-  of the Tracks' gated loudness, which differs from BS.1770 gating over the
-  album's merged blocks. Per-file gated-block counts cannot reproduce album-wide gating, which
-  depends on the album's loudness distribution; exactness needs each file's
-  block-energy distribution ([analysis.md](analysis.md#album-replaygain)).
+- Exact album loudness from each file's block-energy distribution instead of
+  a duration-weighted mean of the Tracks' loudness
+  ([analysis.md](analysis.md#album-replaygain)).
 - Batched Track inserts for the first scan.
-- `orca-cli tracks --filter` and a text `TrackQuery` rank every match by
-  bm25 before the page is cut, about 83 ms at 500,000 Tracks.
-- Tracks within a search tier are ordered by id, not by relevance.
-- The genre totals triggers cost about 7 µs per `track_genres` row, which
-  took the 500,000-Track benchmark's insert from 3.8 s to 10.3 s.
-- The output kind is unknown for device id 0, the system default, and for
-  any sink past the 64th PipeWire discovers.
-- Folders that hold only images, such as a `Scans/` folder of booklet pages,
-  in `orca-cli folders` and the Folders page. The scanner records images
-  only in folders that hold audio, so such a folder has no entry to list.
-- `orca-gtk`'s Settings equalizer band captions are written in
-  `preferences.zig` rather than taken from `equalizer_band_frequencies_hz`.
-- macOS: a macOS app with a CoreAudio output behind the same backend contract
-  and a filesystem watcher (FSEvents) behind the same `library/watch.zig`
-  contract. There is none today: `liborca` compiles for macOS but cannot play
-  there, and `libraryWatch` returns `error.WatchingUnsupported`. The macOS
-  POSIX-lock write-loss Known issue must be fixed first.
-- Opt-in per write: embedding a Release's fetched cover only in files with no
-  embedded picture, as one front cover, stored once per plan and referenced
-  by digest from each action rather than copied into every action. In
-  `orca-gtk` it brings an Embed artwork when writing setting (Ask each time,
-  Always, Never) on Settings › Library, Artwork Review's option to embed
-  the chosen cover the next time tags are written, Write to Files' Artwork
-  replaced card and Front cover rows, and Front cover rows in Change
-  History.
-- Opt-in writing of the AcoustID track ID (`ACOUSTID_ID`, `TXXX:Acoustid
-  Id`) for matches accepted with a fingerprint, never the fingerprint
-  itself.
-- Similar artists in the details sidebar for a track, album or artist, from
-  ListenBrainz's `labs.api.listenbrainz.org/similar-artists` (no account or
-  token; only the seed artist's MusicBrainz ID leaves the machine), cached for
-  a week to match its weekly refresh, with artists already in the library
-  marked. The endpoint is experimental and takes a required `algorithm` name
-  that may change, so a failed lookup hides the list rather than erroring.
-- A release calendar: new and upcoming releases by artists in the library,
-  from ListenBrainz's `/1/explore/fresh-releases` filtered locally by owned
-  artist MusicBrainz IDs, fetched at most daily.
-- Radio and mixes from the library, in the manner of Plexamp: a queue that
-  keeps extending from a seed track, album or artist, scored in `liborca` from
-  local data only — shared artist, tags, genre and era, play history and
-  feedback — optionally boosted by cached ListenBrainz similar-artist data.
-- The C ABI for what only the Zig API offers, each named with its reason in
-  `scripts/check-abi-coverage.sh`: a host-supplied audio output
-  (`setOutputFactory`), Zone policy and render strategy (`setZonePolicy`,
-  `zoneRenderStrategy`), playing a file outside a Library
-  (`playerLoadFile`), drain detection (`playerDrained`), one-file analysis
-  on the caller's thread (`libraryAnalyzeFile`) and re-analysis
-  (`libraryReanalyzeFile`), a Track's fingerprint
-  (`libraryTrackFingerprint`), the Albums letter index
-  (`libraryReleaseLetterIndex`) and filtered totals
-  (`libraryReleaseQueryTotals`, `libraryTrackQueryTotals`), a listing's
-  playable ids from a row (`libraryTrackQueryPlayableIds`), with the
-  `added_after`, `name_order`, `codec` and `max_sample_rate` query fields they
-  share with the pages; also `TrackSummary`'s `integrated_lufs`,
-  `bitrate_kbps`, `path` and `album_artist_id` and the `loudness`, `bitrate`,
-  `path`, `album_artist` and `genre` Track sorts; an Artist's release groups
-  outside the library (`libraryArtistElsewhere`, `ElsewhereRelease`) and
-  their covers (the `release_group` artwork subject, which
-  `orca_library_request_artwork` refuses as unsupported), its origin (`ArtistInfoRecord.origin`) and the album-artist role filter
-  (`ArtistQuery.role`); Track and Release pages, totals and counts read off
-  the host's thread (`libraryRequestBrowse`, `libraryCancelBrowse`,
-  `libraryTakeBrowse`); a playlist's codecs and analysis counts
-  (`libraryPlaylistFormats`), its Artist count (`PlaylistSummary.artist_count`)
-  and a smart playlist preview with its length and a sample
-  (`librarySmartPlaylistPreview`), and new random orders
-  (`libraryReshufflePlaylists`); a search hit's detail fields, its reason
-  hits (`SearchHit.reason`, which `orca_library_search` leaves out) and the
-  hit to feature (`SearchResults.top`); the roots offline now and what they
-  leave unable to play (`libraryAvailability`, `libraryReleasesAvailable`),
-  and a root's `volume` and `last_seen_at`; a selection's shared, mixed and
-  edited field values and its cover (`libraryTrackFieldStates`), and the tag
-  block a tag write replaces in each file (`TagWriteFile.format`); a
-  Release's cover art candidates and chosen covers
-  (`startCoverArtCandidates`, `libraryCoverArtCandidates`,
-  `libraryUseCoverArtCandidate`, `librarySetReleaseArtwork`,
-  `libraryStoredReleaseArtwork`, `libraryClearReleaseArtwork`), what an
-  `artwork_problem` issue found (`libraryArtworkProblem`), the albums with
-  artwork problems (`libraryArtworkProblemReleasePage`,
-  `libraryArtworkProblemReleaseCount`), a candidates
-  Job's counts (`MatchStats.cover_art_candidates`), and the metadata
-  consistency pass and its issues (`startLibraryConsistencyPass`,
-  `libraryMetadataIssueCount`, `libraryMetadataIssuePage`,
-  `libraryApplyMetadataIssue`, `libraryApplyMetadataIssues`,
-  `librarySkipMetadataIssue`, `libraryMetadataIssueStatus`); and fields the
-  existing views leave out: where lyrics came from and their offset
-  (`Lyrics.source_name`, `Lyrics.offset_ms`, absent from
-  `orca_lyrics_view`), a duplicate copy's tagged date and track numbers
-  (`DuplicateCopy.tagged_date`, `tagged_track_number`,
-  `tagged_track_total`), and a folder entry's status, type and image role
-  (`FolderEntry.status`, `mime`, `artwork_role`). The command lane (`submit`,
-  `processNextCommand`) stays behind `orca_runtime_pump` and the
-  request-correlated functions that use it.
+- Tracks within a search tier ordered by relevance instead of id, and a text
+  `TrackQuery` that ranks by bm25 only for the page it returns.
+- The output kind for device id 0, the system default, and for any sink past
+  the 64th PipeWire discovers.
+- Folders that hold only images in `orca-cli folders` and the Folders page.
+  The scanner records images only in folders that hold audio.
+- `orca-gtk` Settings equalizer band captions taken from
+  `equalizer_band_frequencies_hz` instead of `preferences.zig`.
+- macOS: an app with a CoreAudio output behind the backend contract and an
+  FSEvents watcher behind `library/watch.zig`. `liborca` compiles for macOS
+  but cannot play there, and `libraryWatch` returns
+  `error.WatchingUnsupported`. The macOS POSIX-lock Known issue is fixed
+  first.
+- Opt-in embedding of a Release's fetched cover, only in files with no
+  embedded picture, stored once per plan and referenced by digest from each
+  action, with an Embed artwork when writing setting in Settings > Library.
+- Opt-in writing of the AcoustID track ID (`ACOUSTID_ID`, `TXXX:Acoustid Id`)
+  for matches accepted with a fingerprint, never the fingerprint itself.
+- Similar artists in the details sidebar from ListenBrainz's
+  `labs.api.listenbrainz.org/similar-artists` (no token; only the seed
+  artist's MusicBrainz ID leaves the machine), cached for a week. The
+  endpoint is experimental, so a failed lookup hides the list.
+- A release calendar of new and upcoming releases by artists in the library,
+  from ListenBrainz's `/1/explore/fresh-releases`, fetched at most daily.
+- Radio and mixes from the library: a queue that keeps extending from a seed
+  track, album or artist, scored in `liborca` from local data only (shared
+  artist, tags, genre, era, play history and feedback), optionally boosted by
+  cached ListenBrainz similar-artist data.
+- C ABI functions for what only the Zig API offers. Each is named with its
+  reason in `scripts/check-abi-coverage.sh`; the command lane (`submit`,
+  `processNextCommand`) stays behind `orca_runtime_pump`.
 - A light theme and a System theme that follows the desktop. `orca-gtk`
   defines dark tokens only.
 - Accent colour choices, as a fixed table of derived token sets.
-- Last.fm scrobbling as a second destination beside ListenBrainz, with its
-  account in Settings › Listening.
-- Exclusive output and an ALSA direct-hardware backend, which bypass the
-  system mixer. They land with the macOS backend.
-- Device hardware volume: setting the volume on the DAC so the signal stays
+- Last.fm scrobbling as a second destination beside ListenBrainz.
+- Exclusive output and an ALSA direct-hardware backend that bypass the system
+  mixer, with the macOS backend.
+- Device hardware volume, setting the volume on the DAC so the signal stays
   bit-perfect.
-- Spectral transcode detection, as a Suspicious transcodes category on
-  Audio Problems with the cutoff and a spectrum graph. KissFFT is already
-  compiled with Chromaprint.
-- Moving a file to the system trash as a journaled `MutationPlan` action,
-  for removing a duplicate copy after Merge Metadata, with trash rows in
-  Activity and Change History.
+- Spectral transcode detection as a Suspicious transcodes category on Audio
+  Problems, with the cutoff and a spectrum graph.
+- Moving a file to the system trash as a journaled `MutationPlan` action, to
+  remove a duplicate copy after Merge Metadata.
 - Writing the chosen cover into the album folder as `cover.jpg`.
-- A frosted background for the Activity popover, as the command palette
-  and search have. A popover is its own surface, so the window behind it
-  cannot be snapshotted the way an overlay's can.
+- A frosted background for the Activity popover. A popover is its own
+  surface, so the window behind it cannot be snapshotted as an overlay's can.
 - A database change log with inverse payloads, so Change History can undo
-  Orca-only edits: metadata edits, accepted matches, chosen covers,
-  playlist reorders and removed folders, each with an Undo Orca Edit Only
-  action, and Undo on Activity's applied-metadata rows.
-- True-peak measurement, 4× oversampled, in a new column filled by
-  re-analysis and shown in the album inspector.
+  Orca-only edits: metadata edits, accepted matches, chosen covers, playlist
+  reorders and removed folders.
+- True-peak measurement, 4x oversampled, in a column filled by re-analysis.
 - Crossfade, never applied between gapless album tracks.
 - Convolution DSP for room correction and headphone targets from impulse
   responses.
-- Customizable keyboard shortcuts. The shortcuts dialog lists the fixed
-  set.
+- Customizable keyboard shortcuts. The shortcuts dialog lists a fixed set.
 - Localisation, with a Language setting.
 - Editing lyrics from Now Playing.
-- Automatic update checks and a release channel (Stable, Preview). Orca is
-  installed from the Nix flake.
-- Listening history retention. Settings › Listening's Keep history for is
+- Automatic update checks and a release channel (Stable, Preview).
+- Listening history retention. Settings > Listening's Keep history for is
   fixed at Forever.
-- Starting a waiting Job ahead of the running one (Start now in Activity).
-  The runtime has no call that reorders its Jobs.
+- Starting a waiting Job ahead of the running one. The runtime has no call
+  that reorders its Jobs.
 - Song credits from MusicBrainz recording relationships: performers,
   composers and producers.
-- Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain
-  lyrics from a sidecar `.txt`. A `.txt` needs a rule for telling lyrics from
-  the other text files that sit in album folders.
+- Lyrics from a WAV or AIFF file's `id3 ` chunk and plain lyrics from a
+  sidecar `.txt`, which needs a rule for telling lyrics from the other text
+  files in album folders.
 - A terminal client built on the Zig API.
-- Conversion and encoding. In `orca-gtk`: a Convert dialog, Convert… in the
-  album inspector, and Converted rows in Activity.
-- Synchronized multi-zone playback with drift correction. In `orca-gtk`: a
-  Play in several rooms block in the output picker, which turns lossless
-  and exclusive output off, and an Experimental section in Settings ›
-  Advanced with a Multi-zone output switch.
-- Secure, verified CD ripping. In `orca-gtk`: a Rip page, an Audio CD group
-  under Devices in the sidebar, and Ripped CD rows in Activity.
-- Windows, then iOS and Android.
+- Conversion and encoding, with a Convert dialog and Converted rows in
+  Activity in `orca-gtk`.
+- Synchronized multi-zone playback with drift correction, with a Play in
+  several rooms block in the output picker and a Multi-zone output switch in
+  Settings > Advanced.
+- Secure, verified CD ripping, with a Rip page and Ripped CD rows in
+  Activity.
+- Windows.
 - Streaming sources and cross-device sync.
 - Audio-feature similarity for radio, analysed from the audio itself. The
   extractor and any models must be permissively licensed; Essentia's code is

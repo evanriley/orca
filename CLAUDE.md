@@ -105,7 +105,7 @@ Every implementation change updates the Unreleased section of `CHANGELOG.md`.
 - [Feature status and release process](docs/roadmap.md)
 - [CLI command catalogue](docs/cli.md)
 - [Public Zig API](docs/api.md)
-- [Runtime ownership and shutdown](docs/ownership.md)
+- [Runtime ownership and shutdown](docs/api.md#runtime-ownership-and-shutdown)
 - [Control plane and jobs](docs/control-plane.md)
 - [Audio engine](docs/audio-engine.md)
 - [Database and schema](docs/database.md)

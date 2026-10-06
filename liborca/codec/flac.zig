@@ -2,7 +2,7 @@
 //!
 //! The reference implementation is used rather than a pure-Zig one because
 //! FLAC's only promise is bit-exactness, which `files.audio_hash` and
-//! fingerprints depend on. See `docs/codecs.md`.
+//! fingerprints depend on. See `docs/architecture.md`.
 //!
 //! Nothing about libFLAC is visible here: the shim exposes an opaque handle
 //! driven by a positional read callback, so this file still sees only a
