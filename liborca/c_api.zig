@@ -1266,6 +1266,11 @@ pub const ScanStatsV2 = extern struct {
     current_path: [512]u8,
 };
 
+pub const ScanStatsV3 = extern struct {
+    base: ScanStatsV2,
+    symlinks_skipped: u64,
+};
+
 pub const FolderEstimate = extern struct {
     audio_files: u64,
     truncated: u8,
@@ -6296,14 +6301,34 @@ pub export fn orca_library_scan_stats_v2(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const stats = box.runtime.jobScanStats(importJob(job_handle)) catch |err|
         return box.fail(@src(), err);
+    destination.* = exportScanStatsV2(&stats);
+    return .ok;
+}
+
+pub export fn orca_library_scan_stats_v3(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*ScanStatsV3,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.jobScanStats(importJob(job_handle)) catch |err|
+        return box.fail(@src(), err);
     destination.* = .{
-        .base = exportScanStats(&stats),
+        .base = exportScanStatsV2(&stats),
+        .symlinks_skipped = stats.symlinks_skipped,
+    };
+    return .ok;
+}
+
+fn exportScanStatsV2(stats: *const core.runtime.ScanStats) ScanStatsV2 {
+    return .{
+        .base = exportScanStats(stats),
         .albums_found = stats.albums_found,
         .stage = exportScanStage(stats.stage),
         .current_path_length = stats.current_path.len,
         .current_path = stats.current_path.bytes,
     };
-    return .ok;
 }
 
 fn exportScanStats(stats: *const core.runtime.ScanStats) ScanStats {

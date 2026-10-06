@@ -6221,7 +6221,7 @@ fn printScanCounters(
     stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
-        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d} missing={d}\n",
+        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d} missing={d}",
         .{
             stats.files_seen,
             stats.changed,
@@ -6232,4 +6232,6 @@ fn printScanCounters(
             stats.marked_missing,
         },
     );
+    if (stats.symlinks_skipped != 0) try stdout.print(" symlinks_skipped={d}", .{stats.symlinks_skipped});
+    try stdout.writeAll("\n");
 }

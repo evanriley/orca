@@ -199,6 +199,12 @@
   change or a decoder for it is added. Such files no longer count towards the
   files left to analyze. A file that could not be read is still examined again
   on the next run.
+- A scan or reconcile counts the symbolic links its walk passes over, to a
+  file, a directory or nothing, in `ScanStats.symlinks_skipped`; it still does
+  not follow them. `orca-cli scan`, `reconcile` and `watch` print
+  `symlinks_skipped=N` and the Job's Activity summary reads "N symbolic links
+  skipped" when it is not zero. C hosts read it through
+  `orca_library_scan_stats_v3`.
 
 ## 0.1.0 - 2026-10-06
 

@@ -300,7 +300,7 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   [metadata.md](metadata.md).
 - Jobs: `orca_library_start_scan`, `orca_library_start_projection`,
   `orca_library_start_reconcile`, `orca_library_start_analysis`,
-  `orca_job_snapshot_get`, `orca_job_cancel`, `orca_library_scan_stats_v2`,
+  `orca_job_snapshot_get`, `orca_job_cancel`, `orca_library_scan_stats_v3`,
   `orca_job_origin_get`, `orca_job_reconcile_root`. Scan progress has `has_total
   = 0` until the count of files is done. See [analysis.md](analysis.md#threads).
 - Watching: `orca_library_watch`, `orca_library_unwatch`,

@@ -5434,6 +5434,36 @@ test "a scan that cannot enter a directory succeeds, keeps everything under it a
     try std.testing.expectEqual(@as(i64, 2), try fixture.scanRunCount(.completed));
 }
 
+test "a scan and a reconcile report the symbolic links their walks skipped" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-symlinks?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.symLink(std.testing.io, "one.flac", "A/linked.flac", .{});
+    try fixture.temporary.dir.symLink(std.testing.io, "../B", "A/album", .{ .is_directory = true });
+    try fixture.temporary.dir.symLink(std.testing.io, "gone.flac", "dangling.flac", .{});
+
+    const scan = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, scan));
+    const scanned = try fixture.runtime.jobScanStats(scan);
+    try std.testing.expectEqual(@as(u64, 3), scanned.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 2), scanned.files_seen);
+
+    const reconcile = try fixture.runtime.startLibraryReconcile(fixture.library, .{
+        .root_id = fixture.root_id,
+        .scope = .{ .subtrees = &.{"A"} },
+    });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, reconcile));
+    const reconciled = try fixture.runtime.jobScanStats(reconcile);
+    try std.testing.expectEqual(@as(u64, 2), reconciled.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 1), reconciled.files_seen);
+
+    const history = try fixture.runtime.jobHistoryPage(fixture.library, std.testing.allocator, .all, 2, 0);
+    defer std.testing.allocator.free(history);
+    try std.testing.expectEqual(@as(usize, 2), history.len);
+    try std.testing.expectStringEndsWith(history[0].summary.slice(), "2 symbolic links skipped");
+    try std.testing.expectStringEndsWith(history[1].summary.slice(), "3 symbolic links skipped");
+}
+
 test "a scan whose root directory cannot be opened fails its run and marks nothing missing" {
     if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
     var fixture: ReconcileFixture = undefined;

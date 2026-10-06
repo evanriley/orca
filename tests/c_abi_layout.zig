@@ -108,6 +108,7 @@ const struct_pairs = .{
     .{ c_api.JobHistoryView, c.orca_job_history_view },
     .{ c_api.ScanStats, c.orca_scan_stats },
     .{ c_api.ScanStatsV2, c.orca_scan_stats_v2 },
+    .{ c_api.ScanStatsV3, c.orca_scan_stats_v3 },
     .{ c_api.FolderEstimate, c.orca_folder_estimate },
     .{ c_api.ScanOptions, c.orca_scan_options },
     .{ c_api.AnalysisOptions, c.orca_analysis_options },

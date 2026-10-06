@@ -5272,6 +5272,10 @@ int main(int argc, char **argv) {
     if (progress.stage != ORCA_SCAN_STAGE_DONE) return 600;
     if (progress.current_path_length != 0) return 601;
     if (progress.albums_found == 0 || progress.albums_found > stats.releases_written) return 602;
+    orca_scan_stats_v3 skipped;
+    if (orca_library_scan_stats_v3(runtime, scan_job, &skipped) != ORCA_STATUS_OK) return 617;
+    if (memcmp(&skipped.base, &progress, sizeof progress) != 0) return 618;
+    if (skipped.symlinks_skipped != 0) return 619;
 
     /* The estimate counts by bytes exactly what the scan imported. */
     orca_folder_estimate estimate;

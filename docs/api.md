@@ -118,7 +118,8 @@ sleep: 0 to pump now, null to wait for the waker alone. See
 - `JobSnapshot` carries `started_at`, `paused`, `estimated_remaining_ms` (null
   until 10 s of progress, while paused and without a total), `current_item` and
   `detail`; `pump` publishes `Telemetry.job_progress` whenever they move.
-  `jobScanStats` reports the `ScanStage`, `current_path` and `albums_found`.
+  `jobScanStats` reports the `ScanStage`, `current_path`, `albums_found` and
+  `symlinks_skipped`, the symbolic links the walk did not follow.
   `ScanRequest.reprobe_all` reads every file again. See
   [storage.md](storage.md#incremental-scanning).
 - `jobHistoryPage(library, allocator, filter, limit, offset)` returns finished

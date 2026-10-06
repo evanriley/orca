@@ -1482,6 +1482,16 @@ typedef struct orca_scan_stats_v2 {
     char current_path[512];
 } orca_scan_stats_v2;
 
+/*
+ * orca_scan_stats_v2 with `symlinks_skipped`: the symbolic links a scan or
+ * reconcile passed over without following, to a file, a directory or nothing.
+ * Zero for other jobs.
+ */
+typedef struct orca_scan_stats_v3 {
+    orca_scan_stats_v2 base;
+    uint64_t symlinks_skipped;
+} orca_scan_stats_v3;
+
 /* How many audio files a folder holds; see orca_estimate_audio_files. */
 typedef struct orca_folder_estimate {
     uint64_t audio_files;
@@ -5658,6 +5668,12 @@ orca_status orca_library_scan_stats_v2(
     orca_runtime *runtime,
     orca_handle job,
     orca_scan_stats_v2 *output
+);
+/* orca_library_scan_stats_v2 with the symbolic links the walk skipped. */
+orca_status orca_library_scan_stats_v3(
+    orca_runtime *runtime,
+    orca_handle job,
+    orca_scan_stats_v3 *output
 );
 
 /*

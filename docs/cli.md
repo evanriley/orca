@@ -41,7 +41,7 @@ zig build run -- demo
 zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown), then `rates=44100-384000 depths=16,24,32 channels=2 state=active|suspended|unavailable`, or `rates=- depths=- channels=- state=unknown` when PipeWire did not answer within 500 ms; the silent sink is virtual
 
 # library
-zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file again, skipping none; `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters
+zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file again, skipping none; `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters, ending in `symlinks_skipped=N` when the walk passed over symbolic links
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
 zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N volume= last_seen_at=
 zig build run -- availability DATABASE [RELEASE_ID...]   # offline_roots= unavailable_tracks= unavailable_releases=, an `offline` line per root, then release= available=yes|no

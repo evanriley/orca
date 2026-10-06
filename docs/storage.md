@@ -72,7 +72,13 @@ The walk and the watcher skip Orca's own files by name anywhere under the root:
 - the backup directory `<database>.orca-backups`, which is not walked into
   ([Tag-write files](metadata.md#tag-write-files)).
 
-Symbolic links are not followed.
+Symbolic links are not followed. The walk records nothing for a link to a file,
+a directory or nothing, and adds one to `ScanStats.symlinks_skipped` for each
+link it passes over, so a scan or reconcile shows that something under the root
+was not scanned. `orca-cli scan`, `reconcile` and `watch` print
+`symlinks_skipped=N` when it is not zero, and the Job's Activity summary reads
+"N symbolic links skipped". Through the C ABI it is
+`orca_scan_stats_v3.symlinks_skipped`.
 
 ### Scan runs and sweeps
 
