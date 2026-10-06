@@ -1,59 +1,50 @@
 # Orca
 
-Orca is a local-files-first music player and library-maintenance application.
-Its engine, `liborca`, is a Zig library for everything music-related, and the
-native frontends are thin clients of it. The [roadmap](docs/roadmap.md) lists
-what works today.
+Orca is a local-files-first music player and library-maintenance application
+for Linux. Its engine, `liborca`, is a Zig library that owns the music library,
+playback, metadata, analysis and online identification; `orca-gtk` and
+`orca-cli` are thin clients of it, and other applications can embed it through
+its Zig API or C ABI.
 
-The [architecture overview](docs/architecture.md) describes the design and
-links each subsystem's contract.
+Orca is pre-1.0. A release before 1.0 bumps the minor version when it breaks
+the Zig API, the C ABI or the Library schema. Orca builds and plays on
+x86_64 Linux with PipeWire; other platforms are on the roadmap.
 
-## Preview status
+Orca changes music files only through a plan the user approves, journaled so
+that an interrupted write is recovered and a finished one can be undone. It
+contacts outside services only for features the user starts or switches on,
+and sends no telemetry; [Privacy](docs/privacy.md) lists each service and what
+it receives.
 
-Orca is a 0.x preview. Before 1.0, a release bumps the minor version when it
-contains a breaking change to the Zig API, the C ABI or the Library schema,
-and the patch version otherwise ([Releases](docs/roadmap.md#releases)).
-Features are frozen until 1.0; the work now is fixes and the
-[release gates](docs/roadmap.md#release-gates).
+## Roadmap and status
 
-Orca changes music files only through an approved, journaled plan; tag writes
-are the only kind reachable today. See
-[Metadata and file mutation](docs/metadata.md).
+| # | Feature | Status |
+| --- | --- | --- |
+| 1 | Local library, gapless playback, journaled tag writes, identification | ✅ 0.1.0 |
+| 2 | Stable Zig API, C ABI and Library schema (1.0) | ⚠️ [release gates](docs/roadmap.md#release-gates) open |
+| 3 | Library radio and mixes | ❌ |
+| 4 | Tag writing for M4A, Ogg, WAV and AIFF | ❌ |
+| 5 | Full multichannel playback | ❌ |
+| 6 | Fixed output rate with a band-limited resampler | ❌ |
+| 7 | Crossfade, and convolution DSP for room correction | ❌ |
+| 8 | Synchronized multi-zone playback | ❌ |
+| 9 | Conversion and encoding | ❌ |
+| 10 | Secure CD ripping | ❌ |
+| 11 | Terminal client, macOS and Windows apps | ❌ |
 
-### Platforms
-
-| Platform | Built | Audio output | Application |
-| --- | --- | --- | --- |
-| x86_64-linux | `liborca`, `orca-cli`, `orca-gtk` | PipeWire | `orca-gtk` |
-| aarch64-darwin | `liborca`, `orca-cli` | none | none |
-| anything else | not built | none | none |
-
-- aarch64-darwin has no audio output, so `orca-cli` cannot play there. There
-  is no macOS app or filesystem watcher; both are on the roadmap's
-  [Later](docs/roadmap.md#later) list. CI cross-compiles only the static
-  `liborca` for macOS (`zig build lib -Dtarget=aarch64-macos`) and does not
-  run Orca there.
-- The Nix flake and package declare exactly `x86_64-linux` and
-  `aarch64-darwin`.
-
-### Privacy and security
-
-Orca contacts outside services only for features you start or switch on, and
-sends no telemetry. [Privacy](docs/privacy.md) lists each service, what it
-receives and when. Report vulnerabilities as [SECURITY.md](SECURITY.md)
-describes, and read [CONTRIBUTING.md](CONTRIBUTING.md) before sending changes.
+[The roadmap](docs/roadmap.md) lists what works today, the release gates,
+known issues and everything planned.
 
 ## Install with Nix
 
-The flake at `github:evanriley/orca` packages Orca for `x86_64-linux` and
-`aarch64-darwin`. The package installs `orca-cli`, `orca-gtk` (Linux only),
-static and shared `liborca`, `include/orca/orca.h`, `lib/pkgconfig/orca.pc`,
-the desktop entry and the icons.
+The flake packages Orca for `x86_64-linux`. The package installs `orca-gtk`,
+`orca-cli`, static and shared `liborca`, `include/orca/orca.h`,
+`lib/pkgconfig/orca.pc`, the desktop entry and the icons.
 
 Run it without installing:
 
 ```sh
-nix run github:evanriley/orca   # orca-gtk on Linux; orca-cli on macOS
+nix run github:evanriley/orca
 nix run github:evanriley/orca#orca-cli -- --version
 ```
 
@@ -82,8 +73,7 @@ nix run github:evanriley/orca#orca-cli -- --version
 
 ### Home Manager
 
-Import `orca.homeModules.default` into the Home Manager configuration and set
-`programs.orca.enable = true;`; the package goes into `home.packages`:
+`orca.homeModules.default` adds the package to `home.packages`:
 
 ```nix
 home-manager.lib.homeManagerConfiguration {
@@ -99,128 +89,188 @@ home-manager.lib.homeManagerConfiguration {
 ### Overlay
 
 `orca.overlays.default` adds `pkgs.orca`, built against the nixpkgs it is
-applied to. That nixpkgs must provide Zig 0.17 as `pkgs.zig_0_17`. The modules'
-default package and `orca.packages.<system>.orca` are built against the
-nixpkgs pinned in this flake's `flake.lock` instead.
+applied to, which must provide Zig 0.17 as `pkgs.zig_0_17`. The modules'
+default package and `orca.packages.x86_64-linux.orca` are built against the
+nixpkgs pinned in this flake's `flake.lock`.
 
-### Runtime requirements
+## Build from source
 
-- A PipeWire audio server, for playback on Linux. The modules do not enable
-  one; on NixOS, set `services.pipewire.enable = true;`.
+The steps below are checked in clean containers of Arch Linux, Fedora 43,
+Debian 13 and Ubuntu 24.04.
+
+### Requirements
+
+- Zig 0.17.0. Zig compiles the bundled C and C++ sources (the codec shims,
+  ALAC, libxaac and Chromaprint), so no separate C or C++ compiler is needed.
+- pkg-config.
+- For `liborca` and `orca-cli`: development files for SQLite, libFLAC, libogg,
+  libvorbis, Opus, opusfile, libsamplerate and PipeWire.
+- For `orca-gtk`: development files for GTK 4.18 or newer, libadwaita 1.8 or
+  newer, Pango 1.56 or newer and libsecret.
+
+Debian 13 ships libadwaita 1.7, and Ubuntu 24.04 ships GTK 4.14, libadwaita
+1.5 and Pango 1.52. Both build `liborca` and `orca-cli`; build them with
+`-Dgtk=false`, which leaves `orca-gtk` out.
+
+### Install Zig
+
+Install the official Zig 0.17.0 release:
+
+```sh
+curl -fLO https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
+echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  zig-x86_64-linux-0.17.0.tar.xz" | sha256sum -c -
+mkdir -p ~/.local/zig
+tar -xJf zig-x86_64-linux-0.17.0.tar.xz -C ~/.local/zig --strip-components=1
+export PATH="$HOME/.local/zig:$PATH"
+zig version
+```
+
+### Install the dependencies
+
+Arch Linux:
+
+```sh
+sudo pacman -S --needed curl pkgconf sqlite flac libogg libvorbis opus opusfile libsamplerate pipewire gtk4 libadwaita libsecret
+```
+
+Fedora:
+
+```sh
+sudo dnf install curl xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel libvorbis-devel opus-devel opusfile-devel libsamplerate-devel pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
+```
+
+Debian and Ubuntu:
+
+```sh
+sudo apt-get install --no-install-recommends ca-certificates curl xz-utils pkg-config libsqlite3-dev libflac-dev libogg-dev libvorbis-dev libopus-dev libopusfile-dev libsamplerate0-dev libpipewire-0.3-dev
+```
+
+Add `libgtk-4-dev libadwaita-1-dev libsecret-1-dev` on a release whose GTK and
+libadwaita meet the requirements above.
+
+### Build and install
+
+```sh
+zig build -Doptimize=ReleaseSafe -p ~/.local
+```
+
+`-p` sets the install prefix. Add `-Dgtk=false` to build without `orca-gtk`,
+and pass it to `zig build test` as well. The install holds:
+
+- `bin/orca-gtk` and `bin/orca-cli`;
+- `lib/liborca.a`, `lib/liborca.so` and `lib/pkgconfig/orca.pc`;
+- `include/orca/orca.h`;
+- `share/applications`, `share/icons` and `share/orca/fonts` for `orca-gtk`;
+- `share/doc/orca/licenses`, the licences of the bundled third-party code.
+
+`orca-gtk` finds its fonts and icons relative to its executable, so keep `bin`
+and `share` under one prefix. A missing development package stops the build
+with its pkg-config name, for example `pkg-config: package not found:
+samplerate`.
+
+### Run the tests
+
+The tests start a private PipeWire and WirePlumber through
+`scripts/headless-audio.sh` and never use an audio device. The script needs
+WirePlumber 0.5 or newer and refuses to start with an older one; Ubuntu 24.04
+ships 0.4, so run the tests there inside `nix develop`. The tests also need
+Python 3, `nm` and `ps`:
+
+```sh
+sudo pacman -S --needed wireplumber python binutils    # Arch Linux
+sudo dnf install pipewire pipewire-utils wireplumber python3 binutils procps-ng    # Fedora
+sudo apt-get install --no-install-recommends pipewire pipewire-bin wireplumber python3 binutils procps    # Debian
+```
+
+```sh
+scripts/headless-audio.sh zig build test
+```
+
+## Runtime requirements
+
+- A PipeWire audio server for playback. On NixOS, set
+  `services.pipewire.enable = true;`.
 - A Secret Service provider, such as GNOME Keyring, for the ListenBrainz token
-  and the AcoustID user key `orca-gtk` stores. `orca-cli` reads them from
+  and AcoustID user key `orca-gtk` stores. `orca-cli` reads them from
   `ORCA_LISTENBRAINZ_TOKEN` and `ORCA_ACOUSTID_USER_KEY`.
-- On Linux distributions other than NixOS, `orca-gtk` may need
+- With the Nix package on a distribution other than NixOS, `orca-gtk` may need
   [nixGL](https://github.com/nix-community/nixGL) to find the host's OpenGL
   drivers.
 
-## Requirements
+## Usage
 
-Every platform:
-
-- Zig `0.17.0`. Zig compiles the C and C++ sources (the codec shims, ALAC,
-  libxaac and Chromaprint) with its bundled Clang, so no separate C or C++
-  compiler is needed.
-- `pkg-config`
-- Development files for SQLite (`sqlite3`), libFLAC (`FLAC`), libogg, libopus,
-  opusfile, libvorbis (`vorbisfile`) and libsamplerate (`samplerate`)
-
-Linux only:
-
-- PipeWire (`libpipewire-0.3`), for audio output
-- For `orca-gtk`: GTK4 (`gtk-4`), libadwaita (`libadwaita-1`), gdk-pixbuf
-  (`gdk-pixbuf-2.0`) and libsecret (`libsecret-1`)
-
-The names in parentheses are the pkg-config packages `build.zig` asks for. With
-Nix, `nix develop` (or direnv) provides all of these, plus the tools the
-scripts and checks use (Python, `ffprobe`, the `sqlite3` shell), and
-`nix build` builds the package described in
-[Install with Nix](#install-with-nix).
-
-## Build and test
+`orca-gtk` opens from the desktop entry, or from a shell:
 
 ```sh
-zig build
-zig build test
-zig build run -- --version
-zig build run -- demo
-zig build run -- scan /tmp/orca.db /path/to/music
-zig build run -- analyze /tmp/orca.db /path/to/audio
-zig build run -- analyze-library /tmp/orca.db
-zig build run -- health /tmp/orca.db
-# The device argument is optional and defaults to 0, the system default
-# output, which is real hardware. For tests and automated runs, pass the device
-# `scripts/silent-sink.sh` prints; it discards audio.
-zig build run -- play /path/to/audio [DEVICE_ID]
-ORCA_LIBRARY=/path/to/library.db zig build run-linux
-zig build bench
-zig build -Doptimize=ReleaseFast dsp-bench
+orca-gtk
+ORCA_LIBRARY=/path/to/library.db orca-gtk    # another Library, for this run only
 ```
 
-The DSP benchmark checks scalar/vector output equality before reporting
-per-sample timings; use a release build for meaningful SIMD measurements.
-
-The benchmark defaults to a generated 500,000-track in-memory library. Pass a
-track count and SQLite path to exercise durable WAL storage, for example:
+`orca-cli` drives the whole engine from a shell. Each command takes the Library
+database path first:
 
 ```sh
-zig build bench -- 500000 /tmp/orca-500k.db
+orca-cli scan ~/orca.db ~/Music
+orca-cli stats ~/orca.db
+orca-cli health ~/orca.db --summary
+orca-cli devices
+orca-cli play-tracks ~/orca.db 1,2,3 --device=ID
 ```
 
-`zig build dependency-smoke` verifies the system-library integration pattern on
-Linux. `zig build pipewire-live-smoke` discovers the current user's output
-devices and opens a short silent native stream. PipeWire C headers and foreign
-types remain contained in the Linux adapter.
-
-Linux builds also install the GTK4 frontend with its desktop entry, static and
-shared `liborca` (`liborca.so.0`), the foreign-client header at
-`include/orca/orca.h`, and `lib/pkgconfig/orca.pc`.
-
-`orca-cli` and `orca-gtk` identify themselves to MusicBrainz, AcoustID and
-ListenBrainz with the contact given by `-Dprovider-contact=CONTACT`; the
-default is set in `build.zig`.
-
-Online identification and scrobbling are optional. Provider traffic passes
-through one rate-limited HTTP boundary, described in
-[Privacy](docs/privacy.md); credentials are supplied by
-platform secure-storage adapters and are never stored in an Orca library.
-Provider matches remain reviewable proposals until explicitly accepted, and
-acceptance updates Orca metadata without writing media files.
+[The CLI reference](docs/cli.md) lists every command, its options and its
+output.
 
 ## Embedding
 
-`liborca` is a library for other applications as well as Orca's own:
-
-- [docs/api.md](docs/api.md) covers the public Zig API, adding liborca as a
-  Zig package dependency, the identity a host must supply before provider
-  work, and what stays stable between releases.
+- [The Zig API](docs/api.md) covers adding `liborca` as a Zig package, the
+  runtime, ownership and shutdown, and what stays stable between releases.
 - [examples/embed](examples/embed) is a complete Zig project that lists a
-  library's tracks through that API; `zig build test` builds it.
-- [docs/frontends.md](docs/frontends.md#c-abi) covers the C ABI in
-  `liborca/orca.h` for clients in other languages, including linking through
-  pkg-config.
+  Library's tracks through that API.
+- [The C ABI](docs/frontends.md#c-abi) covers `orca.h` for other languages,
+  including linking through pkg-config.
 
-## Repository layout
+## Documentation
 
-- `liborca/` — reusable headless engine
-- `apps/` — CLI and native application frontends
-- `benchmarks/` — executable performance fixtures
-- `examples/` — projects that embed `liborca`
-- `tests/` — integration, platform, recovery, and performance tests
-- `fixtures/` — checked-in test media and pathological inputs
-- `docs/` — architecture decisions and subsystem documentation
+- [Architecture](docs/architecture.md): subsystems, dependencies and licences,
+  supported formats.
+- [Roadmap](docs/roadmap.md): feature status, release gates and releases.
+- [Privacy](docs/privacy.md): what each outside service receives.
+- [CLI](docs/cli.md), [Zig API](docs/api.md) and
+  [C ABI and frontends](docs/frontends.md).
+- Subsystems: [audio engine](docs/audio-engine.md),
+  [control plane and jobs](docs/control-plane.md),
+  [database](docs/database.md), [storage and scanning](docs/storage.md),
+  [metadata and file mutation](docs/metadata.md),
+  [providers](docs/providers.md) and [analysis](docs/analysis.md).
+
+## Contributing and security
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the development environment, the
+checks a change must pass and the licence boundary. Report vulnerabilities as
+[SECURITY.md](SECURITY.md) describes.
 
 ## License
 
 Orca is licensed under the [Mozilla Public License 2.0](LICENSE). Applications
-of any licence may embed `liborca`; changes to Orca's own files are shared
+under any licence may embed `liborca`; changes to Orca's own files are shared
 under the same terms.
 
-`liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac, both
-Apache-2.0, Chromaprint (MIT) with its KissFFT (BSD-3-Clause), a vendored CC0
-minimp3, and the vendored MIT reference QOA decoder. `zig build` installs their
-licence and notice files under `share/doc/orca/licenses`; distribute that
-directory with any binary. The system libraries Orca links (SQLite, libFLAC,
-libogg, libopus, opusfile, libvorbis, libsamplerate, PipeWire, and for
-`orca-gtk` GTK4, libadwaita, gdk-pixbuf and libsecret) are distributed under
-their own licences.
+`liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac (Apache-2.0),
+Chromaprint (MIT) with KissFFT (BSD-3-Clause), minimp3 (CC0) and the reference
+QOA decoder (MIT). `zig build` installs their licence and notice files under
+`share/doc/orca/licenses`; distribute that directory with any binary. The
+system libraries Orca links are distributed under their own licences. The
+fonts `orca-gtk` bundles use the SIL Open Font License, installed beside them.
+
+## Resources
+
+- [MusicBrainz](https://musicbrainz.org) and the
+  [Cover Art Archive](https://coverartarchive.org): release metadata and
+  covers.
+- [AcoustID](https://acoustid.org) and
+  [Chromaprint](https://acoustid.org/chromaprint): audio fingerprints.
+- [ListenBrainz](https://listenbrainz.org): scrobbling and listening data.
+- [LRCLIB](https://lrclib.net): synchronized lyrics.
+- [Wikidata](https://www.wikidata.org),
+  [Wikimedia Commons](https://commons.wikimedia.org) and
+  [Wikipedia](https://www.wikipedia.org): artist information.
