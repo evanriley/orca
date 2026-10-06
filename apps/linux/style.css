@@ -5313,6 +5313,71 @@ checkbutton.match-review-check check:checked {
   color: @orca_text_3;
 }
 
+.match-review-track .match-review-missing {
+  color: @orca_text_3;
+}
+
+.match-review-status {
+  padding-left: 8px;
+}
+
+.match-review-status > label {
+  font-size: 12.5px;
+}
+
+.chip.match-review-chip {
+  min-height: 0;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+button.match-review-action,
+menubutton.match-review-action > button {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: @orca_accent_text;
+}
+
+menubutton.match-review-action > button {
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+}
+
+button.match-review-action:hover,
+menubutton.match-review-action > button:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_accent_hover;
+}
+
+menubutton.match-review-action > button:disabled {
+  color: @orca_text_3;
+}
+
+.match-review-note {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.match-review-heading.match-review-subheading {
+  margin-top: 24px;
+  margin-bottom: 8px;
+}
+
+button.match-review-option {
+  min-height: 0;
+  padding: 6px 4px;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+button.match-review-option .match-review-number,
+button.match-review-option .match-review-delta {
+  color: @orca_text_3;
+}
+
 /* Settings */
 
 .page-title .settings-title {

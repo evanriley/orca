@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Match Review shows the release beside your files.** In `orca-gtk`, Match
+  Review lists the release tracklist next to the album's files: confirm a
+  suggested pairing, pair or unpair a track, and see which files are not on
+  the release. Apply works when some tracks stay unplaced and names them; a
+  fully placed, unchanged release can be marked as reviewed. Matches gains a
+  Reviewed tab with Unmark and offers Accept only when every track is
+  placed.
 - **Release alignment, pairing and review in the C ABI.**
   `orca_library_release_alignment`, `orca_library_pair_release_track`,
   `orca_library_unpair_release_track`,

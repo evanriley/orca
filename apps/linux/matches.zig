@@ -233,7 +233,7 @@ pub fn writeSource(writer: *std.Io.Writer, proposal: liborca.MatchProposal) std.
     if (proposal.acoustid_score) |score| try writer.print(separator ++ "fingerprint {d}%", .{percent(score)});
 }
 
-fn finish(buffer: []u8, writer: *const std.Io.Writer) [:0]const u8 {
+pub fn finish(buffer: []u8, writer: *const std.Io.Writer) [:0]const u8 {
     buffer[writer.end] = 0;
     return buffer[0..writer.end :0];
 }
@@ -577,17 +577,50 @@ fn acceptedFields(diff: ?liborca.ReleaseMatchDiff) liborca.ReleaseFieldSet {
     return fields;
 }
 
+pub fn writeTitles(writer: *std.Io.Writer, titles: []const []const u8, total: usize) std.Io.Writer.Error!void {
+    for (titles, 0..) |title, index| {
+        if (index != 0) try writer.writeAll(if (index + 1 == titles.len and total == titles.len) " and " else ", ");
+        try writer.writeAll(if (title.len != 0) title else "Untitled track");
+    }
+    if (total > titles.len) try writer.print(" and {d} more", .{total - titles.len});
+}
+
+pub fn writeLeftAlone(writer: *std.Io.Writer, outcome: liborca.ReleaseApplyOutcome) std.Io.Writer.Error!bool {
+    if (outcome.left_alone.len == 0) return false;
+    var titles: [2][]const u8 = undefined;
+    const count = @min(titles.len, outcome.left_alone.len);
+    for (outcome.left_alone[0..count], titles[0..count]) |track, *title| title.* = track.title;
+    try writer.writeAll("Applied" ++ separator ++ "left alone: ");
+    try writeTitles(writer, titles[0..count], outcome.left_alone.len);
+    return true;
+}
+
 fn acceptClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const row = rowOf(data);
     const self = row.self;
     const library = self.library orelse return;
     const listed = shownItem(self, row.release_id) orelse return;
     const diff = if (listed.detail) |detail| detail.diff else null;
-    const written = self.runtime.libraryApplyMatchedRelease(library, row.release_id, acceptedFields(diff)) catch
-        return self.toast("Could not accept that release");
-    if (written == 0) return self.toast("Every track must be on the release first: review it to see which are not");
-    self.toast("Release accepted");
+    const outcome = self.runtime.libraryApplyRelease(library, self.allocator, row.release_id, acceptedFields(diff)) catch |err|
+        return self.toast(if (err == error.NoReleaseTracklist) "Look up the release first" else "Could not accept that release");
+    defer outcome.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    const partial = writeLeftAlone(&writer, outcome) catch true;
+    self.toast(if (partial) finish(&buffer, &writer) else "Release accepted");
     accepted(self);
+}
+
+fn unmarkClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const row = rowOf(data);
+    const self = row.self;
+    const library = self.library orelse return;
+    self.runtime.libraryUnmarkReleaseReviewed(library, row.release_id) catch |err| {
+        if (err != error.ReleaseNotReviewed) return self.toast("Could not undo the review");
+        return invalidate(self);
+    };
+    self.toast("Review undone");
+    invalidate(self);
 }
 
 fn reviewClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -738,11 +771,24 @@ fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) 
 
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
-    if (item.best != null) {
+    const review_tooltip = "Choose what to take from this release";
+    if (item.bucket == .reviewed) {
         append(actions, &.{
-            actionButton("Accept", "Take this release's IDs, and its album, album artist and date where they differ", gtk.callback(acceptClicked), row),
-            actionButton("Review", "Choose what to take from this release", gtk.callback(reviewClicked), row),
+            actionButton("Unmark", "Put this album back in the list to review", gtk.callback(unmarkClicked), row),
+            actionButton("Review", review_tooltip, gtk.callback(reviewClicked), row),
         });
+    } else if (item.best != null) {
+        const needs_pairing = if (item.placement) |placement| placement.needs_pairing else 0;
+        if (item.placement != null and needs_pairing == 0) {
+            gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton("Accept", "Take this release's IDs, and its album, album artist and date where they differ", gtk.callback(acceptClicked), row));
+        }
+        var review_buffer: [64]u8 = undefined;
+        const review_text: [:0]const u8 = switch (needs_pairing) {
+            0 => "Review",
+            1 => "Review" ++ separator ++ "1 track needs pairing",
+            else => |count| strings.format(&review_buffer, "Review" ++ separator ++ "{d} tracks need pairing", .{count}),
+        };
+        gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton(review_text.ptr, if (needs_pairing == 0) review_tooltip else "Place every track on the release before accepting it", gtk.callback(reviewClicked), row));
     } else {
         gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton("Search", "Search MusicBrainz for this album again", gtk.callback(searchClicked), row));
     }
@@ -872,7 +918,7 @@ pub fn build(self: *App) *gtk.Widget {
     const tabs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(tabs, "match-tabs");
     var first: ?*gtk.Widget = null;
-    for ([_]Bucket{ .confident, .needs_review, .unmatched }) |bucket| {
+    for (std.enums.values(Bucket)) |bucket| {
         const button = tabButton(self, bucket, first);
         if (first == null) first = button;
         gtk.gtk_box_append(gtk.cast(gtk.Box, tabs), button);

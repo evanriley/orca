@@ -1174,11 +1174,13 @@ The window is an `AdwNavigationSplitView`:
   duplicate finding finishes.
 - **Matches**, "How your albums line up with MusicBrainz releases, and
   why.", sorts Releases by their best MusicBrainz release candidate into
-  three tabs, Confident, Needs Review and Unmatched, each with its count
-  from `libraryReleaseMatchCounts`; Needs Review is shown first and its
-  count is the sidebar badge, with the album corrections added. A Release
-  is confident when its best candidate scores at or above the threshold set
-  in Settings (90% by default, `[matching] accept_confidence`). "Search
+  four tabs, Confident, Needs Review, Unmatched and Reviewed, each with its
+  count from `libraryReleaseMatchCounts`; Needs Review is shown first and
+  its count is the sidebar badge, with the album corrections added. A
+  Release is confident when its best candidate scores at or above the
+  threshold set in Settings (90% by default, `[matching]
+  accept_confidence`); a Release marked as reviewed is listed only under
+  Reviewed. "Search
   matches…" in the top bar, focused by Ctrl+F, filters the tabs, their
   counts and the list by album title or artist; the badge stays unfiltered.
   Counts and the tab's Releases (`libraryReleaseMatchPage`), with each one's
@@ -1189,15 +1191,22 @@ The window is an `AdwNavigationSplitView`:
   listed and keeps the scroll position, and a read started before a tab or
   filter change is dropped. Each row shows the cover,
   title and artist, "Best candidate" with the release's title and year, the
-  confidence over a bar, and Accept and Review; an Unmatched row has only
-  Search, which starts a re-identify Job for the album. Clicking a row
+  confidence over a bar, and Accept and Review. Accept is offered only when
+  the release tracklist is read and every Track has a place on it
+  (`placement` with `needs_pairing` 0); otherwise the row offers only
+  "Review · N tracks need pairing", or Review when no tracklist is read. A
+  Reviewed row offers Unmark (`libraryUnmarkReleaseReviewed`, "Review
+  undone") and Review. An Unmatched row has only Search, which starts a
+  re-identify Job for the album. Clicking a row
   expands it to show the artist's local track count, the candidate's full
   date and track count, and the evidence (`libraryReleaseMatchEvidence`):
   AcoustID fingerprints `N of M tracks`, Track durations `within 1 s`,
   Artist, Album title and Release date, each marked agrees or differs with
   both values, beside a sentence that explains the confidence. Accept
   applies the release ID and whichever of album, album artist and release
-  date differ (`libraryApplyMatchedRelease` with that `ReleaseFieldSet`).
+  date differ (`libraryApplyRelease` with that `ReleaseFieldSet`) and
+  toasts "Release accepted", or "Applied · left alone: A, B and N more"
+  naming the Tracks it left alone.
   Match Again starts the matching Job. Library Health's Unmatched releases
   Review opens the Unmatched tab.
 
@@ -1214,17 +1223,35 @@ The window is an `AdwNavigationSplitView`:
   type, Genre and Artwork are compared but never applied, so their Use box
   is insensitive. Artwork shows each side's source and size, "Local · 1200
   × 1200" and "Cover Art Archive · 1200 × 1200", "—" when unmeasured.
-  Tracks · N of M aligned lists #, Local, Candidate, Δ time
-  (`0 s`, `+1 s`, `−1 s`) and Print (✓ when AcoustID heard the track), a
-  local title that differs in the diff colour. Apply N Fields to Orca
-  stores only the checked fields (`libraryApplyMatchedRelease` with a
-  `ReleaseFieldSet`), Not This Release dismisses the candidate
+  Tracks · P of N placed aligns the release tracklist with the Tracks
+  (`libraryReleaseAlignment`) in #, Your file, Release, Δ time (`0 s`,
+  `+1 s`, `−1 s`) and Status, a local title that differs in the diff
+  colour. Status reads ✓ Same recording for an automatic placement,
+  Paired with Unpair (`libraryUnpairReleaseTrack`, "Unpaired") for one the
+  user chose, a "Suggested · evidence" chip with Confirm for a suggestion,
+  and "Not in your files" with a Pair… menu of the unplaced Tracks for a
+  release track no file holds. Not on this release · kept as is lists the
+  Tracks with no place, each with a Pair… menu of the release tracks no
+  file holds. Pairing (`libraryPairReleaseTrack`) toasts "Paired with
+  track N"; a release track another Track already holds reads "Another
+  track already holds that release track". An empty menu is insensitive.
+  Without a tracklist the section explains why and offers Look Up Release,
+  which starts a re-identify Job, and Apply is insensitive; a release too
+  large to align says so. The primary button reads Apply N Fields to Orca,
+  or Apply N Fields · M of T Tracks when some Tracks have no place, with
+  "Left alone on Apply:" naming them above the table. Apply stores only
+  the checked fields (`libraryApplyRelease` with a `ReleaseFieldSet`) and
+  toasts "Applied N fields", "· reviewed" when that marked the Release
+  reviewed, the left-alone Tracks when any were, and "· album artist ID on
+  the next lookup" when the artist IDs are not yet known. With every Track
+  placed and nothing differing it reads Mark as Reviewed
+  (`libraryMarkReleaseReviewed`), and on a reviewed Release Unmark
+  Reviewed. Not This Release dismisses the candidate
   (`libraryDismissReleaseCandidate`), which moves the Release to Unmatched
   when it had no other, and Search MusicBrainz… starts a re-identify Job
-  for the album. After Apply or Not This Release the page rereads the tab
-  and moves on to the next Release, or back to Matches when the tab is
-  empty. No media file is
-  written.
+  for the album. After Apply, Mark as Reviewed or Not This Release the
+  page rereads the tab and moves on to the next Release, or back to
+  Matches when the tab is empty. No media file is written.
 
   **Album corrections**, a section under the tabs that is hidden when
   there are none, lists the album groups a verification proposed
