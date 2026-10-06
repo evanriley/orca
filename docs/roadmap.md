@@ -357,42 +357,10 @@ removed.
   display in CI. A release candidate passes an acceptance period with no open
   data-loss, memory-corruption, wrong-song or unintended-output defect.
 
-## Releases
+### Defects to fix before 1.0
 
-Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
-release bumps the minor version when it contains a breaking change to the
-Zig API, the C ABI or the Library schema, and the patch version otherwise.
-1.0 follows the [Before 1.0](#before-10) gates.
-
-Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
-the same commit: features, fixes, refactors, removals and breaking changes
-alike.
-
-To release:
-
-1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
-   and state the Library schema version it ships.
-2. Set `.version` in `build.zig.zon`.
-3. Commit, and tag the commit with a signed, annotated `vX.Y.Z` tag whose
-   message is that version's section of `CHANGELOG.md`:
-
-   ```sh
-   version=X.Y.Z
-   { printf 'Orca %s\n\n' "$version"
-     awk -v v="$version" '$1 == "##" { p = ($2 == v); next } p' CHANGELOG.md
-   } | git tag -s "v$version" --cleanup=whitespace -F -
-   ```
-
-   `--cleanup=whitespace` keeps the `###` headings, which the default
-   cleanup removes as comments.
-4. Update Orca's application entry on the AcoustID website to the new
-   version. Every lookup and submission sends the version as
-   `clientversion`, and the registered details should match what the
-   service receives.
-
-## Known issues
-
-Small defects that are not yet scheduled:
+Fixed before 1.0. Each fix adds a test that fails without it, or a headless
+screenshot for a display-only defect, and removes its entry.
 
 - A file that leaves a Release loses its Track id when another folder on that
   Release projects first and one of its files states the old position:
@@ -415,13 +383,6 @@ Small defects that are not yet scheduled:
   looked up again on every match run of the Library.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
-- On macOS, which has no OFD locks, opening and closing a Library's
-  database, `-wal` or `-shm` file from another part of the same process
-  drops SQLite's POSIX locks on it. A second Orca process can then
-  check-point and delete the WAL under the first, and the first process's
-  later writes are lost. Linux uses OFD locks; see
-  [database.md](database.md#concurrency).
-- Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
 - When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
   sometimes not drawn, and stays missing. The race is likely in
   `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
@@ -467,6 +428,73 @@ Small defects that are not yet scheduled:
   lookups take it as no key (they fall back to the application key) and a
   submission as no user key (`needs_user_key`). Whether AcoustID should fail
   instead is undecided.
+- `scripts/headless-gui.sh` reuses a `fixtures/library/design.db` that this
+  build cannot open, such as one built before the schema was squashed, so
+  every headless GUI run fails to open its library.
+- Queue history skips Tracks that left the Library, so history positions
+  shift; the queue row menu offers Track actions, such as Play Next, on a
+  removed row; and whether a queued Track is always looked up in the Library
+  that holds it is unchecked.
+- A loudness result stored for a file whose channel count is unknown is used
+  for album gain and never checked again, though the file may have more than
+  two channels.
+- Untested: the AcoustID key read once per job on the submission path, and
+  gapless identity at the successor's first frame after a re-seek other than
+  a user seek, such as an output reopen.
+- Not checked on screen: the Player paused after every output failed, the
+  match result toasts and the read-only tag write dialogs in `orca-gtk`.
+- A pause resets an output's stall count, so a stuck output can cost the
+  other outputs up to 128 ms after resume.
+- Recovery that finishes an interrupted undo does not check that the files it
+  restores are writable.
+- The check for SQLite connections open before the lock replacement is
+  installed reads SQLite's memory accounting. It sees nothing when SQLite is
+  built without memory statistics, and refuses a host that holds SQLite
+  memory with no connection open.
+
+## Releases
+
+Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
+release bumps the minor version when it contains a breaking change to the
+Zig API, the C ABI or the Library schema, and the patch version otherwise.
+1.0 follows the [Before 1.0](#before-10) gates.
+
+Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
+the same commit: features, fixes, refactors, removals and breaking changes
+alike.
+
+To release:
+
+1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
+   and state the Library schema version it ships.
+2. Set `.version` in `build.zig.zon`.
+3. Commit, and tag the commit with a signed, annotated `vX.Y.Z` tag whose
+   message is that version's section of `CHANGELOG.md`:
+
+   ```sh
+   version=X.Y.Z
+   { printf 'Orca %s\n\n' "$version"
+     awk -v v="$version" '$1 == "##" { p = ($2 == v); next } p' CHANGELOG.md
+   } | git tag -s "v$version" --cleanup=whitespace -F -
+   ```
+
+   `--cleanup=whitespace` keeps the `###` headings, which the default
+   cleanup removes as comments.
+4. Update Orca's application entry on the AcoustID website to the new
+   version. Every lookup and submission sends the version as
+   `clientversion`, and the registered details should match what the
+   service receives.
+
+## Known issues
+
+Small defects that are not yet scheduled:
+
+- On macOS, which has no OFD locks, opening and closing a Library's
+  database, `-wal` or `-shm` file from another part of the same process
+  drops SQLite's POSIX locks on it. A second Orca process can then
+  check-point and delete the WAL under the first, and the first process's
+  later writes are lost. Linux uses OFD locks; see
+  [database.md](database.md#concurrency).
 
 ## Deferred formats
 
@@ -483,6 +511,7 @@ are sniffed or not recognized until then:
 
 ## Later
 
+- Ratings read from and written to tags (POPM, FMPS_RATING).
 - More identification sources: ListenBrainz's `/1/metadata/lookup` would match
   what MusicBrainz and AcoustID miss, but needs the user's token and must share
   the listen worker's gateway.
