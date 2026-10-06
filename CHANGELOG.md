@@ -61,6 +61,11 @@
   changes; and undo refuses, changing nothing, while a file to restore is
   read-only. A rewritten or restored file keeps its exact permission bits
   instead of losing those the umask removes, such as group write.
+- A lost output that reopens counts each reopen as a recovery attempt until it
+  has played 32 blocks, or until the host closes it. A device-0 output, which
+  always reopens on the default sink, now ends `failed` after its fourth loss
+  without a stable interval instead of retrying without end, so its Player
+  drains.
 
 ## 0.1.0 - 2026-10-06
 

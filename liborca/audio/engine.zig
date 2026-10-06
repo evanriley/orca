@@ -341,6 +341,7 @@ pub const PlayerEngine = struct {
             const reclaimed = runtime_zone.reclaim();
             runtime_zone.silenced.store(silenced, .release);
             self.watchConsumption(runtime_zone, reclaimed, playing);
+            self.countStableConsumption(runtime_zone, reclaimed);
         }
         self.serviceSeek();
         self.serviceQueue(zones);
@@ -806,6 +807,7 @@ pub const PlayerEngine = struct {
             };
             watchOutput(runtime_zone, self.waker());
             runtime_zone.stall_started_ns = self.elapsed_ns;
+            runtime_zone.stable_blocks = 0;
             if (runtime_zone.output.?.latency(
                 @intCast(runtime_zone.blockBudget() * frames_per_block),
                 0,
@@ -838,6 +840,14 @@ pub const PlayerEngine = struct {
         if (runtime_zone.output == null or runtime_zone.zone.output_state != .active) return;
         if (self.elapsed_ns -| runtime_zone.stall_started_ns < stall_timeout_ns) return;
         self.loseOutput(runtime_zone);
+    }
+
+    fn countStableConsumption(self: *PlayerEngine, runtime_zone: *ZoneRuntime, reclaimed: usize) void {
+        if (runtime_zone.output == null or runtime_zone.zone.output_state != .active) return;
+        runtime_zone.stable_blocks +|= @intCast(reclaimed);
+        if (runtime_zone.stable_blocks < block_count or runtime_zone.zone.recovery_attempts == 0) return;
+        runtime_zone.zone.recovery_attempts = 0;
+        self.publishZoneState(runtime_zone);
     }
 
     fn publishZoneState(self: *PlayerEngine, runtime_zone: *ZoneRuntime) void {
@@ -1158,6 +1168,17 @@ fn exhaustRecovery(harness: *Harness, runtime_zone: *ZoneRuntime) !void {
     if (!runtime_zone.recoveryExhausted()) return error.RecoveryNeverExhausted;
 }
 
+fn loseAndReopen(harness: *Harness, runtime_zone: *ZoneRuntime) !void {
+    const opens_before = harness.backend.opens;
+    liveStreamFor(&harness.backend, runtime_zone).?.markLost();
+    for (0..8) |_| {
+        runtime_zone.recovery_wait_ns = 0;
+        harness.engine.pass();
+        if (harness.backend.opens > opens_before) break;
+    }
+    if (runtime_zone.outputState() != .active) return error.OutputNeverReopened;
+}
+
 fn passAfter(engine: *PlayerEngine, elapsed_ns: u64) void {
     engine.elapsed_ns += elapsed_ns;
     engine.pass();
@@ -1458,7 +1479,7 @@ test "a lost output recovers within bounded attempts and then stays failed" {
     runtime_zone.recovery_wait_ns = 0;
     harness.engine.pass();
     try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
-    try std.testing.expectEqual(@as(u32, 0), runtime_zone.published_recovery_attempts.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), runtime_zone.published_recovery_attempts.load(.acquire));
 
     // Now make every reopen fail: recovery is bounded, not infinite.
     harness.backend.fail_next_open = true;
@@ -1473,6 +1494,152 @@ test "a lost output recovers within bounded attempts and then stays failed" {
         zone_runtime.max_recovery_attempts,
         runtime_zone.published_recovery_attempts.load(.acquire),
     );
+}
+
+test "an output lost again after every reopen without consuming ends failed" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+
+    for (1..zone_runtime.max_recovery_attempts + 1) |attempt| {
+        try loseAndReopen(harness, runtime_zone);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(attempt)),
+            runtime_zone.published_recovery_attempts.load(.acquire),
+        );
+    }
+    liveStreamFor(&harness.backend, runtime_zone).?.markLost();
+    for (0..8) |_| {
+        runtime_zone.recovery_wait_ns = 0;
+        harness.engine.pass();
+    }
+    try std.testing.expectEqual(zone_model.OutputState.failed, runtime_zone.outputState());
+    try std.testing.expect(runtime_zone.recoveryExhausted());
+    try std.testing.expectEqual(@as(usize, 1 + zone_runtime.max_recovery_attempts), harness.backend.opens);
+}
+
+test "an output that consumes a full pipe after its reopen starts its recovery count again" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    try loseAndReopen(harness, runtime_zone);
+    try loseAndReopen(harness, runtime_zone);
+    try std.testing.expectEqual(@as(u32, 2), runtime_zone.published_recovery_attempts.load(.acquire));
+
+    var scratch: [frames_per_block]f32 = undefined;
+    for (0..block_count - 1) |_| {
+        liveStreamFor(&harness.backend, runtime_zone).?.pump(&scratch, frames_per_block);
+        harness.engine.pass();
+    }
+    try std.testing.expectEqual(@as(u32, 2), runtime_zone.published_recovery_attempts.load(.acquire));
+    liveStreamFor(&harness.backend, runtime_zone).?.pump(&scratch, frames_per_block);
+    harness.engine.pass();
+    try std.testing.expectEqual(@as(u32, 0), runtime_zone.published_recovery_attempts.load(.acquire));
+
+    try loseAndReopen(harness, runtime_zone);
+    try std.testing.expectEqual(@as(u32, 1), runtime_zone.published_recovery_attempts.load(.acquire));
+}
+
+test "a device-0 output that reopens but never consumes ends failed and its Player drains" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = frames_per_block };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    harness.engine.pass();
+    try std.testing.expect(harness.player.finishedDecoding());
+    try std.testing.expect(!runtime_zone.quiescent());
+
+    const cycle_ns = stall_timeout_ns + recovery_backoff_ns;
+    for (0..(zone_runtime.max_recovery_attempts + 2) * cycle_ns / park_ns) |_| {
+        if (harness.engine.isDrained()) break;
+        passAfter(harness.engine, park_ns);
+    }
+    try std.testing.expectEqual(zone_model.OutputState.failed, runtime_zone.outputState());
+    try std.testing.expect(runtime_zone.recoveryExhausted());
+    try std.testing.expect(runtime_zone.quiescent());
+    try std.testing.expect(harness.engine.isDrained());
+    try std.testing.expectEqual(@as(usize, 1 + zone_runtime.max_recovery_attempts), harness.backend.opens);
+}
+
+test "a latency refresh on a reopened output keeps its recovery count until a full pipe is consumed" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    try loseAndReopen(harness, runtime_zone);
+
+    var scratch: [frames_per_block]f32 = undefined;
+    var refreshes: usize = 0;
+    var pumped: usize = 0;
+    for (0..3 * latency_refresh_passes) |pass| {
+        if (pass % 2 == 0 and pumped < block_count - 1) {
+            liveStreamFor(&harness.backend, runtime_zone).?.pump(&scratch, frames_per_block);
+            pumped += 1;
+        }
+        harness.engine.pass();
+        if (harness.engine.passes % latency_refresh_passes == 0) refreshes += 1;
+        try std.testing.expectEqual(@as(u32, 1), runtime_zone.published_recovery_attempts.load(.acquire));
+    }
+    try std.testing.expect(refreshes >= 2);
+    try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
+}
+
+test "closing a recovered output and requesting it again starts its recovery count afresh" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    try loseAndReopen(harness, runtime_zone);
+    try loseAndReopen(harness, runtime_zone);
+    try std.testing.expectEqual(@as(u32, 2), runtime_zone.published_recovery_attempts.load(.acquire));
+
+    runtime_zone.output_requested.store(false, .release);
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.closed, runtime_zone.outputState());
+    try std.testing.expectEqual(@as(u32, 0), runtime_zone.published_recovery_attempts.load(.acquire));
+
+    runtime_zone.output_requested.store(true, .release);
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
+    try loseAndReopen(harness, runtime_zone);
+    try std.testing.expectEqual(@as(u32, 1), runtime_zone.published_recovery_attempts.load(.acquire));
 }
 
 test "a Zone whose recovery is exhausted hands back every block it held" {

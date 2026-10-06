@@ -132,6 +132,7 @@ pub const ZoneRuntime = struct {
     stalled_passes: u32 = 0,
     stall_started_ns: u64 = 0,
     recovery_wait_ns: u64 = 0,
+    stable_blocks: u32 = 0,
     /// Negotiated backend quantum, refreshed from the open output. A device
     /// asks for a whole quantum per callback, so it is a hard floor on how far
     /// ahead the producer has to stay regardless of the Zone's policy target.

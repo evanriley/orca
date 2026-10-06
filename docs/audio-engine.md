@@ -298,9 +298,14 @@ chain, reports its own input format, not that of the hardware behind it.
 
 A lost output is closed and reopened with bounded attempts while its Player
 epoch and prepared render path remain intact. Recovery state belongs to each
-Zone; another Zone stays active if reopening fails. Once
-`zone_runtime.max_recovery_attempts` (3) reopens have failed, the Zone reports
-`failed` and returns every prepared block to its pool. It stays failed until
+Zone; another Zone stays active if reopening fails. Each reopen counts as one
+attempt, whether it succeeds or not. The count returns to zero only once a
+reopened output has handed back `zone_runtime.block_count` (32) blocks, or when
+the host closes the output. When `zone_runtime.max_recovery_attempts` (3)
+attempts are counted and the output is lost or fails to open again, the Zone
+reports `failed` and returns every prepared block to its pool. A device that
+reopens but never plays, such as device 0 following a default sink that does
+not consume, therefore fails after its fourth loss. The Zone stays failed until
 the host closes its output and, once the Zone reports `closed`, requests it
 again, which starts a new set of attempts.
 

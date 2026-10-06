@@ -78,7 +78,6 @@ pub const Zone = struct {
     pub fn opened(self: *Zone, latency: Latency) void {
         self.latency = latency;
         self.output_state = .active;
-        self.recovery_attempts = 0;
     }
 
     pub fn deviceLost(self: *Zone) void {
