@@ -249,6 +249,44 @@ pub fn applySnapshotToDiff(
     }
 }
 
+/// The evidence for the Release against `release_mbid`, else its best
+/// candidate, with the release's values and the placed Tracks' durations
+/// taken from its snapshot when it has one.
+pub fn releaseMatchEvidence(
+    allocator: std.mem.Allocator,
+    library: *database.LibraryDatabase,
+    release_id: i64,
+    release_mbid: ?[]const u8,
+) !matching.MatchEvidence {
+    var planned = plan(allocator, library, release_id, release_mbid) catch |err| switch (err) {
+        error.NoReleaseTracklist, error.ReleaseTooLarge => {
+            const view = try library.identification_proposals.releaseMatchView(allocator, release_id, false);
+            defer view.deinit();
+            const compared = try matching.comparedRelease(&view, allocator, release_mbid);
+            return matching.releaseMatchEvidence(allocator, &view, compared, null);
+        },
+        else => |other| return other,
+    };
+    defer planned.deinit();
+    const record = &planned.tracklist.record;
+    var compared: u32 = 0;
+    var within: u32 = 0;
+    for (planned.apply_tracks.items) |entry| {
+        const on_release = entry.placed orelse continue;
+        const track = planned.viewTrack(entry.track_id) orelse continue;
+        const delta = lengthDelta(track.duration_ms, on_release.length_ms) orelse continue;
+        compared += 1;
+        if (@abs(delta) <= matching.duration_agreement_ms) within += 1;
+    }
+    return matching.releaseMatchEvidence(allocator, &planned.view, record.release_mbid, .{
+        .title = record.title,
+        .artist = record.artist_credit,
+        .date = record.release_date orelse "",
+        .durations_compared = compared,
+        .durations_within_1s = within,
+    });
+}
+
 fn differingValues(
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,

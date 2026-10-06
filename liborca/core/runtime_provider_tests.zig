@@ -8843,6 +8843,46 @@ test "a library match run's job ends the step for the releases its tags name wit
     try std.testing.expect(!std.mem.eql(u8, "looking up the releases your tags name", snapshot.detail.slice()));
 }
 
+test "a Release reviewed by its tags, with no proposals, has the evidence of its snapshot: every duration within a second and the artist, title and date agreeing" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-tagged-evidence?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try taggedNightcallAlbum(library_database);
+    var tracks: [4]database.ReleaseTracklistTrack = undefined;
+    for (&tracks, 0..) |*track, index| track.* = .{
+        .disc = 1,
+        .position = @intCast(index + 1),
+        .title = nightcall_titles[index],
+        .artist_credit = "Kavinsky",
+        .length_ms = 258_000,
+        .recording_mbid = nightcall_recordings[index],
+        .release_track_mbid = nightcall_track_mbids[index],
+    };
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = nightcall_mbid,
+        .title = "Nightcall",
+        .artist_credit = "Kavinsky",
+        .release_date = "2010-11-08",
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &tracks,
+    });
+    try expectTagged(&runtime, library, album, true);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM identification_proposals;"));
+
+    const evidence = try runtime.libraryReleaseMatchEvidence(library, album, null);
+    try std.testing.expectEqual(@as(u32, 4), evidence.tracks);
+    try std.testing.expectEqual(@as(u32, 0), evidence.fingerprints_matched);
+    try std.testing.expect(evidence.durations_within_1s);
+    try std.testing.expect(evidence.artist_agrees);
+    try std.testing.expect(evidence.title_agrees);
+    try std.testing.expect(evidence.date_agrees);
+
+    try library_database.database.exec("UPDATE musicbrainz_release_tracks SET length_ms = 262000 WHERE position = 2;");
+    try std.testing.expect(!(try runtime.libraryReleaseMatchEvidence(library, album, null)).durations_within_1s);
+}
+
 fn countOn(library_database: *database.LibraryDatabase, sql: [:0]const u8, id: i64) !i64 {
     var statement = try library_database.database.prepare(sql);
     defer statement.deinit();

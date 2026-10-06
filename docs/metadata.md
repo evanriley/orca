@@ -251,6 +251,11 @@ those Tracks. A field among `album`, `album_artist`, `release_date`,
 alone would change a value in effect, computed by the dry run the Apply uses.
 `release_type`, `genre` and `artwork` come from proposals and stored covers.
 
+`Runtime.libraryReleaseMatchEvidence` takes the candidate's title, artist
+credit and date from its snapshot when there is one, and compares each placed
+Track's duration with its release track's length. Without a snapshot they come
+from proposals. Fingerprint counts always come from proposals.
+
 #### Release alignment
 
 Match Review compares a Release with one MusicBrainz release's own tracklist,

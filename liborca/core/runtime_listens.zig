@@ -358,10 +358,7 @@ pub fn libraryReleaseMatchCounts(self: *OrcaRuntime, library: LibraryHandle, con
 }
 
 pub fn libraryReleaseMatchEvidence(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !MatchEvidence {
-    const view = try (try runtime.libraryDatabase(self, library)).identification_proposals.releaseMatchView(self.allocator, release_id, false);
-    defer view.deinit();
-    const compared = try library_pass.matching.comparedRelease(&view, self.allocator, release_mbid);
-    return library_pass.matching.releaseMatchEvidence(self.allocator, &view, compared);
+    return library_pass.release_apply.releaseMatchEvidence(self.allocator, try runtime.libraryDatabase(self, library), release_id, release_mbid);
 }
 
 pub fn libraryReleaseMatchDiff(

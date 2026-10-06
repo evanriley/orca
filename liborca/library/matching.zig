@@ -1105,10 +1105,21 @@ fn textsAgree(allocator: std.mem.Allocator, local: []const u8, candidate: []cons
     return try providers.scoring.textSimilarity(allocator, local_key, candidate_key) >= text_agreement_minimum;
 }
 
+/// What a snapshot of the compared release says, which takes the place of
+/// the proposals' release values and durations.
+pub const SnapshotEvidence = struct {
+    title: []const u8,
+    artist: []const u8,
+    date: []const u8,
+    durations_compared: u32,
+    durations_within_1s: u32,
+};
+
 pub fn releaseMatchEvidence(
     allocator: std.mem.Allocator,
     view: *const database.ReleaseMatchView,
     release_mbid: []const u8,
+    snapshot: ?SnapshotEvidence,
 ) !MatchEvidence {
     var evidence: MatchEvidence = .{
         .fingerprints_matched = 0,
@@ -1129,8 +1140,15 @@ pub fn releaseMatchEvidence(
             if (@abs(delta) <= duration_agreement_ms) within += 1;
         }
     }
+    var release = candidateRelease(view, release_mbid);
+    if (snapshot) |snapshotted| {
+        compared = snapshotted.durations_compared;
+        within = snapshotted.durations_within_1s;
+        release.title = snapshotted.title;
+        release.artist = snapshotted.artist;
+        release.date = snapshotted.date;
+    }
     evidence.durations_within_1s = compared != 0 and within == compared;
-    const release = candidateRelease(view, release_mbid);
     evidence.artist_agrees = try textsAgree(allocator, view.album_artist, release.artist);
     evidence.title_agrees = try textsAgree(allocator, view.title, release.title);
     evidence.date_agrees = view.release_date != null and release.date.len != 0 and
