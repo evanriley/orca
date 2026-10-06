@@ -308,7 +308,13 @@ fn holdsTexture(stack: *gtk.Stack) bool {
 fn coverMapped(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self: *App = @ptrCast(@alignCast(data.?));
     const stack = gtk.cast(gtk.Stack, widget);
-    for (self.art.bindings.items) |binding| if (binding.stack == stack) return paintBinding(self, binding);
+    const cache = &self.art;
+    for (cache.bindings.items) |binding| {
+        if (binding.stack != stack) continue;
+        const evicted = binding.key.kind == .backdrop and !cache.entries.contains(binding.key) and !cache.blurring.contains(binding.key);
+        if (evicted) recomposeBackdrops(self);
+        return paintBinding(self, binding);
+    }
 }
 
 fn coverUnmapped(widget: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
@@ -608,15 +614,15 @@ fn backdropDestroyed(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 /// Paints run inside `remember`'s walk of `bindings`, which `show` can
 /// reallocate, so backdrops are recomposed later, when the main loop is idle.
 fn sourcePainted(self: *App, stack: *gtk.Stack) void {
-    const cache = &self.art;
-    if (cache.backdrop_idle != 0) return;
-    for (cache.backdrops.items) |record| {
+    for (self.art.backdrops.items) |record| {
         for (record.sources[0..record.source_count]) |source| {
-            if (source != stack) continue;
-            cache.backdrop_idle = gtk.g_idle_add(updateBackdropsIdle, self);
-            return;
+            if (source == stack) return recomposeBackdrops(self);
         }
     }
+}
+
+fn recomposeBackdrops(self: *App) void {
+    if (self.art.backdrop_idle == 0) self.art.backdrop_idle = gtk.g_idle_add(updateBackdropsIdle, self);
 }
 
 fn updateBackdropsIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
@@ -628,7 +634,7 @@ fn updateBackdropsIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
 }
 
 const Painted = union(enum) {
-    loading,
+    loading: Key,
     empty,
     art: struct { key: Key, texture: *gtk.GdkTexture },
 };
@@ -639,9 +645,9 @@ fn paintedArt(cache: *const Cache, stack: *gtk.Stack) Painted {
     } else return .empty;
     if (cache.entries.get(binding.key)) |entry| {
         if (entry.texture) |texture| return .{ .art = .{ .key = binding.key, .texture = texture } };
-    } else if (binding.request_key) return .loading;
+    } else if (binding.request_key) return .{ .loading = binding.key };
     const fallback = binding.fallback orelse return .empty;
-    const entry = cache.entries.get(fallback) orelse return .loading;
+    const entry = cache.entries.get(fallback) orelse return .{ .loading = fallback };
     const texture = entry.texture orelse return .empty;
     return .{ .art = .{ .key = fallback, .texture = texture } };
 }
@@ -658,7 +664,7 @@ fn updateBackdrop(self: *App, record: Backdrop) void {
     var hasher: std.hash.Wyhash = .init(0);
     for (record.sources[0..record.source_count]) |source| {
         switch (paintedArt(cache, source)) {
-            .loading => return,
+            .loading => |key| return want(self, key),
             .empty => {},
             .art => |found| {
                 std.hash.autoHash(&hasher, found.key);

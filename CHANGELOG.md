@@ -188,6 +188,10 @@
 - Listens and now-playing updates sent to ListenBrainz name the media player
   and its version (`media_player`, `media_player_version`), taken from the
   client identity, as well as the submission client.
+- `orca-gtk` draws the cover-tinted backdrop on Now Playing even when the
+  cover cache drops the cover before the backdrop is composed, which a large
+  library could do at start-up, and redraws a backdrop dropped from the cache
+  when its page is shown again.
 
 ## 0.1.0 - 2026-10-06
 

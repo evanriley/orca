@@ -367,9 +367,6 @@ screenshot for a display-only defect, and removes its entry.
   looked up again on every match run of the Library.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
-- When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
-  sometimes not drawn, and stays missing. The race is likely in
-  `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.
