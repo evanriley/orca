@@ -22,6 +22,7 @@ pub const Outcome = enum {
     invalid_user_key,
     unavailable,
     busy,
+    credential_unavailable,
 };
 
 pub const Result = struct {
@@ -64,7 +65,10 @@ pub const AcoustIdSubmission = struct {
         var result: Result = .{};
         if (self.batch_size == 0) return error.InvalidBatchSize;
         {
-            const key = try self.userKey() orelse return finish(&result, .needs_user_key);
+            const key = self.userKey() catch |err| switch (err) {
+                error.CredentialUnreadable => return finish(&result, .credential_unavailable),
+                else => return err,
+            } orelse return finish(&result, .needs_user_key);
             providers.credentials.wipeAndFree(self.allocator, key);
         }
         self.batch = .init(self.allocator);
@@ -142,7 +146,10 @@ pub const AcoustIdSubmission = struct {
         var attempt: u32 = 0;
         const outcome = while (true) : (attempt += 1) {
             if (self.isCancelled()) return .cancelled;
-            const key = try self.userKey() orelse return .needs_user_key;
+            const key = self.userKey() catch |err| switch (err) {
+                error.CredentialUnreadable => return .credential_unavailable,
+                else => return err,
+            } orelse return .needs_user_key;
             defer providers.credentials.wipeAndFree(self.allocator, key);
             result.requests += 1;
             break self.acoustid.submit(self.allocator, key, &self.batch) catch |err| switch (err) {
@@ -185,7 +192,7 @@ pub const AcoustIdSubmission = struct {
         const store = self.credentials orelse return null;
         const stored = store.get(self.allocator, acoustid.credential_service, acoustid.user_key_account) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => return null,
+            else => return error.CredentialUnreadable,
         };
         const key = stored orelse return null;
         if (key.len == 0) {

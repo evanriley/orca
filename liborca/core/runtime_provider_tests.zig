@@ -2587,6 +2587,16 @@ const AcoustIdUserKey = struct {
     }
 };
 
+const UnreadableCredentials = struct {
+    fn store(self: *UnreadableCredentials) CredentialStore {
+        return .{ .context = self, .get_fn = get };
+    }
+
+    fn get(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: []const u8) anyerror!?[]u8 {
+        return error.CredentialUnavailable;
+    }
+};
+
 /// Fifteen seconds of a mono tone at 11025 Hz, long enough to fingerprint.
 pub fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
     const rate = 11_025;
@@ -2910,6 +2920,28 @@ test "a matching job keeps the credential store's application key from its start
     try expectKeyKeptThroughJob(&runtime, library, &acoustid, .{ .runtime = "other-host-key" }, "client=stored-second&");
 }
 
+test "a matching job looks up with the application key when the credential store cannot be read" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var musicbrainz: FakeMusicBrainz = .{};
+    var acoustid: FakeAcoustId = .{};
+    var unreadable: UnreadableCredentials = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("host-key");
+    try runtime.setCredentialStore(unreadable.store());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-acoustid-unreadable-store?mode=memory&cache=shared");
+    try addTwoUntaggedFiles(&runtime, library, &temporary);
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .batch_size = 1 });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u32, 2), acoustid.lookups.load(.acquire));
+    try std.testing.expect(std.mem.startsWith(u8, acoustid.lastForm(), "client=host-key&"));
+}
+
 const CountedAcoustIdKeys = struct {
     client_keys: []const []const u8,
     client_key_reads: std.atomic.Value(u32) = .init(0),
@@ -3126,6 +3158,16 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     try std.testing.expectEqual(SubmissionOutcome.needs_user_key, (try runtime.jobSubmissionStats(without_key)).outcome);
     try std.testing.expectEqual(@as(u32, 0), acoustid.submissions.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittedCount(library));
+
+    var unreadable: UnreadableCredentials = .{};
+    try runtime.setCredentialStore(unreadable.store());
+    const unreadable_key = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, unreadable_key));
+    try std.testing.expectEqual(SubmissionOutcome.credential_unavailable, (try runtime.jobSubmissionStats(unreadable_key)).outcome);
+    try std.testing.expectEqual(@as(u32, 0), acoustid.submissions.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittedCount(library));
+    try runtime.setCredentialStore(user.store());
 
     user.key = "user key";
     acoustid.submit_status = 400;

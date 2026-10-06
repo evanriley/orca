@@ -1643,7 +1643,7 @@ pub const JobWorker = struct {
         switch (result.outcome) {
             .completed => {},
             .cancelled => stats.cancelled.store(true, .release),
-            .needs_client_key, .invalid_client_key, .needs_user_key, .invalid_user_key, .unavailable, .busy => self.failed.store(true, .release),
+            .needs_client_key, .invalid_client_key, .needs_user_key, .invalid_user_key, .unavailable, .busy, .credential_unavailable => self.failed.store(true, .release),
         }
     }
 

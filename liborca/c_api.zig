@@ -5860,6 +5860,7 @@ pub fn exportSubmissionOutcome(outcome: core.runtime.SubmissionOutcome) u8 {
         .invalid_user_key => 5,
         .unavailable => 6,
         .busy => 7,
+        .credential_unavailable => 8,
     };
 }
 
@@ -11684,8 +11685,18 @@ test "a submission started through the C ABI sends an accepted recording ID once
     try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
     try std.testing.expectEqual(job.State.failed, try rig.finish(submitting));
     try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
-    try std.testing.expectEqual(exportSubmissionOutcome(.needs_user_key), stats.outcome);
+    try std.testing.expectEqual(exportSubmissionOutcome(.credential_unavailable), stats.outcome);
+    try std.testing.expectEqual(@as(u8, 8), stats.outcome);
     try std.testing.expectEqual(@as(u32, 0), rig.acoustid.submissions.load(.acquire));
+
+    keyring.result = @backingInt(CredentialResult.too_large);
+    try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
+    try std.testing.expectEqual(job.State.failed, try rig.finish(submitting));
+    try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
+    try std.testing.expectEqual(exportSubmissionOutcome(.credential_unavailable), stats.outcome);
+    try std.testing.expectEqual(@as(u32, 0), rig.acoustid.submissions.load(.acquire));
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
 
     keyring.result = @backingInt(CredentialResult.found);
     try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));

@@ -375,11 +375,6 @@ screenshot for a display-only defect, and removes its entry.
 - In a Release of more than 512 Tracks, verified a page at a time, a file
   that still disagrees is checked again only while the Release has a stale
   file left when its page is reached, though the job's total counted it.
-- A credential store that is unavailable, or a credential too large for the
-  C ABI's buffer, stops the listen worker with an error, while AcoustID
-  lookups take it as no key (they fall back to the application key) and a
-  submission as no user key (`needs_user_key`). Whether AcoustID should fail
-  instead is undecided.
 - Not checked on screen: the Player paused after every output failed, the
   match result toasts and the read-only tag write dialogs in `orca-gtk`.
 - A pause resets an output's stall count, so a stuck output can cost the

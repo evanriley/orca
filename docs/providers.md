@@ -653,12 +653,19 @@ falls when a file leaves the Library.
 
 The user's key is read from the `CredentialStore` under `org.acoustid` /
 `user-key` before each request and never kept. Without one the job fails with
-`needs_user_key` before fingerprinting anything; a key AcoustID refuses (`401`,
-`403`, or error code 6) fails it with `invalid_user_key`. Nothing is marked sent
-in either case. Another `4xx` rejects that batch: its files are counted in
-`rejected` and stay unsent. Rate limits, outages and timeouts are retried as in
-matching, and after three attempts the job fails with `unavailable`. While
-another process holds AcoustID it fails with `busy`.
+`needs_user_key` before fingerprinting anything. A `CredentialStore` that cannot
+be read, with any error but `OutOfMemory`, fails it with
+`credential_unavailable` instead, as does a credential the C ABI's buffer
+cannot hold. A key AcoustID refuses (`401`, `403`, or error code 6) fails it
+with `invalid_user_key`. Nothing is marked sent in any of these cases. Another
+`4xx` rejects that batch: its files are counted in `rejected` and stay unsent.
+Rate limits, outages and timeouts are retried as in matching, and after three
+attempts the job fails with `unavailable`. While another process holds AcoustID
+it fails with `busy`.
+
+AcoustID lookups read an application key override from the same store and use
+the host's application key when the store cannot be read. The listen worker
+stops with an error when its credential cannot be read.
 
 `jobSubmissionStats` reports the files examined, submitted and sent as metadata,
 fingerprints taken, read from the cache or failed, files rejected, requests made

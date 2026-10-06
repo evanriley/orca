@@ -669,6 +669,7 @@ fn submissionFinished(self: *App, quiet: bool, state_value: liborca.JobState, st
     if (state_value != .succeeded) return if (!quiet or result.outcome == .invalid_user_key) self.toast(switch (result.outcome) {
         .needs_user_key => "Save your AcoustID key in Settings first",
         .invalid_user_key => "AcoustID did not accept your key",
+        .credential_unavailable => "Could not read your AcoustID key from the system keyring",
         .cancelled => "Stopped",
         .busy => "AcoustID is in use by another Orca process; try again once it finishes",
         .completed, .needs_client_key, .invalid_client_key, .unavailable => "AcoustID could not be reached; try again later",

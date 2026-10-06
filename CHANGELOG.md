@@ -232,6 +232,10 @@
   under `/run/opengl-driver` meet a glibc at least as new as their own and
   `orca-gtk` keeps its Vulkan device. The README documents
   `inputs.orca.inputs.nixpkgs.follows` and nixGL for `nix run` outside NixOS.
+- An AcoustID submission whose user key cannot be read from the credential
+  store, or is too large for the C ABI's buffer, fails with the new outcome
+  `credential_unavailable` (`ORCA_SUBMISSION_OUTCOME_CREDENTIAL_UNAVAILABLE`)
+  instead of `needs_user_key`. `orca-gtk` and `orca-cli` report it.
 
 ## 0.1.0 - 2026-10-06
 

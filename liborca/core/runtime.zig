@@ -3278,7 +3278,8 @@ pub const OrcaRuntime = struct {
     /// Fingerprints every file whose recording ID came from an accepted match
     /// or an edit and sends it to AcoustID, as the user whose key the
     /// credential store holds under `org.acoustid`/`user-key`. Fails with
-    /// `needs_user_key` or `invalid_user_key` without marking anything sent.
+    /// `needs_user_key`, `credential_unavailable` or `invalid_user_key`
+    /// without marking anything sent.
     /// Queued like `startLibraryMatching` beside a maintenance unit.
     pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
         return runtime_jobs.startAcoustIdSubmission(self, library);

@@ -5277,10 +5277,11 @@ orca_status orca_library_dismiss_correction_group(orca_runtime *runtime, orca_ha
  * CANCELLED leaves the job FAILED, with nothing from the failed request
  * marked sent. NEEDS_CLIENT_KEY: no application key is set. NEEDS_USER_KEY:
  * the credential callback has none for ORCA_CREDENTIAL_SERVICE_ACOUSTID /
- * ORCA_CREDENTIAL_ACCOUNT_USER_KEY, or its answer was UNAVAILABLE or
- * TOO_LARGE. INVALID_CLIENT_KEY and INVALID_USER_KEY: AcoustID refused the
- * key. UNAVAILABLE: AcoustID did not answer after retries. BUSY: another Orca
- * process holds AcoustID. */
+ * ORCA_CREDENTIAL_ACCOUNT_USER_KEY. INVALID_CLIENT_KEY and INVALID_USER_KEY:
+ * AcoustID refused the key. UNAVAILABLE: AcoustID did not answer after
+ * retries. BUSY: another Orca process holds AcoustID. CREDENTIAL_UNAVAILABLE:
+ * the credential callback's answer for the user key was UNAVAILABLE or
+ * TOO_LARGE. */
 typedef enum orca_submission_outcome {
     ORCA_SUBMISSION_OUTCOME_COMPLETED = 0,
     ORCA_SUBMISSION_OUTCOME_CANCELLED = 1,
@@ -5290,6 +5291,7 @@ typedef enum orca_submission_outcome {
     ORCA_SUBMISSION_OUTCOME_INVALID_USER_KEY = 5,
     ORCA_SUBMISSION_OUTCOME_UNAVAILABLE = 6,
     ORCA_SUBMISSION_OUTCOME_BUSY = 7,
+    ORCA_SUBMISSION_OUTCOME_CREDENTIAL_UNAVAILABLE = 8,
 } orca_submission_outcome;
 
 /*
