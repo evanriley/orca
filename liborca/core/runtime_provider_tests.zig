@@ -2513,7 +2513,7 @@ test "re-identifying a Release searches its identified files and points their pr
     try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
     try std.testing.expectEqual(@as(i64, 2), try database.columns.scalar(
         library_database.database,
-        "SELECT count(*) FROM identification_proposals WHERE state = 0 AND payload LIKE '%\"release_mbid\":\"" ++ bryter_layter_mbid ++ "\"%';",
+        "SELECT count(*) FROM identification_proposals WHERE state = 0 AND CAST(payload AS TEXT) LIKE '%\"release_mbid\":\"" ++ bryter_layter_mbid ++ "\"%';",
     ));
 }
 
@@ -2865,9 +2865,11 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
         proposal_id.* = page.items[0].id;
     }
     for (proposal_ids) |proposal_id| _ = try runtime.libraryAcceptMatch(library, proposal_id);
+    _ = try addMatchTrack(library_database, "Hazey Jane II", "Nick Drake", null);
     try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
 
     const matching = try runtime.startLibraryMatching(library, .{ .fingerprints = false });
+    try musicbrainz.awaitRequests(1);
     try std.testing.expectError(error.AcoustIdBusy, runtime.startAcoustIdSubmission(library));
     try runtime.cancelJob(matching);
     _ = try runtime_tests.awaitJob(&runtime, matching);
@@ -3207,7 +3209,7 @@ test "Match Album points every file at the release most of them list, accepts, a
     );
     try std.testing.expectEqual(@as(i64, 2), try database.columns.scalar(
         library_database.database,
-        "SELECT count(*) FROM identification_proposals WHERE state = 1 AND payload LIKE '%\"release_mbid\":\"" ++ bryter_layter_mbid ++ "\"%';",
+        "SELECT count(*) FROM identification_proposals WHERE state = 1 AND CAST(payload AS TEXT) LIKE '%\"release_mbid\":\"" ++ bryter_layter_mbid ++ "\"%';",
     ));
     try expectOrcaValue(library_database, northern_sky, .musicbrainz_release_id, bryter_layter_mbid);
     try expectOrcaValue(library_database, northern_sky, .track_number, "3");
