@@ -3,6 +3,11 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  nixConfig = {
+    extra-substituters = [ "https://orca.cachix.org" ];
+    extra-trusted-public-keys = [ "orca.cachix.org-1:Cn49KmT1A0Sg/RPfc6TnKmaQYirb2b58eZD6nUP/Nxg=" ];
+  };
+
   outputs =
     { self, nixpkgs, ... }:
     let

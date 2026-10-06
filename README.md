@@ -93,6 +93,25 @@ applied to, which must provide Zig 0.17 as `pkgs.zig_0_17`. The modules'
 default package and `orca.packages.x86_64-linux.orca` are built against the
 nixpkgs pinned in this flake's `flake.lock`.
 
+### Binary cache
+
+CI uploads every `main` build of `orca.packages.x86_64-linux.orca` to
+[orca.cachix.org](https://orca.cachix.org). The flake's `nixConfig` names the
+cache, so `nix run` and `nix build` of this flake ask whether to use it, and
+`--accept-flake-config` accepts it without asking. Nix applies `nixConfig`
+only from the flake it is run on, and the daemon ignores it for users not in
+`trusted-users`. For the modules, or for such users, add the cache to the
+system configuration:
+
+```nix
+nix.settings = {
+  substituters = [ "https://orca.cachix.org" ];
+  trusted-public-keys = [ "orca.cachix.org-1:Cn49KmT1A0Sg/RPfc6TnKmaQYirb2b58eZD6nUP/Nxg=" ];
+};
+```
+
+The overlay builds against another nixpkgs, so its package is built locally.
+
 ## Build from source
 
 The steps below are checked in clean containers of Arch Linux, Fedora 43,

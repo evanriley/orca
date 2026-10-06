@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A binary cache at [orca.cachix.org](https://orca.cachix.org) for the flake's
+  package, named in the flake's `nixConfig` and filled by CI from `main`.
+
 ## 0.1.0 - 2026-10-06
 
 The first public release. Ships Library schema version 1.
