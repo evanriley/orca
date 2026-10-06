@@ -51,6 +51,9 @@
   open error is returned and the playing entry keeps playing with now-playing
   and the queue history unchanged. A queue jump to an entry that fails to open
   changes nothing.
+- An output that stops consuming while its Player plays leaves the shared
+  decoder after 64 engine passes, and after 2 s is lost and goes through the
+  same bounded recovery as any other lost output.
 
 ## 0.1.0 - 2026-10-06
 

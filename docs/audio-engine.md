@@ -95,7 +95,9 @@ Detaching a Zone and destroying its Player retire it the same way.
 A Zone takes part in a drain while its output is requested and its recovery is
 not exhausted. A format switch waits for every such Zone to hand back its
 blocks, and a Player reports drained only once they all have. A Zone whose
-recovery is exhausted does not take part, so it cannot stall the others.
+recovery is exhausted does not take part, so it cannot stall the others. An
+output that stops consuming while its Player plays is lost and recovered (see
+[Recovery](#recovery)), so it cannot hold a drain open either.
 
 ## Engine thread
 
@@ -137,8 +139,8 @@ output's waker from the stream's state-changed callback on its loop thread,
 never from the process callback. An engine sets that waker on every output it
 adopts or opens and clears it on every output it drops or leaves open at exit;
 setting it takes the stream loop's lock, so an output that outlives its engine
-never calls into a freed one. Telemetry cadence and recovery backoff use a
-monotonic clock.
+never calls into a freed one. Telemetry cadence, recovery backoff and the stall
+timeout use a monotonic clock.
 
 ## Player DSP
 
@@ -301,6 +303,23 @@ Zone; another Zone stays active if reopening fails. Once
 `failed` and returns every prepared block to its pool. It stays failed until
 the host closes its output and, once the Zone reports `closed`, requests it
 again, which starts a new set of attempts.
+
+An output that stops consuming is handled in two stages. A pass counts as
+stalled for a Zone when its Player is playing, the Zone holds prepared blocks
+and its output handed none back since the previous pass. A block handed back,
+a paused or stopped Player, or an empty Zone resets the count.
+
+1. After `ZoneRuntime.stall_limit` (64) consecutive stalled passes, the Zone
+   stops holding the shared decode cursor, so the other Zones keep playing. It
+   rejoins once its output hands a block back.
+2. Once the stall has also lasted `engine.stall_timeout_ns` (2 s) on the
+   engine's monotonic clock, measured from the first stalled pass or from the
+   output's latest open, whichever is later, the output is lost and recovered
+   as above.
+
+The pass count alone is not enough: control operations run many passes inside
+one device quantum, and a sink resuming from suspend reports active before its
+first callback.
 
 ### Device selection
 
