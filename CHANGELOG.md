@@ -38,6 +38,14 @@
   naming the channel count instead of storing a loudness from unweighted
   surround channels. Results a Library already stored for such a file are
   ignored for album gain and discarded by the next analysis pass.
+- A search no longer reports "Found a match to review" when its proposals form
+  no release candidate and the album stays Unmatched. A search of one album or
+  Track names the album and the Matches tab it is ready to review in, with a
+  Review button that opens it, or says "No album match found"; Find Matches
+  names how many albums are ready to review. `MatchStats` gains
+  `releases_to_review` (`orca_job_match_stats_v2`), and
+  `libraryReleaseMatchBucket` (`orca_library_release_match_bucket`) gives one
+  Release's bucket.
 
 ## 0.1.0 - 2026-10-06
 

@@ -316,7 +316,12 @@ section lists the entry points, errors and limits.
   that searches MusicBrainz, and AcoustID by fingerprint, for Tracks without a
   recording ID and stores proposals. `MatchRequest.fingerprints` (default true)
   includes AcoustID when an application key is set; `track_id` and `release_id`
-  narrow it. `jobMatchStats` returns `MatchStats`. One runs per runtime
+  narrow it. `jobMatchStats` returns `MatchStats`: `matched` counts Tracks
+  that gained a recording proposal, and `releases_to_review` the Releases
+  holding them that, when the searches ended and before anything was
+  accepted, were in the `confident` or `needs_review` bucket. A proposal that
+  lists no release forms no release candidate, so `matched` can be nonzero
+  with nothing to review. One runs per runtime
   (`error.MatchingAlreadyRunning`), none beside an AcoustID submission
   (`error.AcoustIdBusy`). `jobMatchRelease(job)` returns the Release that holds
   most of an album's files once a Job started with `release_id` has finished, so
@@ -355,7 +360,10 @@ section lists the entry points, errors and limits.
   (`ReleaseCandidate.unread`) while a Track's release ID names the candidate
   and Orca holds no snapshot of it; such an item is in `needs_review` (see
   [metadata.md](metadata.md#release-candidates-and-confidence)).
-  `libraryReleaseMatchCounts` counts the buckets.
+  `libraryReleaseMatchCounts` counts the buckets, and
+  `libraryReleaseMatchBucket(library, release_id, confident_at)` gives the
+  one bucket that lists a Release (`error.UnknownRelease`), so a host can say
+  where a finished search left an album.
 - `libraryReleaseMatchEvidence` returns a `MatchEvidence` and
   `libraryReleaseMatchDiff` a `ReleaseMatchDiff`, against `release_mbid` or the
   best candidate (`error.NoReleaseCandidate`); with a snapshot a field differs

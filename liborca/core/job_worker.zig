@@ -633,6 +633,10 @@ pub const MatchStats = struct {
     /// Files a verification passed over for having no quick hash.
     skipped: u64 = 0,
     correction_groups: u64 = 0,
+    /// Releases holding a Track the job matched that, when its searches
+    /// ended and before it accepted anything, the Matches page listed as
+    /// Confident or Needs Review.
+    releases_to_review: u64 = 0,
     requests: u64 = 0,
     cache_hits: u64 = 0,
     fingerprinted: u64 = 0,
@@ -671,6 +675,7 @@ const LiveMatchStats = struct {
     unconfirmed: std.atomic.Value(u64) = .init(0),
     skipped: std.atomic.Value(u64) = .init(0),
     correction_groups: std.atomic.Value(u64) = .init(0),
+    releases_to_review: std.atomic.Value(u64) = .init(0),
     requests: std.atomic.Value(u64) = .init(0),
     cache_hits: std.atomic.Value(u64) = .init(0),
     fingerprinted: std.atomic.Value(u64) = .init(0),
@@ -707,6 +712,7 @@ const LiveMatchStats = struct {
             .unconfirmed = self.unconfirmed.load(.acquire),
             .skipped = self.skipped.load(.acquire),
             .correction_groups = self.correction_groups.load(.acquire),
+            .releases_to_review = self.releases_to_review.load(.acquire),
             .requests = self.requests.load(.acquire),
             .cache_hits = self.cache_hits.load(.acquire),
             .fingerprinted = self.fingerprinted.load(.acquire) + progress.fingerprinted.load(.acquire),
@@ -1530,6 +1536,7 @@ pub const JobWorker = struct {
         _ = stats.unconfirmed.fetchAdd(result.unconfirmed, .acq_rel);
         _ = stats.skipped.fetchAdd(result.skipped, .acq_rel);
         _ = stats.correction_groups.fetchAdd(result.correction_groups, .acq_rel);
+        _ = stats.releases_to_review.fetchAdd(result.releases_to_review, .acq_rel);
         _ = stats.requests.fetchAdd(result.requests_answered, .acq_rel);
         _ = stats.cache_hits.fetchAdd(result.cache_hits, .acq_rel);
         _ = stats.fingerprinted.fetchAdd(result.fingerprinted, .acq_rel);

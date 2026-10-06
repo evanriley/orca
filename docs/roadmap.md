@@ -386,12 +386,6 @@ removed.
   from the Library, contrary to the comment in `core/runtime_status.zig` that
   it keeps its place, so a page's row `n` is then not queue position
   `offset + n`. Checked by a page over a queue with a removed Track.
-- Match results name what can be reviewed. Search on an Unmatched album
-  reports "Found a match to review" when a Track gained a recording proposal
-  (`MatchStats.matched`) even when no release candidate forms, as for Big
-  Grams by Big Grams, which then stays Unmatched with nothing to review. The
-  result names an album the person can open, or says none was found.
-  Checked by a search whose proposals form no release candidate.
 - Embedding is specified. The SQLite unix-VFS lock replacement on Linux
   (`liborca/database/sqlite_locks.zig`) is process-wide; its initialization
   contract is documented and enforced. `orca_runtime_destroy` skips the Debug

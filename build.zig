@@ -306,6 +306,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         }) });
         test_step.dependOn(&b.addRunArtifact(signal_path_tests).step);
+        const match_outcome_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/match_outcome.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }) });
+        test_step.dependOn(&b.addRunArtifact(match_outcome_tests).step);
         const browse_model_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("apps/linux/browse_model.zig"),
             .target = target,

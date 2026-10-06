@@ -18,6 +18,7 @@ const submissions = @import("submissions.zig");
 const tags = @import("tags.zig");
 const page_ui = @import("page.zig");
 const match_review = @import("match_review.zig");
+const match_outcome = @import("match_outcome.zig");
 
 const App = app.App;
 
@@ -847,20 +848,11 @@ fn tabClicked(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     }
 }
 
-fn bucketName(bucket: Bucket) [*:0]const u8 {
-    return switch (bucket) {
-        .confident => "Confident",
-        .needs_review => "Needs Review",
-        .unmatched => "Unmatched",
-        .reviewed => "Reviewed",
-    };
-}
-
 fn tabButton(self: *App, bucket: Bucket, group: ?*gtk.Widget) *gtk.Widget {
     const count = label("", "match-tab-count");
     gtk.gtk_widget_add_css_class(count, "numeric");
     const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    append(content, &.{ gtk.gtk_label_new(bucketName(bucket)), count });
+    append(content, &.{ gtk.gtk_label_new(match_outcome.bucketName(bucket).ptr), count });
     const button = gtk.gtk_toggle_button_new();
     gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
     gtk.gtk_widget_add_css_class(button, "match-tab");
@@ -1224,16 +1216,40 @@ pub fn reveal(self: *App, track_id: i64) void {
 }
 
 pub fn showBucket(self: *App, bucket: Bucket) void {
-    const matches = &self.matches;
-    if (bucket != matches.bucket) {
-        matches.bucket = bucket;
-        matches.expanded = null;
-        matches.stale = true;
-        matches.generation +%= 1;
-        if (matches.tabs.get(bucket).button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
-    }
+    selectBucket(self, bucket);
     window.goTo(self, .matches);
     shown(self);
+}
+
+/// Opens `bucket` searched for the album's title, with the album's row open.
+pub fn showRelease(self: *App, bucket: Bucket, release_id: i64, title: []const u8) void {
+    selectBucket(self, bucket);
+    const matches = &self.matches;
+    const trimmed = std.mem.trim(u8, title, " \t");
+    const text = if (trimmed.len <= matches.filter.buffer.len) trimmed else "";
+    if (!std.mem.eql(u8, text, matches.filter.buffer[0..matches.filter.len])) {
+        matches.filter.set(text);
+        matches.filtered_counts = null;
+        matches.stale = true;
+        matches.generation +%= 1;
+        if (matches.search) |entry| {
+            var buffer: [liborca.max_search_text + 1]u8 = undefined;
+            gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, entry), strings.terminated(&buffer, matches.filter.buffer[0..matches.filter.len]).ptr);
+        }
+    }
+    matches.expanded = release_id;
+    window.goTo(self, .matches);
+    shown(self);
+}
+
+fn selectBucket(self: *App, bucket: Bucket) void {
+    const matches = &self.matches;
+    if (bucket == matches.bucket) return;
+    matches.bucket = bucket;
+    matches.expanded = null;
+    matches.stale = true;
+    matches.generation +%= 1;
+    if (matches.tabs.get(bucket).button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
 }
 
 pub fn invalidate(self: *App) void {

@@ -93,6 +93,9 @@ pub const Result = struct {
     /// Files a verification passed over for having no quick hash.
     skipped: u64 = 0,
     correction_groups: u64 = 0,
+    /// Releases holding a matched Track that, once the searches end, the
+    /// Matches page lists as Confident or Needs Review.
+    releases_to_review: u64 = 0,
     acoustid: AcoustIdUse = .off,
     cancelled: bool = false,
     unavailable: bool = false,
@@ -177,10 +180,12 @@ pub const LibraryMatching = struct {
     mode: Mode = .search,
     last_release: ?ReleaseLookup = null,
     unusable_releases: std.StringHashMapUnmanaged(void) = .empty,
+    matched_tracks: std.ArrayList(i64) = .empty,
 
     pub fn run(self: *LibraryMatching) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
         defer self.forgetReleases();
+        defer self.matched_tracks.clearAndFree(self.allocator);
         const acoustid_service = self.acoustid;
         var result: Result = .{ .acoustid = if (acoustid_service != null) .searched else self.acoustid_use };
         const page_limit: u32 = @intCast(@min(self.batch_size, @as(usize, database.repository.max_page)));
@@ -231,6 +236,7 @@ pub const LibraryMatching = struct {
             .library => if (!limited) try self.snapshotTaggedReleases(&result),
             .track => {},
         };
+        result.releases_to_review = try self.proposals.reviewableReleaseCount(self.allocator, self.matched_tracks.items);
         return self.finish(result, acoustid_service);
     }
 
@@ -519,6 +525,7 @@ pub const LibraryMatching = struct {
                 result.proposals_stored += stored;
                 if (stored != 0) {
                     result.matched += 1;
+                    try self.matched_tracks.append(self.allocator, candidate.track_id);
                 } else if (!confirmed) {
                     result.unmatched += 1;
                 }

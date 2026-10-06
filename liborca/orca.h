@@ -4408,6 +4408,21 @@ orca_status orca_job_match_stats(
     orca_match_stats *output
 );
 
+/* orca_match_stats with `releases_to_review`: the Releases holding a Track
+ * the job matched that, when its searches ended and before it accepted
+ * anything, were in the CONFIDENT or NEEDS_REVIEW bucket. 0 until then. */
+typedef struct orca_match_stats_v2 {
+    orca_match_stats base;
+    uint64_t releases_to_review;
+} orca_match_stats_v2;
+
+/* orca_job_match_stats with `releases_to_review`. */
+orca_status orca_job_match_stats_v2(
+    orca_runtime *runtime,
+    orca_handle job,
+    orca_match_stats_v2 *output
+);
+
 /* The Release that holds most of a finished Match Album's files, with
  * `has_release_id` 1: the files of the album's Tracks when the job started,
  * so a host can follow an album that accepting a release ID moved to a new
@@ -4843,6 +4858,18 @@ orca_status orca_library_release_match_counts_v2(
     float confident_at,
     const char *filter,
     orca_release_match_counts_v2 *output
+);
+
+/* The orca_release_match_bucket that
+ * orca_library_query_release_matches_v2 lists the Release in against
+ * `confident_at`, so a host can say where a finished search left an album.
+ * NOT_FOUND for an unknown Release. */
+orca_status orca_library_release_match_bucket(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    float confident_at,
+    uint8_t *bucket
 );
 
 /* How a release track of an alignment has its Track. PAIRED: a person paired

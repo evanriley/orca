@@ -1294,6 +1294,15 @@ fn reviewOf(db: sqlite.Database, release_id: i64, best: ?ReleaseCandidate, ident
     return if (identified_by_tags) .tags else .none;
 }
 
+fn nextReleaseIds(statement: *sqlite.Statement, ids: []i64) !usize {
+    var count: usize = 0;
+    while (count < ids.len) : (count += 1) {
+        if (try statement.step() != .row) break;
+        ids[count] = statement.columnInt64(0);
+    }
+    return count;
+}
+
 pub fn releaseMatchBucket(best: ?ReleaseCandidate, confident_at: f32) ReleaseMatchBucket {
     const candidate = best orelse return .unmatched;
     const confidence = candidate.confidence orelse return .needs_review;
@@ -2122,40 +2131,107 @@ pub const IdentificationProposalRepository = struct {
         defer releases.deinit();
         try releases.bindInt64(1, @backingInt(ProposalState.dismissed));
         if (expression != null) try releases.bindOptionalText(2, expression);
+        var ids: [weigh_chunk]i64 = undefined;
+        var buckets: [weigh_chunk]?ReleaseMatchBucket = undefined;
         var more = true;
         while (more) {
+            const count = try nextReleaseIds(&releases, &ids);
+            more = count == ids.len;
             var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
             defer chunk_arena.deinit();
-            const chunk = chunk_arena.allocator();
-            var views: std.ArrayList(ReleaseMatchView) = .empty;
-            while (views.items.len < weigh_chunk) {
-                if (try releases.step() != .row) {
-                    more = false;
-                    break;
-                }
-                try views.append(chunk, emptyReleaseMatchView(&chunk_arena, releases.columnInt64(0)));
-            }
-            const found = try chunk.alloc(bool, views.items.len);
-            @memset(found, false);
-            try self.fillReleaseMatchViews(chunk, views.items, found);
-            const bests = try chunk.alloc(?ReleaseCandidate, views.items.len);
-            for (views.items, found, bests) |*view, exists, *best| best.* = if (exists) try view.best(chunk) else null;
-            const by_tags = try self.identifiedByTags(chunk, views.items, bests);
-            for (views.items, found, bests, by_tags) |view, exists, best, identified| {
-                if (!exists) continue;
-                if (try reviewOf(self.db, view.release_id, best, identified) != .none) {
-                    counts.reviewed += 1;
-                    continue;
-                }
-                switch (releaseMatchBucket(best, confident_at)) {
-                    .confident => counts.confident += 1,
-                    .needs_review => counts.needs_review += 1,
-                    .unmatched, .reviewed => {},
-                }
-            }
+            try self.weighReleases(&chunk_arena, ids[0..count], confident_at, buckets[0..count]);
+            for (buckets[0..count]) |bucket| switch (bucket orelse continue) {
+                .confident => counts.confident += 1,
+                .needs_review => counts.needs_review += 1,
+                .reviewed => counts.reviewed += 1,
+                .unmatched => {},
+            };
         }
         counts.unmatched = total -| (counts.confident + counts.needs_review + counts.reviewed);
         return counts;
+    }
+
+    /// The bucket `releaseMatchPage` lists the Release in against
+    /// `confident_at`.
+    pub fn releaseMatchBucketOf(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+        confident_at: f32,
+    ) !ReleaseMatchBucket {
+        if (!validMinimumConfidence(confident_at)) return error.InvalidMinimumConfidence;
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var bucket: [1]?ReleaseMatchBucket = undefined;
+        try self.weighReleases(&arena, &.{release_id}, confident_at, &bucket);
+        return bucket[0] orelse error.UnknownRelease;
+    }
+
+    /// How many of the Releases holding `track_ids` have a release
+    /// candidate and no review that holds: those the `confident` and
+    /// `needs_review` buckets list, whatever the threshold.
+    pub fn reviewableReleaseCount(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        track_ids: []const i64,
+    ) !u64 {
+        if (track_ids.len == 0) return 0;
+        var json: std.ArrayList(u8) = .empty;
+        defer json.deinit(allocator);
+        try json.append(allocator, '[');
+        for (track_ids, 0..) |track_id, index| try json.print(allocator, "{s}{d}", .{ if (index == 0) "" else ",", track_id });
+        try json.append(allocator, ']');
+        var releases = try self.db.prepare(
+            "SELECT DISTINCT release_id FROM tracks WHERE id IN " ++ json_release_ids ++ " AND release_id IS NOT NULL;",
+        );
+        defer releases.deinit();
+        try releases.bindText(1, json.items);
+        var reviewable: u64 = 0;
+        var ids: [weigh_chunk]i64 = undefined;
+        var buckets: [weigh_chunk]?ReleaseMatchBucket = undefined;
+        var more = true;
+        while (more) {
+            const count = try nextReleaseIds(&releases, &ids);
+            more = count == ids.len;
+            var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
+            defer chunk_arena.deinit();
+            try self.weighReleases(&chunk_arena, ids[0..count], 1, buckets[0..count]);
+            for (buckets[0..count]) |bucket| switch (bucket orelse continue) {
+                .confident, .needs_review => reviewable += 1,
+                .reviewed, .unmatched => {},
+            };
+        }
+        return reviewable;
+    }
+
+    /// Each of `release_ids`' bucket against `confident_at`, as
+    /// `releaseMatchPage` sorts them, or null for a Release that does not
+    /// exist. At most `weigh_chunk` Releases.
+    fn weighReleases(
+        self: *const IdentificationProposalRepository,
+        chunk_arena: *std.heap.ArenaAllocator,
+        release_ids: []const i64,
+        confident_at: f32,
+        buckets: []?ReleaseMatchBucket,
+    ) !void {
+        if (release_ids.len == 0) return;
+        const chunk = chunk_arena.allocator();
+        const views = try chunk.alloc(ReleaseMatchView, release_ids.len);
+        for (views, release_ids) |*view, release_id| view.* = emptyReleaseMatchView(chunk_arena, release_id);
+        const found = try chunk.alloc(bool, views.len);
+        @memset(found, false);
+        try self.fillReleaseMatchViews(chunk, views, found);
+        const bests = try chunk.alloc(?ReleaseCandidate, views.len);
+        for (views, found, bests) |*view, exists, *best| best.* = if (exists) try view.best(chunk) else null;
+        const by_tags = try self.identifiedByTags(chunk, views, bests);
+        for (views, found, bests, by_tags, buckets) |view, exists, best, identified, *bucket| {
+            bucket.* = if (!exists)
+                null
+            else if (try reviewOf(self.db, view.release_id, best, identified) != .none)
+                .reviewed
+            else
+                releaseMatchBucket(best, confident_at);
+        }
     }
 
     /// For each of `views`, whether every Track's play file has a release ID

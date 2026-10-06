@@ -4037,10 +4037,22 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
     SMOKE_CHECK(listed.calls == 0);
     SMOKE_CHECK(orca_library_release_match_counts_v2(runtime, library, 0.9f, 0, &counts) == ORCA_STATUS_OK);
     SMOKE_CHECK(counts.reviewed == 0 && counts.base.confident + counts.base.needs_review == 1);
+    uint8_t bucket = ORCA_RELEASE_MATCH_BUCKET_REVIEWED;
+    SMOKE_CHECK(orca_library_release_match_bucket(runtime, library, ids.release_id, 0.9f, &bucket) == ORCA_STATUS_OK);
+    SMOKE_CHECK(bucket == (counts.base.confident == 1 ? ORCA_RELEASE_MATCH_BUCKET_CONFIDENT
+                                                      : ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW));
+    SMOKE_CHECK(orca_library_release_match_bucket(runtime, library, ids.release_id, 0.9f, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_release_match_bucket(runtime, library, ids.release_id, 0.0f, &bucket) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_release_match_bucket(runtime, library, 999999999, 0.9f, &bucket) ==
+                ORCA_STATUS_NOT_FOUND);
     SMOKE_CHECK(orca_library_mark_release_reviewed(runtime, library, ids.release_id, REVIEW_RELEASE_MBID) ==
                 ORCA_STATUS_OK);
     SMOKE_CHECK(orca_library_release_match_counts_v2(runtime, library, 0.9f, 0, &counts) == ORCA_STATUS_OK);
     SMOKE_CHECK(counts.reviewed == 1);
+    SMOKE_CHECK(orca_library_release_match_bucket(runtime, library, ids.release_id, 0.9f, &bucket) == ORCA_STATUS_OK);
+    SMOKE_CHECK(bucket == ORCA_RELEASE_MATCH_BUCKET_REVIEWED);
 
     SMOKE_CHECK(orca_library_unpair_release_track(runtime, library, ids.release_id, ids.first) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_library_unpair_release_track(runtime, library, ids.release_id, ids.first) ==
@@ -4508,6 +4520,10 @@ static int matching_smoke(orca_runtime *runtime, orca_handle library, int64_t tr
     SMOKE_CHECK(orca_library_start_cover_art_fetch(runtime, library, release_id, &job) ==
                 ORCA_STATUS_INVALID_STATE);
     SMOKE_CHECK(orca_job_match_stats(runtime, job, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_job_match_stats_v2(runtime, job, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    orca_match_stats_v2 stats_v2;
+    memset(&stats_v2, 0xff, sizeof stats_v2);
+    SMOKE_CHECK(orca_job_match_stats_v2(runtime, job, &stats_v2) == ORCA_STATUS_STALE_HANDLE);
 
     uint64_t count = 0;
     SMOKE_CHECK(orca_library_unidentified_count(runtime, library, &count) == ORCA_STATUS_OK);

@@ -1672,6 +1672,12 @@ pub const OrcaRuntime = struct {
         return runtime_listens.libraryReleaseMatchCounts(self, library, confident_at, filter);
     }
 
+    /// The bucket of `libraryReleaseMatchPage` that lists the Release
+    /// against `confident_at`. Costs one Release's weighing.
+    pub fn libraryReleaseMatchBucket(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, confident_at: f32) !ReleaseMatchBucket {
+        return runtime_listens.libraryReleaseMatchBucket(self, library, release_id, confident_at);
+    }
+
     /// Why the Release is or is not `release_mbid`, or its best candidate
     /// when that is null.
     pub fn libraryReleaseMatchEvidence(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, release_mbid: ?[]const u8) !MatchEvidence {

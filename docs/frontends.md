@@ -319,13 +319,14 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   scrobbles; a second is `ORCA_STATUS_INVALID_STATE`. See [Listening from a
   host](#listening-from-a-host).
 - Matching: `orca_library_start_match`, `orca_library_start_cover_art_fetch`,
-  `orca_job_match_stats`, `orca_job_match_release`,
+  `orca_job_match_stats`, `orca_job_match_stats_v2`, `orca_job_match_release`,
   `orca_library_query_match_review`, `orca_library_query_match_proposals`,
   `orca_library_accept_match`, `orca_library_dismiss_match`,
   `orca_library_accept_confident_matches`, `orca_library_apply_release`,
   `orca_library_apply_matched_release_fields`,
   `orca_library_query_release_matches_v2`,
-  `orca_library_release_match_counts_v2`, `orca_library_release_alignment`,
+  `orca_library_release_match_counts_v2`,
+  `orca_library_release_match_bucket`, `orca_library_release_alignment`,
   `orca_library_pair_release_track`, `orca_library_unpair_release_track`,
   `orca_library_mark_release_reviewed`, `orca_library_query_correction_groups`,
   `orca_library_track_verification`. A second match job while one runs is

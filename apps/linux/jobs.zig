@@ -18,6 +18,7 @@ const artists = @import("artists.zig");
 const artist_page = @import("artist_page.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
+const match_outcome = @import("match_outcome.zig");
 const metadata_issues = @import("metadata_issues.zig");
 const details = @import("details.zig");
 const tags = @import("tags.zig");
@@ -262,7 +263,16 @@ fn startIdentificationJob(self: *App, mode: liborca.MatchMode, target: MatchTarg
         .accept_minimum_confidence = null,
         .cover_art = false,
     }) catch |err| return self.toast(matchingRefusal(err));
-    begin(self, .{ .task = .matching, .job = job, .match_track = track_id, .match_mode = mode });
+    begin(self, .{
+        .task = .matching,
+        .job = job,
+        .match_track = track_id,
+        .match_release = switch (target) {
+            .track, .library => null,
+            .release => |id| id,
+        },
+        .match_mode = mode,
+    });
     if (track_id != null) details.invalidate(self);
 }
 
@@ -482,8 +492,12 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
             .none => "MusicBrainz or AcoustID could not be reached; try again later",
         },
     });
+    var album_buffer: [160]u8 = undefined;
     const cover: [:0]const u8 = switch (result.cover_art) {
-        .no_release_id => "No release ID — review matches, then Fetch Cover Art",
+        .no_release_id => if (result.matched == 0 or result.accepted != 0)
+            "No release ID to fetch its cover"
+        else
+            return albumOutcome(self, &album_buffer, .album, moved_to orelse release_id),
         .fetched => "Found the album's cover",
         .embedded => "The album's files already carry a cover",
         .folder => "The album's folder already has a cover",
@@ -536,17 +550,81 @@ fn verificationFinished(self: *App, track_id: ?i64, state_value: liborca.JobStat
     }) catch "Verified");
 }
 
-fn reidentificationFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+fn reidentificationFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.JobState, stats: ?liborca.MatchStats, match_release: ?i64) void {
     if (state_value == .cancelled) return self.toast("Stopped");
     const result = stats orelse return self.toast("Could not search again");
     if (state_value != .succeeded) return self.toast(unreachableText(result.busy));
     if (result.matched == 0) return self.toast(if (result.confirmed != 0) "Confirmed the current recording" else "No match found");
-    var buffer: [64]u8 = undefined;
-    self.toast(if (result.matched == 1)
-        "Found a match to review"
-    else
-        strings.printZ(&buffer, "Found {f} matches to review", .{strings.grouped(result.matched)}) catch "Found matches to review");
+    var buffer: [160]u8 = undefined;
+    if (tracked.match_release) |release_id| return albumOutcome(self, &buffer, .album, match_release orelse release_id);
+    if (tracked.match_track) |track_id| return albumOutcome(self, &buffer, .track_reidentify, trackRelease(self, track_id));
+    self.toast(match_outcome.libraryText(&buffer, result.matched, result.releases_to_review));
 }
+
+fn trackRelease(self: *App, track_id: i64) ?i64 {
+    const library = self.library orelse return null;
+    const summary = (self.runtime.libraryTrackSummary(library, track_id) catch null) orelse return null;
+    defer summary.deinit(self.runtime.allocator);
+    return summary.release_id;
+}
+
+/// Says where a search left the album it concerned, from liborca's bucket
+/// for it, with a button that opens it when it waits for review.
+fn albumOutcome(self: *App, buffer: []u8, scope: match_outcome.Scope, release_id: ?i64) void {
+    const library = self.library orelse return;
+    const id = release_id orelse return self.toast(match_outcome.matchedText(buffer, scope, "", null));
+    const bucket = self.runtime.libraryReleaseMatchBucket(library, id, matches.thresholdFraction(self)) catch |err| switch (err) {
+        error.UnknownRelease => null,
+        else => return self.toast("Could not read the album's matches"),
+    };
+    const release = (self.runtime.libraryRelease(library, id) catch null) orelse
+        return self.toast(match_outcome.matchedText(buffer, scope, "", null));
+    defer release.deinit(self.runtime.allocator);
+    const text = match_outcome.matchedText(buffer, scope, release.title, bucket);
+    if (!match_outcome.reviewable(bucket)) return self.toast(text);
+    const overlay = self.toasts orelse return;
+    const review = AlbumReview.create(self, id, bucket.?, release.title) orelse return self.toast(text);
+    const item = adw.adw_toast_new(text.ptr);
+    adw.adw_toast_set_timeout(item, 8);
+    adw.adw_toast_set_button_label(item, "Review");
+    gtk.g_object_set_data_full(item, "orca-album-review", review, AlbumReview.free);
+    _ = gtk.signalConnect(item, "button-clicked", gtk.callback(AlbumReview.clicked), review);
+    adw.adw_toast_overlay_add_toast(overlay, item);
+}
+
+const AlbumReview = struct {
+    self: *App,
+    library: liborca.LibraryHandle,
+    release_id: i64,
+    bucket: liborca.ReleaseMatchBucket,
+    title: []u8,
+
+    fn create(self: *App, release_id: i64, bucket: liborca.ReleaseMatchBucket, title: []const u8) ?*AlbumReview {
+        const library = self.library orelse return null;
+        const review = self.allocator.create(AlbumReview) catch return null;
+        const owned = self.allocator.dupe(u8, title) catch {
+            self.allocator.destroy(review);
+            return null;
+        };
+        review.* = .{ .self = self, .library = library, .release_id = release_id, .bucket = bucket, .title = owned };
+        return review;
+    }
+
+    fn free(data: ?*anyopaque) callconv(.c) void {
+        const review: *AlbumReview = @ptrCast(@alignCast(data.?));
+        const allocator = review.self.allocator;
+        allocator.free(review.title);
+        allocator.destroy(review);
+    }
+
+    fn clicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+        const review: *AlbumReview = @ptrCast(@alignCast(data.?));
+        const self = review.self;
+        const library = self.library orelse return;
+        if (!library.eql(review.library)) return;
+        matches.showRelease(self, review.bucket, review.release_id, review.title);
+    }
+};
 
 fn matchingFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.JobState, stats: ?liborca.MatchStats, match_release: ?i64) void {
     const mode = tracked.match_mode;
@@ -556,7 +634,7 @@ fn matchingFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.J
         details.invalidate(self);
         return switch (mode) {
             .verify => verificationFinished(self, track_id, state_value, stats),
-            .reidentify => reidentificationFinished(self, state_value, stats),
+            .reidentify => reidentificationFinished(self, tracked, state_value, stats, match_release),
             .search => unreachable,
         };
     }
@@ -575,12 +653,12 @@ fn matchingFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.J
         .acoustid => "AcoustID is in use by another Orca process; try again once it finishes",
         .none => "MusicBrainz or AcoustID could not be reached; Find Matches continues where it stopped",
     });
-    if (searched != null) return self.toast(if (matched == 0) "No match found" else "Found a match to review");
-    var buffer: [96]u8 = undefined;
-    self.toast(if (matched == 0)
-        "No new matches found"
+    var buffer: [160]u8 = undefined;
+    if (searched) |track_id| return if (matched == 0)
+        self.toast("No match found")
     else
-        strings.printZ(&buffer, "Found matches for {f} {s}", .{ strings.grouped(matched), if (matched == 1) "track" else "tracks" }) catch "Found matches");
+        albumOutcome(self, &buffer, .track_search, trackRelease(self, track_id));
+    self.toast(match_outcome.libraryText(&buffer, matched, if (stats) |value| value.releases_to_review else 0));
 }
 
 fn submissionFinished(self: *App, quiet: bool, state_value: liborca.JobState, stats: ?liborca.SubmissionStats) void {

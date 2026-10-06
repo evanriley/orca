@@ -3379,6 +3379,100 @@ test "a Match Album that changes no key reports the Release it started on, and a
     try std.testing.expectError(error.StaleHandle, runtime.jobMatchRelease(.{ .index = 999, .generation = 7 }));
 }
 
+const big_grams_mbid = "8f9a0b1c-2d3e-4f4a-8b5c-6d7e8f9a0b1c";
+const big_grams_answer = "{\"recordings\":[{\"id\":\"" ++ big_grams_mbid ++ "\",\"score\":100,\"title\":\"Big Grams\"," ++
+    "\"length\":180000,\"artist-credit\":[{\"name\":\"Big Grams\"}]}]}";
+
+fn expectListedIn(runtime: *OrcaRuntime, library: LibraryHandle, bucket: database.ReleaseMatchBucket, release_id: i64) !void {
+    const page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, null, 50, 0);
+    defer page.deinit();
+    for (page.items) |item| {
+        if (item.release_id == release_id) return;
+    }
+    return error.ReleaseNotListed;
+}
+
+test "an album search whose recordings name no release stores proposals but leaves the album Unmatched with nothing to review" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Big%20Grams", .body = big_grams_answer }} };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-no-release?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const file = try observeFile(library_database, "/music/big-grams/01.flac", "Big Grams", "Big Grams");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, file);
+    try std.testing.expectEqual(database.ReleaseMatchBucket.unmatched, try runtime.libraryReleaseMatchBucket(library, album, 0.9));
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .mode = .reidentify, .release_id = album, .accept_minimum_confidence = null, .cover_art = false });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 1), stats.matched);
+    try std.testing.expectEqual(@as(u64, 0), stats.releases_to_review);
+    const finished_on = (try runtime.jobMatchRelease(job_handle)).?;
+    try std.testing.expectEqual(database.ReleaseMatchBucket.unmatched, try runtime.libraryReleaseMatchBucket(library, finished_on, 0.9));
+    try expectListedIn(&runtime, library, .unmatched, finished_on);
+}
+
+test "an album search whose recordings name a release reports the album ready to review in the bucket the Matches page lists it in" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-reviewable?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    _ = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .mode = .reidentify, .release_id = album, .accept_minimum_confidence = null, .cover_art = false });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 2), stats.matched);
+    try std.testing.expectEqual(@as(u64, 1), stats.releases_to_review);
+    const finished_on = (try runtime.jobMatchRelease(job_handle)).?;
+    const bucket = try runtime.libraryReleaseMatchBucket(library, finished_on, 0.9);
+    try std.testing.expect(bucket == .confident or bucket == .needs_review);
+    try expectListedIn(&runtime, library, bucket, finished_on);
+    try std.testing.expectError(error.UnknownRelease, runtime.libraryReleaseMatchBucket(library, 999_999, 0.9));
+    try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryReleaseMatchBucket(library, finished_on, 0));
+}
+
+test "a library search counts the albums its matches left ready to review, not the albums whose recordings name no release" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+        .{ .title = "Big%20Grams", .body = big_grams_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-library-reviewable?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    const big_grams = try observeFile(library_database, "/music/big-grams/01.flac", "Big Grams", "Big Grams");
+    try projectAll(library_database);
+    try std.testing.expect(try releaseOfFile(library_database, northern_sky) == try releaseOfFile(library_database, pink_moon));
+    try std.testing.expect(try releaseOfFile(library_database, northern_sky) != try releaseOfFile(library_database, big_grams));
+
+    const job_handle = try runtime.startLibraryMatching(library, .{});
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 3), stats.matched);
+    try std.testing.expectEqual(@as(u64, 1), stats.releases_to_review);
+}
+
 test "accepting one file of a two-file Release stores its title and artist only, and accepting the other stores the release's values on both" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();

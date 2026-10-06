@@ -1449,6 +1449,11 @@ pub const MatchStatsView = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const MatchStatsViewV2 = extern struct {
+    base: MatchStatsView,
+    releases_to_review: u64,
+};
+
 pub const SubmissionStatsView = extern struct {
     files_examined: u64,
     submitted: u64,
@@ -4900,6 +4905,18 @@ pub export fn orca_job_match_stats(
     return .ok;
 }
 
+pub export fn orca_job_match_stats_v2(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*MatchStatsViewV2,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.jobMatchStats(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = .{ .base = exportMatchStats(stats), .releases_to_review = stats.releases_to_review };
+    return .ok;
+}
+
 pub export fn orca_job_match_release(
     runtime: ?*Runtime,
     job_handle: Handle,
@@ -5263,6 +5280,21 @@ pub export fn orca_library_release_match_counts_v2(
         .base = .{ .confident = counts.confident, .needs_review = counts.needs_review, .unmatched = counts.unmatched },
         .reviewed = counts.reviewed,
     };
+    return .ok;
+}
+
+pub export fn orca_library_release_match_bucket(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    confident_at: f32,
+    output: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const bucket = box.runtime.libraryReleaseMatchBucket(importLibrary(library), release_id, confident_at) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportReleaseMatchBucket(bucket);
     return .ok;
 }
 
@@ -8454,6 +8486,15 @@ fn exportFailure(failure: control.Failure) u8 {
     };
 }
 
+pub fn exportReleaseMatchBucket(bucket: database.ReleaseMatchBucket) u8 {
+    return switch (bucket) {
+        .confident => 0,
+        .needs_review => 1,
+        .unmatched => 2,
+        .reviewed => 3,
+    };
+}
+
 pub fn importReleaseMatchBucket(value: u8) ?database.ReleaseMatchBucket {
     return switch (value) {
         0 => .confident,
@@ -11072,6 +11113,10 @@ test "a match started through the C ABI stores proposals that review lists, acce
     try std.testing.expectEqual(exportAcoustIdUse(.no_client_key), stats.acoustid);
     try std.testing.expectEqual(exportCoverArtOutcome(.not_requested), stats.cover_art);
     try std.testing.expectEqual(@as(u8, 0), stats.cancelled);
+    var stats_v2: MatchStatsViewV2 = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats_v2(rig.runtime, matching, &stats_v2));
+    try std.testing.expectEqual(stats, stats_v2.base);
+    try std.testing.expectEqual(@as(u64, 0), stats_v2.releases_to_review);
     try std.testing.expectEqual(Status.ok, orca_library_unidentified_count(rig.runtime, rig.library, &count));
     try std.testing.expectEqual(@as(u64, 0), count);
 
