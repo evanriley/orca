@@ -395,6 +395,14 @@ matching releases without excluding the others. Lucene syntax characters in the
 values are escaped with a backslash. A Track without a title or an artist is
 counted and not searched.
 
+When the answer is empty and the artist splits at commas into two or more
+names, one more query is sent with the artist term replaced by
+`(artist:"NAME1" OR artist:"NAME2" ...)` over the first eight names, so a
+recording credited to any of them is found. The whole artist is always asked
+first, so an artist whose name holds commas ("Earth, Wind & Fire") matches in
+one request. The second query goes through the same gateway, pacing and cache
+and counts as a request of its own.
+
 Kept: the recording ID, title, full artist credit, the release whose title is
 closest to the album with its ID and track number, the IDs of up to 25 releases
 the recording is listed on with each one's status, date and track count, the

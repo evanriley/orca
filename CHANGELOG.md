@@ -172,6 +172,11 @@
   loudness column is empty, the loudness sort places it with the unmeasured
   Tracks, the Track details carry no loudness, and a playlist's formats count
   it as not analyzed.
+- A MusicBrainz search finds a Track whose artist tag joins several artists
+  with commas, such as "Pa Salieu, Black Sherif". When the whole tag finds
+  nothing, the search is asked once more for a recording credited to any of
+  the first eight names; an artist whose name holds commas, such as "Earth,
+  Wind & Fire", still matches on the whole name in one request.
 
 ## 0.1.0 - 2026-10-06
 
