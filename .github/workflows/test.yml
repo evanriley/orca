@@ -33,6 +33,17 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - run: nix develop -c zig fmt --check liborca apps benchmarks tests build build.zig
 
+  pinact:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: nix run --inputs-from . nixpkgs#pinact -- run --check --verify
+
   cross-macos:
     runs-on: ubuntu-24.04
     steps:
@@ -98,7 +109,7 @@ jobs:
 
   required:
     if: always()
-    needs: [test, fmt, cross-macos, nix, package, distro]
+    needs: [test, fmt, pinact, cross-macos, nix, package, distro]
     runs-on: ubuntu-24.04
     steps:
       - env:

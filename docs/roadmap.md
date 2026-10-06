@@ -320,12 +320,14 @@ names each `Runtime` method the C ABI does not reach and why.
   -Dtarget=aarch64-macos`). `zig build -Dgtk=false` builds without `orca-gtk`
   where GTK 4.18, libadwaita 1.8 or Pango 1.56 is not available.
 - CI (`.github/workflows/test.yml`): `zig build test` against a private
-  PipeWire and WirePlumber, `zig build fuzz`, `zig fmt --check`, the aarch64
-  macOS cross-build, `nix flake check` (package build, NixOS module and the
-  installed tree), `zig build package-check` against the fetched Zig
-  package, and a build and test run with the official Zig release against the
-  libraries of Debian 13 (with `-Dgtk=false`) and Fedora 43. A `required` job
-  fails when any of them fails.
+  PipeWire and WirePlumber, `zig build fuzz`, `zig fmt --check`, a pinact
+  check that every action is pinned to the commit its version comment names,
+  the aarch64 macOS cross-build, `nix flake check` (package build, NixOS
+  module and the installed tree), `zig build package-check` against the
+  fetched Zig package, and a build and test run with the official Zig release
+  against the libraries of Debian 13 (with `-Dgtk=false`) and Fedora 43. A
+  `required` job fails when any of them fails. Dependabot proposes action
+  updates weekly, a week after their release.
 
 ## Built but not reachable
 
@@ -345,9 +347,9 @@ removed.
 
 - Publication. The GitHub items: the `required` CI job passing on GitHub and
   made required by branch protection, private vulnerability reporting turned
-  on for `SECURITY.md`, Dependabot and pinact for pinned actions, the provider
-  User-Agent contact switched to the repository URL, and the README's flake
-  snippets checked from outside the repository.
+  on for `SECURITY.md`, the provider User-Agent contact switched to the
+  repository URL, and the README's flake snippets checked from outside the
+  repository.
 
 ### Before 1.0
 
