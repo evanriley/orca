@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
         "provider-contact",
         "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
     ) orelse "evan@evanriley.com";
+    const gtk = b.option(bool, "gtk", "Build and install orca-gtk on Linux") orelse true;
     const app_options = b.addOptions();
     app_options.addOption([]const u8, "acoustid_key", acoustid_key);
     app_options.addOption([]const u8, "provider_contact", provider_contact);
@@ -40,21 +41,20 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = version_options.createModule() },
         },
     });
-    liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+    liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .force });
     // Vendored minimp3 behind a narrow shim. Header-only and public domain,
     // so this is a source addition on every target and not a system linkage.
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/mp3_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
-    // libFLAC behind a narrow shim. The reference implementation is used
-    // because FLAC's only promise is bit-exactness, and the pure-Zig package
-    // this replaced did not keep it -- see `docs/codecs.md`.
+    // libFLAC behind a narrow shim: the reference decoder is the one that
+    // keeps FLAC's bit-exactness guarantee; see `docs/architecture.md`.
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/flac_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
-    liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .yes });
+    liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .force });
     // The reference QOA decoder, vendored like minimp3.
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/qoa_shim.c"),
@@ -64,12 +64,12 @@ pub fn build(b: *std.Build) void {
         .file = b.path("liborca/codec/opus_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
-    liborca_module.linkSystemLibrary("opusfile", .{ .use_pkg_config = .yes });
+    liborca_module.linkSystemLibrary("opusfile", .{ .use_pkg_config = .force });
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/vorbis_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
-    liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .yes });
+    liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .force });
     for ([_][]const u8{ "ogg", "opus" }) |package| {
         liborca_module.addSystemIncludePath(pkgConfigIncludeDir(b, package));
     }
@@ -80,7 +80,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("liborca/audio/samplerate_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
-    liborca_module.linkSystemLibrary("samplerate", .{ .use_pkg_config = .yes });
+    liborca_module.linkSystemLibrary("samplerate", .{ .use_pkg_config = .force });
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/aac_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .root_module = liborca_module,
     });
+    liborca.bundle_compiler_rt = true;
     liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
     installLicenses(b);
     b.getInstallStep().dependOn(chromaprint_licences);
@@ -178,7 +179,7 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
     const released_header_translate = b.addTranslateC(.{
-        .root_source_file = b.path("tests/abi/orca-0.8.1.h"),
+        .root_source_file = b.path("tests/abi/orca-0.1.0.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -199,23 +200,6 @@ pub fn build(b: *std.Build) void {
         .root_module = abi_compat_module,
     });
     const run_abi_compat_tests = b.addRunArtifact(abi_compat_tests);
-
-    const released_client_module = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    released_client_module.addCSourceFile(.{
-        .file = b.path("tests/abi/scan_stats_0_8_1.c"),
-        .flags = &.{"-std=c11"},
-    });
-    released_client_module.addIncludePath(b.path("tests/abi"));
-    released_client_module.linkLibrary(liborca);
-    const released_client = b.addExecutable(.{
-        .name = "abi-0.8.1-scan-stats",
-        .root_module = released_client_module,
-    });
-    const run_released_client = b.addRunArtifact(released_client);
 
     const c_abi_module = b.createModule(.{
         .target = target,
@@ -253,11 +237,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_c_abi_smoke.step);
-    const abi_compat_step = b.step("abi-compat", "Check orca.h keeps the layouts, values and functions of the released 0.8.1 header");
+    const abi_compat_step = b.step("abi-compat", "Check orca.h keeps the layouts, values and functions of the released 0.1.0 header");
     abi_compat_step.dependOn(&run_abi_compat_tests.step);
-    abi_compat_step.dependOn(&run_released_client.step);
     test_step.dependOn(&run_abi_compat_tests.step);
-    test_step.dependOn(&run_released_client.step);
     if (target.result.os.tag == .linux) {
         const check_exports = b.addSystemCommand(&.{"bash"});
         check_exports.addFileArg(b.path("scripts/check-exports.sh"));
@@ -317,39 +299,6 @@ pub fn build(b: *std.Build) void {
     fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
     if (target.result.os.tag == .linux) {
-        // The GTK4 frontend is Zig and consumes liborca's Zig-facing API
-        // directly. GTK itself is bound with hand-written `extern fn`
-        // declarations in `apps/linux/gtk.zig`, so no C include paths are
-        // needed here — only the linkage pkg-config resolves.
-        const linux_app_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "liborca", .module = liborca_module },
-                .{ .name = "build_options", .module = app_options_module },
-            },
-        });
-        linux_app_module.addAnonymousImport("hd650.txt", .{ .root_source_file = b.path("fixtures/eq/hd650.txt") });
-        linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("libsecret-1", .{ .use_pkg_config = .yes });
-        // Cover art is decoded at a bounded size through gdk-pixbuf's
-        // scaling loader. GTK4 depends on it, but the frontend calls it
-        // directly, so it has to be linked directly.
-        linux_app_module.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("pango", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
-        linux_app_module.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
-        const linux_app = b.addExecutable(.{
-            .name = "orca-gtk",
-            .root_module = linux_app_module,
-        });
-        b.installArtifact(linux_app);
         const signal_path_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("apps/linux/signal_path.zig"),
             .target = target,
@@ -365,51 +314,94 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         }) });
         test_step.dependOn(&b.addRunArtifact(browse_model_tests).step);
-        b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
-        b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
-        for ([_][]const u8{
-            "orca-heart-filled-symbolic", "orca-heart-outline-symbolic",    "orca-pulse-symbolic",
-            "orca-albums-symbolic",       "orca-artists-symbolic",          "orca-tracks-symbolic",
-            "orca-genres-symbolic",       "orca-folders-symbolic",          "orca-loved-symbolic",
-            "orca-playlists-symbolic",    "orca-now-playing-symbolic",      "orca-queue-symbolic",
-            "orca-health-symbolic",       "orca-matches-symbolic",          "orca-settings-symbolic",
-            "orca-signal-symbolic",       "orca-search-symbolic",           "orca-back-symbolic",
-            "orca-forward-symbolic",      "orca-chevron-down-symbolic",     "orca-shuffle-symbolic",
-            "orca-repeat-symbolic",       "orca-repeat-one-symbolic",       "orca-previous-symbolic",
-            "orca-next-symbolic",         "orca-play-symbolic",             "orca-pause-symbolic",
-            "orca-volume-high-symbolic",  "orca-volume-low-symbolic",       "orca-volume-muted-symbolic",
-            "orca-filter-symbolic",       "orca-grid-symbolic",             "orca-list-symbolic",
-            "orca-star-symbolic",         "orca-more-symbolic",             "orca-columns-symbolic",
-            "orca-arrow-down-symbolic",   "orca-arrow-up-symbolic",         "orca-close-symbolic",
-            "orca-plus-symbolic",         "orca-grip-symbolic",             "orca-sparkle-symbolic",
-            "orca-pin-symbolic",          "orca-minus-symbolic",            "orca-chevron-right-symbolic",
-            "orca-file-symbolic",         "orca-image-symbolic",            "orca-external-link-symbolic",
-            "orca-check-symbolic",        "orca-device-dac-symbolic",       "orca-device-speaker-symbolic",
-            "orca-device-tv-symbolic",    "orca-device-bluetooth-symbolic", "orca-refresh-symbolic",
-            "orca-gain-symbolic",         "orca-engine-symbolic",           "orca-system-symbolic",
-            "orca-info-symbolic",         "orca-undo-symbolic",             "orca-alert-symbolic",
-            "orca-pen-symbolic",          "orca-type-symbolic",             "orca-wave-symbolic",
-            "orca-clock-symbolic",        "orca-drive-off-symbolic",        "orca-shield-symbolic",
-        }) |icon| {
-            b.installFile(
-                b.fmt("apps/linux/data/{s}.svg", .{icon}),
-                b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),
-            );
+        if (gtk) {
+            // The GTK4 frontend is Zig and consumes liborca's Zig-facing API
+            // directly. GTK itself is bound with hand-written `extern fn`
+            // declarations in `apps/linux/gtk.zig`, so no C include paths are
+            // needed here — only the linkage pkg-config resolves.
+            const linux_app_module = b.createModule(.{
+                .root_source_file = b.path("apps/linux/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "liborca", .module = liborca_module },
+                    .{ .name = "build_options", .module = app_options_module },
+                },
+            });
+            linux_app_module.addAnonymousImport("hd650.txt", .{ .root_source_file = b.path("fixtures/eq/hd650.txt") });
+            linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("libsecret-1", .{ .use_pkg_config = .yes });
+            // Cover art is decoded at a bounded size through gdk-pixbuf's
+            // scaling loader. GTK4 depends on it, but the frontend calls it
+            // directly, so it has to be linked directly.
+            linux_app_module.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("pango", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
+            linux_app_module.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
+            const linux_app = b.addExecutable(.{
+                .name = "orca-gtk",
+                .root_module = linux_app_module,
+            });
+            const gtk_requirements = b.addSystemCommand(&.{
+                "pkg-config",     "--exists",            "--print-errors",
+                "gtk4 >= 4.18",   "libadwaita-1 >= 1.8", "libsecret-1",
+                "gdk-pixbuf-2.0", "pango >= 1.56",       "pangocairo",
+                "cairo",          "gio-2.0",             "gobject-2.0",
+                "glib-2.0",
+            });
+            linux_app.step.dependOn(&gtk_requirements.step);
+            b.installArtifact(linux_app);
+            b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
+            b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
+            for ([_][]const u8{
+                "orca-heart-filled-symbolic", "orca-heart-outline-symbolic",    "orca-pulse-symbolic",
+                "orca-albums-symbolic",       "orca-artists-symbolic",          "orca-tracks-symbolic",
+                "orca-genres-symbolic",       "orca-folders-symbolic",          "orca-loved-symbolic",
+                "orca-playlists-symbolic",    "orca-now-playing-symbolic",      "orca-queue-symbolic",
+                "orca-health-symbolic",       "orca-matches-symbolic",          "orca-settings-symbolic",
+                "orca-signal-symbolic",       "orca-search-symbolic",           "orca-back-symbolic",
+                "orca-forward-symbolic",      "orca-chevron-down-symbolic",     "orca-shuffle-symbolic",
+                "orca-repeat-symbolic",       "orca-repeat-one-symbolic",       "orca-previous-symbolic",
+                "orca-next-symbolic",         "orca-play-symbolic",             "orca-pause-symbolic",
+                "orca-volume-high-symbolic",  "orca-volume-low-symbolic",       "orca-volume-muted-symbolic",
+                "orca-filter-symbolic",       "orca-grid-symbolic",             "orca-list-symbolic",
+                "orca-star-symbolic",         "orca-more-symbolic",             "orca-columns-symbolic",
+                "orca-arrow-down-symbolic",   "orca-arrow-up-symbolic",         "orca-close-symbolic",
+                "orca-plus-symbolic",         "orca-grip-symbolic",             "orca-sparkle-symbolic",
+                "orca-pin-symbolic",          "orca-minus-symbolic",            "orca-chevron-right-symbolic",
+                "orca-file-symbolic",         "orca-image-symbolic",            "orca-external-link-symbolic",
+                "orca-check-symbolic",        "orca-device-dac-symbolic",       "orca-device-speaker-symbolic",
+                "orca-device-tv-symbolic",    "orca-device-bluetooth-symbolic", "orca-refresh-symbolic",
+                "orca-gain-symbolic",         "orca-engine-symbolic",           "orca-system-symbolic",
+                "orca-info-symbolic",         "orca-undo-symbolic",             "orca-alert-symbolic",
+                "orca-pen-symbolic",          "orca-type-symbolic",             "orca-wave-symbolic",
+                "orca-clock-symbolic",        "orca-drive-off-symbolic",        "orca-shield-symbolic",
+            }) |icon| {
+                b.installFile(
+                    b.fmt("apps/linux/data/{s}.svg", .{icon}),
+                    b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),
+                );
+            }
+            for ([_][]const u8{ "Newsreader[opsz,wght].ttf", "Newsreader-Italic[opsz,wght].ttf", "Geist[wght].ttf", "GeistMono[wght].ttf", "Newsreader-OFL.txt", "Geist-OFL.txt", "GeistMono-OFL.txt" }) |font_file| {
+                b.installFile(b.fmt("apps/linux/data/fonts/{s}", .{font_file}), b.fmt("share/orca/fonts/{s}", .{font_file}));
+            }
+            const run_linux_app = b.addSystemCommand(&.{
+                "sh",
+                "-c",
+                "XDG_DATA_DIRS=\"$0:${XDG_DATA_DIRS-/usr/local/share:/usr/share}\" exec \"$1\"",
+            });
+            run_linux_app.setName("run exe orca-gtk");
+            run_linux_app.addDirectoryArg2(b.graph.path(.install_prefix, "share"), .{ .make_absolute = true });
+            run_linux_app.addArtifactArg2(linux_app, .{});
+            run_linux_app.step.dependOn(b.getInstallStep());
+            const run_linux_step = b.step("run-linux", "Run the native GTK4 frontend");
+            run_linux_step.dependOn(&run_linux_app.step);
         }
-        for ([_][]const u8{ "Newsreader[opsz,wght].ttf", "Newsreader-Italic[opsz,wght].ttf", "Geist[wght].ttf", "GeistMono[wght].ttf", "Newsreader-OFL.txt", "Geist-OFL.txt", "GeistMono-OFL.txt" }) |font_file| {
-            b.installFile(b.fmt("apps/linux/data/fonts/{s}", .{font_file}), b.fmt("share/orca/fonts/{s}", .{font_file}));
-        }
-        const run_linux_app = b.addSystemCommand(&.{
-            "sh",
-            "-c",
-            "XDG_DATA_DIRS=\"$0:${XDG_DATA_DIRS-/usr/local/share:/usr/share}\" exec \"$1\"",
-        });
-        run_linux_app.setName("run exe orca-gtk");
-        run_linux_app.addDirectoryArg2(b.graph.path(.install_prefix, "share"), .{ .make_absolute = true });
-        run_linux_app.addArtifactArg2(linux_app, .{});
-        run_linux_app.step.dependOn(b.getInstallStep());
-        const run_linux_step = b.step("run-linux", "Run the native GTK4 frontend");
-        run_linux_step.dependOn(&run_linux_app.step);
 
         const dependency_test_module = b.createModule(.{
             .root_source_file = b.path("tests/platform/pipewire_smoke.zig"),
@@ -418,9 +410,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         dependency_test_module.linkSystemLibrary("pipewire-0.3", .{
-            // PipeWire currently emits compiler flags that Zig's development
-            // pkg-config parser rejects. Library discovery still follows the
-            // platform linker paths; adapter modules will own C include paths.
+            // Zig's pkg-config parser rejects the compiler flags PipeWire's
+            // .pc emits, so the library is found on the linker paths.
             .use_pkg_config = .no,
         });
         const dependency_tests = b.addTest(.{ .root_module = dependency_test_module });
