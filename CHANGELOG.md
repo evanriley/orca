@@ -117,6 +117,9 @@
   by the next projection that no longer displaces the file, as after a retag to
   a free number or to another album, or that finds the file unreadable,
   instead of staying until dismissed.
+- `orca-cli` exits with status 2 and prints the usage to standard error when
+  given no command, an unknown command or a wrong argument count, instead of
+  exiting 0. `orca-cli --help` prints the usage to standard output and exits 0.
 
 ## 0.1.0 - 2026-10-06
 

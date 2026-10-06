@@ -4,7 +4,11 @@ This file covers `orca-cli`, the command-line client of liborca's public Zig
 API: build and verification commands, every `orca-cli` command with its output
 format, environment variables, playlist and rating commands, and how to verify
 playback without real audio hardware. Running `orca-cli` with no command, an
-unknown command or a wrong argument count prints the usage.
+unknown command or a wrong argument count prints the usage to standard error
+and exits with status 2. `orca-cli --help` prints it to standard output and
+exits 0. A command that fails, including one given an unknown option or a bad
+option value, prints `orca-cli: REASON` to standard error and exits with
+status 1.
 
 ## Build and verification commands
 

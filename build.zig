@@ -261,6 +261,11 @@ pub fn build(b: *std.Build) void {
     check_cli_stdio.addArtifactArg(cli);
     _ = check_cli_stdio.addOutputDirectoryArg("cli-stdio");
     test_step.dependOn(&check_cli_stdio.step);
+    const check_cli_usage = b.addSystemCommand(&.{"bash"});
+    check_cli_usage.addFileArg(b.path("scripts/check-cli-usage.sh"));
+    check_cli_usage.addArtifactArg(cli);
+    _ = check_cli_usage.addOutputDirectoryArg("cli-usage");
+    test_step.dependOn(&check_cli_usage.step);
     if (target.result.os.tag == .linux) {
         const check_output_fail_closed = b.addSystemCommand(&.{"bash"});
         check_output_fail_closed.addFileArg(b.path("scripts/check-output-fail-closed.sh"));

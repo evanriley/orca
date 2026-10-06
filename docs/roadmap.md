@@ -364,7 +364,6 @@ screenshot for a display-only defect, and removes its entry.
 
 - A FLAC seek past the end of the stream fails as a decode error, while WAV
   clamps to the last frame; the other decoders are unchecked.
-- `orca-cli` exits 0 after printing usage for a wrong argument count.
 - A tag write that fails before it reaches a file, such as when its
   backup directory already exists, records no `TagWriteFailure`, so
   `orca-cli` and `orca-gtk` fall back to a message without a reason.

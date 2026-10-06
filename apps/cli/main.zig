@@ -7,6 +7,11 @@ pub fn main(init: std.process.Init) void {
         var stderr_buffer: [256]u8 = undefined;
         var stderr_file_writer: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &stderr_buffer);
         const stderr = &stderr_file_writer.interface;
+        if (err == error.Usage) {
+            writeHelp(stderr) catch {};
+            stderr.flush() catch {};
+            std.process.exit(usage_exit_status);
+        }
         stderr.print("orca-cli: {s}\n", .{describe(err)}) catch {};
         stderr.flush() catch {};
         std.process.exit(1);
@@ -148,6 +153,8 @@ fn describe(err: anyerror) []const u8 {
     };
 }
 
+const usage_exit_status = 2;
+
 fn run(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -155,6 +162,12 @@ fn run(init: std.process.Init) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
+
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
+        try writeHelp(stdout);
+        try stdout.flush();
+        return;
+    }
 
     const command = if (args.len > 1) findCommand(args[1], args.len - 2) else null;
     if (command) |found| {
@@ -165,7 +178,7 @@ fn run(init: std.process.Init) !void {
             .stdout = stdout,
             .arguments = args[2..],
         });
-    } else try writeHelp(stdout);
+    } else return error.Usage;
 
     try stdout.flush();
 }
