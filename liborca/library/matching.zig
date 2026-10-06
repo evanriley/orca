@@ -5,6 +5,7 @@ const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
 const scanner = @import("scanner.zig");
+const CurrentItem = scanner.CurrentItem;
 const BoundedText = @import("../core/job.zig").BoundedText;
 
 pub const CancellationToken = scanner.CancellationToken;
@@ -104,6 +105,11 @@ pub const Progress = struct {
     matched: std.atomic.Value(u64) = .init(0),
     fingerprinted: std.atomic.Value(u64) = .init(0),
     verified: std.atomic.Value(u64) = .init(0),
+    /// Releases the library-scope step for the releases tags name has
+    /// handled, looked up or not, of `tagged_releases_total`, which is 0
+    /// until that step starts; both equal the total once it finishes.
+    tagged_releases: std.atomic.Value(u64) = .init(0),
+    tagged_releases_total: std.atomic.Value(u64) = .init(0),
 };
 
 const SearchOutcome = union(enum) {
@@ -164,6 +170,7 @@ pub const LibraryMatching = struct {
     fingerprinter: ?analysis.chromaprint.Fingerprinter = null,
     cancellation: ?*const CancellationToken = null,
     progress: ?*Progress = null,
+    current_item: ?*CurrentItem = null,
     batch_size: usize = 64,
     limit: ?u32 = null,
     scope: database.MatchScope = .library,
@@ -211,6 +218,7 @@ pub const LibraryMatching = struct {
             }
         }
         const stopped = result.cancelled or result.unavailable or result.busy != .none;
+        const limited = if (self.limit) |limit| result.tracks_seen >= limit else false;
         if (!stopped) switch (self.scope) {
             .release => |release_id| if (self.isCancelled()) {
                 _ = self.stop(&result, .cancelled);
@@ -220,7 +228,8 @@ pub const LibraryMatching = struct {
                 .unavailable => _ = self.stop(&result, .unavailable),
                 .busy => _ = self.stop(&result, .musicbrainz_busy),
             },
-            .library, .track => {},
+            .library => if (!limited) try self.snapshotTaggedReleases(&result),
+            .track => {},
         };
         return self.finish(result, acoustid_service);
     }
@@ -609,13 +618,84 @@ pub const LibraryMatching = struct {
         return .done;
     }
 
+    /// Snapshots the release a library's Releases are tagged with, as
+    /// Match Album does, for each Release whose every play file's release ID
+    /// tag names its best candidate and which has no fresh snapshot of it.
+    /// Releases are taken in ID order a page at a time; each lookup stores
+    /// a whole snapshot or nothing.
+    fn snapshotTaggedReleases(self: *LibraryMatching, result: *Result) !void {
+        var buffer: [64]database.repository.TaggedRelease = undefined;
+        var cursor: i64 = 0;
+        var handled: u64 = 0;
+        if (self.progress) |progress| {
+            const total = try self.proposals.taggedReleasesToSnapshotCount(self.freshAfter());
+            progress.tagged_releases_total.store(total, .release);
+        }
+        while (true) {
+            const page = try self.proposals.taggedReleasesToSnapshot(cursor, self.freshAfter(), &buffer);
+            if (page.len == 0) {
+                if (self.progress) |progress| {
+                    const total = @max(handled, progress.tagged_releases_total.load(.acquire));
+                    progress.tagged_releases_total.store(total, .release);
+                    progress.tagged_releases.store(total, .release);
+                }
+                if (self.current_item) |current| current.set("");
+                return;
+            }
+            for (page) |tagged| {
+                cursor = tagged.release_id;
+                if (self.isCancelled()) {
+                    _ = self.stop(result, .cancelled);
+                    return;
+                }
+                switch (try self.snapshotCandidate(tagged.release_id, &tagged.release_mbid)) {
+                    .done => {
+                        handled += 1;
+                        if (self.progress) |progress| progress.tagged_releases.store(handled, .release);
+                    },
+                    .cancelled => {
+                        _ = self.stop(result, .cancelled);
+                        return;
+                    },
+                    .unavailable => {
+                        _ = self.stop(result, .unavailable);
+                        return;
+                    },
+                    .busy => {
+                        _ = self.stop(result, .musicbrainz_busy);
+                        return;
+                    },
+                }
+            }
+        }
+    }
+
+    fn showRelease(self: *const LibraryMatching, view: *const database.ReleaseMatchView) void {
+        const current = self.current_item orelse return;
+        if (view.album_artist.len == 0) return current.set(view.title);
+        var buffer: [CurrentItem.capacity]u8 = undefined;
+        current.set(std.fmt.bufPrint(&buffer, "{s} — {s}", .{ view.album_artist, view.title }) catch view.title);
+    }
+
+    fn freshAfter(self: *const LibraryMatching) i64 {
+        const now_s = @divFloor(self.musicbrainz.wall_clock.nowMs(), 1000);
+        return now_s - self.musicbrainz.cache_ttl_seconds;
+    }
+
     fn snapshotBestCandidate(self: *LibraryMatching, release_id: i64) !ReleaseStep {
+        return self.snapshotCandidate(release_id, null);
+    }
+
+    /// Snapshots the Release's best candidate when it has no fresh snapshot,
+    /// and only when it is `named`, given one.
+    fn snapshotCandidate(self: *LibraryMatching, release_id: i64, named: ?[]const u8) !ReleaseStep {
         const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
         defer view.deinit();
+        if (named != null) self.showRelease(&view);
         const best = try view.best(self.allocator) orelse return .done;
+        if (named) |mbid| if (!std.mem.eql(u8, best.release_mbid, mbid)) return .done;
         if (try self.tracklists.fetchedAt(best.release_mbid)) |fetched_at| {
-            const now_s = @divFloor(self.musicbrainz.wall_clock.nowMs(), 1000);
-            if (now_s - fetched_at < self.musicbrainz.cache_ttl_seconds) return .done;
+            if (fetched_at > self.freshAfter()) return .done;
         }
         return switch (try self.lookUpRelease(best.release_mbid)) {
             .found, .unusable => .done,

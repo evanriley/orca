@@ -30,6 +30,7 @@ const apply_tooltip = "Take the checked fields into Orca's library; no file is w
 pub const Entry = struct {
     release_id: i64,
     confidence: f32,
+    from_tags: bool = false,
 };
 
 const Tracklist = union(enum) {
@@ -343,6 +344,10 @@ fn showChecked(self: *App) void {
         text = "Unmark Reviewed";
         tooltip = "Put this album back in the list to review";
         sensitive = review.diff != null;
+        if (current(self)) |entry| if (entry.from_tags) {
+            tooltip = "Your tags identify this album; remove or change a file's release ID tag to put it back in the list";
+            sensitive = false;
+        };
     } else switch (review.tracklist) {
         .not_read => {
             sensitive = false;
@@ -940,7 +945,7 @@ fn adoptWindow(self: *App, loader: *Loader) bool {
         review.entries.ensureTotalCapacity(self.allocator, page.items.len) catch {};
         for (page.items) |item| {
             const confidence = if (item.best) |best| best.confidence else 0;
-            review.entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence }) catch break;
+            review.entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence, .from_tags = item.from_tags }) catch break;
         }
     }
     review.window_stale = false;

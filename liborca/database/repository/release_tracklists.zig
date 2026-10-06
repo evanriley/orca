@@ -139,53 +139,95 @@ pub const ReleaseTracklistRepository = struct {
         errdefer result.deinit();
         const arena = result.arena.allocator();
         {
-            var statement = try self.db.prepare(
-                \\SELECT musicbrainz_release_id, title, artist_credit, release_date, release_group_id,
-                \\    medium_count, fetched_at, artist_credit_ids
-                \\FROM musicbrainz_releases WHERE musicbrainz_release_id=?1;
-            );
+            var statement = try self.db.prepare("SELECT " ++ header_columns ++ " FROM musicbrainz_releases WHERE musicbrainz_release_id=?1;");
             defer statement.deinit();
             try statement.bindText(1, release_mbid);
             if (try statement.step() != .row) {
                 result.deinit();
                 return null;
             }
-            result.record = .{
-                .release_mbid = try arena.dupe(u8, statement.columnText(0)),
-                .title = try arena.dupe(u8, statement.columnText(1)),
-                .artist_credit = try arena.dupe(u8, statement.columnText(2)),
-                .release_date = if (statement.columnIsNull(3)) null else try arena.dupe(u8, statement.columnText(3)),
-                .release_group_mbid = if (statement.columnIsNull(4)) null else try arena.dupe(u8, statement.columnText(4)),
-                .medium_count = std.math.cast(u32, statement.columnInt64(5)) orelse 0,
-                .fetched_at = statement.columnInt64(6),
-                .artist_credit_mbids = if (statement.columnIsNull(7)) null else try parseCreditIds(arena, statement.columnText(7)),
-                .tracks = &.{},
-            };
+            result.record = try readHeader(arena, statement);
         }
         var statement = try self.db.prepare(
-            \\SELECT disc, position, title, artist_credit, length_ms, recording_id, release_track_id
-            \\FROM musicbrainz_release_tracks WHERE musicbrainz_release_id=?1
-            \\ORDER BY disc, position LIMIT ?2;
+            "SELECT " ++ track_columns ++ " FROM musicbrainz_release_tracks WHERE musicbrainz_release_id=?1\n" ++
+                "ORDER BY disc, position LIMIT ?2;",
         );
         defer statement.deinit();
         try statement.bindText(1, release_mbid);
         try statement.bindInt64(2, max_tracks);
         var tracks: std.ArrayList(ReleaseTracklistTrack) = .empty;
-        while (try statement.step() == .row) {
-            try tracks.append(arena, .{
-                .disc = std.math.cast(u32, statement.columnInt64(0)) orelse 0,
-                .position = std.math.cast(u32, statement.columnInt64(1)) orelse 0,
-                .title = try arena.dupe(u8, statement.columnText(2)),
-                .artist_credit = try arena.dupe(u8, statement.columnText(3)),
-                .length_ms = if (statement.columnIsNull(4)) null else std.math.cast(u64, statement.columnInt64(4)),
-                .recording_mbid = try arena.dupe(u8, statement.columnText(5)),
-                .release_track_mbid = try arena.dupe(u8, statement.columnText(6)),
-            });
-        }
+        while (try statement.step() == .row) try tracks.append(arena, try readTrack(arena, statement));
         result.record.tracks = tracks.items;
         return result;
     }
+
+    /// The snapshots of the releases a JSON array of release MBIDs names,
+    /// in no order, allocated with `arena`; a release without one is left
+    /// out. Three statements, whatever the number of releases.
+    pub fn getMany(self: *const ReleaseTracklistRepository, arena: std.mem.Allocator, release_mbids_json: []const u8) ![]ReleaseTracklistRecord {
+        var records: std.ArrayList(ReleaseTracklistRecord) = .empty;
+        var index_of: std.StringHashMapUnmanaged(usize) = .empty;
+        {
+            var statement = try self.db.prepare(
+                "SELECT " ++ header_columns ++ " FROM musicbrainz_releases\n" ++
+                    "WHERE musicbrainz_release_id IN (SELECT value FROM json_each(?1));",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, release_mbids_json);
+            while (try statement.step() == .row) {
+                const record = try readHeader(arena, statement);
+                try index_of.put(arena, record.release_mbid, records.items.len);
+                try records.append(arena, record);
+            }
+        }
+        const tracks = try arena.alloc(std.ArrayList(ReleaseTracklistTrack), records.items.len);
+        for (tracks) |*list| list.* = .empty;
+        var statement = try self.db.prepare(
+            "SELECT " ++ track_columns ++ ", musicbrainz_release_id FROM musicbrainz_release_tracks\n" ++
+                "WHERE musicbrainz_release_id IN (SELECT value FROM json_each(?1))\n" ++
+                "ORDER BY musicbrainz_release_id, disc, position;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, release_mbids_json);
+        while (try statement.step() == .row) {
+            const index = index_of.get(statement.columnText(7)) orelse continue;
+            if (tracks[index].items.len >= max_tracks) continue;
+            try tracks[index].append(arena, try readTrack(arena, statement));
+        }
+        for (records.items, tracks) |*record, list| record.tracks = list.items;
+        return records.items;
+    }
 };
+
+const header_columns =
+    "musicbrainz_release_id, title, artist_credit, release_date, release_group_id, medium_count, fetched_at, artist_credit_ids";
+const track_columns = "disc, position, title, artist_credit, length_ms, recording_id, release_track_id";
+
+fn readHeader(arena: std.mem.Allocator, statement: sqlite.Statement) !ReleaseTracklistRecord {
+    return .{
+        .release_mbid = try arena.dupe(u8, statement.columnText(0)),
+        .title = try arena.dupe(u8, statement.columnText(1)),
+        .artist_credit = try arena.dupe(u8, statement.columnText(2)),
+        .release_date = if (statement.columnIsNull(3)) null else try arena.dupe(u8, statement.columnText(3)),
+        .release_group_mbid = if (statement.columnIsNull(4)) null else try arena.dupe(u8, statement.columnText(4)),
+        .medium_count = std.math.cast(u32, statement.columnInt64(5)) orelse 0,
+        .fetched_at = statement.columnInt64(6),
+        .artist_credit_mbids = if (statement.columnIsNull(7)) null else try parseCreditIds(arena, statement.columnText(7)),
+        .tracks = &.{},
+    };
+}
+
+fn readTrack(arena: std.mem.Allocator, statement: sqlite.Statement) !ReleaseTracklistTrack {
+    return .{
+        .disc = std.math.cast(u32, statement.columnInt64(0)) orelse 0,
+        .position = std.math.cast(u32, statement.columnInt64(1)) orelse 0,
+        .title = try arena.dupe(u8, statement.columnText(2)),
+        .artist_credit = try arena.dupe(u8, statement.columnText(3)),
+        .length_ms = if (statement.columnIsNull(4)) null else std.math.cast(u64, statement.columnInt64(4)),
+        .recording_mbid = try arena.dupe(u8, statement.columnText(5)),
+        .release_track_mbid = try arena.dupe(u8, statement.columnText(6)),
+    };
+}
 
 const recording_a = "1b8c1c69-8a4a-4c0f-9a5e-0a7f4f6a3b01";
 const recording_b = "1b8c1c69-8a4a-4c0f-9a5e-0a7f4f6a3b02";

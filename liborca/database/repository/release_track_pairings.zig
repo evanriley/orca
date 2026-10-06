@@ -43,6 +43,30 @@ pub const ReleaseTrackPairing = struct {
     position: ?u32,
 };
 
+const pairing_columns =
+    "p.track_id, p.musicbrainz_release_id, p.release_track_id, p.recording_id, p.origin, p.created_at, t.disc, t.position, p.release_id";
+const pairing_source =
+    "FROM release_track_pairings p\n" ++
+    "LEFT JOIN musicbrainz_release_tracks t\n" ++
+    "    ON t.musicbrainz_release_id = p.musicbrainz_release_id AND t.release_track_id = p.release_track_id";
+const pairing_order = "p.musicbrainz_release_id, t.disc IS NULL, t.disc, t.position, p.track_id";
+
+fn readPairing(arena: std.mem.Allocator, statement: sqlite.Statement) !ReleaseTrackPairing {
+    const listed = !statement.columnIsNull(6);
+    return .{
+        .release_id = statement.columnInt64(8),
+        .track_id = statement.columnInt64(0),
+        .release_mbid = try arena.dupe(u8, statement.columnText(1)),
+        .release_track_mbid = try arena.dupe(u8, statement.columnText(2)),
+        .recording_mbid = try arena.dupe(u8, statement.columnText(3)),
+        .origin = std.enums.fromInt(PairingOrigin, statement.columnInt64(4)) orelse .by_hand,
+        .created_at = statement.columnInt64(5),
+        .in_snapshot = listed,
+        .disc = if (listed) std.math.cast(u32, statement.columnInt64(6)) else null,
+        .position = if (listed) std.math.cast(u32, statement.columnInt64(7)) else null,
+    };
+}
+
 pub const ReleaseTrackPairings = struct {
     arena: std.heap.ArenaAllocator,
     /// Release MBID, then disc and position, unlisted release tracks last.
@@ -201,37 +225,43 @@ pub const ReleaseTrackPairingRepository = struct {
         errdefer result.deinit();
         const arena = result.arena.allocator();
         var statement = try self.db.prepare(
-            \\SELECT p.track_id, p.musicbrainz_release_id, p.release_track_id, p.recording_id, p.origin,
-            \\    p.created_at, t.disc, t.position
-            \\FROM release_track_pairings p
-            \\LEFT JOIN musicbrainz_release_tracks t
-            \\    ON t.musicbrainz_release_id = p.musicbrainz_release_id AND t.release_track_id = p.release_track_id
-            \\WHERE p.release_id=?1 AND (?2 IS NULL OR p.musicbrainz_release_id=?2)
-            \\ORDER BY p.musicbrainz_release_id, t.disc IS NULL, t.disc, t.position, p.track_id
-            \\LIMIT ?3;
+            "SELECT " ++ pairing_columns ++ "\n" ++ pairing_source ++ "\n" ++
+                "WHERE p.release_id=?1 AND (?2 IS NULL OR p.musicbrainz_release_id=?2)\n" ++
+                "ORDER BY " ++ pairing_order ++ "\n" ++
+                "LIMIT ?3;",
         );
         defer statement.deinit();
         try statement.bindInt64(1, release_id);
         try statement.bindOptionalText(2, release_mbid);
         try statement.bindInt64(3, max_page);
         var items: std.ArrayList(ReleaseTrackPairing) = .empty;
-        while (try statement.step() == .row) {
-            const listed = !statement.columnIsNull(6);
-            try items.append(arena, .{
-                .release_id = release_id,
-                .track_id = statement.columnInt64(0),
-                .release_mbid = try arena.dupe(u8, statement.columnText(1)),
-                .release_track_mbid = try arena.dupe(u8, statement.columnText(2)),
-                .recording_mbid = try arena.dupe(u8, statement.columnText(3)),
-                .origin = std.enums.fromInt(PairingOrigin, statement.columnInt64(4)) orelse .by_hand,
-                .created_at = statement.columnInt64(5),
-                .in_snapshot = listed,
-                .disc = if (listed) std.math.cast(u32, statement.columnInt64(6)) else null,
-                .position = if (listed) std.math.cast(u32, statement.columnInt64(7)) else null,
-            });
-        }
+        while (try statement.step() == .row) try items.append(arena, try readPairing(arena, statement));
         result.items = items.items;
         return result;
+    }
+
+    /// The pairings of the Releases a JSON array of Release IDs names, by
+    /// Release ID, then as `list` orders them, at most `max_page` for each
+    /// Release, allocated with `arena`. One statement, whatever the number
+    /// of Releases.
+    pub fn listMany(self: *const ReleaseTrackPairingRepository, arena: std.mem.Allocator, release_ids_json: []const u8) ![]ReleaseTrackPairing {
+        var statement = try self.db.prepare(
+            "SELECT " ++ pairing_columns ++ "\n" ++ pairing_source ++ "\n" ++
+                "WHERE p.release_id IN (SELECT value FROM json_each(?1))\n" ++
+                "ORDER BY p.release_id, " ++ pairing_order ++ ";",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, release_ids_json);
+        var items: std.ArrayList(ReleaseTrackPairing) = .empty;
+        var taken: usize = 0;
+        while (try statement.step() == .row) {
+            const pairing = try readPairing(arena, statement);
+            const first_of_release = items.items.len == 0 or items.items[items.items.len - 1].release_id != pairing.release_id;
+            taken = if (first_of_release) 1 else taken + 1;
+            if (taken > max_page) continue;
+            try items.append(arena, pairing);
+        }
+        return items.items;
     }
 
     fn deletePairing(self: *ReleaseTrackPairingRepository, track_id: i64, release_id: ?i64) !bool {

@@ -4620,7 +4620,8 @@ orca_status orca_library_apply_matched_release_fields(
  * is at least `confident_at` and is not dismissed. NEEDS_REVIEW: a candidate
  * exists below that. UNMATCHED: there is none. REVIEWED: a person's review of
  * its best candidate still holds, as orca_library_mark_release_reviewed
- * describes; such a Release is in no other bucket. */
+ * describes, or its tags identify it, as orca_release_match_view
+ * `from_tags` describes; such a Release is in no other bucket. */
 typedef enum orca_release_match_bucket {
     ORCA_RELEASE_MATCH_BUCKET_CONFIDENT = 0,
     ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW = 1,
@@ -4631,15 +4632,18 @@ typedef enum orca_release_match_bucket {
 /* A Release beside its best MusicBrainz release candidate: the release its
  * Tracks are named on, by tag, accepted match or proposal, that has the
  * highest mean per-Track confidence. The candidate fields are empty and
- * `has_best` 0 for an unmatched Release. Valid only for the duration of the
- * callback. */
+ * `has_best` 0 for an unmatched Release. `from_tags` is 1 for a REVIEWED
+ * Release no person reviewed: every Track's file has a release ID tag
+ * naming the best candidate, and the alignment with its tracklist snapshot
+ * places every Track by recording ID or by a pairing. Valid only for the
+ * duration of the callback. */
 typedef struct orca_release_match_view {
     int64_t release_id;
     uint32_t track_count;
     uint8_t bucket;
     uint8_t has_best;
     uint8_t has_candidate_track_count;
-    uint8_t reserved[1];
+    uint8_t from_tags;
     orca_string_view title;
     orca_string_view artist;
     orca_string_view release_mbid;
@@ -5088,7 +5092,8 @@ orca_status orca_library_mark_release_reviewed(
 
 /* Forgets the Release's review, holding or not, so it returns to the bucket
  * its best candidate puts it in. NOT_FOUND for an unknown Release;
- * ALREADY_DONE when it has no review. */
+ * ALREADY_DONE when it has no review, as for a Release only its tags
+ * identify; removing or changing a file's release ID tag returns that one. */
 orca_status orca_library_unmark_release_reviewed(
     orca_runtime *runtime,
     orca_handle library,

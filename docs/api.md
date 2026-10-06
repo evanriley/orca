@@ -350,7 +350,9 @@ section lists the entry points, errors and limits.
   `confident_at` is in (0, 1], else `error.InvalidMinimumConfidence`; a
   non-null `filter` is the word-prefix search of `librarySearch`
   (`error.SearchTextTooLong`). Each item with a candidate costs a Release view,
-  snapshot and alignment. `libraryReleaseMatchCounts` counts the buckets.
+  snapshot and alignment. An item in the `reviewed` bucket that only its
+  tags identify has `from_tags` set. `libraryReleaseMatchCounts` counts the
+  buckets.
 - `libraryReleaseMatchEvidence` returns a `MatchEvidence` and
   `libraryReleaseMatchDiff` a `ReleaseMatchDiff`, against `release_mbid` or the
   best candidate (`error.NoReleaseCandidate`); with a snapshot a field differs

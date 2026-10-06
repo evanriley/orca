@@ -978,7 +978,11 @@ fn writeDetail(worker: *const JobWorker, detail: *job.BoundedText(128)) void {
                 threads, if (threads == 1) "thread" else "threads",
             }) catch "";
         },
-        .metadata_lookup, .acoustid_submission => "rate-limited to 1 request a second",
+        .metadata_lookup => if (worker.lookingUpTaggedReleases())
+            "looking up the releases your tags name"
+        else
+            "rate-limited to 1 request a second",
+        .acoustid_submission => "rate-limited to 1 request a second",
         else => "",
     });
 }

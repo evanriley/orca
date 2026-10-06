@@ -190,9 +190,36 @@ is listed only in the `reviewed` bucket of the release-match page, and
 best candidate or the snapshot brings the Release back; the stale row stays
 until the next review replaces it.
 
+A Release its tags identify is reviewed without a stored row: every Track's
+play file has an observed `musicbrainz_release_id` tag naming one release, that
+release is the best candidate, and the alignment with its snapshot places every
+Track `automatic` or `paired`. It is listed in the `reviewed` bucket with
+`ReleaseMatchItem.from_tags` set and counted in `ReleaseMatchCounts.reviewed`.
+A person's review that holds takes precedence and clears `from_tags`. The
+release-match page and counts decide this per chunk of Releases with one tag
+statement and, for the Releases whose tags name their best candidate, one
+snapshot read and one pairing read.
+
+A library-scope match run (`Runtime.startLibraryMatching` without a Release or
+Track, Match Again) looks up the release the tags name once its Track walk
+finishes without stopping. It takes, 64 at a time in ID order, each Release
+whose every Track's play file has a release ID tag naming one release that has
+no snapshot younger than the 30-day cache, and looks that release up only when
+it is the Release's best candidate. Each lookup stores a whole snapshot or none.
+A cancelled, offline or busy run stops at the Release it reached; the next run
+selects the remaining Releases again, since nothing records the step as done.
+A run with a `limit` that the walk reaches skips the step. Before its first
+lookup the step counts the Releases it selects; the Job's `total_units` becomes
+the Tracks walked plus that count, `completed_units` advances by one for each
+Release looked up or skipped and reaches the total when the step ends,
+`current_item` is the Release's album artist and title, and `detail` is
+"looking up the releases your tags name" until the step ends.
+
 `Runtime.libraryUnmarkReleaseReviewed(library, release_id)` and `orca-cli
 unmark-release-reviewed` delete the review, held or stale, and change no value:
-`error.ReleaseNotReviewed` when there is none. `libraryDismissReleaseCandidate`
+`error.ReleaseNotReviewed` when there is none, including for a Release only its
+tags identify. Such a Release returns to its own bucket when a file's release
+ID tag is removed or names another release. `libraryDismissReleaseCandidate`
 removes a release from the candidates.
 
 #### Release identity

@@ -1503,6 +1503,7 @@ pub const JobWorker = struct {
             },
             .cancellation = &self.token,
             .progress = &stats.progress,
+            .current_item = &self.current_item,
             .batch_size = request.batch_size,
             .limit = request.limit,
             .scope = setup.scope,
@@ -1951,9 +1952,10 @@ pub const JobWorker = struct {
 
     pub fn filesProcessed(self: *const JobWorker) u64 {
         return switch (self.stats) {
-            .matching => matching: {
+            .matching => |*live| matching: {
                 const stats = self.matchStats();
-                break :matching stats.tracks_examined + stats.cover_art_candidates_examined;
+                break :matching stats.tracks_examined + stats.cover_art_candidates_examined +
+                    live.progress.tagged_releases.load(.acquire);
             },
             .submission => self.submissionStats().files_examined,
             .scan => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
@@ -1966,15 +1968,28 @@ pub const JobWorker = struct {
         };
     }
 
+    /// A library match run is looking up the releases its Releases' tags
+    /// name.
+    pub fn lookingUpTaggedReleases(self: *const JobWorker) bool {
+        return switch (self.stats) {
+            .matching => |*stats| stats.progress.tagged_releases.load(.acquire) <
+                stats.progress.tagged_releases_total.load(.acquire),
+            .scan, .duplicates, .submission, .lyrics, .artist_info => false,
+        };
+    }
+
     pub fn totalUnits(self: *const JobWorker, completed_units: u64) ?u64 {
         return switch (self.stats) {
             .scan => |*stats| if (stats.total_known.load(.acquire))
                 @max(stats.total_files.load(.acquire), completed_units)
             else
                 null,
-            .matching => |*stats| switch (stats.cover_art_candidates.total.load(.acquire)) {
-                0 => null,
-                else => |total| @max(total, completed_units),
+            .matching => |*stats| matching: {
+                const cover_art_total = stats.cover_art_candidates.total.load(.acquire);
+                const tagged_total = stats.progress.tagged_releases_total.load(.acquire);
+                if (cover_art_total == 0 and tagged_total == 0) break :matching null;
+                const walked = if (tagged_total == 0) 0 else stats.read().tracks_examined;
+                break :matching @max(cover_art_total + walked + tagged_total, completed_units);
             },
             .duplicates, .submission, .lyrics, .artist_info => null,
         };

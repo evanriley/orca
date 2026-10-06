@@ -54,7 +54,7 @@ fn describe(err: anyerror) []const u8 {
         error.ReleaseTrackAlreadyPaired => "another track is paired with that release track; run unpair-track on it first",
         error.TrackNotPaired => "that track is not paired on that release",
         error.ReleaseNotPlaced => "every track must have a file and be placed on the release first; run release-alignment, then pair-track",
-        error.ReleaseNotReviewed => "that release is not marked as reviewed; run matches --releases --bucket=reviewed for those that are",
+        error.ReleaseNotReviewed => "that release has no review to forget; one its tags identify returns when a file's release ID tag is removed or changed",
         error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
         error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -800,9 +800,13 @@ const help_details =
     \\mark-release-reviewed moves a Release to the reviewed bucket while its
     \\best candidate, tracklist, Tracks and their values stay as they are;
     \\every Track must be placed, and values that still differ stay as they
-    \\are. matches --releases --bucket=reviewed lists the Releases whose
-    \\review still holds, and unmark-release-reviewed forgets a review so the
-    \\Release returns to its bucket. matches --releases prints placed= and
+    \\are. A Release whose files all carry a release ID tag naming its best
+    \\candidate, with every Track placed on that release's tracklist, is in
+    \\the reviewed bucket without a review and prints from_tags; removing or
+    \\changing one file's release ID tag returns it to its bucket.
+    \\matches --releases --bucket=reviewed lists the reviewed Releases, and
+    \\unmark-release-reviewed forgets a person's review so the Release
+    \\returns to its bucket. matches --releases prints placed= and
     \\needs_pairing= for each Release with a tracklist, and reviewed= in its
     \\totals. matches --release=ID --diff prints each Track's title and
     \\artist credit beside the release track's.
@@ -5239,6 +5243,7 @@ fn listReleaseMatches(context: Context) !void {
             if (item.placement) |placement| {
                 try stdout.print("\tplaced={d} needs_pairing={d}", .{ placement.placed, placement.needs_pairing });
             } else try stdout.writeAll("\tplaced=- needs_pairing=-");
+            if (item.from_tags) try stdout.writeAll("\tfrom_tags");
             try stdout.writeAll("\n");
         }
     }

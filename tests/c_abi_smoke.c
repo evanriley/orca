@@ -3994,6 +3994,7 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
     SMOKE_CHECK(listed.calls == 1 && listed.first.base.release_id == ids.release_id);
     SMOKE_CHECK(listed.first.base.bucket == ORCA_RELEASE_MATCH_BUCKET_REVIEWED);
     SMOKE_CHECK(listed.first.has_placement == 1 && listed.first.placed == 2 && listed.first.needs_pairing == 0);
+    SMOKE_CHECK(listed.first.base.from_tags == 0);
     memset(&listed, 0, sizeof listed);
     SMOKE_CHECK(orca_library_query_release_matches_v2(runtime, library, ORCA_RELEASE_MATCH_BUCKET_REVIEWED, 0.9f,
                                                       "nothing", 512, 0, &listed,

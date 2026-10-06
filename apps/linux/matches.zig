@@ -630,7 +630,7 @@ fn reviewClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         for (each.page.items) |item| {
             if (item.release_id == row.release_id) at = entries.items.len;
             const confidence = if (item.best) |best| best.confidence else 0;
-            entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence }) catch return;
+            entries.append(self.allocator, .{ .release_id = item.release_id, .confidence = confidence, .from_tags = item.from_tags }) catch return;
         }
     }
     if (entries.items.len == 0) return;
@@ -757,7 +757,7 @@ fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) 
     const best = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     gtk.gtk_widget_set_valign(best, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_hexpand(best, gtk.true_);
-    append(best, &.{ cell("Best candidate", "match-caption"), candidate });
+    append(best, &.{ cell(if (item.from_tags) "Identified by your tags" else "Best candidate", "match-caption"), candidate });
 
     const confidence = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 5);
     gtk.gtk_widget_set_size_request(confidence, 150, -1);
@@ -785,10 +785,8 @@ fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) 
     gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
     const review_tooltip = "Choose what to take from this release";
     if (item.bucket == .reviewed) {
-        append(actions, &.{
-            actionButton("Unmark", "Put this album back in the list to review", gtk.callback(unmarkClicked), row),
-            actionButton("Review", review_tooltip, gtk.callback(reviewClicked), row),
-        });
+        if (!item.from_tags) gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton("Unmark", "Put this album back in the list to review", gtk.callback(unmarkClicked), row));
+        gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton("Review", review_tooltip, gtk.callback(reviewClicked), row));
     } else if (item.best != null) {
         const needs_pairing = if (item.placement) |placement| placement.needs_pairing else 0;
         if (item.placement != null and needs_pairing == 0) {

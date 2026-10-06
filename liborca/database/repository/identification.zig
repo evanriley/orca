@@ -18,7 +18,9 @@ const WriteLane = @import("write_lane.zig").WriteLane;
 const recording_verifications = @import("recording_verifications.zig");
 const health = @import("health.zig");
 const release_tracklists = @import("release_tracklists.zig");
+const release_track_pairings = @import("release_track_pairings.zig");
 const reviewed_releases = @import("reviewed_releases.zig");
+const release_alignment = @import("../../library/release_alignment.zig");
 
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
 
@@ -906,6 +908,10 @@ pub const ReleaseMatchItem = struct {
     track_count: u32,
     best: ?ReleaseCandidate,
     bucket: ReleaseMatchBucket,
+    /// In the reviewed bucket because its tags identify it, with no
+    /// person's review: every Track's play file has a release ID tag naming
+    /// `best`, and the alignment with `best`'s snapshot places every Track.
+    from_tags: bool = false,
     /// Null without a snapshot of `best`'s release; filled by the runtime.
     placement: ?ReleasePlacementCounts = null,
 };
@@ -925,8 +931,8 @@ pub const ReleaseMatchCounts = struct {
     confident: u64 = 0,
     needs_review: u64 = 0,
     unmatched: u64 = 0,
-    /// Releases a person marked as reviewed whose review still holds; in no
-    /// bucket.
+    /// Releases a person marked as reviewed whose review still holds, and
+    /// Releases their tags identify; in no other bucket.
     reviewed: u64 = 0,
 };
 
@@ -1195,6 +1201,34 @@ const release_search_kind = std.fmt.comptimePrint("{d}", .{@backingInt(search.Se
 const release_match_filter =
     "(?2 IS NULL OR releases.id * 8 + " ++ release_search_kind ++ " IN (SELECT rowid FROM search_index\n" ++
     "    WHERE search_index MATCH ?2 AND rowid % 8 = " ++ release_search_kind ++ "))";
+
+const release_tag_join = "FROM tracks LEFT JOIN observed_file_tags AS tags ON tags.file_id = " ++ track_play_file ++ "\n";
+const release_tag_grouping = "GROUP BY tracks.release_id\n" ++
+    "HAVING count(*) = count(NULLIF(tags.musicbrainz_release_id, ''))\n" ++
+    "   AND min(tags.musicbrainz_release_id) = max(tags.musicbrainz_release_id)";
+
+const tagged_releases_to_snapshot = "(\n" ++
+    "    SELECT tracks.release_id AS release_id, min(tags.musicbrainz_release_id) AS release_mbid\n" ++
+    "    " ++ release_tag_join ++
+    "    WHERE tracks.release_id > ?1\n" ++
+    "    " ++ release_tag_grouping ++ ")\n" ++
+    "WHERE length(CAST(release_mbid AS BLOB)) = 36 AND NOT EXISTS (SELECT 1 FROM musicbrainz_releases\n" ++
+    "    WHERE musicbrainz_release_id = release_mbid AND fetched_at > ?2)";
+
+/// A Release whose every Track's play file has a release ID tag naming
+/// `release_mbid`.
+pub const TaggedRelease = struct {
+    release_id: i64,
+    release_mbid: [36]u8,
+};
+
+const Review = enum { none, person, tags };
+
+fn reviewOf(db: sqlite.Database, release_id: i64, best: ?ReleaseCandidate, identified_by_tags: bool) !Review {
+    const candidate = best orelse return .none;
+    if (try reviewed_releases.stillReviewed(db, release_id, candidate.release_mbid)) return .person;
+    return if (identified_by_tags) .tags else .none;
+}
 
 pub fn releaseMatchBucket(best: ?ReleaseCandidate, confident_at: f32) ReleaseMatchBucket {
     const candidate = best orelse return .unmatched;
@@ -1832,9 +1866,10 @@ pub const IdentificationProposalRepository = struct {
     /// `bucket` against `confident_at`. Only Releases a release ID or a
     /// proposal could name a release for are weighed; every other one is
     /// unmatched.
-    /// A Release whose review of its best candidate still holds is in the
-    /// reviewed bucket only. A `filter` keeps only Releases whose title or album artist
-    /// has a word starting with each of its words.
+    /// A Release whose review of its best candidate still holds, or whose
+    /// tags identify it as `ReleaseMatchItem.from_tags` describes, is in the
+    /// reviewed bucket only. A `filter` keeps only Releases whose title or
+    /// album artist has a word starting with each of its words.
     pub fn releaseMatchPage(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
@@ -1859,10 +1894,7 @@ pub const IdentificationProposalRepository = struct {
             .unmatched => "SELECT id, id IN (" ++ releases_with_candidate_sources ++ ") FROM releases\n" ++
                 "WHERE " ++ release_match_filter ++ "\n" ++
                 "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
-            .reviewed => "SELECT id, 1 FROM releases WHERE id IN (SELECT release_id FROM reviewed_releases)\n" ++
-                "AND " ++ release_match_filter ++ "\n" ++
-                "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
-            .confident, .needs_review => "SELECT id, 1 FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ")\n" ++
+            .confident, .needs_review, .reviewed => "SELECT id, 1 FROM releases WHERE id IN (" ++ releases_with_candidate_sources ++ ")\n" ++
                 "AND " ++ release_match_filter ++ "\n" ++
                 "ORDER BY album_artist COLLATE NOCASE, title COLLATE NOCASE, id;",
         });
@@ -1893,22 +1925,25 @@ pub const IdentificationProposalRepository = struct {
             const found = try chunk.alloc(bool, views.items.len);
             @memset(found, false);
             if (views.items.len != 0) try self.fillReleaseMatchViews(chunk, views.items, found);
+            const bests = try chunk.alloc(?ReleaseCandidate, views.items.len);
+            for (views.items, found, bests) |*view, exists, *best| best.* = if (exists) try view.best(chunk) else null;
+            const by_tags = try self.identifiedByTags(chunk, views.items, bests);
             var next_view: usize = 0;
             for (ids[0..count], weighed[0..count]) |id, weigh| {
                 if (items.items.len >= limit) break;
                 var best: ?ReleaseCandidate = null;
+                var identified = false;
                 var view: *const ReleaseMatchView = undefined;
                 if (weigh) {
                     view = &views.items[next_view];
                     const exists = found[next_view];
+                    best = bests[next_view];
+                    identified = by_tags[next_view];
                     next_view += 1;
                     if (!exists) continue;
-                    best = try view.best(chunk);
                 }
-                const in_bucket: ReleaseMatchBucket = if (best) |candidate|
-                    (if (try reviewed_releases.stillReviewed(self.db, id, candidate.release_mbid)) .reviewed else releaseMatchBucket(best, confident_at))
-                else
-                    .unmatched;
+                const review = try reviewOf(self.db, id, best, identified);
+                const in_bucket: ReleaseMatchBucket = if (review != .none) .reviewed else releaseMatchBucket(best, confident_at);
                 if (in_bucket != bucket) continue;
                 if (skipped < offset) {
                     skipped += 1;
@@ -1936,6 +1971,7 @@ pub const IdentificationProposalRepository = struct {
                         .confidence = candidate.confidence,
                     } else null,
                     .bucket = bucket,
+                    .from_tags = review == .tags,
                 });
             }
         }
@@ -1986,13 +2022,15 @@ pub const IdentificationProposalRepository = struct {
             const found = try chunk.alloc(bool, views.items.len);
             @memset(found, false);
             try self.fillReleaseMatchViews(chunk, views.items, found);
-            for (views.items, found) |*view, exists| {
+            const bests = try chunk.alloc(?ReleaseCandidate, views.items.len);
+            for (views.items, found, bests) |*view, exists, *best| best.* = if (exists) try view.best(chunk) else null;
+            const by_tags = try self.identifiedByTags(chunk, views.items, bests);
+            for (views.items, found, bests, by_tags) |view, exists, best, identified| {
                 if (!exists) continue;
-                const best = try view.best(chunk);
-                if (best) |candidate| if (try reviewed_releases.stillReviewed(self.db, view.release_id, candidate.release_mbid)) {
+                if (try reviewOf(self.db, view.release_id, best, identified) != .none) {
                     counts.reviewed += 1;
                     continue;
-                };
+                }
                 switch (releaseMatchBucket(best, confident_at)) {
                     .confident => counts.confident += 1,
                     .needs_review => counts.needs_review += 1,
@@ -2002,6 +2040,111 @@ pub const IdentificationProposalRepository = struct {
         }
         counts.unmatched = total -| (counts.confident + counts.needs_review + counts.reviewed);
         return counts;
+    }
+
+    /// For each of `views`, whether every Track's play file has a release ID
+    /// tag naming its candidate in `bests` and the alignment with that
+    /// release's snapshot places every Track `automatic` or `paired`. One
+    /// tag statement, then for the Releases the tags name their best
+    /// candidate, three snapshot statements and one pairing statement.
+    fn identifiedByTags(
+        self: *const IdentificationProposalRepository,
+        chunk: std.mem.Allocator,
+        views: []const ReleaseMatchView,
+        bests: []const ?ReleaseCandidate,
+    ) ![]bool {
+        const identified = try chunk.alloc(bool, views.len);
+        @memset(identified, false);
+        if (views.len == 0) return identified;
+        var index_of: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+        for (views, bests, 0..) |view, best, index| {
+            if (best == null or view.track_count == 0 or view.tracks.len != view.track_count) continue;
+            try index_of.put(chunk, view.release_id, index);
+        }
+        if (index_of.count() == 0) return identified;
+        var tagged_best: std.ArrayList(usize) = .empty;
+        var release_ids: std.ArrayList(u8) = .empty;
+        var release_mbids: std.ArrayList(u8) = .empty;
+        try release_ids.append(chunk, '[');
+        try release_mbids.append(chunk, '[');
+        {
+            var candidate_ids: std.ArrayList(u8) = .empty;
+            try candidate_ids.append(chunk, '[');
+            var ids = index_of.keyIterator();
+            while (ids.next()) |id| try candidate_ids.print(chunk, "{s}{d}", .{ if (candidate_ids.items.len == 1) "" else ",", id.* });
+            try candidate_ids.append(chunk, ']');
+            var statement = try self.db.prepare(
+                comptime "SELECT tracks.release_id, min(tags.musicbrainz_release_id)\n" ++
+                    release_tag_join ++
+                    "WHERE tracks.release_id IN " ++ json_release_ids ++ "\n" ++
+                    release_tag_grouping ++ ";",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, candidate_ids.items);
+            while (try statement.step() == .row) {
+                const index = index_of.get(statement.columnInt64(0)) orelse continue;
+                const tagged = statement.columnText(1);
+                if (!std.mem.eql(u8, tagged, bests[index].?.release_mbid)) continue;
+                try tagged_best.append(chunk, index);
+                const separator = if (release_ids.items.len == 1) "" else ",";
+                try release_ids.print(chunk, "{s}{d}", .{ separator, views[index].release_id });
+                try release_mbids.print(chunk, "{s}\"{s}\"", .{ separator, bests[index].?.release_mbid });
+            }
+        }
+        if (tagged_best.items.len == 0) return identified;
+        try release_ids.append(chunk, ']');
+        try release_mbids.append(chunk, ']');
+        const tracklists_repository: release_tracklists.ReleaseTracklistRepository = .{ .db = self.db, .write_lane = self.write_lane };
+        const tracklists = try tracklists_repository.getMany(chunk, release_mbids.items);
+        var tracklist_of: std.StringHashMapUnmanaged(*const release_tracklists.ReleaseTracklistRecord) = .empty;
+        for (tracklists) |*tracklist| try tracklist_of.put(chunk, tracklist.release_mbid, tracklist);
+        const pairings_repository: release_track_pairings.ReleaseTrackPairingRepository = .{ .db = self.db, .write_lane = self.write_lane };
+        const pairings = try pairings_repository.listMany(chunk, release_ids.items);
+        for (tagged_best.items) |index| {
+            const view = &views[index];
+            const tracklist = tracklist_of.get(bests[index].?.release_mbid) orelse continue;
+            var first: usize = 0;
+            while (first < pairings.len and pairings[first].release_id != view.release_id) first += 1;
+            var end = first;
+            while (end < pairings.len and pairings[end].release_id == view.release_id) end += 1;
+            const alignment = try release_alignment.alignRelease(chunk, view.release_id, view.tracks, tracklist, pairings[first..end]);
+            defer alignment.deinit();
+            var placed: usize = 0;
+            for (alignment.rows) |row| {
+                if (row.track != null and (row.status == .automatic or row.status == .paired)) placed += 1;
+            }
+            identified[index] = placed == view.tracks.len;
+        }
+        return identified;
+    }
+
+    /// The Releases after `cursor`, in ID order and at most `buffer.len`,
+    /// whose every Track's play file has a release ID tag naming one release
+    /// with no snapshot fetched after `fetched_after`.
+    pub fn taggedReleasesToSnapshot(self: *const IdentificationProposalRepository, cursor: i64, fetched_after: i64, buffer: []TaggedRelease) ![]TaggedRelease {
+        var statement = try self.db.prepare(comptime "SELECT release_id, release_mbid FROM " ++ tagged_releases_to_snapshot ++ "\n" ++
+            "ORDER BY release_id LIMIT ?3;");
+        defer statement.deinit();
+        try statement.bindInt64(1, cursor);
+        try statement.bindInt64(2, fetched_after);
+        try statement.bindInt64(3, @intCast(buffer.len));
+        var count: usize = 0;
+        while (try statement.step() == .row) : (count += 1) {
+            buffer[count] = .{ .release_id = statement.columnInt64(0), .release_mbid = undefined };
+            @memcpy(&buffer[count].release_mbid, statement.columnText(1));
+        }
+        return buffer[0..count];
+    }
+
+    /// How many Releases `taggedReleasesToSnapshot` would page through from
+    /// the start.
+    pub fn taggedReleasesToSnapshotCount(self: *const IdentificationProposalRepository, fetched_after: i64) !u64 {
+        var statement = try self.db.prepare(comptime "SELECT count(*) FROM " ++ tagged_releases_to_snapshot ++ ";");
+        defer statement.deinit();
+        try statement.bindInt64(1, 0);
+        try statement.bindInt64(2, fetched_after);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     /// Remembers that the Release is not `release_mbid`, so the release is
