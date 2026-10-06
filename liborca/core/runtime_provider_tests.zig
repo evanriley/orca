@@ -8463,7 +8463,7 @@ test "the release-match list counts a Release's placed Tracks and those needing 
     try std.testing.expectEqual(@as(?runtime_module.ReleasePlacementCounts, .{ .placed = 3, .needs_pairing = 2 }), try matchPlacement(&runtime, partial.library, partial.album));
 }
 
-test "a Release equal to its snapshot can be marked reviewed and leaves the list until a value changes, and marking refuses a differing value or an unplaced Track" {
+test "a Release can be marked reviewed while a value differs and leaves the list until a value changes, and marking refuses an unplaced Track" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-mark-reviewed?mode=memory&cache=shared");
@@ -8490,7 +8490,9 @@ test "a Release equal to its snapshot can be marked reviewed and leaves the list
     try std.testing.expectEqual(@as(u64, 0), (try runtime.libraryReleaseMatchCounts(library, 0.9, null)).reviewed);
 
     try tagFullNightcall(library_database, files[2], 2, "Nightcall EP");
-    try std.testing.expectError(error.ReleaseDiffers, runtime.libraryMarkReleaseReviewed(library, album, null));
+    try runtime.libraryMarkReleaseReviewed(library, album, null);
+    try std.testing.expect(!try matchListed(&runtime, library, album));
+    try runtime.libraryUnmarkReleaseReviewed(library, album);
     _ = try addFilelessTrack(library_database, album, "Ghost");
     try std.testing.expectError(error.ReleaseNotPlaced, runtime.libraryMarkReleaseReviewed(library, album, nightcall_mbid));
     try std.testing.expect(try matchListed(&runtime, library, album));
@@ -8692,27 +8694,19 @@ fn snapshotDatedNightcall(library_database: *database.LibraryDatabase, release_d
     });
 }
 
-fn storedFieldDiffers(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64) !bool {
+fn releaseFieldDiffers(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64, field: ReleaseField) !bool {
     const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, release_id, null);
     defer diff.deinit();
-    var differs = false;
-    for (diff.fields) |field| {
-        if (library_pass.release_apply.stored_fields.contains(field.field) and field.differs) differs = true;
-    }
-    return differs;
+    return diff.fields[@backingInt(field)].differs;
 }
 
-fn expectMarkingAgrees(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64, differs: bool) !void {
-    try std.testing.expectEqual(differs, try storedFieldDiffers(runtime, library, release_id));
-    if (differs) {
-        try std.testing.expectError(error.ReleaseDiffers, runtime.libraryMarkReleaseReviewed(library, release_id, null));
-    } else {
-        try runtime.libraryMarkReleaseReviewed(library, release_id, null);
-        try runtime.libraryUnmarkReleaseReviewed(library, release_id);
-    }
+fn expectMarkingReviews(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64) !void {
+    try runtime.libraryMarkReleaseReviewed(library, release_id, null);
+    try std.testing.expect(try reviewedListed(runtime, library, release_id, null));
+    try runtime.libraryUnmarkReleaseReviewed(library, release_id);
 }
 
-test "the diff shows the snapshot's values, and a field differs exactly when an Apply of it would change a value, as Mark as Reviewed decides" {
+test "the diff shows the snapshot's values, a field differs exactly when an Apply of it would change a value, and Mark as Reviewed records the album whatever differs" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-diff-snapshot?mode=memory&cache=shared");
@@ -8757,14 +8751,17 @@ test "the diff shows the snapshot's values, and a field differs exactly when an 
         try std.testing.expectEqual(@as(u32, 4), diff.aligned);
         try std.testing.expectEqualStrings(nightcall_titles[2], diff.tracks[2].candidate_title);
     }
-    try expectMarkingAgrees(&runtime, library, album, true);
+    try expectMarkingReviews(&runtime, library, album);
 
     const dated = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_date));
     dated.deinit();
-    try expectMarkingAgrees(&runtime, library, album, true);
+    try std.testing.expect(!try releaseFieldDiffers(&runtime, library, album, .release_date));
+    try std.testing.expect(try releaseFieldDiffers(&runtime, library, album, .release_id));
+    try expectMarkingReviews(&runtime, library, album);
     const numbered = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_id));
     numbered.deinit();
-    try expectMarkingAgrees(&runtime, library, album, false);
+    try std.testing.expect(!try releaseFieldDiffers(&runtime, library, album, .release_id));
+    try expectMarkingReviews(&runtime, library, album);
 
     const edit = try runtime.libraryEditTracks(library, &.{try trackOfFile(library_database, files[1])}, &.{.{ .field = .title, .value = "Nightcall (Remix)" }});
     edit.deinit();
@@ -8775,7 +8772,110 @@ test "the diff shows the snapshot's values, and a field differs exactly when an 
         try std.testing.expectEqualStrings("0 of 4 differ", titles.local);
         try std.testing.expect(!titles.differs);
     }
-    try expectMarkingAgrees(&runtime, library, album, false);
+    try expectMarkingReviews(&runtime, library, album);
+}
+
+fn snapshotFeaturedNightcall(library_database: *database.LibraryDatabase) !void {
+    var tracks: [4]database.ReleaseTracklistTrack = undefined;
+    for (&tracks, 0..) |*track, index| track.* = .{
+        .disc = 1,
+        .position = @intCast(index + 1),
+        .title = nightcall_titles[index],
+        .artist_credit = if (index == 0) "Kavinsky feat. Lovefoxxx" else "Kavinsky",
+        .length_ms = 258_000,
+        .recording_mbid = nightcall_recordings[index],
+        .release_track_mbid = nightcall_track_mbids[index],
+    };
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = nightcall_mbid,
+        .title = "Nightcall",
+        .artist_credit = "Kavinsky",
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &tracks,
+    });
+}
+
+test "an Apply of any fields that leaves no Track alone marks the album reviewed while a track artist still differs" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-apply-ids-reviewed?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeFullNightcall(library_database, index);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    try snapshotFeaturedNightcall(library_database);
+    try std.testing.expect(try releaseFieldDiffers(&runtime, library, album, .track_titles));
+    try std.testing.expect(try matchListed(&runtime, library, album));
+
+    const nothing = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .empty);
+    defer nothing.deinit();
+    try std.testing.expectEqual(@as(usize, 0), nothing.left_alone.len);
+    try std.testing.expectEqual(@as(?i64, album), nothing.reviewed_release_id);
+    try std.testing.expect(try reviewedListed(&runtime, library, album, null));
+    try runtime.libraryUnmarkReleaseReviewed(library, album);
+    try std.testing.expect(try matchListed(&runtime, library, album));
+
+    const dated = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_date));
+    defer dated.deinit();
+    try std.testing.expectEqual(@as(?i64, album), dated.reviewed_release_id);
+    try runtime.libraryUnmarkReleaseReviewed(library, album);
+
+    const accepted = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_id));
+    defer accepted.deinit();
+    try std.testing.expectEqual(@as(usize, 0), accepted.left_alone.len);
+    try std.testing.expectEqual(@as(?i64, album), accepted.reviewed_release_id);
+    try std.testing.expect(!try matchListed(&runtime, library, album));
+    try std.testing.expect(try reviewedListed(&runtime, library, album, null));
+    try expectOrcaValue(library_database, files[0], .artist, null);
+    try std.testing.expect(try releaseFieldDiffers(&runtime, library, album, .track_titles));
+    try runtime.libraryMarkReleaseReviewed(library, album, null);
+    try std.testing.expect(try reviewedListed(&runtime, library, album, null));
+}
+
+test "an Apply that leaves a Track alone does not mark the album reviewed" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try partialNightcall(&runtime, "file:orca-apply-left-alone-unreviewed?mode=memory&cache=shared");
+    const applied = try runtime.libraryApplyRelease(setup.library, std.testing.allocator, setup.album, .initOne(.release_id));
+    defer applied.deinit();
+    try std.testing.expect(applied.left_alone.len != 0);
+    try std.testing.expectEqual(@as(?i64, null), applied.reviewed_release_id);
+    try std.testing.expectError(error.ReleaseNotPlaced, runtime.libraryMarkReleaseReviewed(setup.library, setup.album, null));
+    try std.testing.expect(try matchListed(&runtime, setup.library, setup.album));
+}
+
+test "the diff carries each placed Track's artist credit beside the release's, and an artist-only difference counts as a differing track" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-diff-artist-credit?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| files[index] = try observeFullNightcall(library_database, index);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    try snapshotFeaturedNightcall(library_database);
+
+    const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, null);
+    defer diff.deinit();
+    const titles = diff.fields[@backingInt(ReleaseField.track_titles)];
+    try std.testing.expectEqualStrings("1 of 4 differ", titles.local);
+    try std.testing.expect(titles.differs);
+    var differing: usize = 0;
+    for (diff.tracks) |track| {
+        try std.testing.expectEqualStrings("Kavinsky", track.local_artist);
+        if (std.mem.eql(u8, track.candidate_title, nightcall_titles[0])) {
+            try std.testing.expectEqualStrings("Kavinsky feat. Lovefoxxx", track.candidate_artist);
+            try std.testing.expectEqualStrings(track.local_title, track.candidate_title);
+            try std.testing.expect(track.differs);
+            differing += 1;
+        } else {
+            try std.testing.expectEqualStrings("Kavinsky", track.candidate_artist);
+            try std.testing.expect(!track.differs);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), differing);
 }
 
 test "the release-match list names the best candidate by its snapshot's title and date" {
@@ -8788,7 +8888,7 @@ test "the release-match list names the best candidate by its snapshot's title an
     try projectAll(library_database);
     const album = try releaseOfFile(library_database, files[0]);
     try snapshotDatedNightcall(library_database, "2013-01-28");
-    for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched }) |bucket| {
+    for ([_]ReleaseMatchBucket{ .confident, .needs_review, .unmatched, .reviewed }) |bucket| {
         var page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, null, 512, 0);
         defer page.deinit();
         for (page.items) |item| if (item.release_id == album) {

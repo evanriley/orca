@@ -3611,6 +3611,8 @@ static const char review_release_json[] =
     "{\"id\":\"" REVIEW_FIRST_TRACK_MBID "\",\"position\":1,\"title\":\"Reference Tone\",\"length\":200,"
     "\"recording\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e21\"}},"
     "{\"id\":\"" REVIEW_SECOND_TRACK_MBID "\",\"position\":2,\"title\":\"Second Song\",\"length\":999000,"
+    "\"artist-credit\":[{\"name\":\"Orca Guest\",\"joinphrase\":\"\","
+    "\"artist\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e04\"}}],"
     "\"recording\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e22\"}},"
     "{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e13\",\"position\":3,\"title\":\"Third Song\",\"length\":999000,"
     "\"recording\":{\"id\":\"5b3f4c1e-9d2a-4e6b-8c7d-0a1b2c3d4e23\"}}]}]}";
@@ -3815,6 +3817,30 @@ static orca_track_edit text_edit(uint8_t field, const char *value) {
     return edit;
 }
 
+struct track_credit_capture {
+    int64_t track_id;
+    uint32_t calls;
+    uint32_t differing;
+    uint8_t differs;
+    char local_title[64];
+    char local_artist[64];
+    char candidate_artist[64];
+};
+
+static void capture_track_credit(void *context, const orca_release_match_diff_view *diff) {
+    struct track_credit_capture *capture = context;
+    capture->calls += 1;
+    for (size_t index = 0; index < diff->track_count; index += 1) {
+        const orca_release_track_alignment_view *track = &diff->tracks[index];
+        if (track->differs) capture->differing += 1;
+        if (track->track_id != capture->track_id) continue;
+        capture->differs = track->differs;
+        copy_view(capture->local_title, sizeof capture->local_title, track->local_title);
+        copy_view(capture->local_artist, sizeof capture->local_artist, track->local_artist);
+        copy_view(capture->candidate_artist, sizeof capture->candidate_artist, track->candidate_artist);
+    }
+}
+
 static int review_library_steps(orca_runtime *runtime, orca_handle library, const char *music) {
     int64_t root_id = 0;
     SMOKE_CHECK(orca_library_add_root(runtime, library, music, &root_id) == ORCA_STATUS_OK);
@@ -3938,6 +3964,14 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
                                                 REVIEW_SECOND_TRACK_MBID, &origin) == ORCA_STATUS_OK);
     SMOKE_CHECK(origin == ORCA_PAIRING_ORIGIN_BY_HAND);
     if (review_tracks(runtime, library, "Synced FLAC", &ids) != 0) return 1;
+    struct track_credit_capture credit;
+    memset(&credit, 0, sizeof credit);
+    credit.track_id = ids.second;
+    SMOKE_CHECK(orca_library_release_match_diff(runtime, library, ids.release_id, REVIEW_RELEASE_MBID, &credit,
+                                                capture_track_credit) == ORCA_STATUS_OK);
+    SMOKE_CHECK(credit.calls == 1 && credit.differs == 1 && credit.differing == 1);
+    SMOKE_CHECK(strcmp(credit.local_title, "Synced FLAC") == 0);
+    SMOKE_CHECK(strcmp(credit.local_artist, "Orca Fixtures") == 0 && strcmp(credit.candidate_artist, "Orca Guest") == 0);
     memset(&applied, 0, sizeof applied);
     SMOKE_CHECK(orca_library_apply_release(runtime, library, ids.release_id, every_field, &applied,
                                            capture_apply) == ORCA_STATUS_OK);
@@ -3945,6 +3979,12 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
     SMOKE_CHECK(applied.view.has_reviewed_release_id == 1);
     if (review_tracks(runtime, library, "Second Song", &ids) != 0) return 1;
     SMOKE_CHECK(applied.view.reviewed_release_id == ids.release_id);
+    memset(&credit, 0, sizeof credit);
+    credit.track_id = ids.second;
+    SMOKE_CHECK(orca_library_release_match_diff(runtime, library, ids.release_id, REVIEW_RELEASE_MBID, &credit,
+                                                capture_track_credit) == ORCA_STATUS_OK);
+    SMOKE_CHECK(credit.calls == 1 && credit.differs == 0 && credit.differing == 0);
+    SMOKE_CHECK(strcmp(credit.local_artist, "Orca Guest") == 0 && strcmp(credit.candidate_artist, "Orca Guest") == 0);
 
     struct release_match_v2_capture listed;
     memset(&listed, 0, sizeof listed);

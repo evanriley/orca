@@ -35,8 +35,7 @@ pub const ReleaseApplyOutcome = struct {
     /// of the release replaces it.
     artist_ids_unknown: bool,
     /// The Release, under its ID after the reprojection, that the Apply
-    /// marked as reviewed because it left no Track alone and no value
-    /// differing; null otherwise.
+    /// marked as reviewed because it left no Track alone; null otherwise.
     reviewed_release_id: ?i64 = null,
 
     pub fn deinit(self: ReleaseApplyOutcome) void {
@@ -45,9 +44,6 @@ pub const ReleaseApplyOutcome = struct {
         child.destroy(self.arena);
     }
 };
-
-/// The fields Mark as Reviewed requires an Apply to leave unchanged.
-pub const stored_fields: database.ReleaseFieldSet = .initMany(&.{ .album, .album_artist, .release_date, .release_id, .track_titles });
 
 /// Stores `fields` of the Release's best candidate's snapshot, as
 /// `IdentificationProposalRepository.applyReleasePlanLocked` describes, on
@@ -108,11 +104,10 @@ pub fn apply(
 }
 
 /// Records that a person found the Release equal to `release_mbid`, else its
-/// best candidate. Refused with `error.ReleaseNotPlaced` unless every Track
-/// has a play file and is placed, and with `error.ReleaseDiffers` when an
-/// Apply of every field would change a value in effect. The review holds
-/// while that release stays the best candidate and the Release's Tracks,
-/// their values and the snapshot stay as they were.
+/// best candidate, whatever values still differ from it. Refused with
+/// `error.ReleaseNotPlaced` unless every Track has a play file and is
+/// placed. The review holds while that release stays the best candidate and
+/// the Release's Tracks, their values and the snapshot stay as they were.
 pub fn markReviewed(
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,
@@ -130,8 +125,8 @@ pub fn markReviewed(
 /// Marks as reviewed against `release_mbid` the one Release that, after an
 /// Apply that left no Track alone was reprojected, holds the files the Apply
 /// wrote, or `release_id` when it wrote none. Returns that Release's ID, or
-/// null when the files now lie on several Releases or marking is refused for
-/// an unplaced Track or a differing value.
+/// null when the files now lie on several Releases or a Track of it is not
+/// placed.
 pub fn reviewApplied(
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,
@@ -148,7 +143,7 @@ pub fn reviewApplied(
         return null;
     };
     markReviewedLocked(allocator, library, reviewed, release_mbid) catch |err| switch (err) {
-        error.ReleaseNotPlaced, error.ReleaseDiffers => {
+        error.ReleaseNotPlaced => {
             try library.database.exec("COMMIT;");
             return null;
         },
@@ -185,11 +180,6 @@ fn markReviewedLocked(
     for (planned.view.tracks) |track| {
         if (track.play_file == null or !planned.isPlaced(track.track_id)) return error.ReleaseNotPlaced;
     }
-    const differing = try library.identification_proposals.applyReleasePlanLocked(allocator, &.{
-        .tracklist = &planned.tracklist.record,
-        .tracks = planned.apply_tracks.items,
-    }, stored_fields, true, null);
-    if (differing != 0) return error.ReleaseDiffers;
     const compared = planned.tracklist.record.release_mbid;
     const digest = try database.repository.releaseReviewDigest(library.database, release_id, compared) orelse
         return error.NoReleaseTracklist;
@@ -199,10 +189,10 @@ fn markReviewedLocked(
 /// Replaces what `diff` says of its release with what an Apply of the
 /// release's snapshot would store, when the release has one: the album,
 /// album artist, date and release ID come from the snapshot, each Track
-/// placed on it takes its release track's position, title and length, and
-/// a stored field differs exactly when an Apply of that field alone would
-/// change a value in effect. Without a snapshot, or for a Release of more
-/// than `max_page` Tracks, `diff` is left as it is.
+/// placed on it takes its release track's position, title, artist credit
+/// and length, and a stored field differs exactly when an Apply of that
+/// field alone would change a value in effect. Without a snapshot, or for a
+/// Release of more than `max_page` Tracks, `diff` is left as it is.
 pub fn applySnapshotToDiff(
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,
@@ -225,13 +215,18 @@ pub fn applySnapshotToDiff(
         const release_track = if (apply_track) |entry| entry.placed else null;
         row.position = fallbackPosition(track, index);
         row.candidate_title = "";
+        row.local_artist = try owned.dupe(u8, track.artist);
+        row.candidate_artist = "";
+        row.differs = false;
         row.delta_ms = null;
         const on_release = release_track orelse continue;
         placed += 1;
         row.position = on_release.position;
         row.candidate_title = try owned.dupe(u8, on_release.title);
+        row.candidate_artist = try owned.dupe(u8, on_release.artist_credit);
         row.delta_ms = lengthDelta(track.duration_ms, on_release.length_ms);
-        if (try differingValues(allocator, library, &planned, &.{apply_track.?}, .initOne(.track_titles)) != 0) titles_differ += 1;
+        row.differs = try differingValues(allocator, library, &planned, &.{apply_track.?}, .initOne(.track_titles)) != 0;
+        if (row.differs) titles_differ += 1;
     }
     diff.aligned = placed;
 

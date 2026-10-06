@@ -333,11 +333,9 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   track or a Release not wholly placed the calls return
   `ORCA_STATUS_INVALID_STATE`; a Release past 512 Tracks is
   `ORCA_STATUS_UNSUPPORTED`; an unknown id is `ORCA_STATUS_NOT_FOUND`; an unpair
-  or unmark with nothing to remove is `ORCA_STATUS_ALREADY_DONE`; marking a
-  Release whose values differ from the release is
-  `ORCA_STATUS_NEEDS_RECONCILIATION`. Pairing and Apply reproject, so Track and
-  Release ids may change: query again. Acceptance writes the library, never a
-  file.
+  or unmark with nothing to remove is `ORCA_STATUS_ALREADY_DONE`. Pairing and
+  Apply reproject, so Track and Release ids may change: query again. Acceptance
+  writes the library, never a file.
 - AcoustID submission: `orca_library_start_acoustid_submission`,
   `orca_job_submission_stats`, `orca_library_acoustid_submittable_count`,
   `orca_library_query_acoustid_submittable`. It cannot run beside a matching

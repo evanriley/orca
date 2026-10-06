@@ -680,6 +680,20 @@ fn diffValues(buffer: []u8, diff: ?liborca.ReleaseMatchDiff, field: Field, fallb
     });
 }
 
+fn trackArtistsLine(buffer: []u8, diff: ?liborca.ReleaseMatchDiff) ?*gtk.Widget {
+    const read = diff orelse return null;
+    var compared: u32 = 0;
+    var differing: u32 = 0;
+    for (read.tracks) |track| {
+        if (track.candidate_artist.len == 0) continue;
+        compared += 1;
+        if (!std.mem.eql(u8, track.local_artist, track.candidate_artist)) differing += 1;
+    }
+    if (compared == 0) return null;
+    if (differing == 0) return evidenceLine(true, "Track artists", strings.terminated(buffer, "as credited"));
+    return evidenceLine(false, "Track artists differ", strings.format(buffer, "{d} of {d}", .{ differing, compared }));
+}
+
 fn explanation(buffer: []u8, evidence: liborca.MatchEvidence, diff: ?liborca.ReleaseMatchDiff) [:0]const u8 {
     const tracks_agree = evidence.tracks != 0 and evidence.fingerprints_matched == evidence.tracks and evidence.durations_within_1s;
     if (tracks_agree and evidence.artist_agrees and evidence.title_agrees and !evidence.date_agrees) {
@@ -706,6 +720,7 @@ fn evidenceView(item: liborca.ReleaseMatchItem, detail: ?*const Detail) ?*gtk.Wi
     gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.artist_agrees, if (evidence.artist_agrees) "Artist" else "Artist differs", diffValues(&buffer, read.diff, .album_artist, item.artist)));
     gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.title_agrees, if (evidence.title_agrees) "Album title" else "Album title differs", diffValues(&buffer, read.diff, .album, item.title)));
     gtk.gtk_box_append(gtk.cast(gtk.Box, lines), evidenceLine(evidence.date_agrees, if (evidence.date_agrees) "Release date" else "Release date differs", diffValues(&buffer, read.diff, .release_date, "unknown")));
+    if (trackArtistsLine(&buffer, read.diff)) |line| gtk.gtk_box_append(gtk.cast(gtk.Box, lines), line);
 
     const sentence = label(explanation(&buffer, evidence, read.diff).ptr, "match-explanation");
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, sentence), gtk.true_);

@@ -338,8 +338,8 @@ section lists the entry points, errors and limits.
   returns how many values it stored. See
   [metadata.md](metadata.md#applying-a-release).
 - `libraryMarkReleaseReviewed(library, release_id, release_mbid)` marks a
-  Release reviewed against `release_mbid` or the best candidate when null
-  (`error.ReleaseNotPlaced`, `error.ReleaseDiffers`) and
+  Release reviewed against `release_mbid` or the best candidate when null,
+  whatever values differ (`error.ReleaseNotPlaced`), and
   `libraryUnmarkReleaseReviewed` forgets it (`error.UnknownRelease`,
   `error.ReleaseNotReviewed`); see
   [metadata.md](metadata.md#marking-a-release-as-reviewed).

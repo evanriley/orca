@@ -1721,9 +1721,12 @@ pub const ReleaseTrackAlignmentView = extern struct {
     position: u32,
     has_delta_ms: u8,
     fingerprint: u8,
-    _reserved: [2]u8 = @splat(0),
+    differs: u8,
+    _reserved: [1]u8 = @splat(0),
     local_title: StringView,
     candidate_title: StringView,
+    local_artist: StringView,
+    candidate_artist: StringView,
 };
 
 pub const ReleaseMatchDiffView = extern struct {
@@ -5315,8 +5318,11 @@ pub export fn orca_library_release_match_diff(
         .position = track.position,
         .has_delta_ms = @intFromBool(track.delta_ms != null),
         .fingerprint = @intFromBool(track.fingerprint),
+        .differs = @intFromBool(track.differs),
         .local_title = stringView(track.local_title),
         .candidate_title = stringView(track.candidate_title),
+        .local_artist = stringView(track.local_artist),
+        .candidate_artist = stringView(track.candidate_artist),
     };
     const view: ReleaseMatchDiffView = .{
         .release_mbid = stringView(diff.release_mbid),
@@ -8613,7 +8619,7 @@ fn mapError(err: anyerror) Status {
         error.NoReleaseTracklist, error.ReleaseTrackAlreadyPaired, error.ReleaseNotPlaced => .invalid_state,
         error.ReleaseTooLarge => .unsupported,
         error.MutationGroupAlreadyUndone, error.TrackNotPaired, error.ReleaseNotReviewed => .already_done,
-        error.MutationNeedsReconciliation, error.ReleaseDiffers => .needs_reconciliation,
+        error.MutationNeedsReconciliation => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,

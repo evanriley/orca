@@ -165,21 +165,21 @@ and `release_values_only` (Tracks that took release-track values, and Tracks
 that took only the release's), `artist_ids_unknown`, a `LeftAloneTrack` per
 Track given no release-track values (reason `not_placed` or `no_play_file`), and
 `reviewed_release_id`. An Apply that left no Track alone marks the reprojected
-Release as [reviewed](#marking-a-release-as-reviewed), so a finished Release
-leaves the Confident and Needs Review lists; `reviewed_release_id` is its ID
-after the reprojection, or null when marking was refused or the written files
-lie on several Releases. An Apply that left a Track alone keeps the Release
-listed with its `needs_pairing` count.
+Release as [reviewed](#marking-a-release-as-reviewed) whatever fields it chose,
+including none, and whatever values still differ, so a finished Release leaves
+the Confident and Needs Review lists. `reviewed_release_id` is the Release's ID
+after the reprojection, or null when a Track is not placed afterwards or the
+written files lie on several Releases. An Apply that left a Track alone keeps
+the Release listed with its `needs_pairing` count.
 
 #### Marking a release as reviewed
 
 `Runtime.libraryMarkReleaseReviewed(library, release_id, release_mbid)` and
-`orca-cli mark-release-reviewed` record that a person found the Release equal to
-`release_mbid`, or its best candidate when null. It is refused with
+`orca-cli mark-release-reviewed` record that a person decided the Release is
+`release_mbid`, or its best candidate when null, and keeps its values as they
+are. Values that differ from the release do not refuse it. It is refused with
 `error.ReleaseNotPlaced` unless the Release has Tracks and every Track has a
-play file and is placed `automatic` or `paired`, and with `error.ReleaseDiffers`
-when an Apply of every field would change a value in effect (a user's locked
-value counts as unchanged).
+play file and is placed `automatic` or `paired`.
 
 The review is stored in `reviewed_releases` with a SHA-256 digest of the
 snapshot's header and tracks, the Release's Track IDs, and each file's observed
@@ -215,13 +215,14 @@ one has its own.
 
 `Runtime.libraryReleaseMatchDiff` compares the Release with a candidate release.
 With a tracklist snapshot, the candidate side is what an Apply of it would
-store; Tracks the alignment does not place show no candidate title. Without one,
-it comes from the Tracks' proposals. A field among `album`, `album_artist`,
-`release_date`, `release_id` and `track_titles` differs exactly when an Apply of
-that field alone would change a value in effect, computed by the dry run the
-Apply uses. A Release with every Track placed and no field differing is
-therefore one `libraryMarkReleaseReviewed` accepts. `release_type`, `genre` and
-`artwork` come from proposals and stored covers.
+store; Tracks the alignment does not place show no candidate title or artist
+credit. Without one, it comes from the Tracks' proposals. Each Track row carries
+the local and candidate title and artist credit, and `differs` is set when an
+Apply of `track_titles` would change either. The `track_titles` field counts
+those Tracks. A field among `album`, `album_artist`, `release_date`,
+`release_id` and `track_titles` differs exactly when an Apply of that field
+alone would change a value in effect, computed by the dry run the Apply uses.
+`release_type`, `genre` and `artwork` come from proposals and stored covers.
 
 #### Release alignment
 

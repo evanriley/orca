@@ -947,6 +947,13 @@ pub const ReleaseTrackAlignment = struct {
     position: u32,
     local_title: []const u8,
     candidate_title: []const u8,
+    /// The Track's artist credit.
+    local_artist: []const u8,
+    /// The release track's artist credit; empty when `candidate_title` is.
+    candidate_artist: []const u8,
+    /// Storing the release track's title and artist credit would change
+    /// the Track's; what the `track_titles` field counts.
+    differs: bool,
     /// The recording's duration less the Track's.
     delta_ms: ?i64,
     fingerprint: bool,
@@ -1109,16 +1116,22 @@ pub fn releaseMatchDiff(
         const proposal = track.chosen(release_mbid);
         const payload = if (proposal) |chosen| chosen.payload else null;
         const candidate_title = if (payload) |named| named.track_title orelse named.title else "";
+        const candidate_artist = if (payload) |named| named.track_artist orelse named.artist else "";
         alignment.* = .{
             .track_id = track.track_id,
             .position = if (payload) |named| named.track_number orelse fallbackPosition(track, index) else fallbackPosition(track, index),
             .local_title = try owned.dupe(u8, track.title),
             .candidate_title = try owned.dupe(u8, candidate_title),
+            .local_artist = try owned.dupe(u8, track.artist),
+            .candidate_artist = if (candidate_title.len == 0) "" else try owned.dupe(u8, candidate_artist),
+            .differs = false,
             .delta_ms = if (proposal) |chosen| durationDelta(track, chosen) else null,
             .fingerprint = if (proposal) |chosen| chosen.fingerprintBacked() else false,
         };
         if (proposal != null or track.names(release_mbid)) diff.aligned += 1;
-        if (candidate_title.len != 0 and !std.mem.eql(u8, candidate_title, track.title)) titles_differ += 1;
+        alignment.differs = candidate_title.len != 0 and (!std.mem.eql(u8, candidate_title, track.title) or
+            (candidate_artist.len != 0 and !std.mem.eql(u8, candidate_artist, track.artist)));
+        if (alignment.differs) titles_differ += 1;
     }
     diff.tracks = tracks;
 

@@ -147,6 +147,7 @@ pub const State = struct {
     previous: ?*gtk.Widget = null,
     next: ?*gtk.Widget = null,
     apply: ?*gtk.Widget = null,
+    mark: ?*gtk.Widget = null,
     not_this: ?*gtk.Widget = null,
     search: ?*gtk.Widget = null,
     fields: ?*gtk.Box = null,
@@ -215,7 +216,7 @@ fn fieldName(field: Field) [*:0]const u8 {
         .release_id => "Release ID",
         .genre => "Genre",
         .artwork => "Artwork",
-        .track_titles => "Track titles",
+        .track_titles => "Track titles and artists",
     };
 }
 
@@ -244,17 +245,27 @@ fn artworkText(buffer: []u8, text: []const u8, size: ?liborca.ArtworkSize) [:0]c
 fn titlesDiffer(diff: liborca.ReleaseMatchDiff) u32 {
     var count: u32 = 0;
     for (diff.tracks) |track| {
-        if (track.candidate_title.len != 0 and !std.mem.eql(u8, track.local_title, track.candidate_title)) count += 1;
+        if (track.differs) count += 1;
     }
     return count;
 }
 
-fn onlyCaseDiffers(diff: liborca.ReleaseMatchDiff) bool {
+const TracksDiffer = enum { nothing, artists_only, case_only, other };
+
+fn howTracksDiffer(diff: liborca.ReleaseMatchDiff) TracksDiffer {
+    var titles_equal = true;
+    var case_only = true;
+    var any = false;
     for (diff.tracks) |track| {
-        if (track.candidate_title.len == 0) continue;
-        if (!std.ascii.eqlIgnoreCase(track.local_title, track.candidate_title)) return false;
+        if (!track.differs) continue;
+        any = true;
+        if (!std.mem.eql(u8, track.local_title, track.candidate_title)) titles_equal = false;
+        if (!std.ascii.eqlIgnoreCase(track.local_title, track.candidate_title) or
+            !std.ascii.eqlIgnoreCase(track.local_artist, track.candidate_artist)) case_only = false;
     }
-    return true;
+    if (!any) return .nothing;
+    if (titles_equal) return .artists_only;
+    return if (case_only) .case_only else .other;
 }
 
 fn localText(buffer: []u8, diff: liborca.ReleaseMatchDiff, each: liborca.ReleaseFieldDiff) [:0]const u8 {
@@ -279,12 +290,11 @@ fn candidateText(buffer: []u8, diff: liborca.ReleaseMatchDiff, each: liborca.Rel
     return switch (each.field) {
         .artwork => artworkText(buffer, each.candidate, diff.candidate_artwork_size),
         .release_id => strings.terminated(buffer, if (each.candidate.len != 0) "MusicBrainz release ID" else "—"),
-        .track_titles => strings.terminated(buffer, if (titlesDiffer(diff) == 0)
-            "As released"
-        else if (onlyCaseDiffers(diff))
-            "Capitalized as released"
-        else
-            "As released"),
+        .track_titles => strings.terminated(buffer, switch (howTracksDiffer(diff)) {
+            .nothing, .other => "As released",
+            .artists_only => "As credited",
+            .case_only => "Capitalized as released",
+        }),
         else => strings.terminated(buffer, if (each.candidate.len != 0) each.candidate else "—"),
     };
 }
@@ -326,6 +336,7 @@ fn showChecked(self: *App) void {
     var text = fieldsText(&text_buffer, count);
     var tooltip: [:0]const u8 = apply_tooltip;
     var sensitive = count != 0 and review.diff != null;
+    var offer_mark = false;
     review.primary = .apply;
     if (review.scope.bucket == .reviewed) {
         review.primary = .unmark;
@@ -349,12 +360,16 @@ fn showChecked(self: *App) void {
                     if (total == 1) "Track" else "Tracks",
                 });
                 tooltip = strings.format(&tooltip_buffer, "Album values go to every track; track values only to the {d} placed", .{placement.placed});
-            } else if (review.diff) |diff| if (!anyDiffers(diff)) {
-                review.primary = .mark;
-                text = "Mark as Reviewed";
-                tooltip = "Nothing differs and every track is placed: take this album off the list without writing";
-                sensitive = true;
-            };
+            } else if (review.diff) |diff| {
+                if (anyDiffers(diff)) {
+                    offer_mark = true;
+                } else {
+                    review.primary = .mark;
+                    text = "Mark as Reviewed";
+                    tooltip = "Nothing differs and every track is placed: take this album off the list without writing";
+                    sensitive = true;
+                }
+            }
         },
         .too_large => {
             sensitive = false;
@@ -362,6 +377,7 @@ fn showChecked(self: *App) void {
         },
         .none => {},
     }
+    if (review.mark) |mark| gtk.gtk_widget_set_visible(mark, @intFromBool(offer_mark));
     gtk.gtk_button_set_label(gtk.cast(gtk.Button, primary), text.ptr);
     gtk.gtk_widget_set_tooltip_text(primary, tooltip.ptr);
     gtk.gtk_widget_set_sensitive(primary, @intFromBool(sensitive));
@@ -389,11 +405,14 @@ fn fieldRow(self: *App, diff: liborca.ReleaseMatchDiff, each: liborca.ReleaseFie
     _ = gtk.signalConnect(check, "toggled", gtk.callback(checkToggled), self);
 
     var buffer: [512]u8 = undefined;
+    const name = cell(fieldName(each.field), "match-review-name", 118);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, name), gtk.ELLIPSIZE_NONE);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, name), gtk.true_);
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(row, "match-review-field");
     append(row, &.{
         check,
-        cell(fieldName(each.field), "match-review-name", 118),
+        name,
         cell(localText(&buffer, diff, each).ptr, "match-review-local", 175),
         cell(candidateText(&buffer, diff, each).ptr, "match-review-candidate", 0),
     });
@@ -696,15 +715,38 @@ fn statusCell(self: *App, alignment: *const liborca.ReleaseAlignment, row: libor
     return status;
 }
 
+fn localArtist(self: *App, track_id: i64) ?[]const u8 {
+    const diff = self.match_review.diff orelse return null;
+    for (diff.tracks) |track| {
+        if (track.track_id == track_id) return track.local_artist;
+    }
+    return null;
+}
+
+fn withCredit(title: *gtk.Widget, credit: []const u8, class: [*:0]const u8) *gtk.Widget {
+    var buffer: [512]u8 = undefined;
+    const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 1);
+    gtk.gtk_widget_add_css_class(column, "match-review-pair");
+    gtk.gtk_widget_set_hexpand(column, gtk.true_);
+    const line = cell(titleText(&buffer, credit).ptr, "match-review-credit", 0);
+    gtk.gtk_widget_add_css_class(line, class);
+    append(column, &.{ title, line });
+    return column;
+}
+
 fn placementRow(self: *App, alignment: *const liborca.ReleaseAlignment, row: liborca.ReleaseTrackPlacement) *gtk.Widget {
     var buffer: [512]u8 = undefined;
     const number = cell(positionText(&buffer, alignment, row.disc, row.position).ptr, "match-review-number", number_width);
     gtk.gtk_widget_add_css_class(number, "numeric");
-    const local = if (row.track) |track|
+    var local = if (row.track) |track|
         cell(titleText(&buffer, track.title).ptr, if (std.mem.eql(u8, track.title, row.title)) "match-review-local" else "match-review-differs", 0)
     else
         cell("Not in your files", "match-review-missing", 0);
-    const release = cell(titleText(&buffer, row.title).ptr, "match-review-candidate", 0);
+    var release = cell(titleText(&buffer, row.title).ptr, "match-review-candidate", 0);
+    if (row.track) |track| if (localArtist(self, track.track_id)) |artist| if (row.artist_credit.len != 0 and !std.mem.eql(u8, artist, row.artist_credit)) {
+        local = withCredit(local, artist, "match-review-differs");
+        release = withCredit(release, row.artist_credit, "match-review-credit");
+    };
     const time = timeLabel(delta(&buffer, if (row.track != null) row.evidence.length_delta_ms else null).ptr, "match-review-delta");
     const widget = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(widget, "match-review-track");
@@ -1043,7 +1085,6 @@ fn markReviewed(self: *App, library: liborca.LibraryHandle, entry: Entry) void {
     };
     self.runtime.libraryMarkReleaseReviewed(library, entry.release_id, release_mbid) catch |err| {
         const message: [:0]const u8 = switch (err) {
-            error.ReleaseDiffers => "Apply or edit the differing values first",
             error.ReleaseNotPlaced => "Pair every track first",
             error.NoReleaseTracklist => "Look up the release first",
             else => "Could not mark the release as reviewed",
@@ -1073,6 +1114,13 @@ fn applyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         .mark => markReviewed(self, library, entry),
         .unmark => unmarkReviewed(self, library, entry),
     }
+}
+
+fn markClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const entry = current(self) orelse return;
+    markReviewed(self, library, entry);
 }
 
 fn notThisClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1160,6 +1208,7 @@ fn buildHeader(self: *App) *gtk.Widget {
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
     review.title = gtk.cast(gtk.Label, title);
     const summary = label("", "match-review-summary");
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, summary), gtk.true_);
     review.summary = gtk.cast(gtk.Label, summary);
     const link_content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 3);
     const link_icon = gtk.gtk_image_new_from_icon_name("orca-external-link-symbolic");
@@ -1181,10 +1230,12 @@ fn buildHeader(self: *App) *gtk.Widget {
 
     review.not_this = button("Not This Release", "match-again", "Dismiss this candidate; the album moves to Unmatched", gtk.callback(notThisClicked), self);
     review.search = button("Search MusicBrainz…", "match-again", "Search MusicBrainz for this album again, ignoring its IDs", gtk.callback(searchClicked), self);
+    review.mark = button("Mark as Reviewed", "match-again", "Every track is placed: keep this album's values as they are and take it off the list without writing", gtk.callback(markClicked), self);
+    gtk.gtk_widget_set_visible(review.mark.?, gtk.false_);
     review.apply = button("Apply 0 Fields to Orca", "match-review-apply", apply_tooltip, gtk.callback(applyClicked), self);
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
-    append(actions, &.{ review.not_this.?, review.search.?, review.apply.? });
+    append(actions, &.{ review.not_this.?, review.search.?, review.mark.?, review.apply.? });
 
     const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 20);
     gtk.gtk_widget_add_css_class(header, "match-review-header");

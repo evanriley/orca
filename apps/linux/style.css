@@ -5313,6 +5313,19 @@ checkbutton.match-review-check check:checked {
   color: @orca_text_3;
 }
 
+.match-review-track > .match-review-pair {
+  padding: 0 8px;
+}
+
+.match-review-track .match-review-credit {
+  color: @orca_text_3;
+  font-size: 11.5px;
+}
+
+.match-review-track .match-review-credit.match-review-differs {
+  color: @orca_diff;
+}
+
 .match-review-track .match-review-missing {
   color: @orca_text_3;
 }

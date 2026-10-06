@@ -54,7 +54,6 @@ fn describe(err: anyerror) []const u8 {
         error.ReleaseTrackAlreadyPaired => "another track is paired with that release track; run unpair-track on it first",
         error.TrackNotPaired => "that track is not paired on that release",
         error.ReleaseNotPlaced => "every track must have a file and be placed on the release first; run release-alignment, then pair-track",
-        error.ReleaseDiffers => "applying the release would change a value; run matches --release=ID --diff, then apply-release",
         error.ReleaseNotReviewed => "that release is not marked as reviewed; run matches --releases --bucket=reviewed for those that are",
         error.MissingReleaseAction => "--release=ID needs --evidence, --diff or --dismiss=MBID",
         error.UnknownReleaseField => "--fields takes album, album_artist, date, release_id and track_titles, comma-separated",
@@ -795,16 +794,18 @@ const help_details =
     \\compilation flag are then left alone until match --release=ID looks
     \\the release up again), and a left_alone line for each Track given no
     \\release-track values, with reason not_placed or no_play_file. An Apply
-    \\that leaves no Track alone and nothing differing marks the Release as
-    \\reviewed and prints its ID after reprojection as reviewed=, else -.
+    \\that leaves no Track alone marks the Release as reviewed, whichever
+    \\fields it stored, and prints its ID after reprojection as reviewed=,
+    \\else -.
     \\mark-release-reviewed moves a Release to the reviewed bucket while its
     \\best candidate, tracklist, Tracks and their values stay as they are;
-    \\every Track must be placed and apply-release must have nothing left to
-    \\change. matches --releases --bucket=reviewed lists the Releases whose
+    \\every Track must be placed, and values that still differ stay as they
+    \\are. matches --releases --bucket=reviewed lists the Releases whose
     \\review still holds, and unmark-release-reviewed forgets a review so the
     \\Release returns to its bucket. matches --releases prints placed= and
     \\needs_pairing= for each Release with a tracklist, and reviewed= in its
-    \\totals.
+    \\totals. matches --release=ID --diff prints each Track's title and
+    \\artist credit beside the release track's.
     \\accept-matches accepts each file's best match at least as confident as
     \\--min-score. A match AcoustID found with a fingerprint score of at least
     \\0.9 comes first; among those, the higher percent, then the Track's own
@@ -5291,7 +5292,9 @@ fn reviewReleaseMatch(context: Context) !void {
             for (diff.tracks) |track| {
                 try stdout.print("track={d}\tposition={d}\tfingerprint={s}\tdelta_ms=", .{ track.track_id, track.position, flag(track.fingerprint) });
                 if (track.delta_ms) |delta| try stdout.print("{d}", .{delta}) else try stdout.writeAll("-");
-                try stdout.print("\tlocal={s}\tcandidate={s}\n", .{ track.local_title, track.candidate_title });
+                try stdout.print("\tlocal={s}\tcandidate={s}\tlocal_artist={s}\tcandidate_artist={s}\n", .{
+                    track.local_title, track.candidate_title, track.local_artist, track.candidate_artist,
+                });
             }
         },
         .dismiss => {

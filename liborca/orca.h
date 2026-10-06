@@ -4724,18 +4724,25 @@ typedef struct orca_release_field_diff_view {
     orca_string_view candidate;
 } orca_release_field_diff_view;
 
-/* A Track beside its track on the candidate: `candidate_title` is empty and
- * `has_delta_ms` 0 when the release does not name it. `delta_ms` is the
- * recording's duration less the Track's. */
+/* A Track beside its track on the candidate: `candidate_title` and
+ * `candidate_artist` are empty and `has_delta_ms` 0 when the release does
+ * not name it. `local_artist` and `candidate_artist` are the Track's and the
+ * release track's artist credits; `differs` is 1 when storing the release
+ * track's title and artist credit would change the Track's, which the
+ * TRACK_TITLES field counts. `delta_ms` is the recording's duration less the
+ * Track's. */
 typedef struct orca_release_track_alignment_view {
     int64_t track_id;
     int64_t delta_ms;
     uint32_t position;
     uint8_t has_delta_ms;
     uint8_t fingerprint;
-    uint8_t reserved[2];
+    uint8_t differs;
+    uint8_t reserved[1];
     orca_string_view local_title;
     orca_string_view candidate_title;
+    orca_string_view local_artist;
+    orca_string_view candidate_artist;
 } orca_release_track_alignment_view;
 
 /* Every orca_release_field in order, then every Track; `aligned` counts the
@@ -5028,10 +5035,11 @@ typedef struct orca_left_alone_track_view {
  * track values, in the alignment's Track order. `artist_ids_unknown` is set
  * when the snapshot predates Orca keeping the release's artist IDs, so the
  * album artist ID and compilation flag were left alone until a lookup
- * replaces it. An Apply that left no Track alone and no value differing
- * marks the Release as reviewed: `reviewed_release_id` is its id after
- * reprojection, with `has_reviewed_release_id` set. Everything is valid only
- * for the duration of the callback. */
+ * replaces it. An Apply that left no Track alone marks the Release as
+ * reviewed, whichever fields it stored and whatever values still differ:
+ * `reviewed_release_id` is its id after reprojection, with
+ * `has_reviewed_release_id` set. Everything is valid only for the duration
+ * of the callback. */
 typedef struct orca_release_apply_view {
     int64_t reviewed_release_id;
     uint32_t values_written;
@@ -5065,14 +5073,12 @@ orca_status orca_library_apply_release(
 );
 
 /* Marks the Release as reviewed against `release_mbid`, NUL-terminated, or
- * its best candidate when NULL: it moves to the REVIEWED bucket while that
- * release stays its best candidate and its Tracks, their values and the
- * snapshot stay as they were. INVALID_STATE unless every Track has a file
- * and is placed, or before a lookup snapshotted the tracklist;
- * NEEDS_RECONCILIATION when an Apply of the album, album artist, release
- * date, release ID and track titles would change a value in effect, which a
- * person settles by an Apply or an edit first. NOT_FOUND,
- * INVALID_ARGUMENT and UNSUPPORTED as orca_library_release_alignment. */
+ * its best candidate when NULL, whatever values still differ from it: it
+ * moves to the REVIEWED bucket while that release stays its best candidate
+ * and its Tracks, their values and the snapshot stay as they were.
+ * INVALID_STATE unless every Track has a file and is placed, or before a
+ * lookup snapshotted the tracklist. NOT_FOUND, INVALID_ARGUMENT and
+ * UNSUPPORTED as orca_library_release_alignment. */
 orca_status orca_library_mark_release_reviewed(
     orca_runtime *runtime,
     orca_handle library,
