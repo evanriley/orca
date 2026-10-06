@@ -370,11 +370,6 @@ screenshot for a display-only defect, and removes its entry.
 - When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
   sometimes not drawn, and stays missing. The race is likely in
   `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
-- On the Match Review page, the Best candidate and confidence columns start
-  at a different position on each row. `matchRow` in
-  `apps/linux/matches.zig` splits each row's width between two expanding
-  boxes, and the width left over depends on that row's action buttons, such
-  as Accept or "Review · 1 track needs pairing".
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. A
   failed fingerprint is decoded again.

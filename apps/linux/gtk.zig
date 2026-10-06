@@ -37,6 +37,7 @@ pub inline fn cast(comptime T: type, pointer: anytype) *T {
 }
 
 pub const Widget = opaque {};
+pub const SizeGroup = opaque {};
 pub const Window = opaque {};
 pub const Application = opaque {};
 pub const GApplication = opaque {};
@@ -144,6 +145,7 @@ pub const Rectangle = extern struct { x: c_int, y: c_int, width: c_int, height: 
 
 pub const ORIENTATION_HORIZONTAL: c_int = 0;
 pub const ORIENTATION_VERTICAL: c_int = 1;
+pub const SIZE_GROUP_HORIZONTAL: c_int = 1;
 
 pub const ALIGN_FILL: c_int = 0;
 pub const ALIGN_START: c_int = 1;
@@ -926,6 +928,8 @@ pub extern fn gtk_box_append(box: *Box, child: *Widget) void;
 pub extern fn gtk_box_prepend(box: *Box, child: *Widget) void;
 pub extern fn gtk_box_remove(box: *Box, child: *Widget) void;
 pub extern fn gtk_box_insert_child_after(box: *Box, child: *Widget, sibling: ?*Widget) void;
+pub extern fn gtk_size_group_new(mode: c_int) *SizeGroup;
+pub extern fn gtk_size_group_add_widget(group: *SizeGroup, widget: *Widget) void;
 pub extern fn gtk_box_set_homogeneous(box: *Box, homogeneous: gboolean) void;
 pub extern fn gtk_box_set_spacing(box: *Box, spacing: c_int) void;
 pub extern fn gtk_separator_new(orientation: c_int) *Widget;

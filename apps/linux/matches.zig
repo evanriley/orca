@@ -179,6 +179,7 @@ pub const State = struct {
     wanted: Want = .none,
     tabs: std.EnumArray(Bucket, Tab) = .initFill(.{}),
     list: ?*gtk.Box = null,
+    action_column: ?*gtk.SizeGroup = null,
     empty: ?*gtk.Label = null,
     corrections: ?*gtk.ListBox = null,
     corrections_box: ?*gtk.Widget = null,
@@ -791,6 +792,7 @@ fn matchRow(self: *App, item: liborca.ReleaseMatchItem, detail: ?*const Detail) 
 
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
+    if (self.matches.action_column) |column| gtk.gtk_size_group_add_widget(column, actions);
     const review_tooltip = "Choose what to take from this release";
     if (item.bucket == .reviewed) {
         if (!item.from_tags) gtk.gtk_box_append(gtk.cast(gtk.Box, actions), actionButton("Unmark", "Put this album back in the list to review", gtk.callback(unmarkClicked), row));
@@ -910,6 +912,8 @@ fn scrollerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.matches.scroller = null;
     self.matches.built = false;
+    if (self.matches.action_column) |column| gtk.g_object_unref(column);
+    self.matches.action_column = null;
 }
 
 pub fn build(self: *App) *gtk.Widget {
@@ -947,6 +951,7 @@ pub fn build(self: *App) *gtk.Widget {
     const list = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(list, "match-rows");
     matches.list = gtk.cast(gtk.Box, list);
+    matches.action_column = gtk.gtk_size_group_new(gtk.SIZE_GROUP_HORIZONTAL);
     const empty = label("", "match-empty");
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, empty), gtk.true_);
     matches.empty = gtk.cast(gtk.Label, empty);

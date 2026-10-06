@@ -149,6 +149,10 @@
   album gain or count as a finished measurement. The next analysis pass
   measures the file again and records its channel count, or, at more than two
   channels, discards the results and raises `missing_analysis`.
+- On the Match Review page, the Best candidate and confidence columns now
+  start at the same position on every row. Every row's action buttons share one
+  width, so a long "Review · 3 tracks need pairing" button no longer shifts the
+  columns of its row.
 
 ## 0.1.0 - 2026-10-06
 
