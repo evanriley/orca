@@ -178,6 +178,8 @@ static int drain_events(orca_runtime *runtime) {
 struct track_capture {
     uint32_t count;
     int64_t first_playable_id;
+    int64_t shortest_playable_id;
+    int64_t shortest_playable_ms;
     uint32_t with_duration;
     uint32_t with_artist;
     uint32_t with_feedback;
@@ -199,6 +201,11 @@ static void capture_track(void *context, const orca_track_view *track) {
     if (track->artist.length != 0) capture->with_artist += 1;
     if (playable(track) && capture->first_playable_id == 0)
         capture->first_playable_id = track->id;
+    if (playable(track) && (capture->shortest_playable_id == 0 ||
+                            track->duration_ms < capture->shortest_playable_ms)) {
+        capture->shortest_playable_id = track->id;
+        capture->shortest_playable_ms = track->duration_ms;
+    }
 }
 
 struct artist_capture {
@@ -2583,14 +2590,14 @@ struct duplicate_copy_capture {
     int suggested;
     int first_suggested;
     int consistent;
-    int64_t file_ids[16];
+    int64_t file_ids[64];
 };
 
 static void collect_duplicate_copy(void *context, const orca_duplicate_copy_view *copy,
                                    const orca_track_details_view *details) {
     struct duplicate_copy_capture *capture = context;
     if (capture->count == 0) capture->first_suggested = copy->suggested_keep;
-    if (capture->count < 16) capture->file_ids[capture->count] = copy->file_id;
+    if (capture->count < 64) capture->file_ids[capture->count] = copy->file_id;
     capture->count += 1;
     capture->suggested += copy->suggested_keep;
     if (copy->locations >= 1 && (details != 0) == (copy->has_track_id != 0) &&
@@ -2643,7 +2650,7 @@ static int duplicate_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(group.bytes_redundant == groups.first.bytes_redundant);
     SMOKE_CHECK(group.same_recording == groups.first.same_recording);
     SMOKE_CHECK(group.verdict == groups.first.verdict);
-    SMOKE_CHECK(copies.count >= 2 && copies.count <= 16 && copies.consistent == copies.count);
+    SMOKE_CHECK(copies.count >= 2 && copies.count <= 64 && copies.consistent == copies.count);
     SMOKE_CHECK(copies.suggested == 1 && copies.first_suggested == 1);
 
     struct text_capture names;
@@ -5743,8 +5750,8 @@ int main(int argc, char **argv) {
      * above: with no audio server nothing ever advances. */
     if (rendered) {
         int64_t pair[2];
-        pair[0] = capture.first_playable_id;
-        pair[1] = capture.first_playable_id;
+        pair[0] = capture.shortest_playable_id;
+        pair[1] = capture.shortest_playable_id;
         if (orca_player_play_tracks(runtime, player, pair, 2, 0) != ORCA_STATUS_OK) return 91;
         int advanced = 0;
         int past_end = 0;
