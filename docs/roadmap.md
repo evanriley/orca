@@ -403,8 +403,6 @@ display-only defect, and removes its entry.
 - In a Release of more than 512 Tracks, verified a page at a time, a file
   that still disagrees is checked again only while the Release has a stale
   file left when its page is reached, though the job's total counted it.
-- Not checked on screen: the Player paused after every output failed, the
-  match result toasts and the read-only tag write dialogs in `orca-gtk`.
 - A pause resets an output's stall count, so a stuck output can cost the
   other outputs up to 128 ms after resume.
 - Recovery that finishes an interrupted undo does not check that the files it

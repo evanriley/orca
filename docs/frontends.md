@@ -527,7 +527,9 @@ open it. The app opens a copy named `Main.db`, so a run never changes it. With
 and are discarded with the session; set `ORCA_HEADLESS_CONFIG` to a directory to
 keep them as `XDG_CONFIG_HOME` across runs. `ORCA_HEADLESS_TMPDIR` (default
 `/tmp`) holds the runtime directory; a path inside the user's runtime directory,
-or one too long for a Wayland socket, is refused.
+or one too long for a Wayland socket, is refused. `ORCA_HEADLESS_MUSICBRAINZ_URL`,
+`ORCA_HEADLESS_ACOUSTID_URL` and `ORCA_HEADLESS_COVERARTARCHIVE_URL` point those
+providers at another server, such as a local mock, instead of the closed port.
 
 ## Listening from a host
 

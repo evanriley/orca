@@ -494,7 +494,7 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
     });
     var album_buffer: [160]u8 = undefined;
     const cover: [:0]const u8 = switch (result.cover_art) {
-        .no_release_id => if (result.matched == 0 or result.accepted != 0)
+        .no_release_id => if (result.accepted != 0)
             "No release ID to fetch its cover"
         else
             return albumOutcome(self, &album_buffer, .album, moved_to orelse release_id),

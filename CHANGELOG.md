@@ -241,6 +241,13 @@
   matches every Track its cache answers, leaves the rest eligible for the next
   run, and ends `failed` with `unavailable` set. An outage that gives up after
   its retries still stops the job.
+- `orca-gtk` says "Paused because the output device stopped working" when the
+  engine pauses a Player after every output failed, and Play then requests the
+  output again instead of staying paused on the failed one. Match Album with no
+  match says "No album match found" instead of "No release ID to fetch its
+  cover". `scripts/headless-gui.sh` points MusicBrainz and AcoustID at
+  `ORCA_HEADLESS_MUSICBRAINZ_URL` and `ORCA_HEADLESS_ACOUSTID_URL` when they
+  are set.
 
 ## 0.1.0 - 2026-10-06
 
