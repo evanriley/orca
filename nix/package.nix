@@ -46,8 +46,8 @@ stdenv.mkDerivation (finalAttrs: {
   nativeBuildInputs = [
     zig_0_17.hook
     pkg-config
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [ wrapGAppsHook4 ];
+    wrapGAppsHook4
+  ];
 
   buildInputs = [
     sqlite
@@ -57,8 +57,6 @@ stdenv.mkDerivation (finalAttrs: {
     opusfile
     libvorbis
     libsamplerate
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [
     pipewire
     gtk4
     libadwaita
@@ -73,10 +71,7 @@ stdenv.mkDerivation (finalAttrs: {
     description = "Local-files-first music player and library-maintenance application";
     homepage = "https://github.com/evanriley/orca";
     license = lib.licenses.mpl20;
-    platforms = [
-      "x86_64-linux"
-      "aarch64-darwin"
-    ];
-    mainProgram = if stdenv.hostPlatform.isLinux then "orca-gtk" else "orca-cli";
+    platforms = [ "x86_64-linux" ];
+    mainProgram = "orca-gtk";
   };
 })
