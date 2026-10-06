@@ -476,10 +476,13 @@ calls it. The rules live in `analysis/health.zig`.
 | `unreadable_file` | warning | property backfill | the file could not be opened or its header would not read |
 | `recording_mismatch` | warning | verification | AcoustID hears another recording and a correction was proposed |
 
-A file not analysed yet has no row; the analysis job's count of files still
-owing work says that. The duplicate kinds name the other file in
-`related_file_id`, which becomes null when that file is deleted; the issue
-stays. A copy at a second location of one file has no related file.
+The projection settles its kinds for every file it projects: an issue is
+recorded while its condition holds and deleted once it does not, and a file
+with an `unreadable_file` issue loses them all. A file not analysed yet has no
+row; the analysis job's count of files still owing work says that. The
+duplicate kinds name the other file in `related_file_id`, which becomes null
+when that file is deleted; the issue stays. A copy at a second location of one
+file has no related file.
 
 `recording_mismatch` is raised by `recordVerifications` in the transaction that
 stores the verification, only when the outcome is `disagrees` and a pending
@@ -504,7 +507,8 @@ the page and count leave out an issue whose dismissal holds the hash the file
 still has, so the issue shows again once the file's bytes change. A file never
 hashed is dismissed under a null hash and stays hidden. The issue row is
 untouched, and `libraryRestoreHealthIssue` (`orca-cli health-restore`) drops the
-dismissal. A dismissal goes with its file.
+dismissal. Deleting an issue keeps its dismissal, so an issue raised again
+while the file keeps that hash stays hidden. A dismissal goes with its file.
 
 ### By kind
 

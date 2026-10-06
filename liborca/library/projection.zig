@@ -695,7 +695,7 @@ pub const Projection = struct {
     }
 
     fn clearProjectionIssues(self: *Projection, file_id: i64) !void {
-        const kinds = [_]database.HealthIssueKind{ .missing_metadata, .album_artist_anomaly, .missing_track_number, .artwork_problem };
+        const kinds = [_]database.HealthIssueKind{ .missing_metadata, .album_artist_anomaly, .missing_track_number, .technical_anomaly, .artwork_problem };
         for (kinds) |kind| try self.library.health_issues.clearLocked(file_id, kind);
     }
 
@@ -1125,6 +1125,11 @@ pub const Projection = struct {
                         .severity = .warning,
                         .details = details,
                     });
+                } else {
+                    try self.library.health_issues.clearLocked(
+                        entry.file_id,
+                        .technical_anomaly,
+                    );
                 }
                 if (entry.foreign) {
                     try foreign_files.append(allocator, entry.*);
@@ -2083,6 +2088,69 @@ test "two songs claiming one track number both stay in the library" {
     const flagged = try filesWithIssue(&library, .technical_anomaly);
     defer testing.allocator.free(flagged);
     try testing.expectEqualSlices(i64, &.{displaced}, flagged);
+}
+
+const technical_anomaly_rows_sql = std.fmt.comptimePrint(
+    "SELECT count(*) FROM library_health_issues WHERE kind = {d};",
+    .{@backingInt(database.HealthIssueKind.technical_anomaly)},
+);
+
+fn displacedTags(title: []const u8, track_number: u32) metadata.ObservedTags {
+    return .{
+        .title = title,
+        .artist = "MitiS",
+        .album = "Oasis",
+        .album_artist = "MitiS",
+        .track_number = track_number,
+    };
+}
+
+test "a displaced position that stops being displaced clears its anomaly, and a dismissal holds while it lasts" {
+    var library = try openTestLibrary("file:orca-projection-displaced-cleared?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observe(&library, "/m/MitiS/01 Prism.flac", .flac, displacedTags("Prism", 1));
+    const renumbered = try observe(&library, "/m/MitiS/02 Oasis.flac", .flac, displacedTags("Oasis", 1));
+    const regrouped = try observe(&library, "/m/MitiS/03 Lost.flac", .flac, displacedTags("Lost", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const flagged = try filesWithIssue(&library, .technical_anomaly);
+    defer testing.allocator.free(flagged);
+    try testing.expectEqualSlices(i64, &.{ renumbered, regrouped }, flagged);
+
+    try library.health_issues.dismiss(renumbered, .technical_anomaly);
+    _ = try projection.run(.all);
+    const visible = try filesWithIssue(&library, .technical_anomaly);
+    defer testing.allocator.free(visible);
+    try testing.expectEqualSlices(i64, &.{regrouped}, visible);
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, technical_anomaly_rows_sql));
+
+    try library.observed_tags.upsert(.{ .file_id = renumbered, .values = displacedTags("Oasis", 4) });
+    var elsewhere = displacedTags("Lost", 1);
+    elsewhere.album = "Lost";
+    try library.observed_tags.upsert(.{ .file_id = regrouped, .values = elsewhere });
+    const result = try projection.run(.{ .files = &.{ renumbered, regrouped } });
+    try testing.expectEqual(@as(u64, 0), result.displaced_positions);
+    try testing.expectEqual(@as(i64, 4), try positionOf(&library, renumbered));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, technical_anomaly_rows_sql));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a displaced file that stops reading loses its anomaly" {
+    var library = try openTestLibrary("file:orca-projection-displaced-unreadable?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observe(&library, "/m/MitiS/01 Prism.flac", .flac, displacedTags("Prism", 1));
+    const displaced = try observe(&library, "/m/MitiS/02 Oasis.flac", .flac, displacedTags("Oasis", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, technical_anomaly_rows_sql));
+
+    try library.health_issues.recordLocked(displaced, .{
+        .kind = .unreadable_file,
+        .severity = .warning,
+        .details = "Not a valid FLAC stream",
+    });
+    _ = try projection.run(.{ .files = &.{displaced} });
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, technical_anomaly_rows_sql));
 }
 
 test "an unreadable file projects no Track until its bytes read, and loses its Track when they stop reading" {

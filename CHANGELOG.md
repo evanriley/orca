@@ -113,6 +113,10 @@
   parks the Track instead of deleting it, and the projection run then projects
   the leaving file's folder, even when the run's scope did not include it,
   which seats the Track where the file now lands.
+- A `technical_anomaly` Health issue for a displaced track position is cleared
+  by the next projection that no longer displaces the file, as after a retag to
+  a free number or to another album, or that finds the file unreadable,
+  instead of staying until dismissed.
 
 ## 0.1.0 - 2026-10-06
 

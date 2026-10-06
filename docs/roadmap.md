@@ -364,8 +364,6 @@ screenshot for a display-only defect, and removes its entry.
 
 - A FLAC seek past the end of the stream fails as a decode error, while WAV
   clamps to the last frame; the other decoders are unchecked.
-- A `technical_anomaly` Health issue for a displaced track position is
-  never cleared once the position is fixed; only dismissing it hides it.
 - `orca-cli` exits 0 after printing usage for a wrong argument count.
 - A tag write that fails before it reaches a file, such as when its
   backup directory already exists, records no `TagWriteFailure`, so

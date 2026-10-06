@@ -230,9 +230,10 @@ Invariants of a run:
   transactions.
 - A file with no track number takes the lowest free position on its disc and
   raises `missing_track_number`; one whose number is held by a different
-  performance is re-seated and raises `technical_anomaly`; one at a position
-  with the same performance (same MusicBrainz recording id or folded title)
-  shares it as a second file of one Track.
+  performance is re-seated and raises `technical_anomaly`, which the next run
+  that does not re-seat it clears; one at a position with the same performance
+  (same MusicBrainz recording id or folded title) shares it as a second file of
+  one Track.
 - A Release whose files sit in several folders is positioned as one group, so
   the result does not depend on which folder projects first. When files at a
   position disagree on recording, the Track keeps the one it presents.
