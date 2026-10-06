@@ -138,9 +138,7 @@ pub fn playerQueueTracks(
     if (limit == 0 or limit > database.repository.max_page)
         return error.PageOutOfRange;
     const object_value = try self.players.get(player);
-    const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
-    const library = opener.library;
-    const library_database = try runtime.libraryDatabase(self, library);
+    if (object_value.opener == null) return error.PlayerHasNoLibrary;
 
     var rows: std.ArrayList(QueueTrack) = .empty;
     errdefer {
@@ -151,13 +149,19 @@ pub fn playerQueueTracks(
     while (index < limit) : (index += 1) {
         const position = std.math.add(u32, offset, index) catch break;
         const ref = object_value.queue.refAt(position) orelse break;
-        // An entry whose Track was removed from the Library keeps its row, with
-        // no summary, so row `n` stays queue position `offset + n`.
-        const track = try library_database.tracks.byId(allocator, ref.track_id);
+        const track = try trackSummaryOf(self, allocator, ref);
         errdefer if (track) |summary| summary.deinit(allocator);
         try rows.append(allocator, .{ .position = position, .id = ref.track_id, .track = track });
     }
     return .{ .allocator = allocator, .items = try rows.toOwnedSlice(allocator) };
+}
+
+pub fn trackSummaryOf(self: *OrcaRuntime, allocator: std.mem.Allocator, ref: TrackRef) !?database.TrackSummary {
+    const library_database = runtime.libraryDatabase(self, ref.library) catch |err| switch (err) {
+        error.StaleHandle, error.LibraryHasNoDatabase => return null,
+        else => return err,
+    };
+    return library_database.tracks.byId(allocator, ref.track_id);
 }
 
 pub fn playerLibrary(self: *OrcaRuntime, player: PlayerHandle) !?LibraryHandle {

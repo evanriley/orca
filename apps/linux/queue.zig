@@ -224,6 +224,7 @@ fn bindHistory(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c
     const played = gtk.gtk_widget_get_next_sibling(labels) orelse return;
     var subtitle: [1024]u8 = undefined;
     showStacked(labels, track.title(), artistAndAlbum(&subtitle, track));
+    dimUnlessInLibrary(labels, track);
     const position = gtk.gtk_list_item_get_position(gtk.cast(gtk.ListItem, item.?));
     var buffer: [48]u8 = undefined;
     const text = if (position < self.queue.history_count)
@@ -272,6 +273,7 @@ fn trackMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) 
     const row = menu.gestureWidget(gesture);
     const item = gtk.g_object_get_data(row, "orca-list-item") orelse return;
     const track = trackOf(item) orelse return;
+    if (!track.inLibrary()) return;
     if (setTrackContext(self, .tracks, track)) menu.popup(self, row, x, y);
 }
 
@@ -287,14 +289,19 @@ fn nextMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) c
     const self = state(data);
     const row = menu.gestureWidget(gesture);
     const item = gtk.g_object_get_data(row, "orca-list-item") orelse return;
-    if (queueContext(self, item)) menu.popupQueueEntry(self, row, x, y);
+    if (queueContext(self, item)) menu.popupQueueEntry(self, row, x, y, inLibrary(item));
 }
 
 fn nextMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const widget = gtk.cast(gtk.Widget, button.?);
     const item = gtk.g_object_get_data(widget, "orca-list-item") orelse return;
-    if (queueContext(self, item)) menu.popupQueueEntryBelow(self, widget);
+    if (queueContext(self, item)) menu.popupQueueEntryBelow(self, widget, inLibrary(item));
+}
+
+fn inLibrary(item: *anyopaque) bool {
+    const track = trackOf(item) orelse return false;
+    return track.inLibrary();
 }
 
 fn nextActivated(_: ?*anyopaque, row: c_uint, data: ?*anyopaque) callconv(.c) void {
@@ -332,12 +339,14 @@ fn nextKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint, 
         gtk.KEY_Return, gtk.KEY_KP_Enter => {
             if (held != gtk.MODIFIER_SHIFT) return gtk.false_;
             const item = focusedItem(self) orelse return gtk.false_;
+            if (!inLibrary(item)) return gtk.false_;
             playNext(self, nextPosition(self, item) orelse return gtk.false_);
         },
         gtk.KEY_l, gtk.KEY_L => {
             if (held & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT) != 0) return gtk.false_;
             const item = focusedItem(self) orelse return gtk.false_;
             const track = trackOf(item) orelse return gtk.false_;
+            if (!track.inLibrary()) return gtk.false_;
             feedback.toggle(self, .{ .track_id = track.id(), .recording_id = track.recordingId(), .feedback = track.feedback() });
         },
         else => return gtk.false_,
@@ -756,22 +765,13 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
     replace(self, now_store, liborca.QueueTrack, now, track_model.queued);
     replace(self, next_store, liborca.QueueTrack, upcoming, track_model.queued);
 
-    var history: [history_capacity]liborca.QueueHistoryEntry = undefined;
-    const history_read = self.runtime.playerQueueHistory(self.player, 0, &history) catch 0;
-    var history_tracks: ?liborca.TrackPage = if (history_read == 0)
-        null
-    else
-        self.runtime.playerQueueHistoryTracks(self.player, self.allocator, 0, @intCast(history_read)) catch null;
+    var history_tracks: ?liborca.QueueHistoryTrackPage =
+        self.runtime.playerQueueHistoryTracks(self.player, self.allocator, 0, history_capacity) catch null;
     defer if (history_tracks) |*value| value.deinit();
-    const played: []const liborca.TrackSummary = if (history_tracks) |value| value.items else &.{};
-    page.history_count = 0;
-    for (history[0..history_read]) |entry| {
-        if (page.history_count >= played.len) break;
-        if (played[page.history_count].id != entry.track.track_id) continue;
-        page.history_ended_ms[page.history_count] = entry.ended_at_ms;
-        page.history_count += 1;
-    }
-    replace(self, history_store, liborca.TrackSummary, played[0..page.history_count], track_model.new);
+    const played: []const liborca.QueueHistoryTrack = if (history_tracks) |value| value.items else &.{};
+    page.history_count = played.len;
+    for (played, page.history_ended_ms[0..played.len]) |entry, *ended_ms| ended_ms.* = entry.ended_at_ms;
+    replace(self, history_store, liborca.QueueHistoryTrack, played, track_model.played);
     page.shown_minute = @divFloor(nowMs(self), std.time.ms_per_min);
 
     visible(page.now_section, now.len != 0);

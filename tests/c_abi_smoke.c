@@ -3632,6 +3632,42 @@ static int scan_new_root(orca_runtime *runtime, orca_handle library, const char 
     return 0;
 }
 
+static int await_audible(orca_runtime *runtime, orca_handle player, int64_t track_id) {
+    orca_player_status status;
+    memset(&status, 0, sizeof status);
+    long deadline = now_ms() + 3000;
+    while (now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(orca_player_status_get(runtime, player, &status) == ORCA_STATUS_OK);
+        if (status.track_id == track_id && status.transport == ORCA_TRANSPORT_PLAYING) return 0;
+    }
+    SMOKE_CHECK(status.track_id == track_id && status.transport == ORCA_TRANSPORT_PLAYING);
+    return 0;
+}
+
+struct removed_history {
+    int64_t gone_id;
+    uint32_t count;
+    uint32_t gone_rows;
+    uint32_t first_gone;
+    uint32_t mismatches;
+};
+
+static void capture_removed_history(void *context, const orca_track_summary_view *summary,
+                                    int64_t ended_at, uint8_t reason) {
+    (void)reason;
+    struct removed_history *capture = context;
+    const orca_track_view *track = &summary->track;
+    int gone = track->id == capture->gone_id;
+    if (gone && capture->gone_rows == 0) capture->first_gone = capture->count;
+    if (gone) capture->gone_rows += 1;
+    if (track->removed != gone || (track->title.length == 0) != gone || ended_at <= 0 ||
+        (gone && (summary->has_release_id || summary->has_artist_id || track->has_file)))
+        capture->mismatches += 1;
+    capture->count += 1;
+}
+
 static int removed_queue_track_steps(orca_runtime *runtime, orca_handle library,
                                      orca_handle player, const char *kept, const char *gone) {
     int64_t kept_root = 0;
@@ -3653,8 +3689,20 @@ static int removed_queue_track_steps(orca_runtime *runtime, orca_handle library,
         if (after.ids[i] != before.ids[0] && after.ids[i] != before.ids[1]) gone_id = after.ids[i];
     SMOKE_CHECK(gone_id > 0);
 
-    int64_t queued[5] = {before.ids[0], before.ids[1], gone_id, before.ids[0], before.ids[1]};
+    int64_t played[3] = {before.ids[0], gone_id, before.ids[1]};
     SMOKE_CHECK(orca_player_set_library(runtime, player, library) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_ONE) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_play_tracks(runtime, player, played, 3, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(await_audible(runtime, player, played[0]) == 0);
+    for (uint32_t position = 1; position < 3; position += 1) {
+        SMOKE_CHECK(orca_player_queue_jump(runtime, player, position) == ORCA_STATUS_OK);
+        SMOKE_CHECK(await_audible(runtime, player, played[position]) == 0);
+    }
+    SMOKE_CHECK(orca_player_stop(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_clear_queue(runtime, player) == ORCA_STATUS_OK);
+
+    int64_t queued[5] = {before.ids[0], before.ids[1], gone_id, before.ids[0], before.ids[1]};
     SMOKE_CHECK(orca_player_enqueue_tracks(runtime, player, queued, 5) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_library_remove_root(runtime, library, gone_root) == ORCA_STATUS_OK);
 
@@ -3685,6 +3733,19 @@ static int removed_queue_track_steps(orca_runtime *runtime, orca_handle library,
                                                capture_queue_row) == ORCA_STATUS_OK);
     SMOKE_CHECK(rows.count == 0);
 
+    struct removed_history history = {.gone_id = gone_id};
+    SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 512, 0, &history,
+                                                capture_removed_history) == ORCA_STATUS_OK);
+    SMOKE_CHECK(history.gone_rows >= 1 && history.count > history.gone_rows);
+    SMOKE_CHECK(history.mismatches == 0);
+    uint32_t first_gone = history.first_gone;
+    memset(&history, 0, sizeof history);
+    history.gone_id = gone_id;
+    SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 1, first_gone, &history,
+                                                capture_removed_history) == ORCA_STATUS_OK);
+    SMOKE_CHECK(history.count == 1 && history.gone_rows == 1 && history.first_gone == 0);
+    SMOKE_CHECK(history.mismatches == 0);
+
     SMOKE_CHECK(orca_player_queue_remove(runtime, player, 2) == ORCA_STATUS_OK);
     memset(&rows, 0, sizeof rows);
     SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 5, 0, &rows,
@@ -3694,7 +3755,7 @@ static int removed_queue_track_steps(orca_runtime *runtime, orca_handle library,
     return 0;
 }
 
-static int removed_queue_track_smoke(orca_runtime *runtime) {
+static int removed_queue_track_smoke(orca_runtime *runtime, uint64_t device_id) {
     char relative[] = ".zig-cache/tmp/orca-c-smoke-removed-queue-XXXXXX";
     SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
     SMOKE_CHECK(mkdtemp(relative) != 0);
@@ -3731,7 +3792,15 @@ static int removed_queue_track_smoke(orca_runtime *runtime) {
         player_open = orca_player_create(runtime, &player) == ORCA_STATUS_OK;
         failed = !player_open;
     }
+    orca_handle zone;
+    int zone_open = 0;
+    if (!failed) {
+        zone_open = orca_player_open_default_output(runtime, player, device_id, &zone) ==
+                    ORCA_STATUS_OK;
+        failed = !zone_open;
+    }
     if (!failed && removed_queue_track_steps(runtime, library, player, kept, gone) != 0) failed = 1;
+    if (zone_open && orca_zone_destroy(runtime, zone) != ORCA_STATUS_OK) failed = 1;
     if (player_open && orca_player_destroy(runtime, player) != ORCA_STATUS_OK) failed = 1;
     if (library_open && orca_library_close(runtime, library) != ORCA_STATUS_OK) failed = 1;
     if (drain_events(runtime) != 0) failed = 1;
@@ -6030,7 +6099,7 @@ int main(int argc, char **argv) {
     if (artwork_smoke(runtime, library) != 0) return 1;
     if (lyrics_smoke(runtime, library) != 0) return 1;
     if (coverless_release_smoke(runtime) != 0) return 1;
-    if (removed_queue_track_smoke(runtime) != 0) return 1;
+    if (removed_queue_track_smoke(runtime, device_id) != 0) return 1;
     if (health_smoke(runtime, library) != 0) return 1;
     if (duplicate_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;

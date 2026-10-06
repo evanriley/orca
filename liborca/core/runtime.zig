@@ -52,6 +52,8 @@ pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const QueueHistoryEntry = queue_history.QueueHistoryEntry;
 pub const QueueTrack = runtime_status.QueueTrack;
 pub const QueueTrackPage = runtime_status.QueueTrackPage;
+pub const QueueHistoryTrack = runtime_queue.QueueHistoryTrack;
+pub const QueueHistoryTrackPage = runtime_queue.QueueHistoryTrackPage;
 pub const QueueHistoryReason = queue_history.QueueHistoryReason;
 pub const RestoreMode = runtime_resume.RestoreMode;
 pub const RestoreOutcome = runtime_resume.RestoreOutcome;
@@ -2635,15 +2637,16 @@ pub const OrcaRuntime = struct {
         return runtime_queue.playerQueueHistory(self, player, offset, output);
     }
 
-    /// `playerQueueHistory` as the rows a host displays, newest first. An
-    /// entry whose Library is closed or whose Track is gone is left out.
+    /// `playerQueueHistory` as the rows a host displays, newest first. Row `n`
+    /// is history entry `offset + n`; an entry whose Library is closed or
+    /// whose Track left it keeps its row with a null `track`.
     pub fn playerQueueHistoryTracks(
         self: *OrcaRuntime,
         player: PlayerHandle,
         allocator: std.mem.Allocator,
         offset: u32,
         limit: u32,
-    ) !database.TrackPage {
+    ) !QueueHistoryTrackPage {
         return runtime_queue.playerQueueHistoryTracks(self, player, allocator, offset, limit);
     }
 
@@ -3477,9 +3480,11 @@ pub const OrcaRuntime = struct {
     /// resolution, which is the one thing frontends here must never do.
     ///
     /// Returned in queue order, so entry `n` of the result is queue position
-    /// `offset + n`, and a shuffled queue reads as the order it will play. An
-    /// entry whose Track was removed from the Library keeps its row with a
-    /// null `track`.
+    /// `offset + n`, and a shuffled queue reads as the order it will play.
+    /// Each entry is read from the Library its `TrackRef` names, which is not
+    /// the bound one when it was queued before the Player was bound to another.
+    /// An entry whose Library is closed or whose Track left it keeps its row
+    /// with a null `track`.
     pub fn playerQueueTracks(
         self: *OrcaRuntime,
         player: PlayerHandle,

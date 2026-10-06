@@ -208,8 +208,9 @@ typedef struct orca_track_view {
     /* `rating` is 1..100 when `has_rating` is set. */
     uint8_t has_rating;
     uint8_t rating;
-    /* 1 when the view is a queue entry whose Track was removed from the
-     * Library: only `id` is set and every other field is zero. */
+    /* 1 when the view is a queue or queue history entry whose Track left its
+     * Library or whose Library is closed: only `id` is set and every other
+     * field, here and in an enclosing orca_track_summary_view, is zero. */
     uint8_t removed;
     orca_string_view title;
     orca_string_view artist;
@@ -6468,12 +6469,12 @@ orca_status orca_player_query_queue(
     void *context,
     orca_queue_entry_callback callback
 );
-/* The queue's Tracks as track views, read from the Library the Player is
- * bound to, in playback order starting at position `offset`. `limit` must be
+/* The queue's Tracks as track views, in playback order starting at position
+ * `offset`, each read from the Library it was queued from. `limit` must be
  * between 1 and 512. The view of call `n` is queue position `offset + n`; an
- * entry whose Track was removed from the Library has `removed` set and only
- * its `id`. ORCA_STATUS_INVALID_STATE when the Player has no Library.
- * Strings are valid only for the callback. */
+ * entry whose Track left its Library, or whose Library is closed, has
+ * `removed` set and only its `id`. ORCA_STATUS_INVALID_STATE when the Player
+ * has no Library. Strings are valid only for the callback. */
 orca_status orca_player_query_queue_tracks(
     orca_runtime *runtime,
     orca_handle player,
@@ -6485,8 +6486,10 @@ orca_status orca_player_query_queue_tracks(
 /* The last 100 entries this Player stopped playing, newest first, starting
  * `offset` entries back. `limit` must be between 1 and 512. Stop leaves no
  * entry, since the entry stays current. The history is held in memory only,
- * so a new runtime starts with none, and it never records a listen. An entry
- * whose Library is closed or whose Track has left it is skipped. */
+ * so a new runtime starts with none, and it never records a listen. Call `n`
+ * is history entry `offset + n`; an entry whose Track left its Library, or
+ * whose Library is closed, has `summary->track.removed` set and only
+ * `summary->track.id`. */
 orca_status orca_player_query_queue_history(
     orca_runtime *runtime,
     orca_handle player,

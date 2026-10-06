@@ -7177,22 +7177,27 @@ pub export fn orca_player_query_queue_history(
     const box = enter(runtime) orelse return refusal(runtime);
     const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
-    var entries: [max_page]core.runtime.QueueHistoryEntry = undefined;
-    const count = box.runtime.playerQueueHistory(
+    var page = box.runtime.playerQueueHistoryTracks(
         importPlayer(player),
+        box.runtime.allocator,
         offset,
-        entries[0..limit],
+        limit,
     ) catch |err| return box.fail(@src(), err);
-    for (entries[0..count]) |entry| {
-        const library_database = core.runtime.libraryDatabase(&box.runtime, entry.track.library) catch |err| switch (err) {
-            error.StaleHandle, error.LibraryHasNoDatabase => continue,
-            else => return box.fail(@src(), err),
-        };
-        const summary = (library_database.tracks.byId(box.runtime.allocator, entry.track.track_id) catch |err|
-            return box.fail(@src(), err)) orelse continue;
-        defer summary.deinit(box.runtime.allocator);
-        const view = trackSummaryView(summary);
-        visit(context, &view, entry.ended_at_ms, @backingInt(entry.reason));
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: TrackSummaryView = if (item.track) |track|
+            trackSummaryView(track)
+        else
+            .{
+                .track = removedTrackView(item.id),
+                .release_id = 0,
+                .artist_id = 0,
+                .recording_id = 0,
+                .has_release_id = 0,
+                .has_artist_id = 0,
+                .has_recording_id = 0,
+            };
+        visit(context, &view, item.ended_at_ms, @backingInt(item.reason));
     }
     return .ok;
 }

@@ -319,7 +319,9 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_player_queue_move`, `orca_player_query_queue_tracks`,
   `orca_player_query_queue_history`, `orca_player_save_queue_as_playlist`.
   `orca_player_query_queue_tracks` calls back once per queue position from
-  `offset`; an entry whose Track was removed from the Library sets
+  `offset`, reading each entry from the Library it was queued from, and
+  `orca_player_query_queue_history` once per history entry from `offset`. An
+  entry whose Track left its Library, or whose Library is closed, sets
   `orca_track_view.removed` and carries only its `id`. The entry playing and
   the one lined up after it cannot be removed or moved
   (`ORCA_STATUS_INVALID_STATE`). A Track on an unavailable root fails with
@@ -406,6 +408,12 @@ processed audio still playing. While a view is on screen and playback runs, it
 re-reads the path every 250 ms until that processing clears. It also re-reads
 it up to eight times after an output starts or the popover opens while the
 device has not reported its rate or format.
+
+The Queue page shows an entry whose Track left the Library as "Removed from
+library", dimmed, in its own position in Up Next and History, and Now Playing
+does the same in its Up Next list. Its Up Next menu offers only Remove from
+Queue and Save Queue as Playlist…; it has no Track menu, Play Next or Love, and
+activating it does not play.
 
 Run it from the tree:
 

@@ -507,33 +507,59 @@ pub fn playerQueueHistory(
     return count;
 }
 
+pub const QueueHistoryTrack = struct {
+    position: u32,
+    id: i64,
+    ended_at_ms: i64,
+    reason: queue_history.QueueHistoryReason,
+    track: ?database.TrackSummary,
+
+    pub fn deinit(self: QueueHistoryTrack, allocator: std.mem.Allocator) void {
+        if (self.track) |track| track.deinit(allocator);
+    }
+};
+
+pub const QueueHistoryTrackPage = struct {
+    allocator: std.mem.Allocator,
+    items: []QueueHistoryTrack,
+
+    pub fn deinit(self: QueueHistoryTrackPage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
 pub fn playerQueueHistoryTracks(
     self: *OrcaRuntime,
     player: PlayerHandle,
     allocator: std.mem.Allocator,
     offset: u32,
     limit: u32,
-) !database.TrackPage {
+) !QueueHistoryTrackPage {
     try runtime.requireRunning(self);
     if (limit == 0 or limit > database.repository.max_page)
         return error.PageOutOfRange;
     const object_value = try self.players.get(player);
     observeQueueHistory(object_value, historyNowMs(self));
 
-    var rows: std.ArrayList(database.TrackSummary) = .empty;
+    var rows: std.ArrayList(QueueHistoryTrack) = .empty;
     errdefer {
         for (rows.items) |item| item.deinit(allocator);
         rows.deinit(allocator);
     }
-    for (0..limit) |index| {
-        const entry = object_value.history.newest(@as(usize, offset) + index) orelse break;
-        const library_database = runtime.libraryDatabase(self, entry.track.library) catch |err| switch (err) {
-            error.StaleHandle, error.LibraryHasNoDatabase => continue,
-            else => return err,
-        };
-        const summary = try library_database.tracks.byId(allocator, entry.track.track_id) orelse
-            continue;
-        try rows.append(allocator, summary);
+    var index: u32 = 0;
+    while (index < limit) : (index += 1) {
+        const position = std.math.add(u32, offset, index) catch break;
+        const entry = object_value.history.newest(position) orelse break;
+        const track = try runtime_status.trackSummaryOf(self, allocator, entry.track);
+        errdefer if (track) |summary| summary.deinit(allocator);
+        try rows.append(allocator, .{
+            .position = position,
+            .id = entry.track.track_id,
+            .ended_at_ms = entry.ended_at_ms,
+            .reason = entry.reason,
+            .track = track,
+        });
     }
     return .{ .allocator = allocator, .items = try rows.toOwnedSlice(allocator) };
 }

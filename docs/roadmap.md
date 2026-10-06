@@ -407,10 +407,6 @@ screenshot for a display-only defect, and removes its entry.
   lookups take it as no key (they fall back to the application key) and a
   submission as no user key (`needs_user_key`). Whether AcoustID should fail
   instead is undecided.
-- Queue history skips Tracks that left the Library, so history positions
-  shift; the queue row menu offers Track actions, such as Play Next, on a
-  removed row; and whether a queued Track is always looked up in the Library
-  that holds it is unchecked.
 - Untested: the AcoustID key read once per job on the submission path, and
   gapless identity at the successor's first frame after a re-seek other than
   a user seek, such as an output reopen.

@@ -153,6 +153,20 @@
   start at the same position on every row. Every row's action buttons share one
   width, so a long "Review · 3 tracks need pairing" button no longer shifts the
   columns of its row.
+- Queue history keeps an entry whose Track left the Library in its place.
+  `playerQueueHistoryTracks` returns a `QueueHistoryTrackPage` whose rows carry
+  the position, Track id, end time, reason and a summary that is null for a
+  removed Track, and `orca_player_query_queue_history` passes such an entry
+  with `removed` set and only `id` filled instead of skipping it. The Queue
+  page's History shows it dimmed as "Removed from library".
+- Queue and history pages read each entry from the Library it was queued
+  from. A Player bound to another Library keeps the earlier Library's entries,
+  which were looked up in the new Library and showed another Track or none;
+  an entry of a closed Library reads as removed.
+- `orca-gtk` offers only Remove from Queue and Save Queue as Playlist… for an
+  Up Next entry whose Track left the Library, and no menu for such an entry
+  in History or as the playing row. Play Next, Play Later, Love and the album
+  and artist links are gone from it, and Shift+Return and L do nothing on it.
 
 ## 0.1.0 - 2026-10-06
 

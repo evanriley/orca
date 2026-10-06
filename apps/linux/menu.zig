@@ -15,6 +15,7 @@ const transport = @import("transport.zig");
 const mpris = @import("mpris.zig");
 const feedback = @import("feedback.zig");
 const strings = @import("strings.zig");
+const queue_menu = @import("queue_menu.zig");
 const jobs = @import("jobs.zig");
 const ratings = @import("ratings.zig");
 const playlists = @import("playlists.zig");
@@ -297,42 +298,35 @@ fn appendWithAccel(menu: *gtk.GMenu, label: [*:0]const u8, action: [*:0]const u8
     gtk.g_menu_append_item(menu, item);
 }
 
-pub fn popupQueueEntry(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
-    const items = queueEntryModel(self);
+pub fn popupQueueEntry(self: *App, widget: *gtk.Widget, x: f64, y: f64, in_library: bool) void {
+    const items = queueEntryModel(self, in_library);
     defer gtk.g_object_unref(items);
     gtk.gtk_widget_add_css_class(present(widget, gtk.cast(gtk.GMenuModel, items), pointAt(x, y), null), "queue-menu");
 }
 
-pub fn popupQueueEntryBelow(self: *App, button: *gtk.Widget) void {
-    const items = queueEntryModel(self);
+pub fn popupQueueEntryBelow(self: *App, button: *gtk.Widget, in_library: bool) void {
+    const items = queueEntryModel(self, in_library);
     defer gtk.g_object_unref(items);
     const bounds: gtk.Rectangle = .{ .x = 0, .y = 0, .width = gtk.gtk_widget_get_width(button), .height = gtk.gtk_widget_get_height(button) };
     gtk.gtk_widget_add_css_class(present(button, gtk.cast(gtk.GMenuModel, items), bounds, gtk.ALIGN_END), "queue-menu");
 }
 
-fn queueEntryModel(self: *App) *gtk.GMenu {
+fn queueEntryModel(self: *App, in_library: bool) *gtk.GMenu {
     const context = &self.context;
-    const queueing = gtk.g_menu_new();
-    defer gtk.g_object_unref(queueing);
-    appendWithAccel(queueing, "Play Next", "queue.play-next", "<Shift>Return");
-    appendWithAccel(queueing, "Play Later", "queue.play-later", null);
-    const track = gtk.g_menu_new();
-    defer gtk.g_object_unref(track);
-    const loved = context.targets.items.len != 0 and context.targets.items[0].feedback == .loved;
-    if (loved)
-        appendWithAccel(track, "Remove Love", "app.ctx-remove-love", "l")
-    else
-        appendWithAccel(track, "Love", "app.ctx-love", "l");
-    if (context.release_id != null) appendWithAccel(track, "Go to Album", "app.ctx-show-album", null);
-    if (context.artist_id != null) appendWithAccel(track, "Go to Artist", "app.ctx-show-artist", null);
-    const queue = gtk.g_menu_new();
-    defer gtk.g_object_unref(queue);
-    appendWithAccel(queue, "Remove from Queue", "app.ctx-remove", "Delete");
-    appendWithAccel(queue, "Save Queue as Playlist…", "queue.save", null);
+    const sections = queue_menu.sections(.{
+        .in_library = in_library,
+        .loved = context.targets.items.len != 0 and context.targets.items[0].feedback == .loved,
+        .has_release = context.release_id != null,
+        .has_artist = context.artist_id != null,
+    });
     const items = gtk.g_menu_new();
-    gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, queueing));
-    gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, track));
-    gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, queue));
+    for (&sections) |*section| {
+        if (section.len == 0) continue;
+        const part = gtk.g_menu_new();
+        defer gtk.g_object_unref(part);
+        for (section.items()) |item| appendWithAccel(part, item.label, item.action, if (item.accel) |accel| accel.ptr else null);
+        gtk.g_menu_append_section(items, null, gtk.cast(gtk.GMenuModel, part));
+    }
     return items;
 }
 

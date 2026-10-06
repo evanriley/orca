@@ -574,5 +574,6 @@ behind it, such as a file loaded with `playerLoadFile`, records nothing.
 The history lives on the control lane in memory only; a new runtime starts
 empty. It never records a listen: listens come only from the Player's
 `ListenTracker`. `playerQueueHistory` reads raw entries,
-`playerQueueHistoryTracks` reads them as `TrackSummary` rows, and
+`playerQueueHistoryTracks` reads them as rows carrying each entry's
+`TrackSummary`, null for a Track that left its Library or a closed Library, and
 `playerClearQueueHistory` empties the ring.

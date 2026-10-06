@@ -401,7 +401,7 @@ fn trackIdOfSong(runtime: *OrcaRuntime, library: LibraryHandle, song: Song) !i64
     return error.SongHasNoTrack;
 }
 
-fn expectQueueRows(page: runtime_module.QueueTrackPage, first_position: u32, songs: []const ?Song, ids: []const i64) !void {
+fn expectQueueRows(page: anytype, first_position: u32, songs: []const ?Song, ids: []const i64) !void {
     try std.testing.expectEqual(songs.len, page.items.len);
     for (page.items, songs, ids, 0..) |row, song, id, index| {
         try std.testing.expectEqual(first_position + @as(u32, @intCast(index)), row.position);
@@ -470,4 +470,123 @@ test "queue pages over an entry whose Track was removed from the Library keep ev
     const past_end = try runtime.playerQueueTracks(player, allocator, 5, 5);
     defer past_end.deinit();
     try std.testing.expectEqual(@as(usize, 0), past_end.items.len);
+}
+
+test "queue history pages over an entry whose Track was removed from the Library keep every row at its history position" {
+    const kept = two_songs;
+    const removed: Song = hazey_jane;
+
+    var backend: audio.output.TestBackend = .{ .allocator = allocator };
+    defer backend.deinit();
+    var runtime: OrcaRuntime = .init(allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    var kept_folder = std.testing.tmpDir(.{});
+    defer kept_folder.cleanup();
+    var removed_folder = std.testing.tmpDir(.{});
+    defer removed_folder.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try runtime_tests.tempDatabasePath(&data);
+    defer allocator.free(database_path);
+
+    for (kept, [_]u32{ 1, 2 }) |song, track_number| try writeSongMp3(kept_folder.dir, song, track_number, 0);
+    try writeSongMp3(removed_folder.dir, removed, 3, 0);
+    const library = try runtime.openLibrary(io, database_path);
+    _ = try scanFolderAsRoot(&runtime, library, &kept_folder);
+    const removed_root = try scanFolderAsRoot(&runtime, library, &removed_folder);
+
+    const queued = [_]Song{ kept[0], removed, kept[1] };
+    var ids: [queued.len]i64 = undefined;
+    for (queued, &ids) |song, *id| id.* = try trackIdOfSong(&runtime, library, song);
+    const player = try runtime.createPlayer();
+    try runtime.playerPlayTracks(player, library, io, &ids, 0);
+    try runtime.pausePlayer(player);
+    for ([_]u32{ 1, 2, 0 }) |position| {
+        try runtime.playerQueueJump(player, position);
+        try runtime.pausePlayer(player);
+    }
+
+    const forgotten = try runtime.libraryRemoveRoot(library, removed_root);
+    try std.testing.expectEqual(@as(u64, 1), forgotten.tracks_removed);
+
+    var entries: [4]runtime_module.QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try runtime.playerQueueHistory(player, 0, &entries));
+    const newest_first = [_]i64{ ids[2], ids[1], ids[0] };
+
+    const whole = try runtime.playerQueueHistoryTracks(player, allocator, 0, 8);
+    defer whole.deinit();
+    try expectQueueRows(whole, 0, &.{ kept[1], null, kept[0] }, &newest_first);
+    for (whole.items, entries[0..3]) |row, entry| {
+        try std.testing.expectEqual(entry.ended_at_ms, row.ended_at_ms);
+        try std.testing.expectEqual(entry.reason, row.reason);
+    }
+
+    const middle = try runtime.playerQueueHistoryTracks(player, allocator, 1, 1);
+    defer middle.deinit();
+    try expectQueueRows(middle, 1, &.{null}, newest_first[1..2]);
+
+    const tail = try runtime.playerQueueHistoryTracks(player, allocator, 2, 8);
+    defer tail.deinit();
+    try expectQueueRows(tail, 2, &.{kept[0]}, newest_first[2..3]);
+
+    const past_end = try runtime.playerQueueHistoryTracks(player, allocator, 3, 8);
+    defer past_end.deinit();
+    try std.testing.expectEqual(@as(usize, 0), past_end.items.len);
+}
+
+test "a queue holding Tracks of a Library the Player was bound to before reads each from its own Library, and a closed one's as removed" {
+    const first_songs = two_songs;
+    const second_songs = [_]Song{ hazey_jane, .{ .file_name = "e.mp3", .title = "Fly" } };
+
+    var backend: audio.output.TestBackend = .{ .allocator = allocator };
+    defer backend.deinit();
+    var runtime: OrcaRuntime = .init(allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    var first_folder = std.testing.tmpDir(.{});
+    defer first_folder.cleanup();
+    var second_folder = std.testing.tmpDir(.{});
+    defer second_folder.cleanup();
+    var first_data = std.testing.tmpDir(.{});
+    defer first_data.cleanup();
+    var second_data = std.testing.tmpDir(.{});
+    defer second_data.cleanup();
+    const first_path = try runtime_tests.tempDatabasePath(&first_data);
+    defer allocator.free(first_path);
+    const second_path = try runtime_tests.tempDatabasePath(&second_data);
+    defer allocator.free(second_path);
+
+    for (first_songs, [_]u32{ 1, 2 }) |song, track_number| try writeSongMp3(first_folder.dir, song, track_number, 0);
+    for (second_songs, [_]u32{ 1, 2 }) |song, track_number| try writeSongMp3(second_folder.dir, song, track_number, 0);
+    const first = try runtime.openLibrary(io, first_path);
+    _ = try scanFolderAsRoot(&runtime, first, &first_folder);
+    const second = try runtime.openLibrary(io, second_path);
+    _ = try scanFolderAsRoot(&runtime, second, &second_folder);
+
+    var ids: [4]i64 = undefined;
+    for (first_songs, ids[0..2]) |song, *id| id.* = try trackIdOfSong(&runtime, first, song);
+    for (second_songs, ids[2..4]) |song, *id| id.* = try trackIdOfSong(&runtime, second, song);
+    const player = try runtime.createPlayer();
+    try runtime.playerEnqueueTracks(player, first, io, ids[0..2]);
+    try runtime.playerEnqueueTracks(player, second, io, ids[2..4]);
+    try std.testing.expectEqual(second, (try runtime.playerLibrary(player)).?);
+    try runtime.playerQueueJump(player, 2);
+    try runtime.pausePlayer(player);
+
+    const both = try runtime.playerQueueTracks(player, allocator, 0, 8);
+    defer both.deinit();
+    try expectQueueRows(both, 0, &.{ first_songs[0], first_songs[1], second_songs[0], second_songs[1] }, &ids);
+    const played_while_open = try runtime.playerQueueHistoryTracks(player, allocator, 0, 8);
+    defer played_while_open.deinit();
+    try expectQueueRows(played_while_open, 0, &.{first_songs[0]}, ids[0..1]);
+
+    try runtime.destroyLibrary(first);
+
+    const after_close = try runtime.playerQueueTracks(player, allocator, 0, 8);
+    defer after_close.deinit();
+    try expectQueueRows(after_close, 0, &.{ null, null, second_songs[0], second_songs[1] }, &ids);
+    const played_after_close = try runtime.playerQueueHistoryTracks(player, allocator, 0, 8);
+    defer played_after_close.deinit();
+    try expectQueueRows(played_after_close, 0, &.{null}, ids[0..1]);
 }
