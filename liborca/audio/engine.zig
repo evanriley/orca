@@ -157,6 +157,18 @@ pub const PlayerEngine = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn spawn(self: *PlayerEngine) !std.Thread {
+        return self.spawnEntry(run, .{self});
+    }
+
+    fn spawnEntry(self: *PlayerEngine, comptime entry: anytype, args: anytype) !std.Thread {
+        // Set before the thread exists, or a waiter could free a Zone the
+        // engine is about to adopt.
+        self.running.store(true, .release);
+        errdefer self.running.store(false, .release);
+        return std.Thread.spawn(.{}, entry, args);
+    }
+
     /// Control lane. Hands the engine a new immutable zone set and does not
     /// return until the engine is provably using it, which is what makes it safe
     /// for the caller to then close an output or free a `ZoneRuntime`.
@@ -278,10 +290,9 @@ pub const PlayerEngine = struct {
 
     /// Engine thread entry point. Registered with `work.Registry`, so shutdown
     /// and `destroyPlayer` cancel and join it rather than abandoning it.
-    pub fn run(self: *PlayerEngine) void {
+    fn run(self: *PlayerEngine) void {
         const registration = self.registration.?;
         const io = self.threaded.io();
-        self.running.store(true, .seq_cst);
         var clock = std.Io.Clock.awake.now(io);
         while (true) {
             // Read before anything the pass reads, so a wake that lands after
@@ -1580,8 +1591,7 @@ test "an engine thread delays shutdown until it has actually stopped" {
 
     const runtime_zone = try openZone(allocator);
     defer runtime_zone.destroy();
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
-    while (!harness.engine.running.load(.acquire)) std.Thread.yield() catch {};
+    harness.registration.thread = try harness.engine.spawn();
     try harness.engine.publishZones(&.{runtime_zone});
     harness.player.play();
 
@@ -1605,8 +1615,7 @@ test "unpublishing a Zone is acknowledged before the control lane frees it" {
     const keep = try openZone(allocator);
     defer keep.destroy();
     const remove = try openZone(allocator);
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
-    while (!harness.engine.running.load(.acquire)) std.Thread.yield() catch {};
+    harness.registration.thread = try harness.engine.spawn();
     try harness.engine.publishZones(&.{ keep, remove });
     harness.player.play();
 
@@ -1635,8 +1644,7 @@ test "a control lane that quiesces back to back still lets the engine run" {
 
     const runtime_zone = try openZone(allocator);
     defer runtime_zone.destroy();
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
-    while (!harness.engine.running.load(.acquire)) std.Thread.yield() catch {};
+    harness.registration.thread = try harness.engine.spawn();
     try harness.engine.publishZones(&.{runtime_zone});
     harness.player.play();
 
@@ -1673,7 +1681,7 @@ test "an idle engine makes no pass in 200 ms and resumes on wakeUp" {
     const allocator = std.testing.allocator;
     var harness = try Harness.init(allocator);
     defer harness.deinit();
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    harness.registration.thread = try harness.engine.spawn();
     defer {
         harness.registration.requestCancellation();
         harness.registration.awaitCompletion();
@@ -1692,7 +1700,7 @@ test "quiesce returns against a parked engine" {
     const allocator = std.testing.allocator;
     var harness = try Harness.init(allocator);
     defer harness.deinit();
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    harness.registration.thread = try harness.engine.spawn();
     defer {
         harness.registration.requestCancellation();
         harness.registration.awaitCompletion();
@@ -1709,7 +1717,7 @@ test "cancellation wakes a parked engine" {
     const allocator = std.testing.allocator;
     var harness = try Harness.init(allocator);
     defer harness.deinit();
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    harness.registration.thread = try harness.engine.spawn();
     errdefer {
         harness.registration.requestCancellation();
         harness.registration.awaitCompletion();
@@ -1721,6 +1729,105 @@ test "cancellation wakes a parked engine" {
     try std.testing.expect(!harness.engine.running.load(.acquire));
 }
 
+const GatedEngineStart = struct {
+    engine: *PlayerEngine,
+    gate: std.atomic.Value(bool) = .init(false),
+    opened: std.atomic.Value(bool) = .init(false),
+
+    fn enter(self: *GatedEngineStart) void {
+        while (!self.gate.load(.acquire)) std.Thread.yield() catch {};
+        self.engine.run();
+    }
+
+    fn openOncePublished(self: *GatedEngineStart) void {
+        while (self.engine.published.load(.acquire) >> 32 == 0) std.Thread.yield() catch {};
+        self.openAfterHold();
+    }
+
+    fn openOnceSuspended(self: *GatedEngineStart) void {
+        while (!self.engine.suspend_requested.load(.seq_cst)) std.Thread.yield() catch {};
+        self.openAfterHold();
+    }
+
+    fn openAfterHold(self: *GatedEngineStart) void {
+        std.testing.io.sleep(.fromMilliseconds(20), .awake) catch {};
+        self.opened.store(true, .release);
+        self.open();
+    }
+
+    fn open(self: *GatedEngineStart) void {
+        self.gate.store(true, .release);
+    }
+};
+
+test "a zone set published before the engine thread first runs is adopted before publishZones returns" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    const runtime_zone = try ZoneRuntime.create(allocator);
+    defer runtime_zone.destroy();
+    var start: GatedEngineStart = .{ .engine = harness.engine };
+    harness.registration.thread = try harness.engine.spawnEntry(GatedEngineStart.enter, .{&start});
+    defer {
+        start.open();
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+    const opener = try std.Thread.spawn(.{}, GatedEngineStart.openOncePublished, .{&start});
+    defer opener.join();
+
+    try harness.engine.publishZones(&.{runtime_zone});
+
+    try std.testing.expect(start.opened.load(.acquire));
+    try std.testing.expectEqual(harness.engine.control_sequence, harness.engine.ack.load(.acquire));
+}
+
+test "quiescing an engine thread that has not yet run waits until it is suspended" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var start: GatedEngineStart = .{ .engine = harness.engine };
+    harness.registration.thread = try harness.engine.spawnEntry(GatedEngineStart.enter, .{&start});
+    defer {
+        start.open();
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+    const opener = try std.Thread.spawn(.{}, GatedEngineStart.openOnceSuspended, .{&start});
+    defer opener.join();
+
+    harness.engine.quiesce();
+
+    try std.testing.expect(start.opened.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.passes);
+    harness.engine.release();
+}
+
+test "a publish waiting on an engine thread cancelled before its first pass returns once the thread exits" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    const runtime_zone = try ZoneRuntime.create(allocator);
+    defer runtime_zone.destroy();
+    var start: GatedEngineStart = .{ .engine = harness.engine };
+    harness.registration.thread = try harness.engine.spawnEntry(GatedEngineStart.enter, .{&start});
+    defer {
+        start.open();
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+    harness.registration.requestCancellation();
+    const opener = try std.Thread.spawn(.{}, GatedEngineStart.openOncePublished, .{&start});
+    defer opener.join();
+
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.registration.awaitCompletion();
+
+    try std.testing.expect(!harness.engine.running.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.passes);
+    try std.testing.expectEqual(harness.engine.control_sequence, harness.engine.ack.load(.acquire));
+}
+
 test "a lost output wakes a parked engine, which recovers it" {
     const allocator = std.testing.allocator;
     var harness = try Harness.init(allocator);
@@ -1730,7 +1837,7 @@ test "a lost output wakes a parked engine, which recovers it" {
     const runtime_zone = try openZone(allocator);
     defer runtime_zone.destroy();
     try harness.engine.publishZones(&.{runtime_zone});
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    harness.registration.thread = try harness.engine.spawn();
     defer {
         harness.registration.requestCancellation();
         harness.registration.awaitCompletion();
@@ -2568,7 +2675,7 @@ test "a parked engine services a seek issued while its Player is paused" {
     harness.step(0);
     try std.testing.expect(harness.engine.isIdle());
 
-    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    harness.registration.thread = try harness.engine.spawn();
     defer {
         harness.registration.requestCancellation();
         harness.registration.awaitCompletion();

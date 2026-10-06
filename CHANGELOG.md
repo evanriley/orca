@@ -22,6 +22,8 @@
   analysis.
 - FLAC frame errors, a short final block and an MD5 mismatch are reported as
   `corrupt_audio` by analysis while playback still tolerates them.
+- A Zone attached, detached, moved or destroyed while its Player's engine
+  thread starts no longer returns before that engine adopts the change.
 
 ## 0.1.0 - 2026-10-06
 

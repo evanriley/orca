@@ -1492,6 +1492,80 @@ test "destroying a Zone is acknowledged by the engine before its path is freed" 
     try std.testing.expectError(error.StaleHandle, runtime.zoneOutputState(removed));
 }
 
+fn expectZoneSetAdopted(engine: *const audio.engine.PlayerEngine) !void {
+    try std.testing.expectEqual(engine.control_sequence, engine.ack.load(.acquire));
+}
+
+test "a Zone attached and destroyed right after play is adopted by the engine before each call returns" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const playing = try runtime.createZone();
+    try runtime.attachZone(playing, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.playPlayer(player);
+    const engine = (try runtime.players.get(player)).engine orelse return error.EngineNeverStarted;
+
+    const added = try runtime.createZone();
+    try runtime.attachZone(added, player);
+    try expectZoneSetAdopted(engine);
+    try runtime.destroyZone(added);
+    try expectZoneSetAdopted(engine);
+}
+
+test "a Zone attached, moved, detached or destroyed while its Player's engine starts waits for that engine to adopt the change" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const zone = try runtime.createZone();
+
+    const attached = try runtime.createPlayer();
+    const attached_engine = try runtime_queue.ensureEngine(&runtime, attached);
+    try runtime.attachZone(zone, attached);
+    try expectZoneSetAdopted(attached_engine);
+
+    const moved_from = try runtime.createPlayer();
+    const moved_to = try runtime.createPlayer();
+    try runtime.attachZone(zone, moved_from);
+    const from_engine = try runtime_queue.ensureEngine(&runtime, moved_from);
+    const to_engine = try runtime_queue.ensureEngine(&runtime, moved_to);
+    try runtime.attachZone(zone, moved_to);
+    try expectZoneSetAdopted(from_engine);
+    try expectZoneSetAdopted(to_engine);
+
+    const detached = try runtime.createPlayer();
+    try runtime.attachZone(zone, detached);
+    const detached_engine = try runtime_queue.ensureEngine(&runtime, detached);
+    try runtime.detachZone(zone);
+    try expectZoneSetAdopted(detached_engine);
+
+    const destroyed = try runtime.createPlayer();
+    try runtime.attachZone(zone, destroyed);
+    const destroyed_engine = try runtime_queue.ensureEngine(&runtime, destroyed);
+    try runtime.destroyZone(zone);
+    try expectZoneSetAdopted(destroyed_engine);
+}
+
+test "destroying a Player right after its engine thread is spawned joins that thread" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    _ = try runtime_queue.ensureEngine(&runtime, player);
+    try runtime.destroyPlayer(player);
+
+    try std.testing.expectEqual(@as(usize, 0), inFlightWorkCount(&runtime));
+}
+
 fn awaitZoneActive(runtime: *OrcaRuntime, zone: ZoneHandle) !void {
     var deadline: TestDeadline = .init(5_000);
     while (try runtime.zoneOutputState(zone) != .active) {

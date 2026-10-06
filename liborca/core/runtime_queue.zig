@@ -682,11 +682,7 @@ pub fn ensureEngine(self: *OrcaRuntime, player: PlayerHandle) !*audio.engine.Pla
     // The engine must never resolve a handle, so it is handed its zone set
     // before it starts and re-handed one on every attach or detach.
     try publishZonesTo(self, player, engine);
-    registration.thread = try std.Thread.spawn(
-        .{},
-        audio.engine.PlayerEngine.run,
-        .{engine},
-    );
+    registration.thread = try engine.spawn();
     const object_value = try self.players.get(player);
     object_value.engine = engine;
     object_value.engine_work = work_handle;
