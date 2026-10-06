@@ -1,9 +1,8 @@
 # Roadmap
 
-What Orca does today, what must hold before 0.1.0 and 1.0, and
-what is deferred. "Works" means reachable from `orca-cli` or `orca-gtk`
-through the public runtime path, per the rule in
-[architecture.md](architecture.md).
+What Orca does today, what must hold before 1.0, and what is deferred.
+"Works" means reachable from `orca-cli` or `orca-gtk` through the public
+runtime path, per the rule in [architecture.md](architecture.md).
 
 ## Status
 
@@ -20,7 +19,7 @@ without a rescan. `liborca` builds for aarch64
 macOS; there is no macOS app, audio output or filesystem watcher.
 
 Features are frozen until 1.0. The work is the [release gates](#release-gates)
-below: the first public release, 0.1.0, then 1.0.
+below.
 
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`
 versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
@@ -343,14 +342,6 @@ Each gate states the defect or requirement, the result that must be observable
 and how it is checked. A gate closes when its check passes and the entry is
 removed.
 
-### Before 0.1.0
-
-- Publication. The GitHub items: the `required` CI job passing on GitHub and
-  made required by branch protection, private vulnerability reporting turned
-  on for `SECURITY.md`, the provider User-Agent contact switched to the
-  repository URL, and the README's flake snippets checked from outside the
-  repository.
-
 ### Before 1.0
 
 - Signal path truth. Unknown device details must not produce an unqualified
@@ -418,8 +409,7 @@ removed.
 Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
 release bumps the minor version when it contains a breaking change to the
 Zig API, the C ABI or the Library schema, and the patch version otherwise.
-The first public release is 0.1.0; 1.0 follows the
-[Before 1.0](#before-10) gates.
+1.0 follows the [Before 1.0](#before-10) gates.
 
 Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
 the same commit: features, fixes, refactors, removals and breaking changes

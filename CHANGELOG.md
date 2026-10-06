@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-10-06
 
 The first public release. Ships Library schema version 1.
 [What works today](docs/roadmap.md#works-today) has the full list.
