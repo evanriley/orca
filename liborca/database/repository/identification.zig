@@ -454,6 +454,7 @@ pub const ReleaseProposal = struct {
     payload: []const u8,
     /// The track number the file's own tag states.
     tagged_track_number: ?u32,
+    in_album_group: bool,
 };
 
 pub const ReleaseProposalList = struct {
@@ -1697,7 +1698,8 @@ pub const IdentificationProposalRepository = struct {
         }
         var statement = try self.db.prepare(
             "SELECT proposal.id, proposal.file_id, proposal.provider_id, proposal.payload,\n" ++
-                "       (SELECT track_number FROM observed_file_tags WHERE observed_file_tags.file_id = proposal.file_id)\n" ++
+                "       (SELECT track_number FROM observed_file_tags WHERE observed_file_tags.file_id = proposal.file_id),\n" ++
+                "       proposal.album_group IS NOT NULL\n" ++
                 "FROM identification_proposals AS proposal\n" ++
                 "WHERE proposal.state != ?2 AND proposal.file_id IN\n" ++
                 "    (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.release_id = ?1)\n" ++
@@ -1715,6 +1717,7 @@ pub const IdentificationProposalRepository = struct {
                 .recording_mbid = try owned.dupe(u8, statement.columnText(2)),
                 .payload = try owned.dupe(u8, statement.columnBlob(3)),
                 .tagged_track_number = if (optionalInt64(statement, 4)) |number| std.math.cast(u32, number) else null,
+                .in_album_group = statement.columnInt64(5) != 0,
             });
         }
         list.items = items.items;
@@ -2876,7 +2879,8 @@ pub const IdentificationProposalRepository = struct {
     /// answered it, in one transaction, so a file is never marked searched
     /// without its proposals. A proposal for a recording the file already has
     /// one for is updated in place and keeps its state, so a dismissed or
-    /// accepted one stays so. Returns how many of the proposals are pending.
+    /// accepted one stays so, and its album group with the group's release
+    /// values. Returns how many of the proposals are pending.
     pub fn recordSearch(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
@@ -2894,7 +2898,7 @@ pub const IdentificationProposalRepository = struct {
         errdefer self.db.exec("ROLLBACK;") catch {};
         var pending_count: u32 = 0;
         for (evidence) |*item| {
-            if (try self.mergeLocked(allocator, file_id, item, null) == .pending) pending_count += 1;
+            if (try self.mergeLocked(allocator, file_id, item, .kept) == .pending) pending_count += 1;
         }
         inline for (.{ IdentificationProvider.musicbrainz, IdentificationProvider.acoustid }) |provider| {
             if (@field(answered, @tagName(provider))) try self.markSearchedLocked(file_id, provider);
@@ -2903,18 +2907,20 @@ pub const IdentificationProposalRepository = struct {
         return pending_count;
     }
 
-    /// Inserts or updates the file's proposal for the evidence's recording,
-    /// in `album_group` or in none. A proposal joining a group takes the
-    /// release values the group was formed on.
+    /// Inserts or updates the file's proposal for the evidence's recording.
+    /// An `assigned` proposal is put in that group or in none, and one joining
+    /// a group takes the release values the group was formed on. A `kept`
+    /// proposal stays in the group it is in, if any, with the group's release
+    /// values.
     fn mergeLocked(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         file_id: i64,
         evidence: *const ProposalEvidence,
-        album_group: ?i64,
+        grouping: AlbumGrouping,
     ) !ProposalState {
         var select = try self.db.prepare(
-            \\SELECT id, provider, confidence, payload, state FROM identification_proposals
+            \\SELECT id, provider, confidence, payload, state, album_group FROM identification_proposals
             \\WHERE file_id=?1 AND provider_id=?2 ORDER BY id LIMIT 1;
         );
         defer select.deinit();
@@ -2935,7 +2941,10 @@ pub const IdentificationProposalRepository = struct {
             try insert.bindDouble(4, evidence.payload.combinedConfidence());
             try insert.bindBlob(5, payload);
             try insert.bindInt64(6, @backingInt(ProposalState.pending));
-            try insert.bindOptionalInt64(7, album_group);
+            try insert.bindOptionalInt64(7, switch (grouping) {
+                .kept => null,
+                .assigned => |group| group,
+            });
             if (try insert.step() != .done) return error.SqlFailed;
             return .pending;
         }
@@ -2949,16 +2958,20 @@ pub const IdentificationProposalRepository = struct {
             error.OutOfMemory => return err,
         };
         defer if (parsed) |value| value.deinit();
-        var merged = mergeProposalPayload(
-            if (parsed) |value| value.value else .{},
-            existing_providers,
-            existing_confidence,
-            evidence.*,
-        );
+        const existing: ProposalPayload = if (parsed) |value| value.value else .{};
+        var merged = mergeProposalPayload(existing, existing_providers, existing_confidence, evidence.*);
+        const album_group = switch (grouping) {
+            .kept => optionalInt64(select, 5),
+            .assigned => |group| group,
+        };
         if (album_group != null) {
-            merged.release_mbid = evidence.payload.release_mbid;
-            merged.track_number = evidence.payload.track_number;
-            merged.copyEnrichment(evidence.payload);
+            const release_values = switch (grouping) {
+                .kept => existing,
+                .assigned => evidence.payload,
+            };
+            merged.release_mbid = release_values.release_mbid;
+            merged.track_number = release_values.track_number;
+            merged.copyEnrichment(release_values);
         }
         const payload = try merged.encode(allocator);
         defer allocator.free(payload);
@@ -3015,7 +3028,7 @@ pub const IdentificationProposalRepository = struct {
             var left_pending = false;
             for (file.evidence, 0..) |*item, index| {
                 const in_group = file.grouped == index;
-                if (try self.mergeLocked(allocator, file_id, item, if (in_group) group else null) != .pending) continue;
+                if (try self.mergeLocked(allocator, file_id, item, .{ .assigned = if (in_group) group else null }) != .pending) continue;
                 record.pending += 1;
                 left_pending = true;
                 if (in_group) record.group = group;
@@ -3057,6 +3070,11 @@ pub const IdentificationProposalRepository = struct {
             .details = text,
         });
     }
+
+    const AlbumGrouping = union(enum) {
+        kept,
+        assigned: ?i64,
+    };
 
     fn nextAlbumGroupLocked(self: *const IdentificationProposalRepository) !i64 {
         var statement = try self.db.prepare(
@@ -3548,6 +3566,75 @@ test "a proposal found again on the same release keeps its release values, and n
         .payload = .{ .acoustid_score = 0.95, .acoustid_confidence = 0.9 },
     });
     try testing.expectEqualStrings("Album", fingerprint_only.release_title.?);
+}
+
+fn storedProposal(db: sqlite.Database, file_id: i64, recording_mbid: []const u8) !struct { album_group: ?i64, providers: ProviderSet, confidence: f64, payload: std.json.Parsed(ProposalPayload) } {
+    var select = try db.prepare("SELECT album_group, provider, confidence, payload FROM identification_proposals WHERE file_id=?1 AND provider_id=?2;");
+    defer select.deinit();
+    try select.bindInt64(1, file_id);
+    try select.bindText(2, recording_mbid);
+    if (try select.step() != .row) return error.TestExpectedRow;
+    return .{
+        .album_group = optionalInt64(select, 0),
+        .providers = ProviderSet.parse(select.columnText(1)),
+        .confidence = select.columnDouble(2),
+        .payload = try ProposalPayload.parse(testing.allocator, select.columnBlob(3)),
+    };
+}
+
+test "a search merge keeps a grouped proposal in its group on the group's release values, and a verification still regroups" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        testing.allocator,
+        testing.io,
+        "file:orca-test-identification-group-merge?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const proposals = &library.identification_proposals;
+    const first = try library.files.create(.{ .size_bytes = 100 });
+    const second = try library.files.create(.{ .size_bytes = 100 });
+    var grouped_payload = enrichedFor(release_a);
+    grouped_payload.acoustid_score = 0.97;
+    grouped_payload.acoustid_confidence = 0.6;
+    grouped_payload.musicbrainz_confidence = null;
+    const grouped_evidence = [_]ProposalEvidence{.{ .recording_mbid = mbid_a, .found_by = .{ .acoustid = true }, .payload = grouped_payload }};
+    const second_evidence = [_]ProposalEvidence{.{ .recording_mbid = mbid_b, .found_by = .{ .acoustid = true }, .payload = grouped_payload }};
+    const verified = try proposals.recordVerifications(testing.allocator, &.{
+        .{ .verification = .{ .file_id = first, .quick_hash = null, .recording_mbid = mbid_b, .outcome = .disagrees, .heard = &.{} }, .evidence = &grouped_evidence, .grouped = 0 },
+        .{ .verification = .{ .file_id = second, .quick_hash = null, .recording_mbid = mbid_a, .outcome = .disagrees, .heard = &.{} }, .evidence = &second_evidence, .grouped = 0 },
+    });
+    const group = verified.group.?;
+
+    const found: ProposalPayload = .{ .title = "Song", .release_mbid = release_b, .track_number = 9, .musicbrainz_confidence = 0.9 };
+    const search_evidence = [_]ProposalEvidence{
+        .{ .recording_mbid = mbid_a, .found_by = .{ .musicbrainz = true }, .payload = found },
+        .{ .recording_mbid = mbid_b, .found_by = .{ .musicbrainz = true }, .payload = found },
+    };
+    try testing.expectEqual(@as(u32, 2), try proposals.recordSearch(testing.allocator, first, .{ .musicbrainz = true }, &search_evidence));
+
+    const kept = try storedProposal(library.database, first, mbid_a);
+    defer kept.payload.deinit();
+    try testing.expectEqual(@as(?i64, group), kept.album_group);
+    try testing.expect(kept.providers.musicbrainz and kept.providers.acoustid);
+    try testing.expect(kept.confidence > 0.9);
+    try testing.expectEqualStrings(release_a, kept.payload.value.release_mbid.?);
+    try testing.expectEqual(@as(?u32, 4), kept.payload.value.track_number);
+    try testing.expectEqual(@as(?u32, 2), kept.payload.value.disc_number);
+    try testing.expectEqualStrings("Album", kept.payload.value.release_title.?);
+    try testing.expectEqualStrings(mbid_b, kept.payload.value.release_track_mbid.?);
+    const added = try storedProposal(library.database, first, mbid_b);
+    defer added.payload.deinit();
+    try testing.expectEqual(@as(?i64, null), added.album_group);
+    try testing.expectEqualStrings(release_b, added.payload.value.release_mbid.?);
+
+    _ = try proposals.recordVerifications(testing.allocator, &.{
+        .{ .verification = .{ .file_id = first, .quick_hash = null, .recording_mbid = mbid_b, .outcome = .disagrees, .heard = &.{} }, .evidence = &grouped_evidence },
+    });
+    const left = try storedProposal(library.database, first, mbid_a);
+    defer left.payload.deinit();
+    try testing.expectEqual(@as(?i64, null), left.album_group);
+    const stayed = try storedProposal(library.database, second, mbid_b);
+    defer stayed.payload.deinit();
+    try testing.expectEqual(@as(?i64, group), stayed.album_group);
 }
 
 test "a proposal keeps the releases and release facts MusicBrainz last listed for it" {

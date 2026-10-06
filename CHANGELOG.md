@@ -255,6 +255,11 @@
   the same answer names it in full, so recordings sharing a fingerprint rank
   on all their evidence rather than on their artist credit. AcoustID answers
   cached before this, which may lack those fields, are asked again.
+- Re-identifying a Release keeps its pending album correction whole. A search
+  that finds a grouped recording again leaves its proposal in the group with
+  the release, positions and release values the group was formed on, and
+  Match Album's release vote leaves a grouped proposal on that release, so no
+  correction of the group can be accepted alone.
 
 ## 0.1.0 - 2026-10-06
 

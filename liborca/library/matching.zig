@@ -605,9 +605,10 @@ pub const LibraryMatching = struct {
 
     /// Match Album's second phase. Each file votes once for every release
     /// its stored proposals list; the winner is looked up, and every proposal
-    /// whose recording it holds is pointed at it with what it says. Then
-    /// every release its Tracks' release IDs name and the Release's best
-    /// candidate are snapshotted when they have no current snapshot.
+    /// outside an album group whose recording it holds is pointed at it with
+    /// what it says. Then every release its Tracks' release IDs name and the
+    /// Release's best candidate are snapshotted when they have no current
+    /// snapshot.
     fn alignRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
         const step = try self.voteRelease(release_id);
         if (step != .done) return step;
@@ -655,6 +656,7 @@ pub const LibraryMatching = struct {
             .busy => return .busy,
         };
         for (list.items, payloads) |item, slot| {
+            if (item.in_album_group) continue;
             var payload = slot orelse continue;
             const enrichment = try release.enrichment(item.recording_mbid, item.tagged_track_number) orelse continue;
             payload.enrich(release.id(), enrichment);

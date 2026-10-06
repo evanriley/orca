@@ -4930,6 +4930,150 @@ test "an album correction forms again with every file it disputes once one file 
     try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(sounds_pink));
 }
 
+test "re-identifying a Release that finds its album correction's recordings keeps every file in the group on the group's release and positions" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-reidentify-group?mode=memory&cache=shared");
+    defer rig.deinit();
+    const album = try addRelease(rig.library_database, "Bryter Layter", bryter_layter_mbid);
+    const sounds_northern = try rig.addTone("northern.wav", 300, "Pink Moon", pink_moon_mbid, album);
+    const sounds_pink = try rig.addTone("pink.wav", 420, "Northern Sky", northern_sky_mbid, album);
+    rig.acoustid.lookup_body = acoustIdAnswer(
+        heardBy("0", heardResult("0.97", northern_sky_heard)) ++ "," ++ heardBy("1", heardResult("0.96", pink_moon_heard)),
+    );
+    _ = try rig.verify(.{ .release_id = album });
+    const formed = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer formed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), formed.items.len);
+    const group = formed.items[0];
+    try std.testing.expectEqual(@as(usize, 2), group.proposals.len);
+
+    rig.musicbrainz.answers = &.{
+        .{ .title = "Pink", .body = northern_sky_answer },
+        .{ .title = "Northern", .body = pink_moon_answer },
+    };
+    rig.runtime.reapFinishedJobs();
+    const job_handle = try rig.runtime.startLibraryMatching(rig.library, .{
+        .mode = .reidentify,
+        .release_id = album,
+        .accept_minimum_confidence = null,
+        .cover_art = false,
+    });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, job_handle));
+    try std.testing.expect((try rig.runtime.jobMatchStats(job_handle)).proposals_stored > 0);
+
+    const kept = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer kept.deinit();
+    try std.testing.expectEqual(@as(usize, 1), kept.items.len);
+    try std.testing.expectEqual(group.group_id, kept.items[0].group_id);
+    try std.testing.expectEqual(@as(usize, 2), kept.items[0].proposals.len);
+    for (group.proposals) |before| {
+        const after = for (kept.items[0].proposals) |member| {
+            if (member.proposal_id == before.proposal_id) break member;
+        } else return error.TestExpectedMember;
+        try std.testing.expectEqualStrings(before.recording_mbid, after.recording_mbid);
+        try std.testing.expectEqual(before.proposed_track_number, after.proposed_track_number);
+        try std.testing.expectEqual(before.proposed_disc_number, after.proposed_disc_number);
+        try std.testing.expectError(error.ProposalInGroup, rig.runtime.libraryAcceptMatch(rig.library, after.proposal_id));
+    }
+    for ([_]struct { track: i64, recording: []const u8, position: u32 }{
+        .{ .track = sounds_northern, .recording = northern_sky_mbid, .position = 3 },
+        .{ .track = sounds_pink, .recording = pink_moon_mbid, .position = 4 },
+    }) |expected| {
+        const proposals = try rig.runtime.libraryMatchProposals(rig.library, expected.track, 10);
+        defer proposals.deinit();
+        const proposal = for (proposals.items) |item| {
+            if (std.mem.eql(u8, item.recording_mbid, expected.recording)) break item;
+        } else return error.TestExpectedProposal;
+        try std.testing.expectEqualStrings(bryter_layter_mbid, proposal.release_mbid.?);
+        try std.testing.expectEqual(@as(?u32, expected.position), proposal.track_number);
+        try std.testing.expectEqual(@as(?u32, 1), proposal.disc_number);
+        try std.testing.expectEqualStrings(if (expected.track == sounds_northern) northern_sky_track_mbid else pink_moon_track_mbid, proposal.release_track_mbid.?);
+    }
+
+    const acceptance = try rig.runtime.libraryAcceptCorrectionGroup(rig.library, group.group_id);
+    try std.testing.expectEqual(@as(u64, 2), acceptance.accepted);
+}
+
+const reissue_mbid = "8f9a0b1c-2d3e-4f40-9b5c-6d7e8f9a0b1c";
+
+fn reissueEntry(comptime mbid: []const u8, comptime title: []const u8, comptime position: []const u8) []const u8 {
+    return "{\"id\":\"" ++ mbid ++ "\",\"score\":100,\"title\":\"" ++ title ++
+        "\",\"length\":15000,\"artist-credit\":[{\"name\":\"Nick Drake\"}],\"releases\":[{" ++
+        "\"id\":\"" ++ reissue_mbid ++ "\",\"title\":\"Bryter Layter\"," ++
+        "\"media\":[{\"track-offset\":0,\"track\":[{\"number\":\"" ++ position ++ "\"}]}]}]}";
+}
+
+const reissue_northern_sky_answer = "{\"recordings\":[" ++ reissueEntry(northern_sky_mbid, "Northern Sky", "7") ++ "]}";
+const reissue_pink_moon_answer = "{\"recordings\":[" ++ reissueEntry(pink_moon_mbid, "Pink Moon", "8") ++ "]}";
+const reissue_river_man_answer = "{\"recordings\":[" ++ reissueEntry(river_man_mbid, "River Man", "9") ++ "]}";
+
+const reissue_release = "{\"id\":\"" ++ reissue_mbid ++ "\",\"title\":\"Bryter Layter\",\"date\":\"2000-01-01\"," ++
+    "\"artist-credit\":[{\"name\":\"Nick Drake\",\"joinphrase\":\"\",\"artist\":{\"id\":\"" ++ nick_drake_mbid ++ "\"}}]," ++
+    "\"release-group\":{\"id\":\"" ++ bryter_layter_group_mbid ++ "\"},\"media\":[{\"position\":1,\"tracks\":[" ++
+    releaseTrack("a0b1c2d3-e4f5-4061-8d7e-8f9a0b1c2d3e", "7", "Northern Sky", northern_sky_mbid) ++ "," ++
+    releaseTrack("b1c2d3e4-f5a6-4172-8e8f-9a0b1c2d3e4f", "8", "Pink Moon", pink_moon_mbid) ++ "," ++
+    releaseTrack("c2d3e4f5-a6b7-4283-8f9a-0b1c2d3e4f5a", "9", "River Man", river_man_mbid) ++ "]}]}";
+
+test "re-identifying a Release whose files mostly list another edition leaves its album correction on the release it was formed on" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-reidentify-group-edition?mode=memory&cache=shared");
+    defer rig.deinit();
+    const album = try addRelease(rig.library_database, "Bryter Layter", bryter_layter_mbid);
+    const sounds_northern = try rig.addTone("northern.wav", 300, "Pink Moon", pink_moon_mbid, album);
+    const sounds_pink = try rig.addTone("pink.wav", 420, "Northern Sky", northern_sky_mbid, album);
+    const sounds_hazey = try rig.addTone("hazey.wav", 540, "Hazey Jane I", feedback_mbid, album);
+    rig.acoustid.lookup_body = acoustIdAnswer(
+        heardBy("0", heardResult("0.97", northern_sky_heard)) ++ "," ++
+            heardBy("1", heardResult("0.96", pink_moon_heard)) ++ "," ++
+            heardBy("2", heardResult("0.98", hazey_jane_heard)),
+    );
+    const verified = try rig.verify(.{ .release_id = album });
+    try std.testing.expectEqual(@as(u64, 1), verified.stats.agreed);
+    try std.testing.expectEqual(@as(u64, 1), verified.stats.correction_groups);
+    const formed = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer formed.deinit();
+    const group = formed.items[0];
+
+    rig.musicbrainz.answers = &.{
+        .{ .title = "Pink", .body = reissue_northern_sky_answer },
+        .{ .title = "Northern", .body = reissue_pink_moon_answer },
+        .{ .title = "Hazey", .body = reissue_river_man_answer },
+    };
+    rig.musicbrainz.release_body = reissue_release;
+    rig.runtime.reapFinishedJobs();
+    const job_handle = try rig.runtime.startLibraryMatching(rig.library, .{
+        .mode = .reidentify,
+        .release_id = album,
+        .accept_minimum_confidence = null,
+        .cover_art = false,
+    });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, job_handle));
+    const river_man = try rig.runtime.libraryMatchProposals(rig.library, sounds_hazey, 10);
+    defer river_man.deinit();
+    try std.testing.expectEqual(@as(usize, 1), river_man.items.len);
+    try std.testing.expectEqualStrings(reissue_mbid, river_man.items[0].release_mbid.?);
+    try std.testing.expectEqual(@as(?u32, 9), river_man.items[0].track_number);
+
+    const kept = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer kept.deinit();
+    try std.testing.expectEqual(@as(usize, 1), kept.items.len);
+    try std.testing.expectEqual(group.group_id, kept.items[0].group_id);
+    try std.testing.expectEqual(@as(usize, 2), kept.items[0].proposals.len);
+    for ([_]struct { track: i64, recording: []const u8, position: u32 }{
+        .{ .track = sounds_northern, .recording = northern_sky_mbid, .position = 3 },
+        .{ .track = sounds_pink, .recording = pink_moon_mbid, .position = 4 },
+    }) |expected| {
+        const proposals = try rig.runtime.libraryMatchProposals(rig.library, expected.track, 10);
+        defer proposals.deinit();
+        const proposal = for (proposals.items) |item| {
+            if (std.mem.eql(u8, item.recording_mbid, expected.recording)) break item;
+        } else return error.TestExpectedProposal;
+        try std.testing.expectEqualStrings(bryter_layter_mbid, proposal.release_mbid.?);
+        try std.testing.expectEqual(@as(?u32, expected.position), proposal.track_number);
+        try std.testing.expectError(error.ProposalInGroup, rig.runtime.libraryAcceptMatch(rig.library, proposal.id));
+    }
+}
+
 test "cancelling a verification while a unit's lookup is in flight commits nothing for that unit and keeps the unit before it" {
     var rig: VerifyRig = undefined;
     try rig.init("file:orca-verify-cancel?mode=memory&cache=shared");

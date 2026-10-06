@@ -482,12 +482,13 @@ what the search said about each release, first seen per release; a release a
 stored payload says none of them about ranks as unofficial, of another length
 and undated.
 
-The winner is looked up once, and every stored proposal whose recording it
-holds, whether or not it lists the release, is pointed at it and filled in
-(`updatePayload`). Then the Release's best candidate, as Match Review ranks it
-before any acceptance, is looked up unless its snapshot is younger than the
-30-day cache: at most one more request per run, none when it is the winner or
-the cache holds it. A rerun after a failure completes from the cache.
+The winner is looked up once, and every stored proposal outside an album group
+whose recording it holds, whether or not it lists the release, is pointed at it
+and filled in (`updatePayload`). Then the Release's best candidate, as Match
+Review ranks it before any acceptance, is looked up unless its snapshot is
+younger than the 30-day cache: at most one more request per run, none when it
+is the winner or the cache holds it. A rerun after a failure completes from the
+cache.
 
 ### AcoustID lookup
 
@@ -596,6 +597,12 @@ whole with `libraryAcceptCorrectionGroup` and `libraryDismissCorrectionGroup`.
 The other disputing files get corrections of their own, with AcoustID's title
 and artist and no position. A lookup that fails stops the job as a search's
 would; a release MusicBrainz does not have leaves every correction ungrouped.
+
+A proposal leaves its group only when its file is verified again. A search
+that finds its recording again, a re-identify included, adds its provider and
+confidence but keeps it in the group with the release ID, positions and release
+values the group was formed on, and [Match Album](#match-album) never points it
+at another release.
 
 ### Idle maintenance
 

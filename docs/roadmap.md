@@ -393,9 +393,6 @@ To release:
 Each fix adds a test that fails without it, or a headless screenshot for a
 display-only defect, and removes its entry.
 
-- Re-identifying a Release turns its pending album correction into
-  single-file corrections, which can then be accepted one at a time and
-  leave the album's positions half-moved until the rest are accepted.
 - In a Release of more than 512 Tracks, verified a page at a time, a file
   that still disagrees is checked again only while the Release has a stale
   file left when its page is reached, though the job's total counted it.
