@@ -363,12 +363,6 @@ removed.
 - Gapless transitions inside one 256-frame block apply the successor's
   identity and position anchor at its first frame, not the block's. Checked
   by an engine test with a boundary mid-block.
-- Embedding is specified. The SQLite unix-VFS lock replacement on Linux
-  (`liborca/database/sqlite_locks.zig`) is process-wide; its initialization
-  contract is documented and enforced. `orca_runtime_destroy` skips the Debug
-  wrong-thread check; document or fix. Whether the AcoustID application key
-  is snapshotted per job or per request is specified. Checked by tests and
-  by [frontends.md](frontends.md) stating each.
 - Compatibility promises for 1.0 are written separately for the Zig API, the
   C ABI and the Library schema. Schema upgrades from 0.1.0 are
   tested. A GTK launch, open, play and close smoke test runs on a private

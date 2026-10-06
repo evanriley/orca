@@ -1902,6 +1902,10 @@ pub export fn orca_runtime_create() callconv(.c) ?*Runtime {
 
 pub export fn orca_runtime_destroy(runtime: ?*Runtime) callconv(.c) void {
     const box = runtimeBox(runtime) orelse return;
+    if (box.foreignThread()) {
+        std.log.warn("orca_runtime_destroy called from a thread other than the runtime's creating thread; the runtime was not destroyed", .{});
+        return;
+    }
     box.runtime.deinit();
     box.threaded.deinit();
     std.heap.c_allocator.destroy(box);
@@ -8654,7 +8658,7 @@ fn mapError(err: anyerror) Status {
         error.WorkersRunning,
         error.ScrobblingEnabledElsewhere,
         => .invalid_state,
-        error.AlreadyWatching => .invalid_state,
+        error.AlreadyWatching, error.SqliteLocksNotInstalled => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty, error.FolderEmpty => .invalid_state,
         error.PlaylistIsSmart, error.PlaylistIsManual => .invalid_state,
         error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable => .invalid_state,
@@ -8917,6 +8921,41 @@ test "a call refused for its thread leaves the owner's last error untouched" {
 
 fn playFromAnotherThread(runtime: *Runtime, status: *Status) void {
     status.* = orca_player_play(runtime, .{ .index = 0, .generation = 0 });
+}
+
+test "a destroy from another thread is refused in debug builds and leaves the runtime usable" {
+    if (builtin.mode != .debug) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_open(runtime, null, &library));
+
+    const thread = try std.Thread.spawn(.{}, orca_runtime_destroy, .{runtime});
+    thread.join();
+
+    try std.testing.expectEqualStrings("orca_library_open: path is null", std.mem.span(orca_runtime_last_error(runtime)));
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-foreign-destroy?mode=memory&cache=shared", &library));
+}
+
+test "two runtimes share the SQLite lock replacement and destroying one leaves it for the other" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const first = orca_runtime_create() orelse return error.OutOfMemory;
+    const second = orca_runtime_create() orelse {
+        orca_runtime_destroy(first);
+        return error.OutOfMemory;
+    };
+    defer orca_runtime_destroy(second);
+    try std.testing.expect(database.sqlite_locks.active());
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(first, "file:orca-c-api-first-runtime?mode=memory&cache=shared", &library));
+    try std.testing.expectEqual(Status.ok, orca_library_open(second, "file:orca-c-api-second-runtime?mode=memory&cache=shared", &library));
+
+    orca_runtime_destroy(first);
+
+    try std.testing.expect(database.sqlite_locks.active());
+    try std.testing.expectEqual(Status.ok, orca_library_open(second, "file:orca-c-api-after-first-runtime?mode=memory&cache=shared", &library));
 }
 
 test "a last error longer than its buffer is truncated and stays terminated" {

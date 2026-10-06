@@ -1654,8 +1654,12 @@ typedef struct orca_event {
 const char *orca_version(void);
 
 /* The caller owns the returned runtime and must destroy it exactly once.
- * NULL means out of memory. */
+ * NULL means out of memory. On Linux the first runtime in the process switches
+ * SQLite to OFD locks; create it before opening any SQLite connection of your
+ * own, or every orca_library_open returns ORCA_STATUS_INVALID_STATE. */
 orca_runtime *orca_runtime_create(void);
+/* Call it on the runtime's creating thread. A Debug build ignores a call from
+ * another thread and leaves the runtime alive. */
 void orca_runtime_destroy(orca_runtime *runtime);
 
 /*
@@ -1779,7 +1783,8 @@ orca_status orca_runtime_set_provider_server(
  * credential callback returns one for ORCA_CREDENTIAL_SERVICE_ACOUSTID /
  * ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY. Without either, matching skips AcoustID.
  * Printable ASCII without spaces, at most 256 bytes; anything else is
- * ORCA_STATUS_INVALID_ARGUMENT. Copied; NULL clears it.
+ * ORCA_STATUS_INVALID_ARGUMENT. Copied; NULL clears it. A job resolves its key
+ * once, when its AcoustID work begins, so a change applies from the next job.
  */
 orca_status orca_runtime_set_acoustid_client_key(orca_runtime *runtime, const char *key);
 

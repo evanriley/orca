@@ -59,10 +59,15 @@ An OFD lock belongs to the open file and survives other closes.
 
 - The override is process-wide and applies to every SQLite connection in the
   process, the embedder's included.
+- The first `Runtime.init`, or else the first database open, installs it once
+  per process; concurrent first calls install it once and all see the result.
+  Nothing removes it.
+- SQLite's system-call table must not change under open connections, so the
+  install is refused when any SQLite connection is open. It is decided once:
+  after a refusal, or when the `fcntl` in effect is no longer the replacement,
+  every database open fails with `error.SqliteLocksNotInstalled`.
 - An embedder's own multi-connection SQLite use in rollback-journal mode in the
   same process can see spurious `SQLITE_BUSY`.
-- An embedder must not open SQLite connections before liborca's first open:
-  SQLite's system-call table must not change under open connections.
 - macOS has no OFD locks and keeps POSIX locks
   ([roadmap.md](roadmap.md#known-issues)).
 

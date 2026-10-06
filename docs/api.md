@@ -31,6 +31,13 @@ and compiles in the rest; see
 [`examples/embed`](../examples/embed) is a complete project; `zig build test`
 builds it.
 
+The process rules in [frontends.md](frontends.md#embedding) apply to Zig hosts
+too. On Linux, the first `Runtime.init` replaces SQLite's `fcntl` with OFD
+locks for the whole process, once; a host creates it before it opens any SQLite
+connection of its own, or every `openLibrary` fails with
+`error.SqliteLocksNotInstalled`. Every call on one `Runtime`, `deinit`
+included, comes from the thread that created it.
+
 ## Surface
 
 ```zig
@@ -406,7 +413,9 @@ section lists the entry points, errors and limits.
   may be called at any time. A null Wikipedia server asks each language's own
   wiki. `setAcoustIdClientKey(key)` copies the application key, or clears it
   when null; a `CredentialStore` value under `acoustid_credential_service` /
-  `acoustid_client_key_account` overrides it.
+  `acoustid_client_key_account` overrides it. A job resolves its key once, when
+  its AcoustID work begins, from the store or else the key as it was when the
+  job was started or queued; a change applies from the next job.
 - `startArtistInfoFetch(library, artist_id, ArtistInfoOptions)` starts an
   `artist_info` Job that gathers an Artist's photo, biography, years active and
   links, listeners and related artists, and fills genres. Options: `language`

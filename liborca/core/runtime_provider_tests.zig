@@ -2744,6 +2744,97 @@ test "a file that fails to decode is not fingerprinted and its Track is still se
     try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM identification_searches WHERE provider = 'acoustid';"));
 }
 
+const AcoustIdClientKeys = struct {
+    keys: [2][]const u8,
+    current: std.atomic.Value(u8) = .init(0),
+
+    fn store(self: *AcoustIdClientKeys) CredentialStore {
+        return .{ .context = self, .get_fn = get };
+    }
+
+    fn get(context: *anyopaque, allocator: std.mem.Allocator, service: []const u8, account: []const u8) anyerror!?[]u8 {
+        const self: *AcoustIdClientKeys = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, service, providers.acoustid.credential_service)) return null;
+        if (!std.mem.eql(u8, account, providers.acoustid.client_key_account)) return null;
+        return try allocator.dupe(u8, self.keys[self.current.load(.acquire)]);
+    }
+};
+
+const KeyChange = union(enum) {
+    runtime: []const u8,
+    store: *AcoustIdClientKeys,
+};
+
+fn addTwoUntaggedFiles(runtime: *OrcaRuntime, library: LibraryHandle, temporary: *std.testing.TmpDir) !void {
+    const library_database = try libraryDatabase(runtime, library);
+    try writeToneWave(temporary.dir, "first.wav", 440);
+    try writeToneWave(temporary.dir, "second.wav", 620);
+    _ = try addAudioTrack(library_database, temporary, "first.wav", "", "");
+    _ = try addAudioTrack(library_database, temporary, "second.wav", "", "");
+}
+
+fn expectKeyKeptThroughJob(
+    runtime: *OrcaRuntime,
+    library: LibraryHandle,
+    acoustid: *FakeAcoustId,
+    change: KeyChange,
+    expected_form_prefix: []const u8,
+) !void {
+    const lookups_before = acoustid.lookups.load(.acquire);
+    acoustid.held.store(true, .release);
+    runtime.reapFinishedJobs();
+    const job_handle = try runtime.startLibraryMatching(library, .{ .batch_size = 1 });
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (acoustid.lookups.load(.acquire) == lookups_before and deadline.tick()) {}
+    switch (change) {
+        .runtime => |key| try runtime.setAcoustIdClientKey(key),
+        .store => |keys| keys.current.store(1, .release),
+    }
+    acoustid.held.store(false, .release);
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, job_handle));
+    try std.testing.expectEqual(lookups_before + 2, acoustid.lookups.load(.acquire));
+    try std.testing.expect(std.mem.startsWith(u8, acoustid.lastForm(), expected_form_prefix));
+}
+
+test "a matching job keeps the runtime's application key from its start and the next job uses the new one" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var musicbrainz: FakeMusicBrainz = .{};
+    var acoustid: FakeAcoustId = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("first-key");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-acoustid-runtime-key-snapshot?mode=memory&cache=shared");
+    try addTwoUntaggedFiles(&runtime, library, &temporary);
+
+    try expectKeyKeptThroughJob(&runtime, library, &acoustid, .{ .runtime = "second-key" }, "client=first-key&");
+    try expectKeyKeptThroughJob(&runtime, library, &acoustid, .{ .runtime = "third-key" }, "client=second-key&");
+}
+
+test "a matching job keeps the credential store's application key from its start and the next job reads it again" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var musicbrainz: FakeMusicBrainz = .{};
+    var acoustid: FakeAcoustId = .{};
+    var stored_keys: AcoustIdClientKeys = .{ .keys = .{ "stored-first", "stored-second" } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("host-key");
+    try runtime.setCredentialStore(stored_keys.store());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-acoustid-stored-key-snapshot?mode=memory&cache=shared");
+    try addTwoUntaggedFiles(&runtime, library, &temporary);
+
+    try expectKeyKeptThroughJob(&runtime, library, &acoustid, .{ .store = &stored_keys }, "client=stored-first&");
+    try expectKeyKeptThroughJob(&runtime, library, &acoustid, .{ .runtime = "other-host-key" }, "client=stored-second&");
+}
+
 test "a submission fails as busy when another process holds AcoustID past its wait and marks nothing sent" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

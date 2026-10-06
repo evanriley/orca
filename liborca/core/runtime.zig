@@ -641,6 +641,7 @@ pub const OrcaRuntime = struct {
     watch_limit: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
+        database.sqlite_locks.installOnce();
         return .{
             .allocator = allocator,
             .libraries = .init(allocator),

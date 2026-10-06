@@ -484,6 +484,13 @@ under `org.acoustid` / `client-key` overrides it. Without a key AcoustID is
 skipped and reported `no_client_key`; a key AcoustID refuses (error code 4)
 stops AcoustID for the rest of the job and is reported `invalid_client_key`.
 
+A matching or submission job resolves its key once, on its worker thread, when
+its AcoustID work begins: the stored key when the store holds a valid one, else
+the runtime's key as it was when the job was started or queued. Every request
+of the job uses that key. A `setAcoustIdClientKey` call or a store change while
+the job runs applies from the next job
+([frontends.md](frontends.md#embedding)).
+
 ## Verification
 
 A recording ID in effect can be wrong: a file tagged as another track of its

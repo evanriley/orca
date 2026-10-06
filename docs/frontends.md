@@ -27,14 +27,44 @@ each function. Static and shared libraries install with it.
   pools take no lock, so a GUI timer racing `orca_runtime_destroy` is a
   use-after-free. The exceptions are the wake and credential callbacks, which
   liborca calls from its own threads.
-- On Linux, liborca switches SQLite to OFD locks for the whole process on its
-  first database open; see [database.md](database.md#concurrency). A host opens
-  no SQLite connection of its own before that.
+- A host embedding liborca follows the process rules in
+  [Embedding](#embedding).
 - `orca_player_play` is refused unless the Player has a loaded source or a
   non-empty queue and an attached Zone: a transport that reports playing while
   nothing renders is a defect, not a state.
 - Events (`orca_runtime_pump`, `orca_runtime_poll_event`) are hints and
   correlations; authoritative consumers read snapshots.
+
+### Embedding
+
+These rules hold for every host, through the C ABI or the Zig API.
+
+- **SQLite locks.** On Linux, liborca replaces the `fcntl` system call of
+  SQLite's `unix` VFS so every connection in the process takes open file
+  description (OFD) locks; see
+  [database.md](database.md#process-wide-lock-replacement). The first
+  `orca_runtime_create` (Zig: `Runtime.init`) installs it. The install runs once
+  per process, is thread-safe, and later runtimes and Library opens reuse it.
+  Destroying a runtime never removes it, so a second runtime, created before or
+  after, keeps it.
+- **Install before any SQLite connection.** The host creates its first runtime
+  before it opens any SQLite connection of its own. If a connection is open
+  when the install runs, liborca leaves `fcntl` unchanged for the life of the
+  process, logs a warning, and every Library open fails with
+  `ORCA_STATUS_INVALID_STATE` (Zig: `error.SqliteLocksNotInstalled`). The same
+  failure follows when the host or another library replaces SQLite's `fcntl`
+  afterwards. The host's own connections opened after the install take OFD
+  locks too; in rollback-journal mode they can see spurious `SQLITE_BUSY`.
+- **Destroy on the creating thread.** `orca_runtime_destroy` follows the
+  threading contract like every other call. A Debug build refuses a destroy
+  from another thread: it logs a warning and returns, and the runtime stays
+  alive and usable on its creating thread. Release builds do not check.
+- **AcoustID application key per job.** A matching or submission job resolves
+  its application key once, when its AcoustID work begins: the credential
+  store's `ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY` when the store holds a valid one,
+  else the key set with `orca_runtime_set_acoustid_client_key` when the job was
+  started or queued. Every request of that job uses it. A key set, or a stored
+  key changed, while a job runs applies from the next job.
 
 ### Errors
 

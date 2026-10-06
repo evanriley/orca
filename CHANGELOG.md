@@ -10,6 +10,12 @@
 ### Changed
 
 - The application icon is a white "O" on the window's dark background.
+- Embedding rules are specified and enforced. The first runtime installs the
+  process-wide SQLite OFD lock replacement once and thread-safely; when SQLite
+  connections were already open, or the replacement was later undone, Library
+  opens fail with `ORCA_STATUS_INVALID_STATE` instead of running on POSIX
+  locks. A Debug build refuses `orca_runtime_destroy` from another thread. An
+  AcoustID job keeps the application key it resolved when it began.
 
 ### Fixed
 

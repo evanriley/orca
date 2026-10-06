@@ -9,7 +9,7 @@ pub const Error = error{
     BindFailed,
     SchemaVersionTooNew,
     ForeignKeyViolation,
-};
+} || sqlite_locks.Error;
 
 pub const Database = struct {
     handle: *c.sqlite3,
@@ -30,7 +30,7 @@ pub const Database = struct {
     }
 
     fn openWithFlags(path: [:0]const u8, flags: c_int) Error!Database {
-        sqlite_locks.installOnce();
+        try sqlite_locks.requireInstalled();
         var raw: ?*c.sqlite3 = null;
         if (c.sqlite3_open_v2(path.ptr, &raw, flags, null) != c.SQLITE_OK) {
             if (raw) |failed| _ = c.sqlite3_close_v2(failed);
