@@ -128,20 +128,12 @@ fn rank(
     library: *database.LibraryDatabase,
     members: database.DuplicateGroupMembers,
 ) !Ranked {
-    var files: std.ArrayList(database.DuplicateFile) = .empty;
-    errdefer files.deinit(allocator);
-    for (members.file_ids) |file_id| {
-        if (try library.duplicate_groups.file(file_id)) |file| try files.append(allocator, file);
-    }
-    std.mem.sort(database.DuplicateFile, files.items, {}, database.repository.keepsBefore);
-    var bytes: u64 = 0;
+    const files = try library.duplicate_groups.rankFiles(allocator, members);
+    errdefer allocator.free(files);
     var copies: u32 = 0;
     var recording: ?i64 = null;
-    var same_recording = files.items.len > 0;
-    for (files.items, 0..) |file, index| {
-        const size: u64 = @intCast(file.size_bytes);
-        const redundant = if (index == 0) file.copies - 1 else file.copies;
-        bytes +|= size *| redundant;
+    var same_recording = files.len > 0;
+    for (files) |file| {
         copies +|= file.copies;
         if (file.recording_id == null or (recording != null and recording.? != file.recording_id.?)) {
             same_recording = false;
@@ -149,9 +141,9 @@ fn rank(
         recording = file.recording_id;
     }
     return .{
-        .files = try files.toOwnedSlice(allocator),
+        .files = files,
         .same_recording = same_recording,
-        .bytes_redundant = bytes,
+        .bytes_redundant = database.repository.redundantBytes(files),
         .copies = copies,
     };
 }
@@ -452,4 +444,47 @@ test "identical-audio findings form a duplicate group that states its verdict an
 
     try owner.libraryIgnoreDuplicateGroup(library, page.items[0].id);
     try std.testing.expectEqual(DuplicateGroupTotals{ .groups = 0, .bytes = 0 }, try owner.libraryDuplicateGroupTotals(library));
+}
+
+fn copyPathsInSuggestedOrder(uri: [:0]const u8, first_id: i64, second_id: i64) ![2][]u8 {
+    var owner = OrcaRuntime.init(std.testing.allocator);
+    defer owner.deinit();
+    const library = try owner.openLibrary(std.testing.io, uri);
+    const library_database = try runtime.libraryDatabase(&owner, library);
+    var sql_buffer: [768]u8 = undefined;
+    try library_database.database.exec(try std.fmt.bufPrintSentinel(&sql_buffer,
+        \\INSERT INTO files(id, audio_format, codec, sample_rate, bit_depth, size_bytes) VALUES
+        \\    ({0d}, 1, 'flac', 44100, 16, 1000), ({1d}, 1, 'flac', 44100, 16, 1000);
+        \\INSERT INTO locations(file_id, volume_id, uri, state) VALUES
+        \\    ({0d}, 1, '/music/b/song.flac', 'present'), ({1d}, 1, '/music/a/song.flac', 'present');
+    , .{ first_id, second_id }, 0));
+    try library_database.health_issues.replaceFile(first_id, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = second_id }});
+    try library_database.health_issues.replaceFile(second_id, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = first_id }});
+
+    var page = try owner.libraryDuplicateGroupPage(library, std.testing.allocator, 10, 0);
+    defer page.deinit();
+    var copies = try owner.libraryDuplicateGroup(library, std.testing.allocator, page.items[0].id);
+    defer copies.deinit();
+    try std.testing.expectEqual(@as(usize, 2), copies.items.len);
+    try std.testing.expect(copies.items[0].suggested_keep);
+    var paths: [2][]u8 = undefined;
+    for (copies.items, &paths) |copy, *path| {
+        var statement = try library_database.database.prepare("SELECT uri FROM locations WHERE file_id = ?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, copy.file_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        path.* = try std.testing.allocator.dupe(u8, statement.columnText(0));
+    }
+    return paths;
+}
+
+test "copies of equal quality are ranked by location, whatever file ids the scan gave them" {
+    const forward = try copyPathsInSuggestedOrder("file:orca-duplicate-ties-forward?mode=memory&cache=shared", 1, 2);
+    defer for (forward) |path| std.testing.allocator.free(path);
+    const swapped = try copyPathsInSuggestedOrder("file:orca-duplicate-ties-swapped?mode=memory&cache=shared", 2, 1);
+    defer for (swapped) |path| std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/music/a/song.flac", forward[0]);
+    try std.testing.expectEqualStrings("/music/b/song.flac", forward[1]);
+    try std.testing.expectEqualStrings(forward[0], swapped[0]);
+    try std.testing.expectEqualStrings(forward[1], swapped[1]);
 }

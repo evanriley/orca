@@ -134,6 +134,12 @@
   stopped being writable after planning reports `changed_since_plan` at that
   file. `orca-cli write-tags` prints `failed - REASON -` and `orca-gtk` names
   the reason.
+- Among duplicate copies of equal format, sample rate, bit depth and size,
+  Duplicates ranks and suggests keeping by location (library root path,
+  volume, then path) instead of the order the scanner found them, so the
+  suggestion and the copy order no longer depend on the order the filesystem
+  lists a folder. The duplicate bytes of the health summary free the same
+  copies, where they counted the lowest-numbered file of a group as kept.
 
 ## 0.1.0 - 2026-10-06
 

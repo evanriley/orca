@@ -2140,7 +2140,7 @@ pub const OrcaRuntime = struct {
 
     /// Each kind with a visible issue: how many, and the highest severity.
     pub fn libraryHealthSummary(self: *OrcaRuntime, library: LibraryHandle) !database.HealthSummary {
-        return (try libraryDatabase(self, library)).health_issues.summary();
+        return (try libraryDatabase(self, library)).health_issues.summary(self.allocator);
     }
 
     /// How many Tracks have no present or unverified copy of their file.

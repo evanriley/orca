@@ -365,9 +365,6 @@ screenshot for a display-only defect, and removes its entry.
 - A FLAC seek past the end of the stream fails as a decode error, while WAV
   clamps to the last frame; the other decoders are unchecked.
 - The scanner skips symbolic links to files without counting them.
-- Among duplicate copies of the same format, sample rate, bit depth and
-  size, Duplicates suggests keeping the one the scanner found first, which
-  depends on the order the filesystem lists the folder.
 - A release ID tag that names a release MusicBrainz does not return is
   looked up again on every match run of the Library.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a

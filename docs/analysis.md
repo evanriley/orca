@@ -348,15 +348,18 @@ identical-audio links), `verdict` and `bytes_redundant`, what removing every
 copy but the suggested one frees. `verdict`, a `DuplicateVerdict`, is the
 weakest kind among the group's links; the C ABI carries it as an
 `orca_health_issue_kind` in `orca_duplicate_group_view.verdict`.
-`libraryDuplicateGroupTotals` sums the groups and their bytes, which can differ
-from [By kind](#by-kind) because that counts the lowest-numbered file as the
-kept copy.
+`libraryDuplicateGroupTotals` sums the groups and their bytes. It keeps the same
+copy as [By kind](#by-kind) but can still differ from it: By kind groups the
+links of one kind at a time, while a group joins files across kinds and through
+other files.
 
 `Runtime.libraryDuplicateGroup` (`orca-cli duplicates DATABASE --group=ID`)
 returns a group's files, the suggested copy first: the lossless over the lossy,
 then the higher sample rate, the higher bit depth and the larger file, then the
-lower file id. Each `DuplicateCopy` holds the lowest Track id the file backs,
-that Track's `TrackDetails` with this file's format, size, path and loudness,
+location its details show, by library root path, volume and path compared
+byte-wise, so the order does not depend on the order files were scanned; the
+lower file id decides only when those agree too. Each `DuplicateCopy` holds the
+lowest Track id the file backs, that Track's `TrackDetails` with this file's format, size, path and loudness,
 the number of playlists holding its recording, and its present locations.
 
 Three actions resolve a group. None writes, moves or deletes a file.
@@ -517,9 +520,11 @@ while the file keeps that hash stays hidden. A dismissal goes with its file.
 non-dismissed issue, holding its count, highest severity, `files` and their
 summed `bytes`, ordered by severity then kind. The counts sum to
 `libraryHealthIssueCount`. For the duplicate kinds, `bytes` is what removing the
-redundant copies would free: the kept copy is the lowest-numbered file of a
-group, and a duplicate held as a second location of one file row counts its size
-once per present location beyond the first. `libraryHealthIssuePageOfKind`
+redundant copies would free: the kept copy is the one Duplicates suggests
+keeping (see [Duplicate detection](#duplicate-detection)), taken within the
+groups the links of that kind make, and a duplicate held as a second
+location of one file row counts its size once per present location beyond the
+first. `libraryHealthIssuePageOfKind`
 (`orca-cli health --kind=KIND`) pages the issues of one kind in the order of
 `libraryHealthIssuePage`. `libraryArtworkProblemReleasePage` and
 `libraryArtworkProblemReleaseCount`

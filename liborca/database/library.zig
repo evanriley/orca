@@ -685,7 +685,7 @@ fn addKindFixture(library: *LibraryDatabase) ![3]i64 {
 }
 
 fn expectSummary(library: *LibraryDatabase, expected: []const repository.HealthKindSummary) !void {
-    const summary = try library.health_issues.summary();
+    const summary = try library.health_issues.summary(std.testing.allocator);
     try std.testing.expectEqualSlices(repository.HealthKindSummary, expected, summary.items());
 }
 
@@ -700,7 +700,7 @@ test "the health summary counts each kind's visible issues and names the highest
         .{ .kind = .missing_track_number, .severity = .information, .count = 2, .files = 2, .bytes = 200 },
     });
     var total: u64 = 0;
-    for ((try library.health_issues.summary()).items()) |entry| total += entry.count;
+    for ((try library.health_issues.summary(std.testing.allocator)).items()) |entry| total += entry.count;
     try std.testing.expectEqual(try library.health_issues.count(), total);
 }
 
@@ -711,7 +711,7 @@ fn addSizedHealthFile(library: *LibraryDatabase, uri: []const u8, size_bytes: i6
 }
 
 fn summaryOf(library: *LibraryDatabase, kind: repository.HealthIssueKind) !?repository.HealthKindSummary {
-    const summary = try library.health_issues.summary();
+    const summary = try library.health_issues.summary(std.testing.allocator);
     for (summary.items()) |entry| if (entry.kind == kind) return entry;
     return null;
 }
@@ -757,7 +757,7 @@ test "duplicate bytes in the health summary count only the redundant copies, not
     try library.health_issues.replaceFile(resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
     try library.health_issues.replaceFile(resembled, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = also_resembles }});
     try library.health_issues.replaceFile(also_resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
-    try std.testing.expectEqual(@as(u64, 35_000), (try summaryOf(&library, .likely_duplicate)).?.bytes);
+    try std.testing.expectEqual(@as(u64, 9_000), (try summaryOf(&library, .likely_duplicate)).?.bytes);
 
     const same_audio = try addSizedHealthFile(&library, "music/same-audio.wav", 50_000);
     const same_audio_flac = try addSizedHealthFile(&library, "music/same-audio.flac", 20_000);
@@ -778,11 +778,38 @@ test "duplicate bytes in the health summary count only the redundant copies, not
     try std.testing.expectEqual(@as(u64, 2 * ten_megabytes + 7_000), (try summaryOf(&library, .exact_duplicate)).?.bytes);
 }
 
+test "duplicate bytes in the health summary free the copy that Duplicates would not keep, whatever the file ids" {
+    var library = try openHealthLibrary("summary-keeper");
+    defer library.close();
+    const lossy_small = try library.files.create(.{ .codec = "mp3", .size_bytes = 500 });
+    _ = try library.locations.upsert(.{ .file_id = lossy_small, .volume_id = LibraryDatabase.null_volume, .uri = "music/0.mp3" });
+    const lossless_large = try library.files.create(.{ .codec = "flac", .size_bytes = 7_000 });
+    _ = try library.locations.upsert(.{ .file_id = lossless_large, .volume_id = LibraryDatabase.null_volume, .uri = "music/1.flac" });
+    try library.health_issues.replaceFile(lossy_small, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = lossless_large }});
+    try library.health_issues.replaceFile(lossless_large, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = lossy_small }});
+    try std.testing.expectEqual(@as(u64, 500), (try summaryOf(&library, .identical_audio)).?.bytes);
+}
+
+test "duplicate bytes in the health summary keep one copy of a group whose best file is not the one the others link to" {
+    var library = try openHealthLibrary("summary-keeper-star");
+    defer library.close();
+    const hub = try library.files.create(.{ .codec = "mp3", .size_bytes = 1_000 });
+    _ = try library.locations.upsert(.{ .file_id = hub, .volume_id = LibraryDatabase.null_volume, .uri = "music/hub.mp3" });
+    const best = try library.files.create(.{ .codec = "flac", .size_bytes = 3_000 });
+    _ = try library.locations.upsert(.{ .file_id = best, .volume_id = LibraryDatabase.null_volume, .uri = "music/best.flac" });
+    const other = try library.files.create(.{ .codec = "flac", .size_bytes = 2_000 });
+    _ = try library.locations.upsert(.{ .file_id = other, .volume_id = LibraryDatabase.null_volume, .uri = "music/other.flac" });
+    try library.health_issues.replaceFile(hub, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = best }});
+    try library.health_issues.replaceFile(best, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = hub }});
+    try library.health_issues.replaceFile(other, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = hub }});
+    try std.testing.expectEqual(@as(u64, 3_000), (try summaryOf(&library, .exact_duplicate)).?.bytes);
+}
+
 test "dismissed issues count toward neither the files nor the bytes of the health summary" {
     var library = try openHealthLibrary("summary-sizes-dismissed");
     defer library.close();
-    const kept = try addSizedHealthFile(&library, "music/kept.flac", 6_000);
-    const copy = try addSizedHealthFile(&library, "music/copy.flac", 6_000);
+    const kept = try addSizedHealthFile(&library, "music/a-kept.flac", 6_000);
+    const copy = try addSizedHealthFile(&library, "music/b-copy.flac", 6_000);
     const loud = try addSizedHealthFile(&library, "music/loud.flac", 2_000);
     try library.health_issues.replaceFile(kept, &.{
         .{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = copy },
@@ -795,7 +822,7 @@ test "dismissed issues count toward neither the files nor the bytes of the healt
     try library.health_issues.dismiss(loud, .clipping);
     try expectSummary(&library, &.{
         .{ .kind = .clipping, .severity = .warning, .count = 1, .files = 1, .bytes = 6_000 },
-        .{ .kind = .exact_duplicate, .severity = .warning, .count = 1, .files = 1, .bytes = 0 },
+        .{ .kind = .exact_duplicate, .severity = .warning, .count = 1, .files = 1, .bytes = 6_000 },
     });
 }
 
@@ -993,13 +1020,12 @@ test "listing, counting and summarising health issues reach kinds, dismissals an
     try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN library_health_issues USING COVERING INDEX library_health_by_kind") != null);
 }
 
-test "duplicate bytes reach one kind's issues and their links through indexes and never scan files" {
+test "duplicate links reach one kind's issues through an index and never scan files" {
     var library = try openHealthLibrary("reclaimable-plan");
     defer library.close();
-    const plan = try queryPlan(&library, @import("repository/health.zig").health_reclaimable_sql);
+    const plan = try queryPlan(&library, repository.duplicate_groups.duplicate_links_sql);
     defer std.testing.allocator.free(plan);
-    try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH library_health_issues USING INDEX library_health_by_kind (kind=?)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan, "library_health_by_related") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "library_health_by_kind") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN health_dismissals") == null);
 }
