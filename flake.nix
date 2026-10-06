@@ -70,6 +70,18 @@
               }
             ];
           };
+
+          modulePackage =
+            moduleArgs:
+            (lib.evalModules {
+              modules = [
+                self.nixosModules.default
+                {
+                  options.environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; };
+                  config._module.args = moduleArgs;
+                }
+              ];
+            }).config.programs.orca.package;
         in
         {
           inherit orca;
@@ -83,6 +95,9 @@
 
           nixos-module =
             assert builtins.elem orca nixos.config.environment.systemPackages;
+            assert nixos.config.programs.orca.package.drvPath == orca.drvPath;
+            assert (modulePackage { inherit pkgs; }).drvPath == orca.drvPath;
+            assert (modulePackage { pkgs = removeAttrs pkgs [ "zig_0_17" ]; }).drvPath == orca.drvPath;
             pkgs.runCommand "orca-nixos-module" { } ''touch "$out"'';
 
           installed =

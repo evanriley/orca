@@ -369,14 +369,6 @@ screenshot for a display-only defect, and removes its entry.
   alone, so for a tagged Track it can rank level with a candidate whose title
   and artist match. Several recording IDs sharing one AcoustID fingerprint
   rank by how closely their artist credit matches the Track's.
-- The NixOS and Home Manager modules default `programs.orca.package` to the
-  build from Orca's pinned nixpkgs. NixOS loads the host's GPU drivers from
-  `/run/opengl-driver` into the app, and those need a glibc at least as new
-  as the one they were built against. A system newer than Orca's
-  `flake.lock` therefore leaves `orca-gtk` without a Vulkan device, and GTK
-  renders in software. To examine: build the default from the consumer's
-  `pkgs` when it has `zig_0_17`, and document `inputs.nixpkgs.follows` and
-  nixGL for `nix run` outside NixOS.
 - Re-identifying a Release turns its pending album correction into
   single-file corrections, which can then be accepted one at a time and
   leave the album's positions half-moved until the rest are accepted.

@@ -223,6 +223,11 @@
   binds to its own `root:<id>` volume. A root bound to an existing marker keeps
   its volume; once the marker is gone, relocating the root to its own path
   rebinds it to `root:<id>`.
+- The NixOS and Home Manager modules build the default `programs.orca.package`
+  against the system's nixpkgs when it provides `zig_0_17`, so the GPU drivers
+  under `/run/opengl-driver` meet a glibc at least as new as their own and
+  `orca-gtk` keeps its Vulkan device. The README documents
+  `inputs.orca.inputs.nixpkgs.follows` and nixGL for `nix run` outside NixOS.
 
 ## 0.1.0 - 2026-10-06
 

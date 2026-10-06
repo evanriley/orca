@@ -52,7 +52,9 @@ nix run github:evanriley/orca#orca-cli -- --version
 
 ```nix
 {
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.orca.url = "github:evanriley/orca";
+  inputs.orca.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs =
     { nixpkgs, orca, ... }:
@@ -71,9 +73,22 @@ nix run github:evanriley/orca#orca-cli -- --version
 `programs.orca.enable` adds `programs.orca.package` to
 `environment.systemPackages`.
 
+The default `programs.orca.package` is built against the system's nixpkgs when
+it provides `zig_0_17`, and against the nixpkgs pinned in this flake's
+`flake.lock` otherwise. NixOS loads the host's GPU drivers from
+`/run/opengl-driver` into the application, and they need a glibc at least as
+new as the one they were built against. A package built against an older
+nixpkgs than the system leaves `orca-gtk` without a Vulkan device, and GTK
+renders in software.
+
+`inputs.orca.inputs.nixpkgs.follows = "nixpkgs";` builds
+`orca.packages.x86_64-linux.orca` against the system's nixpkgs as well.
+
 ### Home Manager
 
-`orca.homeModules.default` adds the package to `home.packages`:
+`orca.homeModules.default` adds the package to `home.packages`. Its default
+package follows the same rule as the NixOS module, using the `pkgs` passed to
+Home Manager:
 
 ```nix
 home-manager.lib.homeManagerConfiguration {
@@ -90,8 +105,9 @@ home-manager.lib.homeManagerConfiguration {
 
 `orca.overlays.default` adds `pkgs.orca`, built against the nixpkgs it is
 applied to, which must provide Zig 0.17 as `pkgs.zig_0_17`. The modules'
-default package and `orca.packages.x86_64-linux.orca` are built against the
-nixpkgs pinned in this flake's `flake.lock`.
+default package is built the same way when `pkgs` provides `zig_0_17`.
+`orca.packages.x86_64-linux.orca` is built against the nixpkgs pinned in this
+flake's `flake.lock` unless `inputs.orca.inputs.nixpkgs.follows` replaces it.
 
 ### Binary cache
 
@@ -110,7 +126,8 @@ nix.settings = {
 };
 ```
 
-The overlay builds against another nixpkgs, so its package is built locally.
+A package built against another nixpkgs is not in the cache and is built
+locally.
 
 ## Build from source
 
@@ -212,7 +229,8 @@ scripts/headless-audio.sh zig build test
 - A Secret Service provider, such as GNOME Keyring, for the ListenBrainz token
   and AcoustID user key `orca-gtk` stores. `orca-cli` reads them from
   `ORCA_LISTENBRAINZ_TOKEN` and `ORCA_ACOUSTID_USER_KEY`.
-- With the Nix package on a distribution other than NixOS, `orca-gtk` may need
+- With the Nix package on a distribution other than NixOS, including
+  `nix run github:evanriley/orca#orca-gtk`, `orca-gtk` may need
   [nixGL](https://github.com/nix-community/nixGL) to find the host's OpenGL
   drivers.
 
