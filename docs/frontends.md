@@ -509,9 +509,9 @@ The first argument is the page (`albums`, `artists`, `tracks`, `genres`,
 each. The PNG is written once two consecutive frames match.
 
 The library is `ORCA_LIBRARY` when set, else `fixtures/library/design.db`, which
-`scripts/design-fixture.sh` builds when missing. The app opens a copy named
-`Main.db`, so a run never changes it. With `ORCA_HEADLESS_LIBRARY=settings` and
-`ORCA_HEADLESS_CONFIG`, the app opens in place the library that directory's
+`scripts/design-fixture.sh` builds when missing or when this build cannot
+open it. The app opens a copy named `Main.db`, so a run never changes it. With
+`ORCA_HEADLESS_LIBRARY=settings` and `ORCA_HEADLESS_CONFIG`, the app opens in place the library that directory's
 `orca/settings.ini` chooses, and the `db:` step is refused. Settings start empty
 and are discarded with the session; set `ORCA_HEADLESS_CONFIG` to a directory to
 keep them as `XDG_CONFIG_HOME` across runs. `ORCA_HEADLESS_TMPDIR` (default

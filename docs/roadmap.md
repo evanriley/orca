@@ -414,9 +414,6 @@ screenshot for a display-only defect, and removes its entry.
   lookups take it as no key (they fall back to the application key) and a
   submission as no user key (`needs_user_key`). Whether AcoustID should fail
   instead is undecided.
-- `scripts/headless-gui.sh` reuses a `fixtures/library/design.db` that this
-  build cannot open, such as one built before the schema was squashed, so
-  every headless GUI run fails to open its library.
 - Queue history skips Tracks that left the Library, so history positions
   shift; the queue row menu offers Track actions, such as Play Next, on a
   removed row; and whether a queued Track is always looked up in the Library

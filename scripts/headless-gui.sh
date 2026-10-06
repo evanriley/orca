@@ -25,10 +25,10 @@
 #                orca-gtk to exit
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
-# scripts/design-fixture.sh when missing; the app gets a copy named Main.db,
-# so Settings names it Main as the design does. With
-# ORCA_HEADLESS_LIBRARY=settings the app gets no ORCA_LIBRARY and opens the
-# library its settings choose, in place, and db: is unavailable. Settings
+# scripts/design-fixture.sh when missing or when this build cannot open it;
+# the app gets a copy named Main.db, so Settings names it Main as the design
+# does. With ORCA_HEADLESS_LIBRARY=settings the app gets no ORCA_LIBRARY and
+# opens the library its settings choose, in place, and db: is unavailable. Settings
 # start empty and are discarded, unless ORCA_HEADLESS_CONFIG names a
 # directory to keep them in as XDG_CONFIG_HOME across runs. Output is
 # pinned to scripts/silent-sink.sh 1. Providers point at a closed port; the
@@ -92,8 +92,9 @@ output=$(cd "$(dirname "$output")" && pwd)/$(basename "$output")
 
 if [ "$library_mode" = copy ]; then
     library=${ORCA_LIBRARY:-$repository/fixtures/library/design.db}
-    if [ ! -f "$library" ]; then
-        [ -z "${ORCA_LIBRARY:-}" ] || fail "ORCA_LIBRARY names $library, which does not exist"
+    if [ -n "${ORCA_LIBRARY:-}" ]; then
+        [ -f "$library" ] || fail "ORCA_LIBRARY names $library, which does not exist"
+    elif [ ! -f "$library" ] || ! "$orca_cli" stats "$library" >/dev/null 2>&1; then
         "$repository/scripts/design-fixture.sh" "$library" >/dev/null
     fi
 else
