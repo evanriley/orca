@@ -465,6 +465,11 @@ Small defects that are not yet scheduled:
 - `orca-cli` runs every command but `duplicates` and `analyze-library` on an
   arena, so a cold scan holds memory for every file until it exits.
 - The scanner skips symbolic links to files without counting them.
+- Among duplicate copies of the same format, sample rate, bit depth and
+  size, Duplicates suggests keeping the one the scanner found first, which
+  depends on the order the filesystem lists the folder.
+- A release ID tag that names a release MusicBrainz does not return is
+  looked up again on every match run of the Library.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
 - On macOS, which has no OFD locks, opening and closing a Library's
