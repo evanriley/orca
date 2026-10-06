@@ -16,9 +16,10 @@
 //! of the most expensive work in the codebase.
 //!
 //! Like the scanner and the backfill it writes only what it owns: the analysis
-//! results, the audio hash it just computed, and the health-issue kinds that
-//! belong to a pass which actually decoded the audio: `corrupt_audio`,
-//! `clipping`, `excessive_silence` and `missing_analysis`.
+//! results, the audio hash it just computed, a channel count the row lacked,
+//! and the health-issue kinds that belong to a pass which actually decoded the
+//! audio: `corrupt_audio`, `clipping`, `excessive_silence` and
+//! `missing_analysis`.
 
 const std = @import("std");
 const analysis = @import("../analysis/root.zig");
@@ -89,6 +90,7 @@ const Measurement = struct {
         clipped_samples: u64,
         silent_frames: u64,
         decoded_frames: u64,
+        channels: u16,
     };
 
     const Outcome = union(enum) {
@@ -419,6 +421,7 @@ pub const LibraryAnalysis = struct {
             .clipped_samples = measured.diagnostics.clipped_samples,
             .silent_frames = measured.diagnostics.silent_frames,
             .decoded_frames = measured.decoded_frames orelse return error.UnexpectedCachedAnalysis,
+            .channels = measured.channels,
         } };
     }
 
@@ -445,6 +448,7 @@ pub const LibraryAnalysis = struct {
                     result.unsupported += 1;
                     continue;
                 }
+                try self.files.recordUnknownChannelsLocked(measurement.file_id, value.channels);
                 try self.analysis_cache.putLocked(
                     analysis.service.diagnosticsKey(
                         measurement.file_id,
@@ -1587,6 +1591,136 @@ test "results a Library already stored for a six-channel file feed no album gain
         defer testing.allocator.free(kinds);
         try testing.expectEqualSlices(database.HealthIssueKind, &.{.missing_analysis}, kinds);
     }
+}
+
+test "results stored for a six-channel file with no recorded channel count feed no album gain and are discarded by the next pass" {
+    var fixture = try Fixture.init("file:orca-analysis-unknown-channels-six?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const stereo = try toneWavChannels(1, 2, 0.5, 0.5);
+    defer testing.allocator.free(stereo);
+    try fixture.writeBytes("stereo.wav", stereo);
+    const stereo_id = try fixture.record("stereo.wav");
+    var pass = fixture.pass();
+    pass.parameters = .{};
+    try testing.expectEqual(@as(u64, 1), (try pass.run()).changed);
+
+    const six = try toneWavChannels(1, 6, 0.5, 0.5);
+    defer testing.allocator.free(six);
+    try fixture.writeBytes("six.wav", six);
+    const six_id = try fixture.record("six.wav");
+    const six_path = try fixture.path("six.wav");
+    defer testing.allocator.free(six_path);
+    const six_digest = try storage.content_hash.fromPath(testing.io, six_path);
+    const seed = try std.fmt.allocPrintSentinel(testing.allocator,
+        \\UPDATE files SET content_hash = X'{[digest]s}', content_hash_algorithm = 1
+        \\    WHERE id = {[six]d};
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version,
+        \\    parameter_hash, source_identity, result)
+        \\SELECT {[six]d}, kind, algorithm_id, algorithm_version, parameter_hash, X'{[digest]s}', result
+        \\    FROM analysis_results WHERE file_id = {[stereo]d};
+        \\INSERT INTO releases(id, title) VALUES (900, 'Album');
+        \\INSERT INTO tracks(id, release_id, title, track_number, preferred_file_id)
+        \\    VALUES (901, 900, 'Stereo', 1, {[stereo]d}), (902, 900, 'Six', 2, {[six]d});
+    , .{ .digest = std.fmt.bytesToHex(six_digest, .lower), .six = six_id, .stereo = stereo_id }, 0);
+    defer testing.allocator.free(seed);
+    try fixture.library.database.exec(seed);
+    const six_results = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "SELECT count(*) FROM analysis_results WHERE file_id = {d};",
+        .{six_id},
+        0,
+    );
+    defer testing.allocator.free(six_results);
+    const six_channels = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "SELECT count(*) FROM files WHERE id = {d} AND channels IS NULL;",
+        .{six_id},
+        0,
+    );
+    defer testing.allocator.free(six_channels);
+    try testing.expect(try scalar(fixture.library.database, six_results) > 0);
+    try testing.expectEqual(@as(i64, 1), try scalar(fixture.library.database, six_channels));
+
+    var members: MeasuredMembers = .{};
+    const selector = analysis.service.diagnosticsSelector(.{});
+    try testing.expectEqual(
+        database.ReleaseVisit.visited,
+        try fixture.library.analysis_cache.visitReleaseMembers(901, &selector, &members),
+    );
+    try testing.expectEqualSlices(?bool, &.{ true, false }, &members.measured);
+    try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(pass.selectors()));
+
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.unsupported);
+    try testing.expectEqual(@as(u64, 0), result.changed + result.unchanged + result.errors);
+    try testing.expectEqual(@as(i64, 0), try scalar(fixture.library.database, six_results));
+    try testing.expectEqual(@as(i64, 1), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM file_loudness;",
+    ));
+    const kinds = try issueKinds(&fixture.library, six_id);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{.missing_analysis}, kinds);
+}
+
+test "a stereo file with no recorded channel count is measured again once, keeps its results, and then feeds album gain" {
+    var fixture = try Fixture.init("file:orca-analysis-unknown-channels-stereo?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const stereo = try toneWavChannels(1, 2, 0.5, 0.5);
+    defer testing.allocator.free(stereo);
+    try fixture.writeBytes("stereo.wav", stereo);
+    const stereo_id = try fixture.record("stereo.wav");
+    const mono = try toneWavChannels(1, 1, 0.5, 0.5);
+    defer testing.allocator.free(mono);
+    try fixture.writeBytes("mono.wav", mono);
+    const mono_id = try fixture.record("mono.wav");
+    var pass = fixture.pass();
+    pass.parameters = .{};
+    try testing.expectEqual(@as(u64, 2), (try pass.run()).changed);
+
+    const seed = try std.fmt.allocPrintSentinel(testing.allocator,
+        \\UPDATE files SET channels = NULL WHERE id = {[stereo]d};
+        \\INSERT INTO releases(id, title) VALUES (900, 'Album');
+        \\INSERT INTO tracks(id, release_id, title, track_number, preferred_file_id)
+        \\    VALUES (901, 900, 'Stereo', 1, {[stereo]d}), (902, 900, 'Mono', 2, {[mono]d});
+    , .{ .stereo = stereo_id, .mono = mono_id }, 0);
+    defer testing.allocator.free(seed);
+    try fixture.library.database.exec(seed);
+    const stereo_results = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "SELECT count(*) FROM analysis_results WHERE file_id = {d};",
+        .{stereo_id},
+        0,
+    );
+    defer testing.allocator.free(stereo_results);
+    const stored = try scalar(fixture.library.database, stereo_results);
+    try testing.expect(stored > 0);
+
+    const selector = analysis.service.diagnosticsSelector(.{});
+    var before: MeasuredMembers = .{};
+    _ = try fixture.library.analysis_cache.visitReleaseMembers(901, &selector, &before);
+    try testing.expectEqualSlices(?bool, &.{ false, true }, &before.measured);
+    try testing.expectEqual(@as(u64, 1), try fixture.library.files.unanalyzedCount(pass.selectors()));
+
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.files_seen);
+    try testing.expectEqual(@as(u64, 1), result.changed);
+    try testing.expectEqual(stored, try scalar(fixture.library.database, stereo_results));
+    const stereo_channels = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "SELECT channels FROM files WHERE id = {d};",
+        .{stereo_id},
+        0,
+    );
+    defer testing.allocator.free(stereo_channels);
+    try testing.expectEqual(@as(i64, 2), try scalar(fixture.library.database, stereo_channels));
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
+    var after: MeasuredMembers = .{};
+    _ = try fixture.library.analysis_cache.visitReleaseMembers(901, &selector, &after);
+    try testing.expectEqualSlices(?bool, &.{ true, true }, &after.measured);
+    const kinds = try issueKinds(&fixture.library, stereo_id);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqual(@as(usize, 0), kinds.len);
 }
 
 test "a file that turns corrupt keeps only corrupt audio" {

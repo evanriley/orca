@@ -53,9 +53,9 @@ pub const AnalysisSelectors = [2]AnalysisSelector;
 /// as a Library before content-hash keying filed them, never equals a content
 /// hash and is selected the same way.
 ///
-/// A file recorded with more than two channels that still holds any result is
-/// selected too, so the pass discards results stored before such files were
-/// refused.
+/// A file recorded with more than two channels, or with no channel count,
+/// that still holds any result is selected too, so the pass discards results
+/// stored before such files were refused and records a count it did not know.
 ///
 /// The *playback* lookup is stricter, and deliberately asymmetric: it keys on
 /// the identity of the bytes it just opened, because adopting a correction for
@@ -78,9 +78,9 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.parameter_hash = ?10
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
-    \\OR (files.channels >
+    \\OR ((files.channels IS NULL OR files.channels >
 ++ max_supported_channels_sql ++
-    \\ AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id))
+    \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id))
 ;
 
 /// One file that still owes an analysis, where to read it, and what the
@@ -234,8 +234,9 @@ pub const AnalysisCacheRepository = struct {
 
     /// A member's result is keyed on `files.content_hash`, the identity the
     /// Library recorded, as `unanalyzed_predicate` keys it. A member recorded
-    /// with more than two channels reads as unmeasured whatever is stored for
-    /// it, because playback and analysis refuse such files. One statement over
+    /// with more than two channels, or with no channel count, reads as
+    /// unmeasured whatever is stored for it, because playback and analysis
+    /// refuse more than two channels. One statement over
     /// `tracks_release` and the primary key of `analysis_results`, at most
     /// `max_release_members` rows, and nothing allocated.
     pub fn visitReleaseMembers(
@@ -260,9 +261,9 @@ pub const AnalysisCacheRepository = struct {
             \\    AND analysis_results.parameter_hash = ?6
             \\    AND analysis_results.source_identity = files.content_hash
             \\    AND files.content_hash_algorithm = 1
-            \\    AND (files.channels IS NULL OR files.channels <=
+            \\    AND files.channels <=
         ++ max_supported_channels_sql ++
-            \\)
+            \\
             \\WHERE entry.id = ?1 AND entry.release_id IS NOT NULL
             \\ORDER BY member.id
             \\LIMIT ?2;

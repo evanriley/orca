@@ -93,7 +93,10 @@ runs before the cache lookup, so a stored result is never reused for such a
 file. A file recorded with more than two channels that still holds results,
 as a Library analysed before the limit holds them, is selected by the pass,
 which deletes all its results (and with them its `file_loudness` row) in the
-same transaction. Results are
+same transaction. A file with no recorded channel count that holds results is
+selected too: the pass measures it again and records the decoded count in
+`files.channels`, or, at more than two channels, deletes its results as
+above. Results are
 keyed by the content hash of the bytes decoded, taken in a second sequential
 read beside the decode, and the same transaction records that hash on the file
 (see [database.md](database.md#schema)).
@@ -196,8 +199,8 @@ an album stay as mastered. `TrackSourceOpener.openTrack` computes it at open
 from one bounded statement over the entry's Release
 (`AnalysisCacheRepository.visitReleaseMembers`); nothing is cached per Release,
 so re-analysing or moving a Track cannot leave a stale figure. A member whose
-file is recorded with more than two channels reads as having no stored
-measurement, whatever is stored for it.
+file is recorded with more than two channels, or with no channel count, reads
+as having no stored measurement, whatever is stored for it.
 
 The album's integrated loudness is a duration-weighted energy mean,
 `10·log10(Σ dᵢ·10^(Lᵢ/10) / Σ dᵢ)`, over the Tracks' integrated loudness `Lᵢ`

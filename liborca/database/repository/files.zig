@@ -722,6 +722,16 @@ pub const FileRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
+    pub fn recordUnknownChannelsLocked(self: *FileRepository, file_id: i64, channels: u16) !void {
+        var statement = try self.db.prepare(
+            "UPDATE files SET channels=?1 WHERE id=?2 AND channels IS NULL;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, channels);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
     /// Records `digest`, read whole from location `location_id` while it had
     /// `identity`, as file `file_id`'s content hash, and reports whether the
     /// file records it now.

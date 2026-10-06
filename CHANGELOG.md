@@ -145,6 +145,10 @@
   target to the stream length, as WAV does, and the next read is end of stream.
   Seeking to the end of a FLAC track, which the Player does when a seek lands
   on the last frame, no longer fails as a decode error.
+- Results stored for a file with no recorded channel count no longer feed
+  album gain or count as a finished measurement. The next analysis pass
+  measures the file again and records its channel count, or, at more than two
+  channels, discards the results and raises `missing_analysis`.
 
 ## 0.1.0 - 2026-10-06
 

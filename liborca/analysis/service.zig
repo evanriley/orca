@@ -127,6 +127,7 @@ pub const Analysis = struct {
     /// The file's storage identity when it was opened, which it still had
     /// once the measurement was taken.
     storage_identity: storage.StorageIdentity,
+    channels: u16,
 
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
@@ -194,6 +195,7 @@ pub const Service = struct {
                     .decoded_frames = null,
                     .source_identity = source_identity,
                     .storage_identity = initial_identity,
+                    .channels = decoder.format.channels,
                 };
             }
             if (cached_diagnostics) |result| result.deinit();
@@ -299,6 +301,7 @@ pub const Service = struct {
             .decoded_frames = completed_frames,
             .source_identity = source_identity,
             .storage_identity = initial_identity,
+            .channels = decoder.format.channels,
         };
     }
 

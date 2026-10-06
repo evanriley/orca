@@ -416,9 +416,6 @@ screenshot for a display-only defect, and removes its entry.
   shift; the queue row menu offers Track actions, such as Play Next, on a
   removed row; and whether a queued Track is always looked up in the Library
   that holds it is unchecked.
-- A loudness result stored for a file whose channel count is unknown is used
-  for album gain and never checked again, though the file may have more than
-  two channels.
 - Untested: the AcoustID key read once per job on the submission path, and
   gapless identity at the successor's first frame after a re-seek other than
   a user seek, such as an output reopen.
