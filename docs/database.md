@@ -219,9 +219,15 @@ Invariants of a run:
   handing its user genres to the Track its file backs, and a Release or Artist
   left unreferenced goes with it. Pruned ids do not come back: clients holding a
   Release, Artist or pruned Track id must look it up again.
-- Positions are never null once a run commits. `tracks_position` is unique; rows
+- A row at a target position whose preferred file lies in a folder the run has
+  not yet projected is parked instead of pruned, and the run queues that folder
+  even when its scope did not name it. That folder claims the row by file, so a
+  file leaving a Release keeps its Track whichever folder projects first.
+- Positions are never null once a run ends. `tracks_position` is unique; rows
   changing position are parked with a null track number (collapsed onto `-id`)
-  and then written by id, so swaps and rotations never collide.
+  and then written by id, so swaps and rotations never collide. A row parked
+  for a later folder keeps a null track number between that run's folder
+  transactions.
 - A file with no track number takes the lowest free position on its disc and
   raises `missing_track_number`; one whose number is held by a different
   performance is re-seated and raises `technical_anomaly`; one at a position

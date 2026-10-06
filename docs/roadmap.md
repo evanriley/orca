@@ -362,9 +362,6 @@ removed.
 Fixed before 1.0. Each fix adds a test that fails without it, or a headless
 screenshot for a display-only defect, and removes its entry.
 
-- A file that leaves a Release loses its Track id when another folder on that
-  Release projects first and one of its files states the old position:
-  that folder prunes the Track, and the leaving file gets a new one.
 - A FLAC seek past the end of the stream fails as a decode error, while WAV
   clamps to the last frame; the other decoders are unchecked.
 - A `technical_anomaly` Health issue for a displaced track position is

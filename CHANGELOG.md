@@ -107,6 +107,12 @@
   device stays eligible. `sample_processing` stays until audio processed under
   earlier settings has played, instead of clearing while that audio is still
   queued.
+- A file that leaves a Release keeps its Track id, with its queue entries,
+  lyrics and user genres, when another folder of that Release projects first
+  and one of its files now states the leaving file's old position. That folder
+  parks the Track instead of deleting it, and the projection run then projects
+  the leaving file's folder, even when the run's scope did not include it,
+  which seats the Track where the file now lands.
 
 ## 0.1.0 - 2026-10-06
 
