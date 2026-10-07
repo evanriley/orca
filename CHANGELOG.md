@@ -260,6 +260,11 @@
   the release, positions and release values the group was formed on, and
   Match Album's release vote leaves a grouped proposal on that release, so no
   correction of the group can be accepted alone.
+- Verification decides once per Release, before its first page, whether the
+  Release's files that still disagree are verified again: they are when it
+  has a stale or unverified file then. A Release of more than 512 Tracks
+  verifies them on every page, so `verified` reaches the `total_units` the job
+  counted.
 
 ## 0.1.0 - 2026-10-06
 

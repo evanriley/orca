@@ -3786,6 +3786,7 @@ test "verification selects its files by Release, Track and key, never by scannin
         try queryPlan(&library, repository.verifiable_track_page_sql),
         try queryPlan(&library, repository.verifiable_releases_sql),
         try queryPlan(&library, repository.verifiable_count_sql),
+        try queryPlan(&library, repository.verifiable_release_due_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
@@ -3795,6 +3796,7 @@ test "verification selects its files by Release, Track and key, never by scannin
         try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
     }
     for (plans[0..4]) |plan| try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN tracks") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[5], "SCAN tracks") == null);
 }
 
 test "a change is offered only once it has stood for two seconds, and the count includes it before" {

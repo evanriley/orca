@@ -566,11 +566,12 @@ never verified.
 
 A file whose stored outcome is missing or stale. An outcome is stale once the
 file's quick hash or its recording ID in effect changes. A file whose fresh
-outcome is `disagrees` is verified again only beside a stale or unverified file
-of its Release, so the album group can form again with every file it disputes,
-or when `track_id` asks for it alone. When only the recording ID changed and the
-new one is among the recordings heard at 0.5 or more, the file agrees again
-without a lookup. `total_units` counts by the same rule.
+outcome is `disagrees` is verified again only when its Release has a stale or
+unverified file as the Release's verification starts, so the album group can
+form again with every file it disputes, or when `track_id` asks for it alone.
+When only the recording ID changed and the new one is among the recordings
+heard at 0.5 or more, the file agrees again without a lookup. `total_units`
+counts by the same rule.
 
 The library is verified one Release at a time, in Release id order, then Tracks
 with no Release a page at a time; `release_id` and `track_id` limit it to one. A

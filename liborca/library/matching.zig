@@ -316,6 +316,7 @@ pub const LibraryMatching = struct {
         release_id: i64,
         result: *Result,
     ) !bool {
+        if (!try verifications.isReleaseDue(release_id)) return true;
         var tag_buffer: [36]u8 = undefined;
         const tag = if (try verifications.isLargeRelease(release_id)) null else try verifications.releaseTag(release_id, &tag_buffer);
         var cursor: i64 = 0;

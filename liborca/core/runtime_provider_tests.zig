@@ -4930,6 +4930,54 @@ test "an album correction forms again with every file it disputes once one file 
     try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(sounds_pink));
 }
 
+test "a Release of more than one page verifies a file that disagrees on a later page when an earlier page held its only stale files" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-large-release?mode=memory&cache=shared");
+    defer rig.deinit();
+    const album = try addRelease(rig.library_database, "Bryter Layter", null);
+    var stale_files = try rig.library_database.database.prepare(
+        \\WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM n WHERE v < ?1)
+        \\INSERT INTO files(id, quick_hash) SELECT v, x'01' FROM n;
+    );
+    defer stale_files.deinit();
+    try stale_files.bindInt64(1, database.repository.max_page);
+    try std.testing.expectEqual(database.sqlite.Step.done, try stale_files.step());
+    var stale_tracks = try rig.library_database.database.prepare(
+        "INSERT INTO tracks(id, release_id, title, preferred_file_id) SELECT id, ?1, 'Northern Sky', id FROM files;",
+    );
+    defer stale_tracks.deinit();
+    try stale_tracks.bindInt64(1, album);
+    try std.testing.expectEqual(database.sqlite.Step.done, try stale_tracks.step());
+    try rig.library_database.database.exec(
+        "INSERT INTO observed_file_tags(file_id, musicbrainz_recording_id) SELECT id, '" ++ northern_sky_mbid ++ "' FROM files;\n" ++
+            "INSERT INTO recording_verifications(file_id, quick_hash, recording_mbid, outcome, heard, verified_at)\n" ++
+            "    SELECT id, x'01', '" ++ pink_moon_mbid ++ "', 0, '[{\"mbid\":\"" ++ northern_sky_mbid ++ "\",\"score\":0.97}]', 0 FROM files;",
+    );
+    rig.acoustid.lookup_body = acoustIdAnswer(heardBy("0", heardResult("0.95", hazey_jane_heard)));
+    const disputed = try rig.addTone("disputed.wav", 420, "Pink Moon", pink_moon_mbid, album);
+    try std.testing.expect(disputed > database.repository.max_page);
+    const alone = try rig.verify(.{ .track_id = disputed });
+    try std.testing.expectEqual(@as(u64, 1), alone.stats.disagreed);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+
+    const first = try rig.verify(.{ .release_id = album });
+
+    try std.testing.expectEqual(@as(?u64, database.repository.max_page + 1), first.total_units);
+    try std.testing.expectEqual(first.total_units.?, first.stats.verified);
+    try std.testing.expectEqual(@as(u64, database.repository.max_page), first.stats.agreed);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.acoustid_cache_hits);
+
+    for ([_]runtime_module.MatchRequest{ .{ .release_id = album }, .{} }) |request| {
+        const again = try rig.verify(request);
+        try std.testing.expectEqual(@as(?u64, 0), again.total_units);
+        try std.testing.expectEqual(@as(u64, 0), again.stats.verified);
+        try std.testing.expectEqual(@as(u64, 0), again.stats.fingerprinted);
+    }
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+}
+
 test "re-identifying a Release that finds its album correction's recordings keeps every file in the group on the group's release and positions" {
     var rig: VerifyRig = undefined;
     try rig.init("file:orca-verify-reidentify-group?mode=memory&cache=shared");

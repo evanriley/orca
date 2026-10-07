@@ -93,6 +93,8 @@ pub const VerifiableFilePage = struct {
 
 /// Which play files `unitPage` reads.
 pub const VerificationUnit = union(enum) {
+    /// A Release's stale and unverified files and those that `disagrees`, for
+    /// a Release `isReleaseDue` found due before its first page.
     release: i64,
     /// Tracks with no Release.
     loose,
@@ -176,6 +178,16 @@ pub const RecordingVerificationRepository = struct {
         try statement.bindInt64(3, if (limit) |bound| bound else -1);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    /// Whether the Release has a verifiable play file that is stale or
+    /// unverified, so its files that `disagrees` are verified again with it.
+    pub fn isReleaseDue(self: *const RecordingVerificationRepository, release_id: i64) !bool {
+        var statement = try self.db.prepare(verifiable_release_due_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0) != 0;
     }
 
     /// Whether the Release has more Tracks than one album group may hold.
@@ -371,12 +383,14 @@ const loose_tracks = "tracks.release_id IS NULL AND tracks.id > ?2";
 const one_track = "tracks.id = ?1 AND tracks.id > ?2";
 const every_track = "tracks.id > ?2";
 
-pub const verifiable_release_page_sql = verifiablePageSql(release_tracks, .with_due_release);
+pub const verifiable_release_page_sql = verifiablePageSql(release_tracks, .included);
 pub const verifiable_loose_page_sql = verifiablePageSql(loose_tracks, .excluded);
 pub const verifiable_track_page_sql = verifiablePageSql(one_track, .included);
 pub const verifiable_count_sql = verifiableCountSql(every_track, .with_due_release);
 pub const verifiable_release_count_sql = verifiableCountSql(release_tracks, .with_due_release);
 pub const verifiable_track_count_sql = verifiableCountSql(one_track, .included);
+pub const verifiable_release_due_sql: [:0]const u8 =
+    "SELECT EXISTS (SELECT 1 FROM " ++ verifiable(outer, "tracks.release_id = ?1", .excluded) ++ ");";
 pub const verifiable_releases_sql: [:0]const u8 =
     "SELECT DISTINCT candidate.release_id FROM " ++ verifiable(outer, "tracks.release_id > ?1", .excluded) ++
     "\nORDER BY candidate.release_id LIMIT ?2;";

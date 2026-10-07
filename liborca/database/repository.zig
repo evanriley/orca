@@ -424,6 +424,7 @@ pub const verifiable_release_page_sql = recording_verifications.verifiable_relea
 pub const verifiable_loose_page_sql = recording_verifications.verifiable_loose_page_sql;
 pub const verifiable_track_page_sql = recording_verifications.verifiable_track_page_sql;
 pub const verifiable_count_sql = recording_verifications.verifiable_count_sql;
+pub const verifiable_release_due_sql = recording_verifications.verifiable_release_due_sql;
 pub const verifiable_releases_sql = recording_verifications.verifiable_releases_sql;
 
 test {
