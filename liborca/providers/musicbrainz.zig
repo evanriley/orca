@@ -10,7 +10,11 @@ const url_encoding = @import("url.zig");
 pub const service = "musicbrainz";
 pub const minimum_interval_ms: u64 = 1000;
 pub const default_server = "https://musicbrainz.org";
+pub const release_lookup_query = "?fmt=json&inc=recordings+artist-credits+release-groups";
 const search_limit = 10;
+const max_credited_artists = 8;
+
+const CachedRefusal = enum { use, ask_again };
 
 pub const MusicBrainz = struct {
     gateway: *network.Gateway,
@@ -20,6 +24,7 @@ pub const MusicBrainz = struct {
     server: []const u8 = default_server,
     cache_ttl_seconds: i64 = 30 * 24 * 60 * 60,
     refusal_ttl_seconds: i64 = 7 * 24 * 60 * 60,
+    offline: bool = false,
     requests_answered: u64 = 0,
     cache_hits: u64 = 0,
 
@@ -33,7 +38,22 @@ pub const MusicBrainz = struct {
         query: model.Query,
     ) !model.CandidateList {
         if (isBlank(query.title) or isBlank(query.artist)) return error.InsufficientIdentificationEvidence;
-        const request_url = try self.searchUrl(allocator, query);
+        const whole_credit = try self.searchCredited(allocator, query, &.{query.artist.?});
+        if (whole_credit.items.len != 0) return whole_credit;
+        var names_buffer: [max_credited_artists][]const u8 = undefined;
+        const names = commaSeparatedNames(query.artist.?, &names_buffer);
+        if (names.len < 2) return whole_credit;
+        whole_credit.deinit();
+        return self.searchCredited(allocator, query, names);
+    }
+
+    fn searchCredited(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        query: model.Query,
+        artists: []const []const u8,
+    ) !model.CandidateList {
+        const request_url = try self.searchUrl(allocator, query, artists);
         defer allocator.free(request_url);
         return self.request(model.CandidateList, allocator, request_url, SearchParser{ .album = query.album });
     }
@@ -43,14 +63,36 @@ pub const MusicBrainz = struct {
         allocator: std.mem.Allocator,
         release_mbid: []const u8,
     ) !ReleaseLookup {
+        return self.fetchRelease(allocator, release_mbid, .use);
+    }
+
+    /// `lookUpRelease`, except that a cached refusal is asked again.
+    pub fn lookUpReleaseAgain(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        release_mbid: []const u8,
+    ) !ReleaseLookup {
+        return self.fetchRelease(allocator, release_mbid, .ask_again);
+    }
+
+    /// What the `provider_cache` key of a release lookup holds before the
+    /// release ID; `release_lookup_query` follows it.
+    pub fn releaseLookupKeyPrefix(self: *const MusicBrainz, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/ws/2/release/", .{std.mem.trimEnd(u8, self.server, "/")});
+    }
+
+    fn fetchRelease(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        release_mbid: []const u8,
+        refusal: CachedRefusal,
+    ) !ReleaseLookup {
         if (!metadata.isMusicBrainzId(release_mbid)) return error.InvalidMusicBrainzId;
-        const request_url = try std.fmt.allocPrint(
-            allocator,
-            "{s}/ws/2/release/{s}?fmt=json&inc=recordings+artist-credits+release-groups",
-            .{ std.mem.trimEnd(u8, self.server, "/"), release_mbid },
-        );
+        const prefix = try self.releaseLookupKeyPrefix(allocator);
+        defer allocator.free(prefix);
+        const request_url = try std.mem.concat(allocator, u8, &.{ prefix, release_mbid, release_lookup_query });
         defer allocator.free(request_url);
-        return self.request(ReleaseLookup, allocator, request_url, ReleaseParser{});
+        return self.requestWith(ReleaseLookup, allocator, request_url, ReleaseParser{}, refusal);
     }
 
     /// `GET {server}/ws/2/artist/{mbid}?fmt=json&inc=url-rels+genres+artist-rels`,
@@ -128,20 +170,26 @@ pub const MusicBrainz = struct {
         request_url: []const u8,
         parser: anytype,
     ) !T {
+        return self.requestWith(T, allocator, request_url, parser, .use);
+    }
+
+    fn requestWith(
+        self: *MusicBrainz,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        request_url: []const u8,
+        parser: anytype,
+        refusal: CachedRefusal,
+    ) !T {
         const now_s = @divFloor(self.wall_clock.nowMs(), 1000);
-        if (try self.cache.get(allocator, service, request_url, now_s, false)) |cached| {
+        if (try self.cache.get(allocator, service, request_url, now_s, false)) |cached| cached: {
             defer cached.deinit();
+            if (cached.status != 200 and refusal == .ask_again) break :cached;
             self.cache_hits += 1;
             if (cached.status != 200) return error.ProviderRejectedRequest;
             return parser.parse(allocator, cached.body);
         }
-        const response = self.gateway.execute(
-            allocator,
-            .get,
-            request_url,
-            null,
-            &.{.{ .name = "accept", .value = "application/json" }},
-        ) catch |err| switch (err) {
+        const response = self.send(allocator, request_url) catch |err| switch (err) {
             error.RateLimited, error.NetworkUnavailable, error.Timeout, error.Offline => {
                 if (try self.stale(T, allocator, request_url, now_s, parser)) |value| return value;
                 return err;
@@ -165,6 +213,17 @@ pub const MusicBrainz = struct {
         return value;
     }
 
+    fn send(self: *MusicBrainz, allocator: std.mem.Allocator, request_url: []const u8) !network.client.Response {
+        if (self.offline) return error.Offline;
+        return self.gateway.execute(
+            allocator,
+            .get,
+            request_url,
+            null,
+            &.{.{ .name = "accept", .value = "application/json" }},
+        );
+    }
+
     fn stale(
         self: *MusicBrainz,
         comptime T: type,
@@ -179,12 +238,21 @@ pub const MusicBrainz = struct {
         return try parser.parse(allocator, entry.body);
     }
 
-    fn searchUrl(self: MusicBrainz, allocator: std.mem.Allocator, query: model.Query) ![]u8 {
+    fn searchUrl(self: MusicBrainz, allocator: std.mem.Allocator, query: model.Query, artists: []const []const u8) ![]u8 {
         var lucene = std.Io.Writer.Allocating.init(allocator);
         defer lucene.deinit();
         try writeTerm(&lucene.writer, "recording", query.title.?);
         try lucene.writer.writeAll(" AND ");
-        try writeTerm(&lucene.writer, "artist", query.artist.?);
+        if (artists.len == 1) {
+            try writeTerm(&lucene.writer, "artist", artists[0]);
+        } else {
+            try lucene.writer.writeAll("(");
+            for (artists, 0..) |artist, index| {
+                if (index != 0) try lucene.writer.writeAll(" OR ");
+                try writeTerm(&lucene.writer, "artist", artist);
+            }
+            try lucene.writer.writeAll(")");
+        }
         if (!isBlank(query.album)) {
             try lucene.writer.writeAll(" ");
             try writeTerm(&lucene.writer, "release", query.album.?);
@@ -893,6 +961,19 @@ fn isBlank(text: ?[]const u8) bool {
     return std.mem.trim(u8, value, " \t").len == 0;
 }
 
+fn commaSeparatedNames(credit: []const u8, buffer: *[max_credited_artists][]const u8) []const []const u8 {
+    var count: usize = 0;
+    var parts = std.mem.splitScalar(u8, credit, ',');
+    while (parts.next()) |part| {
+        const name = std.mem.trim(u8, part, " \t");
+        if (name.len == 0) continue;
+        if (count == buffer.len) break;
+        buffer[count] = name;
+        count += 1;
+    }
+    return buffer[0..count];
+}
+
 fn writeTerm(writer: *std.Io.Writer, field: []const u8, value: []const u8) !void {
     try writer.print("{s}:\"", .{field});
     for (value) |byte| {
@@ -1175,6 +1256,136 @@ test "a title with quotes and brackets is escaped for Lucene and then for the UR
     );
 }
 
+const found_recording_mbid = "5b0e6b4c-2f7a-4d1e-9c3b-8a1f2e3d4c5b";
+
+const CreditMatchingService = struct {
+    matched_term: []const u8,
+    body: []const u8,
+
+    fn responder(self: *CreditMatchingService) network.testing.Responder {
+        return .{ .context = self, .respond_fn = respond };
+    }
+
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) !network.testing.Reply {
+        const self: *CreditMatchingService = @ptrCast(@alignCast(context));
+        const matched = std.mem.indexOf(u8, exchange.request.url, self.matched_term) != null;
+        return .{ .respond = .{ .body = if (matched) self.body else empty_answer } };
+    }
+};
+
+fn expectHistory(rig: *const Rig, expected: []const []const u8) !void {
+    try testing.expectEqual(expected.len, rig.net.transport.history.items.len);
+    for (expected, rig.net.transport.history.items) |url, recorded| try testing.expectEqualStrings(url, recorded.url);
+}
+
+test "a comma-joined artist credit that finds nothing is asked again with each artist, paced like any request" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-comma-credit?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.adapter.server = "http://127.0.0.1:5000";
+    rig.net.transport.keep_history = true;
+    var service_mock: CreditMatchingService = .{
+        .matched_term = "artist%3A%22Pa%20Salieu%22",
+        .body = "{\"recordings\":[{\"id\":\"" ++ found_recording_mbid ++ "\",\"title\":\"Glidin\",\"score\":100," ++
+            "\"artist-credit\":[{\"name\":\"Pa Salieu\",\"joinphrase\":\"\"}]}]}",
+    };
+    rig.net.transport.responder = service_mock.responder();
+
+    const list = try rig.search(.{ .title = "Glidin", .artist = "Pa Salieu, Black Sherif" });
+    defer list.deinit();
+
+    try expectHistory(&rig, &.{
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "recording%3A%22Glidin%22%20AND%20artist%3A%22Pa%20Salieu%2C%20Black%20Sherif%22",
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "recording%3A%22Glidin%22%20AND%20%28artist%3A%22Pa%20Salieu%22%20OR%20artist%3A%22Black%20Sherif%22%29",
+    });
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqualStrings(found_recording_mbid, list.items[0].provider_id);
+    try testing.expectEqualStrings("Pa Salieu", list.items[0].artist);
+    try testing.expectEqual(@as(u64, 2), rig.adapter.requests_answered);
+    try testing.expect(rig.net.transport.request_times_ms[1] - rig.net.transport.request_times_ms[0] >=
+        @as(i64, @intCast(rig.net.gateway.config.minimum_interval_ms)));
+}
+
+test "a recording credited to a later artist of a comma-joined credit is found, and both answers are cached" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-comma-later?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.net.transport.keep_history = true;
+    var service_mock: CreditMatchingService = .{
+        .matched_term = "artist%3A%22Pharrell%20Williams%22",
+        .body = "{\"recordings\":[{\"id\":\"" ++ found_recording_mbid ++ "\",\"title\":\"Get Lucky\"," ++
+            "\"artist-credit\":[{\"name\":\"Daft Punk\",\"joinphrase\":\" feat. \"},{\"name\":\"Pharrell Williams\",\"joinphrase\":\"\"}]}]}",
+    };
+    rig.net.transport.responder = service_mock.responder();
+
+    const query: model.Query = .{ .title = "Get Lucky", .artist = "Daft Punk, , Pharrell Williams ", .album = "Random Access Memories" };
+    const first = try rig.search(query);
+    defer first.deinit();
+    const again = try rig.search(query);
+    defer again.deinit();
+
+    try testing.expectEqual(@as(usize, 2), rig.net.transport.history.items.len);
+    try testing.expect(std.mem.endsWith(
+        u8,
+        rig.net.transport.history.items[1].url,
+        "%20AND%20%28artist%3A%22Daft%20Punk%22%20OR%20artist%3A%22Pharrell%20Williams%22%29" ++
+            "%20release%3A%22Random%20Access%20Memories%22",
+    ));
+    try testing.expectEqualStrings("Daft Punk feat. Pharrell Williams", first.items[0].artist);
+    try testing.expectEqualStrings(found_recording_mbid, again.items[0].provider_id);
+    try testing.expectEqual(@as(u64, 2), rig.adapter.cache_hits);
+}
+
+test "an artist whose name holds commas is matched on the whole name in one request" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-comma-name?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.net.transport.keep_history = true;
+    var service_mock: CreditMatchingService = .{
+        .matched_term = "artist%3A%22Earth%2C%20Wind%20%5C%26%20Fire%22",
+        .body = "{\"recordings\":[{\"id\":\"" ++ found_recording_mbid ++ "\",\"title\":\"September\"," ++
+            "\"artist-credit\":[{\"name\":\"Earth, Wind & Fire\",\"joinphrase\":\"\"}]}]}",
+    };
+    rig.net.transport.responder = service_mock.responder();
+
+    const list = try rig.search(.{ .title = "September", .artist = "Earth, Wind & Fire" });
+    defer list.deinit();
+
+    try testing.expectEqual(@as(usize, 1), rig.net.transport.history.items.len);
+    try testing.expectEqualStrings("Earth, Wind & Fire", list.items[0].artist);
+}
+
+test "the second query names at most eight artists of a comma-joined credit" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-comma-bound?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.net.transport.keep_history = true;
+
+    const list = try rig.search(.{ .title = "Posse Cut", .artist = "A1, A2, A3, A4, A5, A6, A7, A8, A9, A10" });
+    defer list.deinit();
+
+    try testing.expectEqual(@as(usize, 2), rig.net.transport.history.items.len);
+    const fallback = rig.net.transport.history.items[1].url;
+    try testing.expect(std.mem.endsWith(u8, fallback, "artist%3A%22A8%22%29"));
+    try testing.expectEqual(@as(usize, 8), std.mem.count(u8, fallback, "artist%3A"));
+    try testing.expectEqual(@as(usize, 0), list.items.len);
+}
+
+test "a single artist that finds nothing is not asked again" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-no-comma?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    const plain = try rig.search(.{ .title = "Unknown", .artist = "Nobody" });
+    defer plain.deinit();
+    const trailing = try rig.search(.{ .title = "Unknown", .artist = "Nobody," });
+    defer trailing.deinit();
+
+    try testing.expectEqual(@as(u32, 2), rig.net.transport.requestCount());
+}
+
 test "a search without a title or an artist makes no request" {
     var rig: Rig = undefined;
     try rig.init("file:orca-musicbrainz-insufficient?mode=memory&cache=shared");
@@ -1406,7 +1617,7 @@ test "an answer that is not a release is refused as invalid" {
     try testing.expectError(error.InvalidProviderResponse, parseRelease("{\"recordings\":[]}"));
 }
 
-test "a release lookup asks for its recordings, credits and release group, is cached for thirty days, and a missing release is cached as refused" {
+test "a release lookup asks for its recordings, credits and release group, is cached for thirty days, and a missing release is cached as refused until asked again" {
     var rig: Rig = undefined;
     try rig.init("file:orca-musicbrainz-release?mode=memory&cache=shared");
     defer rig.deinit();
@@ -1434,6 +1645,17 @@ test "a release lookup asks for its recordings, credits and release group, is ca
     try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpRelease(testing.allocator, missing));
     try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpRelease(testing.allocator, missing));
     try testing.expectEqual(@as(u32, 2), rig.net.transport.requestCount());
+    const prefix = try rig.adapter.releaseLookupKeyPrefix(testing.allocator);
+    defer testing.allocator.free(prefix);
+    const key = try std.mem.concat(testing.allocator, u8, &.{ prefix, missing, release_lookup_query });
+    defer testing.allocator.free(key);
+    const refusal = (try rig.library.provider_cache.get(testing.allocator, service, key, 0, false)).?;
+    defer refusal.deinit();
+    try testing.expectEqual(@as(u16, 404), refusal.status);
+    const hits = rig.adapter.cache_hits;
+    try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpReleaseAgain(testing.allocator, missing));
+    try testing.expectEqual(@as(u32, 3), rig.net.transport.requestCount());
+    try testing.expectEqual(hits, rig.adapter.cache_hits);
     rig.respond(503, "");
     try testing.expectError(error.ProviderUnavailable, rig.adapter.lookUpRelease(testing.allocator, "bbbbbbbb-0000-4000-8000-000000000000"));
 }

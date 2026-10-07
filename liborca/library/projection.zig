@@ -499,6 +499,61 @@ const Folder = struct {
     path: []const u8,
 };
 
+/// The folders a run projects, in order. A folder found while the run is
+/// under way joins the end, so a Track parked for a file elsewhere is seated
+/// by that file's folder before the run ends.
+const FolderQueue = struct {
+    allocator: std.mem.Allocator,
+    folders: std.ArrayList(Folder) = .empty,
+    indexes: std.StringHashMapUnmanaged(usize) = .empty,
+    next: usize = 0,
+
+    fn add(self: *FolderQueue, volume_id: i64, path: []const u8) !bool {
+        const stamped = try std.fmt.allocPrint(self.allocator, "{d}\x1f{s}", .{ volume_id, path });
+        if (self.indexes.get(stamped)) |index| {
+            self.allocator.free(stamped);
+            return index >= self.next;
+        }
+        try self.indexes.put(self.allocator, stamped, self.folders.items.len);
+        try self.append(volume_id, path);
+        return true;
+    }
+
+    fn append(self: *FolderQueue, volume_id: i64, path: []const u8) !void {
+        try self.folders.append(self.allocator, .{
+            .volume_id = volume_id,
+            .path = try self.allocator.dupe(u8, path),
+        });
+    }
+
+    fn pop(self: *FolderQueue) ?Folder {
+        if (self.next == self.folders.items.len) return null;
+        defer self.next += 1;
+        return self.folders.items[self.next];
+    }
+
+    fn awaitsFile(self: *FolderQueue, db: database.sqlite.Database, file_id: i64) !bool {
+        var statement = try db.prepare(folders_of_file);
+        defer statement.deinit();
+        return self.addFoldersOf(&statement, file_id);
+    }
+
+    fn addFoldersOf(self: *FolderQueue, statement: *database.sqlite.Statement, file_id: i64) !bool {
+        try statement.bindInt64(1, file_id);
+        defer statement.reset() catch {};
+        var pending = false;
+        while (try statement.step() == .row) {
+            if (try self.add(statement.columnInt64(0), statement.columnText(1))) pending = true;
+        }
+        return pending;
+    }
+};
+
+const folders_of_file =
+    \\SELECT volume_id, rtrim(uri, replace(uri, '/', ''))
+    \\FROM locations WHERE file_id = ?1;
+;
+
 /// Only the projecting thread touches `ids`; `count` is the one field another
 /// thread may read.
 pub const FoundReleases = struct {
@@ -536,17 +591,18 @@ pub const Projection = struct {
     pub fn run(self: *Projection, scope: Scope) !Result {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
-        const folders = try self.collectFolders(arena.allocator(), scope);
+        var queue: FolderQueue = .{ .allocator = arena.allocator() };
+        try self.collectFolders(&queue, scope);
 
         var result: Result = .{};
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
         defer scratch.deinit();
-        for (folders) |folder| {
+        while (queue.pop()) |folder| {
             _ = scratch.reset(.retain_capacity);
-            try self.projectFolder(scratch.allocator(), folder, &result);
+            try self.projectFolder(scratch.allocator(), folder, &queue, &result);
             result.folders_visited += 1;
         }
-        if (folders.len != 0) try self.pruneGenres();
+        if (queue.folders.items.len != 0) try self.pruneGenres();
         return result;
     }
 
@@ -639,7 +695,7 @@ pub const Projection = struct {
     }
 
     fn clearProjectionIssues(self: *Projection, file_id: i64) !void {
-        const kinds = [_]database.HealthIssueKind{ .missing_metadata, .album_artist_anomaly, .missing_track_number, .artwork_problem };
+        const kinds = [_]database.HealthIssueKind{ .missing_metadata, .album_artist_anomaly, .missing_track_number, .technical_anomaly, .artwork_problem };
         for (kinds) |kind| try self.library.health_issues.clearLocked(file_id, kind);
     }
 
@@ -669,13 +725,7 @@ pub const Projection = struct {
     /// reachable right now is what `has_playable_file` and `playableLocation`
     /// answer. Excluding them would also make a folder that went missing
     /// wholesale un-reprojectable, freezing whatever the last run left behind.
-    fn collectFolders(
-        self: *Projection,
-        allocator: std.mem.Allocator,
-        scope: Scope,
-    ) ![]Folder {
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        var folders: std.ArrayList(Folder) = .empty;
+    fn collectFolders(self: *Projection, queue: *FolderQueue, scope: Scope) !void {
         switch (scope) {
             .all => {
                 var statement = try self.library.database.prepare(
@@ -683,40 +733,22 @@ pub const Projection = struct {
                     \\FROM locations ORDER BY 1, 2;
                 );
                 defer statement.deinit();
-                while (try statement.step() == .row) try appendFolder(
-                    allocator,
-                    &folders,
-                    &seen,
-                    statement.columnInt64(0),
-                    statement.columnText(1),
-                );
+                while (try statement.step() == .row)
+                    _ = try queue.add(statement.columnInt64(0), statement.columnText(1));
             },
             .files => |ids| {
-                var statement = try self.library.database.prepare(
-                    \\SELECT volume_id, rtrim(uri, replace(uri, '/', ''))
-                    \\FROM locations WHERE file_id = ?1;
-                );
+                var statement = try self.library.database.prepare(folders_of_file);
                 defer statement.deinit();
-                for (ids) |file_id| {
-                    try statement.bindInt64(1, file_id);
-                    while (try statement.step() == .row) try appendFolder(
-                        allocator,
-                        &folders,
-                        &seen,
-                        statement.columnInt64(0),
-                        statement.columnText(1),
-                    );
-                    try statement.reset();
-                }
+                for (ids) |file_id| _ = try queue.addFoldersOf(&statement, file_id);
             },
         }
-        return folders.toOwnedSlice(allocator);
     }
 
     fn projectFolder(
         self: *Projection,
         allocator: std.mem.Allocator,
         folder: Folder,
+        queue: *FolderQueue,
         result: *Result,
     ) !void {
         const entries = try self.loadFolder(allocator, folder);
@@ -754,9 +786,9 @@ pub const Projection = struct {
         var writes: std.ArrayList(database.TrackSeat) = .empty;
         var foreign: std.ArrayList(Entry) = .empty;
         for (plans.items) |plan| try self.resolveGroup(allocator, plan, &claims, &seats, &writes, &foreign, result);
-        try self.writeTracks(allocator, seats.items, writes.items, &claims, &vacated, &genres, result);
-        for (entries) |entry| if (entry.unreadable) try self.clearProjectionIssues(entry.file_id);
         const backing = try std.mem.concat(allocator, Entry, &.{ entries, foreign.items });
+        try self.writeTracks(allocator, seats.items, writes.items, backing, queue, &claims, &vacated, &genres, result);
+        for (entries) |entry| if (entry.unreadable) try self.clearProjectionIssues(entry.file_id);
         try self.pruneStale(allocator, backing, &claims, &vacated, &genres, result);
         try self.settleArtwork(allocator, projected, vacated.releases.items);
         try self.library.database.exec("COMMIT;");
@@ -1093,6 +1125,11 @@ pub const Projection = struct {
                         .severity = .warning,
                         .details = details,
                     });
+                } else {
+                    try self.library.health_issues.clearLocked(
+                        entry.file_id,
+                        .technical_anomaly,
+                    );
                 }
                 if (entry.foreign) {
                     try foreign_files.append(allocator, entry.*);
@@ -1107,12 +1144,16 @@ pub const Projection = struct {
     /// Writes every position the folder projects to. A row standing on one
     /// that no position claimed is parked, and deleted as pruning would once
     /// the rest are seated by id, so each Track keeps the file it presents
-    /// wherever that file now lands.
+    /// wherever that file now lands. A parked row whose file lies outside
+    /// `backing` in a folder the run has yet to project stays parked for that
+    /// folder to claim.
     fn writeTracks(
         self: *Projection,
         allocator: std.mem.Allocator,
         seats: []const Seat,
         writes: []database.TrackSeat,
+        backing: []const Entry,
+        queue: *FolderQueue,
         claims: *TrackClaims,
         vacated: *Vacated,
         genres: *database.GenreWriter,
@@ -1163,13 +1204,21 @@ pub const Projection = struct {
             try genres.projectAt(allocator, seat.release_id, seat.disc, seat.number, seat.genres);
         }
         for (evicted.items) |resident| {
-            if (resident.file_id) |file_id| try genres.carryUser(resident.track_id, file_id);
+            if (resident.file_id) |file_id| {
+                if (try self.awaitsElsewhere(queue, backing, file_id)) continue;
+                try genres.carryUser(resident.track_id, file_id);
+            }
             try delete_track.bindInt64(1, resident.track_id);
             if (try delete_track.step() != .done) return error.SqlFailed;
             try delete_track.reset();
             result.tracks_pruned += 1;
         }
         result.tracks_written += @intCast(writes.len);
+    }
+
+    fn awaitsElsewhere(self: *Projection, queue: *FolderQueue, backing: []const Entry, file_id: i64) !bool {
+        for (backing) |entry| if (entry.file_id == file_id) return false;
+        return queue.awaitsFile(self.library.database, file_id);
     }
 
     /// Resolve one Artist row and hand back its id. Both the key and the sort
@@ -1582,31 +1631,6 @@ fn lessByGroup(_: void, a: Entry, b: Entry) bool {
         .gt => false,
         .eq => std.mem.order(u8, a.uri, b.uri) == .lt,
     };
-}
-
-fn appendFolder(
-    allocator: std.mem.Allocator,
-    folders: *std.ArrayList(Folder),
-    seen: *std.StringHashMapUnmanaged(void),
-    volume_id: i64,
-    path: []const u8,
-) !void {
-    var buffer: [4096]u8 = undefined;
-    const stamped = std.fmt.bufPrint(&buffer, "{d}\x1f{s}", .{ volume_id, path }) catch {
-        // A path longer than the buffer is projected rather than skipped; the
-        // duplicate check simply does not apply to it.
-        try folders.append(allocator, .{
-            .volume_id = volume_id,
-            .path = try allocator.dupe(u8, path),
-        });
-        return;
-    };
-    if (seen.contains(stamped)) return;
-    try seen.put(allocator, try allocator.dupe(u8, stamped), {});
-    try folders.append(allocator, .{
-        .volume_id = volume_id,
-        .path = try allocator.dupe(u8, path),
-    });
 }
 
 /// The exclusive end of a folder's subtree in `uri` order. A folder path ends
@@ -2064,6 +2088,69 @@ test "two songs claiming one track number both stay in the library" {
     const flagged = try filesWithIssue(&library, .technical_anomaly);
     defer testing.allocator.free(flagged);
     try testing.expectEqualSlices(i64, &.{displaced}, flagged);
+}
+
+const technical_anomaly_rows_sql = std.fmt.comptimePrint(
+    "SELECT count(*) FROM library_health_issues WHERE kind = {d};",
+    .{@backingInt(database.HealthIssueKind.technical_anomaly)},
+);
+
+fn displacedTags(title: []const u8, track_number: u32) metadata.ObservedTags {
+    return .{
+        .title = title,
+        .artist = "MitiS",
+        .album = "Oasis",
+        .album_artist = "MitiS",
+        .track_number = track_number,
+    };
+}
+
+test "a displaced position that stops being displaced clears its anomaly, and a dismissal holds while it lasts" {
+    var library = try openTestLibrary("file:orca-projection-displaced-cleared?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observe(&library, "/m/MitiS/01 Prism.flac", .flac, displacedTags("Prism", 1));
+    const renumbered = try observe(&library, "/m/MitiS/02 Oasis.flac", .flac, displacedTags("Oasis", 1));
+    const regrouped = try observe(&library, "/m/MitiS/03 Lost.flac", .flac, displacedTags("Lost", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const flagged = try filesWithIssue(&library, .technical_anomaly);
+    defer testing.allocator.free(flagged);
+    try testing.expectEqualSlices(i64, &.{ renumbered, regrouped }, flagged);
+
+    try library.health_issues.dismiss(renumbered, .technical_anomaly);
+    _ = try projection.run(.all);
+    const visible = try filesWithIssue(&library, .technical_anomaly);
+    defer testing.allocator.free(visible);
+    try testing.expectEqualSlices(i64, &.{regrouped}, visible);
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, technical_anomaly_rows_sql));
+
+    try library.observed_tags.upsert(.{ .file_id = renumbered, .values = displacedTags("Oasis", 4) });
+    var elsewhere = displacedTags("Lost", 1);
+    elsewhere.album = "Lost";
+    try library.observed_tags.upsert(.{ .file_id = regrouped, .values = elsewhere });
+    const result = try projection.run(.{ .files = &.{ renumbered, regrouped } });
+    try testing.expectEqual(@as(u64, 0), result.displaced_positions);
+    try testing.expectEqual(@as(i64, 4), try positionOf(&library, renumbered));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, technical_anomaly_rows_sql));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a displaced file that stops reading loses its anomaly" {
+    var library = try openTestLibrary("file:orca-projection-displaced-unreadable?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observe(&library, "/m/MitiS/01 Prism.flac", .flac, displacedTags("Prism", 1));
+    const displaced = try observe(&library, "/m/MitiS/02 Oasis.flac", .flac, displacedTags("Oasis", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, technical_anomaly_rows_sql));
+
+    try library.health_issues.recordLocked(displaced, .{
+        .kind = .unreadable_file,
+        .severity = .warning,
+        .details = "Not a valid FLAC stream",
+    });
+    _ = try projection.run(.{ .files = &.{displaced} });
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, technical_anomaly_rows_sql));
 }
 
 test "an unreadable file projects no Track until its bytes read, and loses its Track when they stop reading" {
@@ -3201,6 +3288,151 @@ test "a file leaving its album keeps its Track while a sibling takes its old pos
     try testing.expectEqual(@as(u64, 2), result.tracks_moved);
     try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
     try expectNoForeignKeyViolations(&library);
+}
+
+fn titledTags(album: []const u8, title: []const u8, track_number: u32) metadata.ObservedTags {
+    var tags = albumTags(album, track_number);
+    tags.title = title;
+    return tags;
+}
+
+const FolderOrder = enum { leaving_first, staying_first, staying_only };
+
+fn scopeInOrder(order: FolderOrder, leaving: i64, staying: i64, both: *[2]i64) Scope {
+    both.* = switch (order) {
+        .leaving_first => .{ leaving, staying },
+        .staying_first, .staying_only => .{ staying, leaving },
+    };
+    return .{ .files = if (order == .staying_only) both[0..1] else both };
+}
+
+/// A Track projected after the others, so a deleted Track's id is never the
+/// highest and a new row cannot take it again.
+fn observeLastTrack(library: *database.LibraryDatabase) !void {
+    _ = try observe(library, "/m/Z/last.flac", .flac, titledTags("Last", "Last", 1));
+}
+
+fn expectLeavingFileKeepsTrack(name: [:0]const u8, order: FolderOrder) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    const staying = try observe(&library, "/m/Artist/First/staying.flac", .flac, titledTags("First", "Staying", 2));
+    const leaving = try observe(&library, "/m/Downloads/First/leaving.flac", .flac, titledTags("First", "Leaving", 1));
+    try observeLastTrack(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const first = try releaseOf(&library, staying);
+    try testing.expectEqual(first, try releaseOf(&library, leaving));
+    const staying_track = try trackOf(&library, staying);
+    const leaving_track = try trackOf(&library, leaving);
+    const digest: [32]u8 = @splat(1);
+    try testing.expect(try library.track_lyrics.put(leaving_track, &digest, .{ .plain = "words" }, 100));
+    try library.genres.setTrackGenres(testing.allocator, &.{leaving_track}, &.{"Shoegaze"});
+    const playlist = try library.playlists.create("Mix");
+    _ = try library.playlists.insert(playlist, &.{leaving_track}, null);
+
+    try library.observed_tags.upsert(.{ .file_id = leaving, .values = titledTags("Second", "Leaving", 1) });
+    try library.observed_tags.upsert(.{ .file_id = staying, .values = titledTags("First", "Staying", 1) });
+    var both: [2]i64 = undefined;
+    const result = try projection.run(scopeInOrder(order, leaving, staying, &both));
+
+    try testing.expectEqual(staying_track, try trackOf(&library, staying));
+    try testing.expectEqual(leaving_track, try trackOf(&library, leaving));
+    try testing.expectEqual(first, try releaseOf(&library, staying));
+    try testing.expect(try releaseOf(&library, leaving) != first);
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, staying));
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, leaving));
+    try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM tracks WHERE track_number IS NULL;"));
+    const stored = (try library.track_lyrics.get(testing.allocator, leaving_track)) orelse return error.TestUnexpectedResult;
+    defer stored.deinit();
+    try testing.expectEqualStrings("words", stored.record.plain.?);
+    try expectGenres(&library, leaving_track, "Shoegaze");
+    const listed = try library.playlists.trackIds(testing.allocator, playlist, .{ .now = 0, .seed = 0 });
+    defer testing.allocator.free(listed);
+    try testing.expectEqualSlices(i64, &.{leaving_track}, listed);
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a file leaving its album keeps its Track when another folder of the album fills its position first" {
+    try expectLeavingFileKeepsTrack("file:orca-projection-leave-staying-first?mode=memory&cache=shared", .staying_first);
+}
+
+test "a file leaving its album keeps its Track when its own folder projects first" {
+    try expectLeavingFileKeepsTrack("file:orca-projection-leave-leaving-first?mode=memory&cache=shared", .leaving_first);
+}
+
+test "a file leaving its album keeps its Track when only the folder filling its position is in scope" {
+    try expectLeavingFileKeepsTrack("file:orca-projection-leave-staying-only?mode=memory&cache=shared", .staying_only);
+}
+
+fn expectTradedFilesKeepTracks(name: [:0]const u8, order: FolderOrder) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    const stays_first = try observe(&library, "/m/A/stays-first.flac", .flac, titledTags("First", "Stays First", 1));
+    const joins_first = try observe(&library, "/m/A/joins-first.flac", .flac, titledTags("Second", "Joins First", 2));
+    const joins_second = try observe(&library, "/m/B/joins-second.flac", .flac, titledTags("First", "Joins Second", 2));
+    const stays_second = try observe(&library, "/m/B/stays-second.flac", .flac, titledTags("Second", "Stays Second", 1));
+    try observeLastTrack(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const files = [_]i64{ stays_first, joins_first, joins_second, stays_second };
+    var tracks: [files.len]i64 = undefined;
+    for (files, &tracks) |file_id, *track| track.* = try trackOf(&library, file_id);
+    const first = try releaseOf(&library, stays_first);
+    const second = try releaseOf(&library, stays_second);
+
+    try library.observed_tags.upsert(.{ .file_id = joins_first, .values = titledTags("First", "Joins First", 2) });
+    try library.observed_tags.upsert(.{ .file_id = joins_second, .values = titledTags("Second", "Joins Second", 2) });
+    var both: [2]i64 = undefined;
+    const result = try projection.run(scopeInOrder(order, joins_second, joins_first, &both));
+
+    for (files, tracks) |file_id, track| try testing.expectEqual(track, try trackOf(&library, file_id));
+    try testing.expectEqual(first, try releaseOf(&library, joins_first));
+    try testing.expectEqual(second, try releaseOf(&library, joins_second));
+    try testing.expectEqual(@as(i64, 2), try positionOf(&library, joins_first));
+    try testing.expectEqual(@as(i64, 2), try positionOf(&library, joins_second));
+    try testing.expectEqual(@as(u64, 2), result.tracks_moved);
+    try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, 5), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "two albums trading files across two folders keep every Track whichever folder projects first" {
+    try expectTradedFilesKeepTracks("file:orca-projection-trade-leaving-first?mode=memory&cache=shared", .leaving_first);
+    try expectTradedFilesKeepTracks("file:orca-projection-trade-staying-first?mode=memory&cache=shared", .staying_first);
+}
+
+fn expectEmptiedReleaseKeepsTracks(name: [:0]const u8, order: FolderOrder) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    const moving = try observe(&library, "/m/A/moving.flac", .flac, titledTags("Gone", "Moving", 1));
+    const leaving = try observe(&library, "/m/B/leaving.flac", .flac, titledTags("Kept", "Leaving", 1));
+    try observeLastTrack(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const moving_track = try trackOf(&library, moving);
+    const leaving_track = try trackOf(&library, leaving);
+    _ = try library.release_loves.set(&.{try releaseOf(&library, moving)}, true);
+
+    try library.observed_tags.upsert(.{ .file_id = moving, .values = titledTags("Kept", "Moving", 1) });
+    try library.observed_tags.upsert(.{ .file_id = leaving, .values = titledTags("Elsewhere", "Leaving", 1) });
+    var both: [2]i64 = undefined;
+    const result = try projection.run(scopeInOrder(order, leaving, moving, &both));
+
+    try testing.expectEqual(moving_track, try trackOf(&library, moving));
+    try testing.expectEqual(leaving_track, try trackOf(&library, leaving));
+    try testing.expect(try releaseOf(&library, moving) != try releaseOf(&library, leaving));
+    try testing.expect(try library.release_loves.isLoved(try releaseOf(&library, moving)));
+    try testing.expectEqual(@as(u64, 0), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a file emptying its album onto a position another folder's leaving file held keeps its Track either way" {
+    try expectEmptiedReleaseKeepsTracks("file:orca-projection-empty-leaving-first?mode=memory&cache=shared", .leaving_first);
+    try expectEmptiedReleaseKeepsTracks("file:orca-projection-empty-staying-first?mode=memory&cache=shared", .staying_first);
 }
 
 test "a Track whose preferred file goes missing follows its other encoding when its album is renamed" {

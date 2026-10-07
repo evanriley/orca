@@ -601,6 +601,64 @@ test "details carry the loudness stored for the file's recorded bytes and no oth
     try std.testing.expect(stale.loudness == null);
 }
 
+test "details and listings show no loudness for a file with no channel count or more than two channels" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scanFixtureLibrary(&runtime, "file:orca-track-details-loudness-channels?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+
+    const scanned = try scannedFixtureDetails(&runtime, library, "covered-reference.flac");
+    defer scanned.deinit();
+    const analysis = @import("../analysis/root.zig");
+    const result: analysis.diagnostics.Result = .{
+        .allocator = std.testing.allocator,
+        .integrated_lufs = -9.1,
+        .replay_gain_db = -8.9,
+        .sample_peak = 0.966,
+        .rms = 0.1,
+        .clipped_runs = 0,
+        .clipped_samples = 0,
+        .silent_frames = 0,
+        .leading_silence_frames = 0,
+        .trailing_silence_frames = 0,
+        .waveform = &.{},
+    };
+    const encoded = try analysis.encoding.encode(std.testing.allocator, result);
+    defer std.testing.allocator.free(encoded);
+    const facts = (try library_database.tracks.fileFacts(std.testing.allocator, scanned.track_id)).?;
+    defer facts.deinit();
+    try library_database.analysis_cache.put(
+        analysis_service.diagnosticsKey(facts.file_id, try recordContentHash(library_database, facts), .{}),
+        encoded,
+    );
+
+    const Case = struct { channels: ?i64, measured: bool };
+    for ([_]Case{
+        .{ .channels = 2, .measured = true },
+        .{ .channels = null, .measured = false },
+        .{ .channels = 6, .measured = false },
+        .{ .channels = 1, .measured = true },
+    }) |case| {
+        var statement = try library_database.database.prepare("UPDATE files SET channels = ?1 WHERE id = ?2;");
+        defer statement.deinit();
+        try statement.bindOptionalInt64(1, case.channels);
+        try statement.bindInt64(2, facts.file_id);
+        if (try statement.step() != .done) return error.TestUnexpectedResult;
+
+        const details = (try runtime.libraryTrackDetails(library, scanned.track_id)).?;
+        defer details.deinit();
+        try std.testing.expectEqual(case.measured, details.loudness != null);
+        var page = try runtime.libraryTrackQuery(library, "", .{ .limit = database.repository.max_page });
+        defer page.deinit();
+        var listed = false;
+        for (page.items) |item| if (item.id == scanned.track_id) {
+            listed = true;
+            try std.testing.expectEqual(case.measured, item.integrated_lufs != null);
+        };
+        try std.testing.expect(listed);
+    }
+}
+
 test "runtime can repeatedly start and stop without leaking" {
     for (0..100) |_| {
         var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -4334,8 +4392,8 @@ test "a failed tag write reports its file and reason" {
     const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
     try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
     const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
-    try std.testing.expectEqual(preview.files[0].file_id, failure.file_id);
-    try std.testing.expectEqual(@as(u32, 0), failure.action_index);
+    try std.testing.expectEqual(preview.files[0].file_id, failure.file.?.file_id);
+    try std.testing.expectEqual(@as(u32, 0), failure.file.?.action_index);
     try std.testing.expectEqual(TagWriteFailureReason.permission_denied, failure.reason);
 
     const library_database = try libraryDatabase(&runtime, library);
@@ -4430,8 +4488,8 @@ test "a file made read-only after planning fails the tag write job as read-only 
     const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
     try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
     const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
-    try std.testing.expectEqual(preview.files[read_only_index].file_id, failure.file_id);
-    try std.testing.expectEqual(read_only_index, failure.action_index);
+    try std.testing.expectEqual(preview.files[read_only_index].file_id, failure.file.?.file_id);
+    try std.testing.expectEqual(read_only_index, failure.file.?.action_index);
     try std.testing.expectEqual(TagWriteFailureReason.file_read_only, failure.reason);
     const library_database = try libraryDatabase(&runtime, library);
     try expectJournaledError(library_database, preview.plan_id, read_only_index, "FileReadOnly");
@@ -4445,6 +4503,151 @@ test "a file made read-only after planning fails the tag write job as read-only 
     try std.testing.expectEqualSlices(u8, other_original, other_after);
     try expectOnlyFixtureFiles(temporary.dir);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, library_database.backup_directory.?, .{}));
+}
+
+test "a tag write whose backup directory was created after planning fails as backup_exists with no file and changes nothing" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const library_database = try libraryDatabase(&runtime, library);
+    const plan_backup_directory = try std.fmt.allocPrint(std.testing.allocator, "{s}/{d}", .{ library_database.backup_directory.?, preview.plan_id });
+    defer std.testing.allocator.free(plan_backup_directory);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plan_backup_directory);
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(@as(?runtime_module.TagWriteFailureFile, null), failure.file);
+    try std.testing.expectEqual(TagWriteFailureReason.backup_exists, failure.reason);
+
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectOnlyFixtureFiles(temporary.dir);
+}
+
+test "a tag write that cannot first recover an interrupted write fails as recovery_failed with no file and changes nothing" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+
+    const library_database = try libraryDatabase(&runtime, library);
+    const root = std.Io.Dir.path.dirname(preview.files[0].path).?;
+    const unmounted_source = try std.fmt.allocPrint(std.testing.allocator, "{s}/unmounted/b.flac", .{root});
+    defer std.testing.allocator.free(unmounted_source);
+    const unmounted_stage = try std.fmt.allocPrint(std.testing.allocator, "{s}/unmounted/.b.flac.orca-stage-1-0", .{root});
+    defer std.testing.allocator.free(unmounted_stage);
+    const unmounted_backup = try std.fmt.allocPrint(std.testing.allocator, "{s}/{d}/0-b.flac", .{ library_database.backup_directory.?, preview.plan_id + 1000 });
+    defer std.testing.allocator.free(unmounted_backup);
+    const identity = try metadata.file_mutation.identity(std.testing.io, preview.files[0].path);
+    const interrupted = try library_database.mutation_journal.prepare(.{
+        .plan_id = preview.plan_id + 1000,
+        .group_id = preview.plan_id + 1000,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = unmounted_source,
+        .stage_path = unmounted_stage,
+        .backup_path = unmounted_backup,
+        .expected_size = identity.size_bytes,
+        .expected_modified_ns = identity.modified_ns,
+        .expected_quick_hash = identity.quick_hash,
+        .expected_content_hash = identity.content_hash,
+    });
+    try library_database.mutation_journal.recordResultIdentity(
+        interrupted,
+        .planned,
+        identity.size_bytes,
+        identity.modified_ns,
+        identity.quick_hash,
+        identity.content_hash.?,
+    );
+    try library_database.mutation_journal.transition(interrupted, .planned, .staged, null);
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(@as(?runtime_module.TagWriteFailureFile, null), failure.file);
+    try std.testing.expectEqual(TagWriteFailureReason.recovery_failed, failure.reason);
+
+    try std.testing.expectEqual(database.MutationState.staged, try library_database.mutation_journal.state(interrupted));
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectOnlyFixtureFiles(temporary.dir);
+}
+
+test "a tag write whose file no longer has a writable format fails as changed_since_plan at that file and changes nothing" {
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const replaced_index: u32 = for (preview.files, 0..) |file, index| {
+        if (std.mem.endsWith(u8, file.path, "/b.flac")) break @intCast(index);
+    } else return error.TestUnexpectedResult;
+    const other_original = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_original);
+    const replacement = "not an audio file";
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "b.flac", .data = replacement });
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(preview.files[replaced_index].file_id, failure.file.?.file_id);
+    try std.testing.expectEqual(replaced_index, failure.file.?.action_index);
+    try std.testing.expectEqual(TagWriteFailureReason.changed_since_plan, failure.reason);
+
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(replacement, after);
+    const other_after = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(other_after);
+    try std.testing.expectEqualSlices(u8, other_original, other_after);
+    try expectOnlyFixtureFiles(temporary.dir);
 }
 
 test "writing tags to one copy of a shared file splits that copy off and marks the written value on the file that holds it" {
@@ -5229,6 +5432,36 @@ test "a scan that cannot enter a directory succeeds, keeps everything under it a
     try std.testing.expectEqual(scanned.generation + 1, kept.generation);
     try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
     try std.testing.expectEqual(@as(i64, 2), try fixture.scanRunCount(.completed));
+}
+
+test "a scan and a reconcile report the symbolic links their walks skipped" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-symlinks?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.symLink(std.testing.io, "one.flac", "A/linked.flac", .{});
+    try fixture.temporary.dir.symLink(std.testing.io, "../B", "A/album", .{ .is_directory = true });
+    try fixture.temporary.dir.symLink(std.testing.io, "gone.flac", "dangling.flac", .{});
+
+    const scan = try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, scan));
+    const scanned = try fixture.runtime.jobScanStats(scan);
+    try std.testing.expectEqual(@as(u64, 3), scanned.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 2), scanned.files_seen);
+
+    const reconcile = try fixture.runtime.startLibraryReconcile(fixture.library, .{
+        .root_id = fixture.root_id,
+        .scope = .{ .subtrees = &.{"A"} },
+    });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, reconcile));
+    const reconciled = try fixture.runtime.jobScanStats(reconcile);
+    try std.testing.expectEqual(@as(u64, 2), reconciled.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 1), reconciled.files_seen);
+
+    const history = try fixture.runtime.jobHistoryPage(fixture.library, std.testing.allocator, .all, 2, 0);
+    defer std.testing.allocator.free(history);
+    try std.testing.expectEqual(@as(usize, 2), history.len);
+    try std.testing.expectStringEndsWith(history[0].summary.slice(), "2 symbolic links skipped");
+    try std.testing.expectStringEndsWith(history[1].summary.slice(), "3 symbolic links skipped");
 }
 
 test "a scan whose root directory cannot be opened fails its run and marks nothing missing" {

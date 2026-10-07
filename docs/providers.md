@@ -300,6 +300,13 @@ and is repeated on the next run. One Track is one search however many files back
 it. `MatchRequest.limit` bounds the Tracks one run examines and
 `MatchRequest.track_id` limits it to one Track.
 
+Two kinds of Track are passed over without a request or a decode. A Track
+without a title or an artist is not offered to MusicBrainz until its title and
+artist are both set, and is counted in `insufficient_evidence` on every run. A
+file whose present bytes could not be fingerprinted is not offered to AcoustID
+until its bytes change ([analysis.md](analysis.md#acoustid-fingerprints)). A
+Track passed over by every service in scope is not examined at all.
+
 ### Proposals and confidence
 
 Candidates from both services are merged by recording ID into one proposal that
@@ -309,19 +316,33 @@ a dismissed or accepted proposal is never offered again.
 
 Orca scores each service's candidate from 0 to 1 against the Track's title,
 artist, album and length; AcoustID's own score is the fingerprint evidence in
-that score. The proposal's confidence is `1 − (1 − c_musicbrainz)(1 −
-c_acoustid)` over the services that found it, so two services agreeing rank
-above either alone. Candidates below 0.5 are dropped.
+that score. A candidate with no title or no artist scores 0 on that field when
+the Track has one; a candidate with no album is scored without it. The
+proposal's confidence is `1 − (1 − c_musicbrainz)(1 − c_acoustid)` over the
+services that found it, so two services agreeing rank above either alone.
+Candidates below 0.5 are dropped.
 
 ### Failures
 
 A rate limit waits out the longer of the service's block and a backoff of 60 s
 doubling per attempt, cancellably, then asks again. An outage or timeout is
 asked again after about 5 s, then about 30 s. After three attempts of either
-kind, or at once when the network cannot be reached or another process holds the
-service, the job stops `failed`. Cached answers are still used without a
-network. A query answered with something that is not a search result is counted
-and skipped.
+kind, or at once when another process holds the service, the job stops `failed`.
+A query answered with something that is not a search result is counted and
+skipped.
+
+When the network cannot be reached, the job sends no further request to either
+service and goes on through every Track from cache alone. A Track whose answers
+are all cached is matched; a Track that needs an answer the cache lacks is
+skipped, is not counted in `tracks_examined`, and stays eligible for the next
+run. A verify job does the same for each file. Match Album's release vote and
+the release snapshots use cached releases and skip the others. The job then
+ends `failed` with `unavailable` set, its statistics counting what the cache
+answered. The gateway's offline flag is left unchanged.
+
+Matching has no offline setting of its own: it always asks the network first.
+`orca-gtk` has no setting for scrobbling offline; `librarySetScrobbling` takes
+`offline` for hosts that offer one.
 
 A query a service refuses with a `4xx` other than `401`, `403`, `408` and `429`
 is counted as refused and skipped, and the refusal is cached in `provider_cache`
@@ -361,7 +382,8 @@ next request slot and while backing off.
 
 `MatchRequest.mode = .reidentify` searches one Track (`track_id`) or one
 Release's Tracks (`release_id`) again: every one with a playing file, whatever
-recording ID is in effect and whatever services answered before. Without either,
+recording ID is in effect and whatever services answered before, and its file
+is fingerprinted again even when its bytes failed before. Without either,
 or with `accept_minimum_confidence`, it returns `error.InvalidMatchRequest`, so
 no correction is accepted in bulk. A candidate for the recording ID already in
 effect is not proposed and counts as `confirmed` in `jobMatchStats`, once per
@@ -392,8 +414,17 @@ action, never run by a job.
 `GET /ws/2/recording?fmt=json&limit=10&query=` with `recording:"TITLE" AND
 artist:"ARTIST" release:"ALBUM"`. The release term is optional, so it raises
 matching releases without excluding the others. Lucene syntax characters in the
-values are escaped with a backslash. A Track without a title or an artist is
-counted and not searched.
+values are escaped with a backslash. A Track whose title or artist is empty or
+only spaces and tabs is counted and not searched, and is not examined again
+until both are set.
+
+When the answer is empty and the artist splits at commas into two or more
+names, one more query is sent with the artist term replaced by
+`(artist:"NAME1" OR artist:"NAME2" ...)` over the first eight names, so a
+recording credited to any of them is found. The whole artist is always asked
+first, so an artist whose name holds commas ("Earth, Wind & Fire") matches in
+one request. The second query goes through the same gateway, pacing and cache
+and counts as a request of its own.
 
 Kept: the recording ID, title, full artist credit, the release whose title is
 closest to the album with its ID and track number, the IDs of up to 25 releases
@@ -408,7 +439,12 @@ cached, that answer is used.
 
 `GET /ws/2/release/{id}?fmt=json&inc=recordings+artist-credits+release-groups`,
 through the same gateway, cache, counters and refusal rules as the search. The
-ID is checked to be a lowercase UUID first.
+ID is checked to be a lowercase UUID first. A refused or missing release (`404`)
+is cached as refused for 7 days, and until then a library-scope run does not
+select it for
+[the tagged-release step](metadata.md#marking-a-release-as-reviewed).
+Re-identify asks MusicBrainz again for a release whose refusal is cached, and
+caches the new answer.
 
 Before a file's search is recorded, the release of its most confident
 MusicBrainz proposal is looked up, once per run, and every proposal naming that
@@ -446,12 +482,13 @@ what the search said about each release, first seen per release; a release a
 stored payload says none of them about ranks as unofficial, of another length
 and undated.
 
-The winner is looked up once, and every stored proposal whose recording it
-holds, whether or not it lists the release, is pointed at it and filled in
-(`updatePayload`). Then the Release's best candidate, as Match Review ranks it
-before any acceptance, is looked up unless its snapshot is younger than the
-30-day cache: at most one more request per run, none when it is the winner or
-the cache holds it. A rerun after a failure completes from the cache.
+The winner is looked up once, and every stored proposal outside an album group
+whose recording it holds, whether or not it lists the release, is pointed at it
+and filled in (`updatePayload`). Then the Release's best candidate, as Match
+Review ranks it before any acceptance, is looked up unless its snapshot is
+younger than the 30-day cache: at most one more request per run, none when it
+is the winner or the cache holds it. A rerun after a failure completes from the
+cache.
 
 ### AcoustID lookup
 
@@ -459,7 +496,10 @@ The first 120 s of the playing file are decoded by Orca, resampled to 11,025 Hz
 and fingerprinted by Chromaprint
 ([analysis.md](analysis.md#acoustid-fingerprints)). A file that does not decode
 cleanly has no fingerprint, is counted in `fingerprint_failures`, and its Track
-is still searched on MusicBrainz.
+is still searched on MusicBrainz. Later runs do not decode those bytes again
+until they change or the Track is re-identified. A file that could not be
+opened or read, or a fingerprint that was cancelled, is tried again on the
+next run.
 
 `POST /v2/lookup`, a gzip-compressed form (`Content-Encoding: gzip`) with
 `client`, `clientversion`, `format=json`, `meta=recordings releasegroups
@@ -471,7 +511,8 @@ Kept: each recording with an ID once per fingerprint under its best score: the
 ID, the title (empty when AcoustID has none), the artists joined by their join
 phrases, the release group title closest to the Track's album, the length and
 AcoustID's score. With `compress`, an artist or release group named in full once
-may appear by ID alone elsewhere, so names are resolved across the whole answer.
+may appear by ID alone elsewhere, so names are resolved across the whole answer,
+and a recording listed in part takes each missing field from its other listings.
 
 Each fingerprint's answer is cached in `provider_cache` for 90 days, keyed by
 the duration and a BLAKE3 hash of the fingerprint; fingerprints already answered
@@ -525,11 +566,12 @@ never verified.
 
 A file whose stored outcome is missing or stale. An outcome is stale once the
 file's quick hash or its recording ID in effect changes. A file whose fresh
-outcome is `disagrees` is verified again only beside a stale or unverified file
-of its Release, so the album group can form again with every file it disputes,
-or when `track_id` asks for it alone. When only the recording ID changed and the
-new one is among the recordings heard at 0.5 or more, the file agrees again
-without a lookup. `total_units` counts by the same rule.
+outcome is `disagrees` is verified again only when its Release has a stale or
+unverified file as the Release's verification starts, so the album group can
+form again with every file it disputes, or when `track_id` asks for it alone.
+When only the recording ID changed and the new one is among the recordings
+heard at 0.5 or more, the file agrees again without a lookup. `total_units`
+counts by the same rule.
 
 The library is verified one Release at a time, in Release id order, then Tracks
 with no Release a page at a time; `release_id` and `track_id` limit it to one. A
@@ -556,6 +598,12 @@ whole with `libraryAcceptCorrectionGroup` and `libraryDismissCorrectionGroup`.
 The other disputing files get corrections of their own, with AcoustID's title
 and artist and no position. A lookup that fails stops the job as a search's
 would; a release MusicBrainz does not have leaves every correction ungrouped.
+
+A proposal leaves its group only when its file is verified again. A search
+that finds its recording again, a re-identify included, adds its provider and
+confidence but keeps it in the group with the release ID, positions and release
+values the group was formed on, and [Match Album](#match-album) never points it
+at another release.
 
 ### Idle maintenance
 
@@ -620,18 +668,27 @@ one, the ID is sent.
 metadata fields. A batch holds at most 50 items and 900 KiB of form, below the
 service's 1 MiB limit; an item that would pass either bound starts the next
 batch. Each accepted item's submission ID is stored in `acoustid_submissions`
-with the file and recording ID.
+with the file and recording ID. `libraryAcoustIdSubmittedCount` returns the
+number of those rows: the files and recording IDs the Library has sent. It
+falls when a file leaves the Library.
 
 ### User key and failures
 
 The user's key is read from the `CredentialStore` under `org.acoustid` /
 `user-key` before each request and never kept. Without one the job fails with
-`needs_user_key` before fingerprinting anything; a key AcoustID refuses (`401`,
-`403`, or error code 6) fails it with `invalid_user_key`. Nothing is marked sent
-in either case. Another `4xx` rejects that batch: its files are counted in
-`rejected` and stay unsent. Rate limits, outages and timeouts are retried as in
-matching, and after three attempts the job fails with `unavailable`. While
-another process holds AcoustID it fails with `busy`.
+`needs_user_key` before fingerprinting anything. A `CredentialStore` that cannot
+be read, with any error but `OutOfMemory`, fails it with
+`credential_unavailable` instead, as does a credential the C ABI's buffer
+cannot hold. A key AcoustID refuses (`401`, `403`, or error code 6) fails it
+with `invalid_user_key`. Nothing is marked sent in any of these cases. Another
+`4xx` rejects that batch: its files are counted in `rejected` and stay unsent.
+Rate limits, outages and timeouts are retried as in matching, and after three
+attempts the job fails with `unavailable`. While another process holds AcoustID
+it fails with `busy`.
+
+AcoustID lookups read an application key override from the same store and use
+the host's application key when the store cannot be read. The listen worker
+stops with an error when its credential cannot be read.
 
 `jobSubmissionStats` reports the files examined, submitted and sent as metadata,
 fingerprints taken, read from the cache or failed, files rejected, requests made

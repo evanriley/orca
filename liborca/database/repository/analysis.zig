@@ -6,6 +6,13 @@ const digestColumn = @import("../columns.zig").digestColumn;
 const max_supported_channels = @import("../../codec/decoder.zig").max_supported_channels;
 const max_supported_channels_sql = std.fmt.comptimePrint("{d}", .{max_supported_channels});
 
+/// Whether the `files` row named `file` records a channel count that analysis
+/// and playback accept, so results stored for it count as a measurement. A
+/// NULL count is unknown and does not count.
+pub fn measurableChannels(comptime file: []const u8) []const u8 {
+    return file ++ ".channels <= " ++ max_supported_channels_sql;
+}
+
 const StorageIdentityKey = @import("locations.zig").StorageIdentityKey;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
@@ -22,18 +29,23 @@ pub const AnalysisSelector = struct {
     parameter_hash: [32]u8,
 };
 
-/// The measurements a library-wide analysis takes together. A file owes the
-/// analysis while either is missing, so bumping either algorithm's version
-/// re-selects every file.
-pub const AnalysisSelectors = [2]AnalysisSelector;
+/// The measurements a library-wide analysis takes together, and the verdict
+/// that excuses a file from them. A file owes the analysis while either
+/// measurement is missing, so bumping either algorithm's version re-selects
+/// every file, unless the decoders it would run have already refused its
+/// bytes.
+pub const AnalysisSelectors = struct {
+    measurements: [2]AnalysisSelector,
+    undecodable: AnalysisSelector,
+};
 
 /// The `files` rows that still owe a library-wide analysis.
 ///
 /// One string, shared by `FileRepository.unanalyzedPage`, `unanalyzedCount`
 /// and the plan test that proves neither is a table scan. Parameters ?3 to ?6
-/// are the first `AnalysisSelector` and ?7 to ?10 the second; ?1 and ?2 stay
-/// the caller's cursor and limit, as they are for every other page in this
-/// file.
+/// and ?7 to ?10 are the two measurements and ?11 to ?14 the undecodable
+/// verdict; ?1 and ?2 stay the caller's cursor and limit, as they are for
+/// every other page in this file.
 ///
 /// This is an anti-join against `analysis_results`' own primary key rather
 /// than a flag on `files`, because that key *is* the answer. It already
@@ -53,16 +65,22 @@ pub const AnalysisSelectors = [2]AnalysisSelector;
 /// as a Library before content-hash keying filed them, never equals a content
 /// hash and is selected the same way.
 ///
-/// A file recorded with more than two channels that still holds any result is
-/// selected too, so the pass discards results stored before such files were
-/// refused.
+/// A file recorded with more than two channels, or with no channel count,
+/// that still holds any result is selected too, so the pass discards results
+/// stored before such files were refused and records a count it did not know.
+///
+/// A file whose recorded bytes the decoders refused, or analysis refused for
+/// their channel count, is not selected while the verdict is keyed as a
+/// measurement is: on those bytes, that decoder set and
+/// that verdict version. A file nothing can decode is otherwise read again on
+/// every run, for an answer that cannot change.
 ///
 /// The *playback* lookup is stricter, and deliberately asymmetric: it keys on
 /// the identity of the bytes it just opened, because adopting a correction for
 /// audio a file no longer contains is a wrong answer, while re-selecting a
 /// file for measurement is only wasted work.
 pub const unanalyzed_predicate =
-    \\NOT EXISTS (SELECT 1 FROM analysis_results
+    \\(NOT EXISTS (SELECT 1 FROM analysis_results
     \\    WHERE analysis_results.file_id = files.id
     \\      AND analysis_results.kind = ?3
     \\      AND analysis_results.algorithm_id = ?4
@@ -78,9 +96,17 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.parameter_hash = ?10
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
-    \\OR (files.channels >
+    \\OR ((files.channels IS NULL OR files.channels >
 ++ max_supported_channels_sql ++
-    \\ AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id))
+    \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id)))
+    \\AND NOT EXISTS (SELECT 1 FROM analysis_results
+    \\    WHERE analysis_results.file_id = files.id
+    \\      AND analysis_results.kind = ?11
+    \\      AND analysis_results.algorithm_id = ?12
+    \\      AND analysis_results.algorithm_version = ?13
+    \\      AND analysis_results.parameter_hash = ?14
+    \\      AND analysis_results.source_identity = files.content_hash
+    \\      AND files.content_hash_algorithm = 1)
 ;
 
 /// One file that still owes an analysis, where to read it, and what the
@@ -234,8 +260,9 @@ pub const AnalysisCacheRepository = struct {
 
     /// A member's result is keyed on `files.content_hash`, the identity the
     /// Library recorded, as `unanalyzed_predicate` keys it. A member recorded
-    /// with more than two channels reads as unmeasured whatever is stored for
-    /// it, because playback and analysis refuse such files. One statement over
+    /// with more than two channels, or with no channel count, reads as
+    /// unmeasured whatever is stored for it, because playback and analysis
+    /// refuse more than two channels. One statement over
     /// `tracks_release` and the primary key of `analysis_results`, at most
     /// `max_release_members` rows, and nothing allocated.
     pub fn visitReleaseMembers(
@@ -260,9 +287,9 @@ pub const AnalysisCacheRepository = struct {
             \\    AND analysis_results.parameter_hash = ?6
             \\    AND analysis_results.source_identity = files.content_hash
             \\    AND files.content_hash_algorithm = 1
-            \\    AND (files.channels IS NULL OR files.channels <=
+            \\    AND files.channels <=
         ++ max_supported_channels_sql ++
-            \\)
+            \\
             \\WHERE entry.id = ?1 AND entry.release_id IS NOT NULL
             \\ORDER BY member.id
             \\LIMIT ?2;
@@ -297,6 +324,43 @@ pub const AnalysisCacheRepository = struct {
         return self.putLocked(key, result);
     }
 
+    /// Stores `result` under `key` as the file's only row of the selector the
+    /// key names.
+    pub fn replace(self: *AnalysisCacheRepository, key: AnalysisCacheKey, result: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const selector: AnalysisSelector = .{
+            .kind = key.kind,
+            .algorithm_id = key.algorithm_id,
+            .algorithm_version = key.algorithm_version,
+            .parameter_hash = key.parameter_hash,
+        };
+        try self.forgetLocked(key.file_id, &selector);
+        try self.putLocked(key, result);
+        try self.db.exec("COMMIT;");
+    }
+
+    /// Removes the file's rows of `selector`, whatever bytes they describe.
+    pub fn forget(self: *AnalysisCacheRepository, file_id: i64, selector: *const AnalysisSelector) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.forgetLocked(file_id, selector);
+    }
+
+    fn forgetLocked(self: *AnalysisCacheRepository, file_id: i64, selector: *const AnalysisSelector) !void {
+        var statement = try self.db.prepare(
+            \\DELETE FROM analysis_results
+            \\WHERE file_id = ?1 AND kind = ?2 AND algorithm_id = ?3
+            \\  AND algorithm_version = ?4 AND parameter_hash = ?5;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try bindAnalysisSelectorAt(statement, 2, selector);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
     /// The same write from inside a caller's transaction. A library-wide
     /// analysis commits a whole batch of files at once — results, identity and
     /// health together — so it holds the lane itself rather than taking it once
@@ -326,13 +390,14 @@ pub fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const Analys
     try bindAnalysisSelectorAt(statement, 3, selector);
 }
 
-/// Binds ?3 to ?10 of `unanalyzed_predicate`.
+/// Binds ?3 to ?14 of `unanalyzed_predicate`.
 pub fn bindAnalysisSelectors(statement: sqlite.Statement, selectors: *const AnalysisSelectors) !void {
-    try bindAnalysisSelectorAt(statement, 3, &selectors[0]);
-    try bindAnalysisSelectorAt(statement, 7, &selectors[1]);
+    try bindAnalysisSelectorAt(statement, 3, &selectors.measurements[0]);
+    try bindAnalysisSelectorAt(statement, 7, &selectors.measurements[1]);
+    try bindAnalysisSelectorAt(statement, 11, &selectors.undecodable);
 }
 
-fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {
+pub fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {
     try statement.bindInt64(first, selector.kind);
     try statement.bindText(first + 1, selector.algorithm_id);
     try statement.bindInt64(first + 2, selector.algorithm_version);

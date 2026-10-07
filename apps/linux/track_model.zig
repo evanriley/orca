@@ -249,6 +249,10 @@ pub fn queued(entry: liborca.QueueTrack) ?*TrackObject {
     return if (entry.track) |track| new(track) else removedFromLibrary(entry.id);
 }
 
+pub fn played(entry: liborca.QueueHistoryTrack) ?*TrackObject {
+    return if (entry.track) |track| new(track) else removedFromLibrary(entry.id);
+}
+
 /// What changed about a recording, applied to every row that shows it.
 pub const Change = union(enum) {
     feedback: liborca.Feedback,

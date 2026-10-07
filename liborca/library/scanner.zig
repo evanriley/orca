@@ -82,6 +82,7 @@ pub const Result = struct {
     changed: u64 = 0,
     unchanged: u64 = 0,
     unsupported: u64 = 0,
+    symlinks_skipped: u64 = 0,
     images: u64 = 0,
     errors: u64 = 0,
     batches_committed: u64 = 0,
@@ -299,6 +300,10 @@ pub const Scanner = struct {
                     error.OutOfMemory, error.Canceled => return err,
                     else => try self.keepUnentered(start_path, entry.path, &result),
                 };
+                continue;
+            }
+            if (entry.kind == .sym_link) {
+                result.symlinks_skipped += 1;
                 continue;
             }
             if (entry.kind != .file) continue;
@@ -1101,6 +1106,48 @@ test "a scan of a root holding the Library never examines its database, WAL file
     try std.testing.expectEqual(@as(u64, 0), result.unsupported);
     try std.testing.expectEqual(@as(u64, 0), result.errors);
     try std.testing.expectEqual(@as(u64, 1), try library.files.count());
+}
+
+test "a scan counts each symbolic link under the root as skipped and records none" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "root");
+    try temporary.dir.createDirPath(std.testing.io, "elsewhere/album");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "root/song.flac", .data = "fLaCgenerated song" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "elsewhere/linked.flac", .data = "fLaCgenerated linked" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "elsewhere/album/track.flac", .data = "fLaCgenerated track" });
+    try temporary.dir.symLink(std.testing.io, "../elsewhere/linked.flac", "root/linked.flac", .{});
+    try temporary.dir.symLink(std.testing.io, "../elsewhere/album", "root/album", .{ .is_directory = true });
+    try temporary.dir.symLink(std.testing.io, "../elsewhere/gone.flac", "root/dangling.flac", .{});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}/root", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-symlinks?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+    };
+    defer scanner.deinit();
+
+    const result = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 3), result.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 1), result.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), result.changed);
+    try std.testing.expectEqual(@as(u64, 0), result.errors);
+    try std.testing.expectEqual(@as(u64, 1), try library.files.count());
+
+    const rescan = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 3), rescan.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 1), rescan.unchanged);
 }
 
 test "cancelled scans stop before filesystem work" {

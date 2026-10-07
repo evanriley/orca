@@ -74,11 +74,73 @@ pub fn fingerprintSelector() database.repository.AnalysisSelector {
 }
 
 /// Every measurement `Service.analyzeFile` stores, for selecting the files
-/// that still owe any of them.
+/// that still owe any of them, and the verdict that excuses a file `codecs`
+/// cannot decode.
 pub fn analysisSelectors(
     parameters: diagnostics.Parameters,
+    codecs: *const codec.CodecRegistry,
 ) database.repository.AnalysisSelectors {
-    return .{ diagnosticsSelector(parameters), fingerprintSelector() };
+    return .{
+        .measurements = .{ diagnosticsSelector(parameters), fingerprintSelector() },
+        .undecodable = undecodableSelector(codecs),
+    };
+}
+
+pub const undecodable_cache_kind: u8 = 4;
+pub const undecodable_algorithm_id = "orca.decoder-set";
+/// Bump whenever a decoder starts accepting content it used to refuse without
+/// its format or name changing, or analysis starts taking more than
+/// `codec.decoder.max_supported_channels` channels, so files refused for
+/// either are examined again.
+pub const undecodable_algorithm_version: u32 = 1;
+
+/// Which decoders judged a file: each registered format and decoder name, in
+/// format order. Registering a decoder for a new format, or renaming one,
+/// changes it.
+pub fn decoderSetHash(codecs: *const codec.CodecRegistry) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    for (std.enums.values(storage.AudioFormat)) |format| {
+        for (codecs.entries[0..codecs.count]) |entry| {
+            if (entry.format != format) continue;
+            var length: [4]u8 = undefined;
+            std.mem.writeInt(u32, &length, @intCast(entry.name.len), .little);
+            hasher.update(&.{@backingInt(format)});
+            hasher.update(&length);
+            hasher.update(entry.name);
+        }
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+/// The verdict that `codecs` cannot decode a file's bytes, without a file or
+/// an identity, as `diagnosticsSelector` is for diagnostics.
+pub fn undecodableSelector(codecs: *const codec.CodecRegistry) database.repository.AnalysisSelector {
+    return .{
+        .kind = undecodable_cache_kind,
+        .algorithm_id = undecodable_algorithm_id,
+        .algorithm_version = undecodable_algorithm_version,
+        .parameter_hash = decoderSetHash(codecs),
+    };
+}
+
+/// The key a verdict that `codecs` cannot decode the bytes with
+/// `source_identity` is stored under. Its result is the decoder's error name.
+pub fn undecodableKey(
+    file_id: i64,
+    source_identity: content_hash.Digest,
+    codecs: *const codec.CodecRegistry,
+) database.AnalysisCacheKey {
+    const selector = undecodableSelector(codecs);
+    return .{
+        .file_id = file_id,
+        .kind = selector.kind,
+        .algorithm_id = selector.algorithm_id,
+        .algorithm_version = selector.algorithm_version,
+        .parameter_hash = selector.parameter_hash,
+        .source_identity = source_identity,
+    };
 }
 
 /// The fingerprint's key. Its parameter hash is zero because the fingerprint
@@ -127,12 +189,73 @@ pub const Analysis = struct {
     /// The file's storage identity when it was opened, which it still had
     /// once the measurement was taken.
     storage_identity: storage.StorageIdentity,
+    channels: u16,
 
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
         self.fingerprint.deinit();
         if (self.chromaprint) |value| value.deinit();
     }
+};
+
+/// The decoders refused bytes that were all read without error.
+pub const Refusal = struct {
+    /// The decoder's error. `error.UnsupportedAudioFormat` and
+    /// `error.CodecUnavailable` mean no decoder takes the encoding, and
+    /// `error.UnsupportedChannelCount` that analysis does not take its channel
+    /// count; anything else means the content is damaged.
+    reason: anyerror,
+    source_identity: content_hash.Digest,
+    storage_identity: storage.StorageIdentity,
+};
+
+pub const Examination = union(enum) {
+    analyzed: Analysis,
+    undecodable: Refusal,
+};
+
+/// Tells a decoder refusing the bytes from a read failing underneath it. A
+/// decoder sees a failed read through its own error set, often as a decode
+/// error, so the failure is recorded where it happens.
+const ReadWatch = struct {
+    source: storage.ReadableSource,
+    read_failed: bool = false,
+    refused: bool = false,
+
+    fn readable(self: *ReadWatch) storage.ReadableSource {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    /// Returns `err`, a decoder's, and records it as a refusal of the content
+    /// when every read so far succeeded.
+    fn decoderFailed(self: *ReadWatch, err: anyerror) anyerror {
+        if (!self.read_failed and err != error.OutOfMemory) self.refused = true;
+        return err;
+    }
+
+    fn readAt(context: *anyopaque, offset: u64, buffer: []u8) anyerror!usize {
+        const self: *ReadWatch = @ptrCast(@alignCast(context));
+        return self.source.readAt(offset, buffer) catch |err| {
+            self.read_failed = true;
+            return err;
+        };
+    }
+
+    fn size(context: *anyopaque) u64 {
+        const self: *ReadWatch = @ptrCast(@alignCast(context));
+        return self.source.size();
+    }
+
+    fn identity(context: *anyopaque) storage.StorageIdentity {
+        const self: *ReadWatch = @ptrCast(@alignCast(context));
+        return self.source.identity();
+    }
+
+    const vtable: storage.ReadableSource.VTable = .{
+        .read_at = readAt,
+        .size = size,
+        .identity = identity,
+    };
 };
 
 pub const Service = struct {
@@ -164,15 +287,64 @@ pub const Service = struct {
         if (self.cancelled()) return error.Cancelled;
         var local = try storage.LocalFileSource.open(self.io, path);
         defer local.close();
-        const initial_identity = local.readable().identity();
-        var decoder = try self.codecs.openDetected(self.allocator, local.readable());
-        defer decoder.deinit();
-        try decoder.requireSupportedChannels();
-        const source_identity = content_hash.fromFileCancellable(self.io, local.file, local.stat.size, self) catch |err|
-            return switch (err) {
+        var watch: ReadWatch = .{ .source = local.readable() };
+        var source_identity: ?content_hash.Digest = null;
+        return self.analyzeOpen(file_id, path, parameters, &local, &watch, &source_identity);
+    }
+
+    /// `analyzeFile`, except that bytes the decoders refuse are an answer
+    /// rather than an error, with the content hash they were refused for.
+    /// A read that fails, cancellation and a file that changes underneath the
+    /// analysis are still errors: none of them says anything about the bytes.
+    pub fn examineFile(
+        self: Service,
+        file_id: ?i64,
+        path: []const u8,
+        parameters: diagnostics.Parameters,
+    ) !Examination {
+        if (self.cancelled()) return error.Cancelled;
+        var local = try storage.LocalFileSource.open(self.io, path);
+        defer local.close();
+        var watch: ReadWatch = .{ .source = local.readable() };
+        var source_identity: ?content_hash.Digest = null;
+        const analysis = self.analyzeOpen(file_id, path, parameters, &local, &watch, &source_identity) catch |err| {
+            if (!watch.refused) return err;
+            const storage_identity = local.readable().identity();
+            const refused_identity = source_identity orelse try self.hashSource(&local);
+            try self.verifyIdentity(path, storage_identity);
+            return .{ .undecodable = .{
+                .reason = err,
+                .source_identity = refused_identity,
+                .storage_identity = storage_identity,
+            } };
+        };
+        return .{ .analyzed = analysis };
+    }
+
+    fn hashSource(self: Service, local: *const storage.LocalFileSource) !content_hash.Digest {
+        return content_hash.fromFileCancellable(self.io, local.file, local.stat.size, self) catch |err|
+            switch (err) {
                 error.UnexpectedEndOfFile => error.SourceChangedDuringAnalysis,
                 else => err,
             };
+    }
+
+    fn analyzeOpen(
+        self: Service,
+        file_id: ?i64,
+        path: []const u8,
+        parameters: diagnostics.Parameters,
+        local: *const storage.LocalFileSource,
+        watch: *ReadWatch,
+        hashed: *?content_hash.Digest,
+    ) !Analysis {
+        const initial_identity = watch.readable().identity();
+        var decoder = self.codecs.openDetected(self.allocator, watch.readable()) catch |err|
+            return watch.decoderFailed(err);
+        defer decoder.deinit();
+        decoder.requireSupportedChannels() catch |err| return watch.decoderFailed(err);
+        const source_identity = try self.hashSource(local);
+        hashed.* = source_identity;
         const diagnostics_key = diagnosticsKey(file_id orelse 0, source_identity, parameters);
         const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
         const chromaprint_key = chromaprint.cacheKey(file_id orelse 0, source_identity, .{});
@@ -194,6 +366,7 @@ pub const Service = struct {
                     .decoded_frames = null,
                     .source_identity = source_identity,
                     .storage_identity = initial_identity,
+                    .channels = decoder.format.channels,
                 };
             }
             if (cached_diagnostics) |result| result.deinit();
@@ -236,10 +409,10 @@ pub const Service = struct {
         var completed_frames: u64 = 0;
         while (true) {
             if (self.cancelled()) return error.Cancelled;
-            const frames = if (integer_source)
-                try decoder.readFramesI32(integers)
+            const frames = (if (integer_source)
+                decoder.readFramesI32(integers)
             else
-                try decoder.readFrames(samples);
+                decoder.readFrames(samples)) catch |err| return watch.decoderFailed(err);
             if (frames == 0) break;
             const chunk = samples[0 .. frames * decoder.format.channels];
             if (integer_source) {
@@ -263,7 +436,7 @@ pub const Service = struct {
             if (self.yield_between_chunks) std.Thread.yield() catch {};
         }
         if (self.cancelled()) return error.Cancelled;
-        if (decoder.damage()) |damage| return damage;
+        if (decoder.damage()) |damage| return watch.decoderFailed(damage);
         const result = try analyzer.finish();
         errdefer result.deinit();
         const fingerprint_result = try fingerprinter.finish();
@@ -299,6 +472,7 @@ pub const Service = struct {
             .decoded_frames = completed_frames,
             .source_identity = source_identity,
             .storage_identity = initial_identity,
+            .channels = decoder.format.channels,
         };
     }
 
@@ -704,4 +878,41 @@ test "the same samples at another rate or as duplicated stereo hash differently"
     defer widened.deinit();
     try std.testing.expect(!first.fingerprint.audio_hash.eql(resampled.fingerprint.audio_hash));
     try std.testing.expect(!first.fingerprint.audio_hash.eql(widened.fingerprint.audio_hash));
+}
+
+test "examining bytes the decoders refuse is a verdict on them, and a failed read is an error" {
+    const allocator = std.testing.allocator;
+    var files = TestFiles.init();
+    defer files.deinit();
+    try files.directory.dir.writeFile(std.testing.io, .{ .sub_path = "song.wv", .data = "wvpk\x18\x00\x00\x00\x10\x04\x00\x00" });
+    try files.directory.dir.writeFile(std.testing.io, .{ .sub_path = "broken.flac", .data = "fLaC but not a stream at all" });
+    try files.directory.dir.createDir(std.testing.io, "folder.flac", .default_dir);
+    const codecs = codec.CodecRegistry.builtins();
+    const service: Service = .{ .allocator = allocator, .io = std.testing.io, .codecs = &codecs };
+
+    const wavpack_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/song.wv", .{files.directory.sub_path});
+    defer allocator.free(wavpack_path);
+    const wavpack = try service.examineFile(null, wavpack_path, .{});
+    try std.testing.expectEqual(error.CodecUnavailable, wavpack.undecodable.reason);
+    try std.testing.expectEqual(try content_hash.fromPath(std.testing.io, wavpack_path), wavpack.undecodable.source_identity);
+
+    const broken_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/broken.flac", .{files.directory.sub_path});
+    defer allocator.free(broken_path);
+    const broken = try service.examineFile(null, broken_path, .{});
+    try std.testing.expect(broken.undecodable.reason != error.CodecUnavailable);
+    try std.testing.expect(broken.undecodable.reason != error.UnsupportedAudioFormat);
+
+    const folder_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/folder.flac", .{files.directory.sub_path});
+    defer allocator.free(folder_path);
+    try std.testing.expectError(error.IsDir, service.examineFile(null, folder_path, .{}));
+}
+
+test "the decoder set's hash changes when a decoder is registered for another format" {
+    const without: codec.CodecRegistry = .{};
+    const builtins = codec.CodecRegistry.builtins();
+    var with_wavpack = builtins;
+    try with_wavpack.register(.{ .name = "WavPack", .format = .wavpack, .open = builtins.entries[0].open });
+    try std.testing.expect(!std.mem.eql(u8, &decoderSetHash(&without), &decoderSetHash(&builtins)));
+    try std.testing.expect(!std.mem.eql(u8, &decoderSetHash(&builtins), &decoderSetHash(&with_wavpack)));
+    try std.testing.expectEqual(decoderSetHash(&builtins), decoderSetHash(&codec.CodecRegistry.builtins()));
 }

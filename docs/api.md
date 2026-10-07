@@ -118,7 +118,8 @@ sleep: 0 to pump now, null to wait for the waker alone. See
 - `JobSnapshot` carries `started_at`, `paused`, `estimated_remaining_ms` (null
   until 10 s of progress, while paused and without a total), `current_item` and
   `detail`; `pump` publishes `Telemetry.job_progress` whenever they move.
-  `jobScanStats` reports the `ScanStage`, `current_path` and `albums_found`.
+  `jobScanStats` reports the `ScanStage`, `current_path`, `albums_found` and
+  `symlinks_skipped`, the symbolic links the walk did not follow.
   `ScanRequest.reprobe_all` reads every file again. See
   [storage.md](storage.md#incremental-scanning).
 - `jobHistoryPage(library, allocator, filter, limit, offset)` returns finished
@@ -401,7 +402,8 @@ section lists the entry points, errors and limits.
   `acoustid_credential_service` / `acoustid_user_key_account`.
   `jobSubmissionStats` returns `SubmissionStats` and a `SubmissionOutcome`;
   `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
-  `AcoustIdSubmittable`s. See [providers.md](providers.md#acoustid-submission).
+  `AcoustIdSubmittable`s; `libraryAcoustIdSubmittedCount` counts the files
+  and recording IDs AcoustID has accepted. See [providers.md](providers.md#acoustid-submission).
 
 ### Providers
 
@@ -537,12 +539,17 @@ in [cli.md](cli.md#playlists-and-ratings).
 - `playerQueueTracks(player, allocator, offset, limit)` returns a
   `QueueTrackPage` of `QueueTrack { position, id, track }` in play order. Row
   `n` is queue position `offset + n`, and the page is shorter only past the end
-  of the queue. `track` is null when the entry's Track was removed from the
-  Library; the entry keeps its place and `id` until it is removed from the
-  queue.
+  of the queue. Each entry is read from the Library its `TrackRef` names: a
+  queue keeps the entries of a Library the Player was bound to before
+  `playerBindLibrary` or an enqueue bound it to another. `track` is null when
+  the entry's Track was removed from its Library or that Library is closed;
+  the entry keeps its place and `id` until it is removed from the queue.
 - `playerQueueHistory(player, offset, output)` fills `QueueHistoryEntry` values,
   newest first, with a `QueueHistoryReason` (`finished`, `skipped`,
-  `replaced`); `playerQueueHistoryTracks` returns a `TrackPage` and
+  `replaced`). `playerQueueHistoryTracks(player, allocator, offset, limit)`
+  returns a `QueueHistoryTrackPage` of `QueueHistoryTrack { position, id,
+  ended_at_ms, reason, track }` in the same order: row `n` is history entry
+  `offset + n`, and `track` is null under the same conditions as a queue row.
   `playerClearQueueHistory` empties it. The history holds
   `queue_history_capacity` (100) entries in memory and records no listen. See
   [audio-engine.md](audio-engine.md#queue-history).

@@ -73,6 +73,8 @@ pub const Result = struct {
     unmatched: u64 = 0,
     /// Tracks found again as the recording they are identified as.
     confirmed: u64 = 0,
+    /// Tracks with no title or no artist to search MusicBrainz with, whether
+    /// examined or passed over.
     insufficient: u64 = 0,
     refused: u64 = 0,
     proposals_stored: u64 = 0,
@@ -119,17 +121,19 @@ const SearchOutcome = union(enum) {
     answered: providers.CandidateList,
     insufficient,
     refused,
+    uncached,
     cancelled,
     unavailable,
     busy,
 };
 
-const ReleaseStep = enum { done, cancelled, unavailable, busy };
+const ReleaseStep = enum { done, uncached, cancelled, unavailable, busy };
 
 const ReleaseOutcome = union(enum) {
     found: *const ReleaseLookup,
     /// Refused, not found, or not a release: proposals stay as found.
     unusable,
+    uncached,
     cancelled,
     unavailable,
     busy,
@@ -147,6 +151,7 @@ const FileCheck = struct {
     lookup: ?providers.CandidateList = null,
     heard: []const database.HeardRecording = &.{},
     outcome: ?database.VerificationOutcome = null,
+    uncached: bool = false,
 };
 
 const LookupOutcome = union(enum) {
@@ -181,25 +186,37 @@ pub const LibraryMatching = struct {
     last_release: ?ReleaseLookup = null,
     unusable_releases: std.StringHashMapUnmanaged(void) = .empty,
     matched_tracks: std.ArrayList(i64) = .empty,
+    offline: bool = false,
 
     pub fn run(self: *LibraryMatching) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
         defer self.forgetReleases();
         defer self.matched_tracks.clearAndFree(self.allocator);
         const acoustid_service = self.acoustid;
+        const musicbrainz_offline = self.musicbrainz.offline;
+        defer self.musicbrainz.offline = musicbrainz_offline;
+        const acoustid_offline = if (acoustid_service) |service| service.offline else false;
+        defer if (acoustid_service) |service| {
+            service.offline = acoustid_offline;
+        };
+        self.offline = false;
         var result: Result = .{ .acoustid = if (acoustid_service != null) .searched else self.acoustid_use };
         const page_limit: u32 = @intCast(@min(self.batch_size, @as(usize, database.repository.max_page)));
         const selection = self.mode.selection() orelse {
             try self.verify(&result, page_limit);
             return self.finish(result, acoustid_service);
         };
+        const fingerprint_failures = analysis.chromaprint.failureSelector(
+            if (self.fingerprinter) |fingerprinter| fingerprinter.parameters else .{},
+        );
+        const acoustid_selection: ?*const database.AnalysisSelector = if (self.acoustid != null) &fingerprint_failures else null;
         var cursor: i64 = 0;
         walk: while (true) {
             var page = try self.proposals.unidentifiedPage(
                 self.allocator,
                 self.scope,
                 selection,
-                self.acoustid != null,
+                acoustid_selection,
                 cursor,
                 page_limit,
             );
@@ -222,13 +239,15 @@ pub const LibraryMatching = struct {
                 if (!try self.matchGroup(group, &result)) break :walk;
             }
         }
+        if (selection == .unidentified)
+            result.insufficient += try self.proposals.unsearchableCount(self.scope, acoustid_selection);
         const stopped = result.cancelled or result.unavailable or result.busy != .none;
         const limited = if (self.limit) |limit| result.tracks_seen >= limit else false;
         if (!stopped) switch (self.scope) {
             .release => |release_id| if (self.isCancelled()) {
                 _ = self.stop(&result, .cancelled);
             } else switch (try self.alignRelease(release_id)) {
-                .done => {},
+                .done, .uncached => {},
                 .cancelled => _ = self.stop(&result, .cancelled),
                 .unavailable => _ = self.stop(&result, .unavailable),
                 .busy => _ = self.stop(&result, .musicbrainz_busy),
@@ -242,6 +261,7 @@ pub const LibraryMatching = struct {
 
     fn finish(self: *const LibraryMatching, finished: Result, acoustid_service: ?*acoustid.AcoustId) Result {
         var result = finished;
+        if (self.offline) result.unavailable = true;
         result.requests_answered = self.musicbrainz.requests_answered;
         result.cache_hits = self.musicbrainz.cache_hits;
         if (acoustid_service) |service| {
@@ -296,6 +316,7 @@ pub const LibraryMatching = struct {
         release_id: i64,
         result: *Result,
     ) !bool {
+        if (!try verifications.isReleaseDue(release_id)) return true;
         var tag_buffer: [36]u8 = undefined;
         const tag = if (try verifications.isLargeRelease(release_id)) null else try verifications.releaseTag(release_id, &tag_buffer);
         var cursor: i64 = 0;
@@ -363,6 +384,15 @@ pub const LibraryMatching = struct {
             release = switch (try self.lookUpRelease(mbid)) {
                 .found => |lookup| lookup,
                 .unusable => null,
+                .uncached => uncached: {
+                    for (files, checks) |file, *check| {
+                        if (check.outcome == .disagrees and !file.user_locked) {
+                            check.outcome = null;
+                            check.uncached = true;
+                        }
+                    }
+                    break :uncached null;
+                },
                 .cancelled => return self.stop(result, .cancelled),
                 .unavailable => return self.stop(result, .unavailable),
                 .busy => return self.stop(result, .musicbrainz_busy),
@@ -371,7 +401,9 @@ pub const LibraryMatching = struct {
 
         var records: std.ArrayList(database.VerifiedFile) = .empty;
         var tally: Result = .{};
+        var unexamined: usize = 0;
         for (files, checks) |file, check| {
+            if (check.uncached) unexamined += 1;
             const outcome = check.outcome orelse continue;
             var record: database.VerifiedFile = .{ .verification = .{
                 .file_id = file.file_id,
@@ -402,7 +434,7 @@ pub const LibraryMatching = struct {
         result.skipped += skipped;
         result.proposals_stored += recorded.pending;
         if (recorded.group != null) result.correction_groups += 1;
-        result.tracks_seen += files.len;
+        result.tracks_seen += files.len - unexamined;
         self.publish(result);
         return true;
     }
@@ -421,6 +453,7 @@ pub const LibraryMatching = struct {
         var fingerprints: [acoustid.max_lookup_queries]?analysis.chromaprint.Fingerprint = @splat(null);
         defer for (fingerprints[0..batch.len]) |fingerprint| if (fingerprint) |value| value.deinit();
         var lookups: [acoustid.max_lookup_queries]?providers.CandidateList = @splat(null);
+        var uncached: [acoustid.max_lookup_queries]bool = @splat(false);
         for (batch, 0..) |index, slot| {
             if (self.isCancelled()) return self.stop(result, .cancelled);
             group[slot] = files[index];
@@ -433,7 +466,7 @@ pub const LibraryMatching = struct {
                 .failed => checks[index].outcome = .no_fingerprint,
             }
         }
-        switch (try self.lookUp(group[0..batch.len], &fingerprints, &lookups)) {
+        switch (try self.lookUp(group[0..batch.len], &fingerprints, &lookups, &uncached)) {
             .answered => {},
             .refused => |queries| result.acoustid_refused += queries,
             .cancelled => return self.stop(result, .cancelled),
@@ -444,7 +477,10 @@ pub const LibraryMatching = struct {
                 return false;
             },
         }
-        for (batch, lookups[0..batch.len]) |index, lookup| checks[index].lookup = lookup;
+        for (batch, lookups[0..batch.len], uncached[0..batch.len]) |index, lookup, missing| {
+            checks[index].lookup = lookup;
+            checks[index].uncached = missing;
+        }
         for (batch) |index| {
             const list = checks[index].lookup orelse continue;
             checks[index].heard = try heardFrom(scratch, list.items, files[index].recording_mbid);
@@ -460,6 +496,7 @@ pub const LibraryMatching = struct {
         defer for (fingerprints[0..group.len]) |fingerprint| if (fingerprint) |value| value.deinit();
         var lookups: [acoustid.max_lookup_queries]?providers.CandidateList = @splat(null);
         defer for (lookups[0..group.len]) |lookup| if (lookup) |list| list.deinit();
+        var uncached: [acoustid.max_lookup_queries]bool = @splat(false);
 
         if (self.acoustid != null) {
             for (group, fingerprints[0..group.len]) |candidate, *fingerprint| {
@@ -470,7 +507,7 @@ pub const LibraryMatching = struct {
                     else => return err,
                 };
             }
-            switch (try self.lookUp(group, &fingerprints, &lookups)) {
+            switch (try self.lookUp(group, &fingerprints, &lookups, &uncached)) {
                 .answered => {},
                 .refused => |queries| result.acoustid_refused += queries,
                 .cancelled => return self.stop(result, .cancelled),
@@ -483,8 +520,9 @@ pub const LibraryMatching = struct {
             }
         }
 
-        for (group, lookups[0..group.len]) |candidate, lookup| {
+        for (group, lookups[0..group.len], uncached[0..group.len]) |candidate, lookup, missing| {
             if (self.isCancelled()) return self.stop(result, .cancelled);
+            if (missing) continue;
             const query = queryFor(candidate);
             var answered: database.ProviderSet = .{ .acoustid = lookup != null };
             var musicbrainz: ?providers.CandidateList = null;
@@ -500,6 +538,7 @@ pub const LibraryMatching = struct {
                 .refused => if (lookup == null) {
                     result.refused += 1;
                 },
+                .uncached => continue,
                 .cancelled => return self.stop(result, .cancelled),
                 .unavailable => return self.stop(result, .unavailable),
                 .busy => return self.stop(result, .musicbrainz_busy),
@@ -514,13 +553,14 @@ pub const LibraryMatching = struct {
                 defer evidence.deinit();
                 const kept = withoutRecording(evidence.items, candidate.recording_mbid);
                 const confirmed = kept.len < evidence.items.len;
-                if (confirmed) result.confirmed += 1;
                 switch (try self.enrich(kept, candidate.tagged_track_number)) {
                     .done => {},
+                    .uncached => continue,
                     .cancelled => return self.stop(result, .cancelled),
                     .unavailable => return self.stop(result, .unavailable),
                     .busy => return self.stop(result, .musicbrainz_busy),
                 }
+                if (confirmed) result.confirmed += 1;
                 const stored = try self.proposals.recordSearch(self.allocator, candidate.file_id, answered, kept);
                 result.proposals_stored += stored;
                 if (stored != 0) {
@@ -551,6 +591,7 @@ pub const LibraryMatching = struct {
         const release = switch (try self.lookUpRelease(chosen.payload.release_mbid.?)) {
             .found => |lookup| lookup,
             .unusable => return .done,
+            .uncached => return .uncached,
             .cancelled => return .cancelled,
             .unavailable => return .unavailable,
             .busy => return .busy,
@@ -565,9 +606,10 @@ pub const LibraryMatching = struct {
 
     /// Match Album's second phase. Each file votes once for every release
     /// its stored proposals list; the winner is looked up, and every proposal
-    /// whose recording it holds is pointed at it with what it says. Then
-    /// every release its Tracks' release IDs name and the Release's best
-    /// candidate are snapshotted when they have no current snapshot.
+    /// outside an album group whose recording it holds is pointed at it with
+    /// what it says. Then every release its Tracks' release IDs name and the
+    /// Release's best candidate are snapshotted when they have no current
+    /// snapshot.
     fn alignRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
         const step = try self.voteRelease(release_id);
         if (step != .done) return step;
@@ -609,12 +651,13 @@ pub const LibraryMatching = struct {
         }) orelse return .done;
         const release = switch (try self.lookUpRelease(&winner)) {
             .found => |lookup| lookup,
-            .unusable => return .done,
+            .unusable, .uncached => return .done,
             .cancelled => return .cancelled,
             .unavailable => return .unavailable,
             .busy => return .busy,
         };
         for (list.items, payloads) |item, slot| {
+            if (item.in_album_group) continue;
             var payload = slot orelse continue;
             const enrichment = try release.enrichment(item.recording_mbid, item.tagged_track_number) orelse continue;
             payload.enrich(release.id(), enrichment);
@@ -626,7 +669,8 @@ pub const LibraryMatching = struct {
     }
 
     /// Snapshots every release a Track's release ID in effect names, unless
-    /// its Release dismissed it or it has a fresh snapshot, so no Release is
+    /// its Release dismissed it, it has a fresh snapshot, or MusicBrainz
+    /// refused its lookup within the refusal expiry, so no Release is
     /// weighed on a release Orca has not read. They are taken in release ID
     /// order a page at a time; each lookup stores a whole snapshot or
     /// nothing.
@@ -634,12 +678,20 @@ pub const LibraryMatching = struct {
         var buffer: [64]database.repository.NamedRelease = undefined;
         var cursor: ?[36]u8 = null;
         var handled: u64 = 0;
+        const key_prefix = try self.musicbrainz.releaseLookupKeyPrefix(self.allocator);
+        defer self.allocator.free(key_prefix);
+        const refusals: database.repository.ReleaseRefusals = .{
+            .provider = providers.musicbrainz.service,
+            .key_prefix = key_prefix,
+            .key_suffix = providers.musicbrainz.release_lookup_query,
+            .now_s = @divFloor(self.musicbrainz.wall_clock.nowMs(), 1000),
+        };
         if (self.progress) |progress| {
-            const total = try self.proposals.namedReleasesToSnapshotCount(self.freshAfter());
+            const total = try self.proposals.namedReleasesToSnapshotCount(self.freshAfter(), &refusals);
             progress.tagged_releases_total.store(total, .release);
         }
         while (true) {
-            const page = try self.proposals.namedReleasesToSnapshot(if (cursor) |*last| last else null, self.freshAfter(), &buffer);
+            const page = try self.proposals.namedReleasesToSnapshot(if (cursor) |*last| last else null, self.freshAfter(), &refusals, &buffer);
             if (page.len == 0) {
                 if (self.progress) |progress| {
                     const total = @max(handled, progress.tagged_releases_total.load(.acquire));
@@ -656,7 +708,7 @@ pub const LibraryMatching = struct {
                     return;
                 }
                 switch (try self.snapshotNamedRelease(named)) {
-                    .done => {
+                    .done, .uncached => {
                         handled += 1;
                         if (self.progress) |progress| progress.tagged_releases.store(handled, .release);
                     },
@@ -724,7 +776,7 @@ pub const LibraryMatching = struct {
             if (fetched_at > self.freshAfter()) return .done;
         }
         return switch (try self.lookUpRelease(release_mbid)) {
-            .found, .unusable => .done,
+            .found, .unusable, .uncached => .done,
             .cancelled => .cancelled,
             .unavailable => .unavailable,
             .busy => .busy,
@@ -732,7 +784,8 @@ pub const LibraryMatching = struct {
     }
 
     /// A release, from this run's memory when it asked already. Transient
-    /// failures are waited out and retried as searches are. Each answer
+    /// failures are waited out and retried as searches are; a re-identify
+    /// asks again a release whose refusal is cached. Each answer
     /// replaces the release's tracklist snapshot.
     fn lookUpRelease(self: *LibraryMatching, release_mbid: []const u8) !ReleaseOutcome {
         if (self.last_release) |*last| {
@@ -741,7 +794,11 @@ pub const LibraryMatching = struct {
         if (self.unusable_releases.contains(release_mbid)) return .unusable;
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const lookup = self.musicbrainz.lookUpRelease(self.allocator, release_mbid) catch |err| switch (err) {
+            const asked = if (self.mode == .reidentify)
+                self.musicbrainz.lookUpReleaseAgain(self.allocator, release_mbid)
+            else
+                self.musicbrainz.lookUpRelease(self.allocator, release_mbid);
+            const lookup = asked catch |err| switch (err) {
                 error.ProviderRejectedRequest, error.InvalidProviderResponse, error.InvalidMusicBrainzId => {
                     const key = try self.allocator.dupe(u8, release_mbid);
                     errdefer self.allocator.free(key);
@@ -749,7 +806,10 @@ pub const LibraryMatching = struct {
                     return .unusable;
                 },
                 error.Canceled => return .cancelled,
-                error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.NetworkUnavailable, error.Offline => {
+                    self.goOffline();
+                    return .uncached;
+                },
                 error.ProviderBusy => return .busy,
                 error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(self.musicbrainz.gateway, err, attempt, .wait, self)) {
                     .again => continue,
@@ -774,6 +834,12 @@ pub const LibraryMatching = struct {
         while (keys.next()) |key| self.allocator.free(key.*);
         self.unusable_releases.deinit(self.allocator);
         self.unusable_releases = .empty;
+    }
+
+    fn goOffline(self: *LibraryMatching) void {
+        self.offline = true;
+        self.musicbrainz.offline = true;
+        if (self.acoustid) |service| service.offline = true;
     }
 
     fn stop(_: *LibraryMatching, result: *Result, reason: enum { cancelled, unavailable, musicbrainz_busy, acoustid_busy }) bool {
@@ -822,6 +888,7 @@ pub const LibraryMatching = struct {
         group: anytype,
         fingerprints: *const [acoustid.max_lookup_queries]?analysis.chromaprint.Fingerprint,
         lookups: *[acoustid.max_lookup_queries]?providers.CandidateList,
+        uncached: *[acoustid.max_lookup_queries]bool,
     ) !LookupOutcome {
         const service = self.acoustid.?;
         var queries: [acoustid.max_lookup_queries]acoustid.LookupQuery = undefined;
@@ -838,13 +905,18 @@ pub const LibraryMatching = struct {
             count += 1;
         }
         if (count == 0) return .answered;
+        const cache_hits = service.cache_hits;
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
             const answers = service.lookup(self.allocator, queries[0..count]) catch |err| switch (err) {
                 error.InvalidClientKey => return .invalid_client_key,
                 error.ProviderRejectedRequest, error.InvalidProviderResponse => return .{ .refused = count },
                 error.Canceled => return .cancelled,
-                error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.NetworkUnavailable, error.Offline => {
+                    self.goOffline();
+                    service.cache_hits = cache_hits;
+                    return self.lookUpEachCached(service, queries[0..count], positions[0..count], lookups, uncached);
+                },
                 error.ProviderBusy => return .busy,
                 error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(service.gateway, err, attempt, .wait, self)) {
                     .again => continue,
@@ -863,6 +935,38 @@ pub const LibraryMatching = struct {
         }
     }
 
+    fn lookUpEachCached(
+        self: *LibraryMatching,
+        service: *acoustid.AcoustId,
+        queries: []const acoustid.LookupQuery,
+        positions: []const usize,
+        lookups: *[acoustid.max_lookup_queries]?providers.CandidateList,
+        uncached: *[acoustid.max_lookup_queries]bool,
+    ) !LookupOutcome {
+        var refused: u64 = 0;
+        errdefer for (positions) |index| if (lookups[index]) |list| {
+            list.deinit();
+            lookups[index] = null;
+        };
+        for (queries, positions) |query, index| {
+            const answers = service.lookup(self.allocator, &.{query}) catch |err| switch (err) {
+                error.Offline => {
+                    uncached[index] = true;
+                    continue;
+                },
+                error.ProviderRejectedRequest, error.InvalidProviderResponse => {
+                    refused += 1;
+                    continue;
+                },
+                else => return err,
+            };
+            defer self.allocator.free(answers.answers);
+            lookups[index] = answers.answers[0];
+            if (answers.answers[0] == null) refused += 1;
+        }
+        return if (refused == 0) .answered else .{ .refused = refused };
+    }
+
     fn searchMusicBrainz(self: *LibraryMatching, query: providers.Query) !SearchOutcome {
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
@@ -870,7 +974,10 @@ pub const LibraryMatching = struct {
                 error.InsufficientIdentificationEvidence => return .insufficient,
                 error.ProviderRejectedRequest, error.InvalidProviderResponse => return .refused,
                 error.Canceled => return .cancelled,
-                error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.NetworkUnavailable, error.Offline => {
+                    self.goOffline();
+                    return .uncached;
+                },
                 error.ProviderBusy => return .busy,
                 error.RateLimited, error.ProviderUnavailable, error.Timeout => switch (network.retry.afterFailure(self.musicbrainz.gateway, err, attempt, .wait, self)) {
                     .again => continue,

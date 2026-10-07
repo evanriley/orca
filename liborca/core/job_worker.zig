@@ -228,12 +228,17 @@ pub const SubmissionStats = struct {
     outcome: SubmissionOutcome = .completed,
 };
 
-/// The file a failed tag write stopped at, and why.
+/// Why a tag write failed, and the file it stopped at.
 pub const TagWriteFailure = struct {
+    /// Null when the write failed before reaching a file.
+    file: ?TagWriteFailureFile,
+    reason: TagWriteFailureReason,
+};
+
+pub const TagWriteFailureFile = struct {
     file_id: i64,
     /// The plan's action for the file, in the order the plan lists its files.
     action_index: u32,
-    reason: TagWriteFailureReason,
 };
 
 pub const TagWriteFailureReason = enum {
@@ -252,6 +257,13 @@ pub const TagWriteFailureReason = enum {
     /// The file is read-only: no write permission bit is set, or the process
     /// may not write it. Orca does not change a file made read-only.
     file_read_only,
+    /// The Library's backup directory already holds backups under the plan's
+    /// ID, made by another write after this plan was made. Plan the write
+    /// again.
+    backup_exists,
+    /// An interrupted earlier write or undo could not be finished first, as
+    /// when the folder of a file it changed is missing.
+    recovery_failed,
 };
 
 fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
@@ -259,8 +271,9 @@ fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
         error.AccessDenied, error.PermissionDenied => .permission_denied,
         error.ReadOnlyFileSystem => .read_only_file_system,
         error.NoSpaceLeft => .no_space,
-        error.FileIdentityChanged => .changed_since_plan,
+        error.FileIdentityChanged, error.UnsupportedTagWriter => .changed_since_plan,
         error.FileReadOnly => .file_read_only,
+        error.TagWriteBackupExists => .backup_exists,
         else => .other,
     };
 }
@@ -493,6 +506,7 @@ pub const ScanStats = struct {
     changed: u64 = 0,
     unchanged: u64 = 0,
     unsupported: u64 = 0,
+    symlinks_skipped: u64 = 0,
     errors: u64 = 0,
     batches_committed: u64 = 0,
     cancelled: bool = false,
@@ -523,6 +537,7 @@ const LiveScanStats = struct {
     changed: std.atomic.Value(u64) = .init(0),
     unchanged: std.atomic.Value(u64) = .init(0),
     unsupported: std.atomic.Value(u64) = .init(0),
+    symlinks_skipped: std.atomic.Value(u64) = .init(0),
     errors: std.atomic.Value(u64) = .init(0),
     batches_committed: std.atomic.Value(u64) = .init(0),
     cancelled: std.atomic.Value(bool) = .init(false),
@@ -542,6 +557,7 @@ const LiveScanStats = struct {
             .changed = self.changed.load(.acquire),
             .unchanged = self.unchanged.load(.acquire),
             .unsupported = self.unsupported.load(.acquire),
+            .symlinks_skipped = self.symlinks_skipped.load(.acquire),
             .errors = self.errors.load(.acquire),
             .batches_committed = self.batches_committed.load(.acquire),
             .cancelled = self.cancelled.load(.acquire),
@@ -1627,7 +1643,7 @@ pub const JobWorker = struct {
         switch (result.outcome) {
             .completed => {},
             .cancelled => stats.cancelled.store(true, .release),
-            .needs_client_key, .invalid_client_key, .needs_user_key, .invalid_user_key, .unavailable, .busy => self.failed.store(true, .release),
+            .needs_client_key, .invalid_client_key, .needs_user_key, .invalid_user_key, .unavailable, .busy, .credential_unavailable => self.failed.store(true, .release),
         }
     }
 
@@ -1888,6 +1904,7 @@ pub const JobWorker = struct {
         _ = stats.changed.fetchAdd(result.changed, .acq_rel);
         _ = stats.unchanged.fetchAdd(result.unchanged, .acq_rel);
         _ = stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
+        _ = stats.symlinks_skipped.fetchAdd(result.symlinks_skipped, .acq_rel);
         _ = stats.errors.fetchAdd(result.errors, .acq_rel);
         _ = stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
         if (result.cancelled) stats.cancelled.store(true, .release);
@@ -1904,7 +1921,10 @@ pub const JobWorker = struct {
                 pending.journal_lock = null;
             }
             const lock = &pending.journal_lock.?;
-            self.database.recoverPendingMutations(io, lock) catch break :written false;
+            self.database.recoverPendingMutations(io, lock) catch {
+                self.tag_write_failure = .{ .file = null, .reason = .recovery_failed };
+                break :written false;
+            };
             var executor: metadata.executor.Executor = .{
                 .allocator = self.allocator,
                 .io = io,
@@ -1913,9 +1933,11 @@ pub const JobWorker = struct {
                 .backup_directory = self.database.backup_directory,
             };
             executor.executePlan(&pending.plan, pending.plan.id) catch |err| {
-                if (executor.failed_action_index) |index| self.tag_write_failure = .{
-                    .file_id = pending.file_ids[index],
-                    .action_index = index,
+                self.tag_write_failure = .{
+                    .file = if (executor.failed_action_index) |index| .{
+                        .file_id = pending.file_ids[index],
+                        .action_index = index,
+                    } else null,
                     .reason = tagWriteFailureReason(err),
                 };
                 break :written false;
@@ -2118,6 +2140,7 @@ fn accumulate(totals: *library_pass.scanner.Result, result: library_pass.scanner
     totals.changed += result.changed;
     totals.unchanged += result.unchanged;
     totals.unsupported += result.unsupported;
+    totals.symlinks_skipped += result.symlinks_skipped;
     totals.images += result.images;
     totals.errors += result.errors;
     totals.batches_committed += result.batches_committed;

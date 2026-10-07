@@ -420,6 +420,12 @@ pub fn showSubmission(self: *App) void {
         "Nothing waiting"
     else
         strings.format(&buffer, "{f} {s} waiting", .{ strings.grouped(count), if (count == 1) "file" else "files" }));
+    const sent = submissions.submitted(self);
+    var sent_buffer: [48]u8 = undefined;
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), if (sent == 0)
+        ""
+    else
+        strings.format(&sent_buffer, "{f} {s} submitted", .{ strings.grouped(sent), if (sent == 1) "file" else "files" }));
     if (self.submission_button) |button| gtk.gtk_widget_set_visible(button, @intFromBool(count != 0));
 }
 

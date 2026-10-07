@@ -208,8 +208,9 @@ typedef struct orca_track_view {
     /* `rating` is 1..100 when `has_rating` is set. */
     uint8_t has_rating;
     uint8_t rating;
-    /* 1 when the view is a queue entry whose Track was removed from the
-     * Library: only `id` is set and every other field is zero. */
+    /* 1 when the view is a queue or queue history entry whose Track left its
+     * Library or whose Library is closed: only `id` is set and every other
+     * field, here and in an enclosing orca_track_summary_view, is zero. */
     uint8_t removed;
     orca_string_view title;
     orca_string_view artist;
@@ -1480,6 +1481,16 @@ typedef struct orca_scan_stats_v2 {
     uint8_t reserved2[4];
     char current_path[512];
 } orca_scan_stats_v2;
+
+/*
+ * orca_scan_stats_v2 with `symlinks_skipped`: the symbolic links a scan or
+ * reconcile passed over without following, to a file, a directory or nothing.
+ * Zero for other jobs.
+ */
+typedef struct orca_scan_stats_v3 {
+    orca_scan_stats_v2 base;
+    uint64_t symlinks_skipped;
+} orca_scan_stats_v3;
 
 /* How many audio files a folder holds; see orca_estimate_audio_files. */
 typedef struct orca_folder_estimate {
@@ -3847,8 +3858,8 @@ orca_status orca_library_plan_tag_write(
  * the Library or destroying the runtime waits for it. It SUCCEEDS when every
  * file was written. It FAILS when the write did not complete, or an earlier
  * interrupted write could not be recovered first; what it had written is then
- * rolled back as recovery does, and orca_job_tag_write_failure says which
- * file it stopped at and why. Either way the files are read again and
+ * rolled back as recovery does, and orca_job_tag_write_failure says why and
+ * which file, if any, it stopped at. Either way the files are read again and
  * reprojected afterwards. Its
  * orca_scan_stats has `files_seen` the files planned, `changed` those
  * written, and `errors` nonzero when it failed or a file could not be read
@@ -3869,7 +3880,7 @@ orca_status orca_library_start_tag_write(
     orca_handle *job
 );
 
-/* Why a tag write failed at a file. */
+/* Why a tag write failed. */
 typedef enum orca_tag_write_failure_reason {
     /* Orca may not create or replace files in the file's folder or in the
      * Library's backup directory. */
@@ -3886,10 +3897,19 @@ typedef enum orca_tag_write_failure_reason {
     /* The file is read-only: no write permission bit is set, or the process
      * may not write it. Orca does not change a file made read-only. */
     ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY = 5,
+    /* The Library's backup directory already holds backups under the plan's
+     * id, made by another write after this plan was made. Plan the write
+     * again. */
+    ORCA_TAG_WRITE_FAILURE_BACKUP_EXISTS = 6,
+    /* An interrupted earlier write or undo could not be finished first, as
+     * when the folder of a file it changed is missing. */
+    ORCA_TAG_WRITE_FAILURE_RECOVERY_FAILED = 7,
 } orca_tag_write_failure_reason;
 
-/* The file a failed tag write stopped at: `action_index` is its position
- * among the plan's files, and `reason` an orca_tag_write_failure_reason. */
+/* Why a tag write failed, as an orca_tag_write_failure_reason in `reason`,
+ * and the file it stopped at: `action_index` is its position among the
+ * plan's files. `file_id` and `action_index` are 0 when the write failed
+ * before reaching a file. */
 typedef struct orca_tag_write_failure {
     int64_t file_id;
     uint32_t action_index;
@@ -3897,11 +3917,10 @@ typedef struct orca_tag_write_failure {
     uint8_t reserved[3];
 } orca_tag_write_failure;
 
-/* Fills `out` with the file a finished, failed tag write job stopped at and
- * why. NOT_FOUND while the job runs, after it succeeded, or when it failed
- * before reaching a file, such as when an earlier interrupted write could
- * not be recovered. INVALID_ARGUMENT for a NULL `out` or a job that is not
- * an ORCA_JOB_KIND_MUTATION job. */
+/* Fills `out` with why a finished tag write job failed and the file it
+ * stopped at. NOT_FOUND while the job runs or after it succeeded.
+ * INVALID_ARGUMENT for a NULL `out` or a job that is not an
+ * ORCA_JOB_KIND_MUTATION job. */
 orca_status orca_job_tag_write_failure(
     orca_runtime *runtime,
     orca_handle job,
@@ -5258,10 +5277,11 @@ orca_status orca_library_dismiss_correction_group(orca_runtime *runtime, orca_ha
  * CANCELLED leaves the job FAILED, with nothing from the failed request
  * marked sent. NEEDS_CLIENT_KEY: no application key is set. NEEDS_USER_KEY:
  * the credential callback has none for ORCA_CREDENTIAL_SERVICE_ACOUSTID /
- * ORCA_CREDENTIAL_ACCOUNT_USER_KEY, or its answer was UNAVAILABLE or
- * TOO_LARGE. INVALID_CLIENT_KEY and INVALID_USER_KEY: AcoustID refused the
- * key. UNAVAILABLE: AcoustID did not answer after retries. BUSY: another Orca
- * process holds AcoustID. */
+ * ORCA_CREDENTIAL_ACCOUNT_USER_KEY. INVALID_CLIENT_KEY and INVALID_USER_KEY:
+ * AcoustID refused the key. UNAVAILABLE: AcoustID did not answer after
+ * retries. BUSY: another Orca process holds AcoustID. CREDENTIAL_UNAVAILABLE:
+ * the credential callback's answer for the user key was UNAVAILABLE or
+ * TOO_LARGE. */
 typedef enum orca_submission_outcome {
     ORCA_SUBMISSION_OUTCOME_COMPLETED = 0,
     ORCA_SUBMISSION_OUTCOME_CANCELLED = 1,
@@ -5271,6 +5291,7 @@ typedef enum orca_submission_outcome {
     ORCA_SUBMISSION_OUTCOME_INVALID_USER_KEY = 5,
     ORCA_SUBMISSION_OUTCOME_UNAVAILABLE = 6,
     ORCA_SUBMISSION_OUTCOME_BUSY = 7,
+    ORCA_SUBMISSION_OUTCOME_CREDENTIAL_UNAVAILABLE = 8,
 } orca_submission_outcome;
 
 /*
@@ -5325,6 +5346,9 @@ orca_status orca_job_submission_stats(
 
 /* How many files a submission would send now, fingerprints permitting. */
 orca_status orca_library_acoustid_submittable_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
+
+/* How many files and recording IDs AcoustID has accepted from the Library. */
+orca_status orca_library_acoustid_submitted_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
 
 /* A file whose chosen recording ID has not been sent to AcoustID. Each
  * optional value has a `has_*` flag and reads 0 when absent; `path` is empty
@@ -5649,6 +5673,12 @@ orca_status orca_library_scan_stats_v2(
     orca_runtime *runtime,
     orca_handle job,
     orca_scan_stats_v2 *output
+);
+/* orca_library_scan_stats_v2 with the symbolic links the walk skipped. */
+orca_status orca_library_scan_stats_v3(
+    orca_runtime *runtime,
+    orca_handle job,
+    orca_scan_stats_v3 *output
 );
 
 /*
@@ -6460,12 +6490,12 @@ orca_status orca_player_query_queue(
     void *context,
     orca_queue_entry_callback callback
 );
-/* The queue's Tracks as track views, read from the Library the Player is
- * bound to, in playback order starting at position `offset`. `limit` must be
+/* The queue's Tracks as track views, in playback order starting at position
+ * `offset`, each read from the Library it was queued from. `limit` must be
  * between 1 and 512. The view of call `n` is queue position `offset + n`; an
- * entry whose Track was removed from the Library has `removed` set and only
- * its `id`. ORCA_STATUS_INVALID_STATE when the Player has no Library.
- * Strings are valid only for the callback. */
+ * entry whose Track left its Library, or whose Library is closed, has
+ * `removed` set and only its `id`. ORCA_STATUS_INVALID_STATE when the Player
+ * has no Library. Strings are valid only for the callback. */
 orca_status orca_player_query_queue_tracks(
     orca_runtime *runtime,
     orca_handle player,
@@ -6477,8 +6507,10 @@ orca_status orca_player_query_queue_tracks(
 /* The last 100 entries this Player stopped playing, newest first, starting
  * `offset` entries back. `limit` must be between 1 and 512. Stop leaves no
  * entry, since the entry stays current. The history is held in memory only,
- * so a new runtime starts with none, and it never records a listen. An entry
- * whose Library is closed or whose Track has left it is skipped. */
+ * so a new runtime starts with none, and it never records a listen. Call `n`
+ * is history entry `offset + n`; an entry whose Track left its Library, or
+ * whose Library is closed, has `summary->track.removed` set and only
+ * `summary->track.id`. */
 orca_status orca_player_query_queue_history(
     orca_runtime *runtime,
     orca_handle player,

@@ -52,6 +52,20 @@ pub fn parameterHash(parameters: Parameters) [32]u8 {
     return digest;
 }
 
+/// A row of this kind records that the bytes whose quick hash is its
+/// `source_identity` could not be fingerprinted. The matching job's selection
+/// compares it with `files.quick_hash`, so it is never keyed by content hash.
+pub const failure_kind: u8 = 5;
+
+pub fn failureSelector(parameters: Parameters) database.AnalysisSelector {
+    return .{
+        .kind = failure_kind,
+        .algorithm_id = algorithm_id,
+        .algorithm_version = algorithm_version,
+        .parameter_hash = parameterHash(parameters),
+    };
+}
+
 pub fn cacheKey(
     file_id: i64,
     source_identity: content_hash.Digest,
@@ -370,21 +384,100 @@ pub const Fingerprinter = struct {
                 } else |_| {}
             }
         }
-        var decoder = try self.codecs.openDetected(self.allocator, local.readable());
-        defer decoder.deinit();
-        const fingerprint = try fingerprintDecoder(self.allocator, decoder, self.parameters, self.cancellation);
+        var watched: WatchedSource = .{ .inner = local.readable() };
+        const fingerprint = self.decode(watched.readable()) catch |err| {
+            if (cache) |repository| if (watched.contentFailure(err))
+                self.recordFailure(repository, file_id.?, &local, path, initial_identity, err) catch {};
+            return err;
+        };
         errdefer fingerprint.deinit();
         try verifyIdentity(self.io, path, initial_identity);
         if (cache) |repository| {
             const bytes = try fingerprint.encode(self.allocator);
             defer self.allocator.free(bytes);
             try repository.put(key.?, bytes);
+            const failure = failureSelector(self.parameters);
+            try repository.forget(file_id.?, &failure);
         }
         return .{ .fingerprint = fingerprint, .cache_hit = false };
     }
 
+    fn decode(self: Fingerprinter, source: storage.ReadableSource) !Fingerprint {
+        var decoder = try self.codecs.openDetected(self.allocator, source);
+        defer decoder.deinit();
+        return fingerprintDecoder(self.allocator, decoder, self.parameters, self.cancellation);
+    }
+
+    fn recordFailure(
+        self: Fingerprinter,
+        repository: *database.AnalysisCacheRepository,
+        file_id: i64,
+        local: *const storage.LocalFileSource,
+        path: []const u8,
+        initial_identity: storage.StorageIdentity,
+        err: anyerror,
+    ) !void {
+        const identity = try storage.quick_hash.fromFile(self.io, local.file, local.stat.size);
+        try verifyIdentity(self.io, path, initial_identity);
+        try repository.replace(.{
+            .file_id = file_id,
+            .kind = failure_kind,
+            .algorithm_id = algorithm_id,
+            .algorithm_version = algorithm_version,
+            .parameter_hash = parameterHash(self.parameters),
+            .source_identity = identity,
+        }, @errorName(err));
+    }
+
     pub fn cancelled(self: Fingerprinter) bool {
         return if (self.cancellation) |token| token.checkpoint() else false;
+    }
+};
+
+/// A source that remembers whether any read of it failed, so a decode error
+/// caused by the storage under it is not taken for one caused by the bytes.
+const WatchedSource = struct {
+    inner: storage.ReadableSource,
+    read_failed: bool = false,
+
+    const vtable: storage.ReadableSource.VTable = .{ .read_at = readAt, .size = size, .identity = identity };
+
+    fn readable(self: *WatchedSource) storage.ReadableSource {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    /// Whether `err`, returned by a decode of this source, is the bytes'
+    /// fault: every read succeeded, and the decode was not stopped and did
+    /// not fail for want of memory, a fingerprinter, a codec or a stable file.
+    fn contentFailure(self: *const WatchedSource, err: anyerror) bool {
+        if (self.read_failed) return false;
+        return switch (err) {
+            error.Cancelled,
+            error.OutOfMemory,
+            error.FingerprinterUnavailable,
+            error.CodecUnavailable,
+            error.SourceChangedDuringAnalysis,
+            => false,
+            else => true,
+        };
+    }
+
+    fn readAt(context: *anyopaque, offset: u64, buffer: []u8) anyerror!usize {
+        const self: *WatchedSource = @ptrCast(@alignCast(context));
+        return self.inner.readAt(offset, buffer) catch |err| {
+            self.read_failed = true;
+            return err;
+        };
+    }
+
+    fn size(context: *anyopaque) u64 {
+        const self: *WatchedSource = @ptrCast(@alignCast(context));
+        return self.inner.size();
+    }
+
+    fn identity(context: *anyopaque) storage.StorageIdentity {
+        const self: *WatchedSource = @ptrCast(@alignCast(context));
+        return self.inner.identity();
     }
 };
 
@@ -537,4 +630,66 @@ test "a fingerprint is cached under the bytes it was taken from and reused" {
     const retaken = try faster.fingerprintFile(binding.file_id, parity_audio);
     defer retaken.fingerprint.deinit();
     try testing.expect(!retaken.cache_hit);
+}
+
+test "bytes that cannot be fingerprinted are recorded under their quick hash, and a later fingerprint of the file forgets them" {
+    var library = try database.LibraryDatabase.open(testing.allocator, testing.io, "file:orca-chromaprint-failure?mode=memory&cache=shared");
+    defer library.close();
+    const silent = "fixtures/audio/generated-reference.qoa";
+    const binding = try library.resolveOrCreateFile(testing.io, silent, .{ .stable_key = "test:chromaprint" });
+    const codecs = codec.CodecRegistry.builtins();
+    const fingerprinter: Fingerprinter = .{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .codecs = &codecs,
+        .cache = &library.analysis_cache,
+    };
+    const markers = "SELECT count(*) FROM analysis_results JOIN files ON files.id = analysis_results.file_id " ++
+        "WHERE analysis_results.kind = 5 AND analysis_results.source_identity = files.quick_hash;";
+
+    if (fingerprinter.fingerprintFile(binding.file_id, silent)) |outcome| {
+        outcome.fingerprint.deinit();
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try testing.expectEqual(@as(i64, 1), try database.columns.scalar(library.database, markers));
+
+    const audible = try library.resolveOrCreateFile(testing.io, parity_audio, .{ .stable_key = "test:chromaprint" });
+    try library.analysis_cache.replace(.{
+        .file_id = audible.file_id,
+        .kind = failure_kind,
+        .algorithm_id = algorithm_id,
+        .algorithm_version = algorithm_version,
+        .parameter_hash = parameterHash(fingerprinter.parameters),
+        .source_identity = @splat(0),
+    }, "AudioTooShortToFingerprint");
+    const taken = try fingerprinter.fingerprintFile(audible.file_id, parity_audio);
+    defer taken.fingerprint.deinit();
+    try testing.expectEqual(@as(i64, 1), try database.columns.scalar(library.database, "SELECT count(*) FROM analysis_results WHERE kind = 5;"));
+    try testing.expectEqual(@as(i64, 1), try database.columns.scalar(library.database, markers));
+}
+
+test "a decode error is the bytes' fault only when every read succeeded and nothing else stopped the decode" {
+    var memory: storage.MemorySource = .{ .bytes = "" };
+    const readable: WatchedSource = .{ .inner = memory.readable() };
+    try testing.expect(readable.contentFailure(error.InvalidFlac));
+    try testing.expect(!readable.contentFailure(error.Cancelled));
+    try testing.expect(!readable.contentFailure(error.OutOfMemory));
+    try testing.expect(!readable.contentFailure(error.SourceChangedDuringAnalysis));
+
+    const Failing = struct {
+        fn readAt(_: *anyopaque, _: u64, _: []u8) anyerror!usize {
+            return error.InputOutput;
+        }
+        fn size(_: *anyopaque) u64 {
+            return 4096;
+        }
+        fn identity(_: *anyopaque) storage.StorageIdentity {
+            return .{ .inode = 0, .size = 4096, .modified_ns = 0 };
+        }
+        const vtable: storage.ReadableSource.VTable = .{ .read_at = readAt, .size = size, .identity = identity };
+    };
+    var unreadable: WatchedSource = .{ .inner = .{ .context = undefined, .vtable = &Failing.vtable } };
+    var buffer: [16]u8 = undefined;
+    try testing.expectError(error.InputOutput, unreadable.readable().readAt(0, &buffer));
+    try testing.expect(!unreadable.contentFailure(error.InvalidFlac));
 }

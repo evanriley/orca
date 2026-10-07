@@ -169,6 +169,7 @@ fn writeSummary(worker: *const JobWorker, writer: *std.Io.Writer) !void {
             try parts.optional(stats.changed, "changed");
             try parts.optional(stats.marked_missing, "missing");
             try parts.optional(stats.errors, "unreadable");
+            if (stats.symlinks_skipped != 0) try parts.count(stats.symlinks_skipped, "symbolic link skipped", "symbolic links skipped");
             if (stats.volume_changed) try parts.text("drive not mounted");
         },
         .property_backfill => {

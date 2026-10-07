@@ -25,15 +25,17 @@
 #                orca-gtk to exit
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
-# scripts/design-fixture.sh when missing; the app gets a copy named Main.db,
-# so Settings names it Main as the design does. With
-# ORCA_HEADLESS_LIBRARY=settings the app gets no ORCA_LIBRARY and opens the
-# library its settings choose, in place, and db: is unavailable. Settings
+# scripts/design-fixture.sh when missing or when this build cannot open it;
+# the app gets a copy named Main.db, so Settings names it Main as the design
+# does. With ORCA_HEADLESS_LIBRARY=settings the app gets no ORCA_LIBRARY and
+# opens the library its settings choose, in place, and db: is unavailable. Settings
 # start empty and are discarded, unless ORCA_HEADLESS_CONFIG names a
 # directory to keep them in as XDG_CONFIG_HOME across runs. Output is
-# pinned to scripts/silent-sink.sh 1. Providers point at a closed port; the
-# Cover Art Archive points at ORCA_HEADLESS_COVERARTARCHIVE_URL when it is
-# set. Nothing reaches the user's desktop:
+# pinned to scripts/silent-sink.sh 1. Providers point at a closed port;
+# MusicBrainz, AcoustID and the Cover Art Archive point at
+# ORCA_HEADLESS_MUSICBRAINZ_URL, ORCA_HEADLESS_ACOUSTID_URL and
+# ORCA_HEADLESS_COVERARTARCHIVE_URL when they are set, such as at a local
+# mock. Nothing reaches the user's desktop:
 # sway, D-Bus, the pointer and orca-gtk run with a private
 # XDG_RUNTIME_DIR, and on exit the script stops only the processes it
 # started.
@@ -92,8 +94,9 @@ output=$(cd "$(dirname "$output")" && pwd)/$(basename "$output")
 
 if [ "$library_mode" = copy ]; then
     library=${ORCA_LIBRARY:-$repository/fixtures/library/design.db}
-    if [ ! -f "$library" ]; then
-        [ -z "${ORCA_LIBRARY:-}" ] || fail "ORCA_LIBRARY names $library, which does not exist"
+    if [ -n "${ORCA_LIBRARY:-}" ]; then
+        [ -f "$library" ] || fail "ORCA_LIBRARY names $library, which does not exist"
+    elif [ ! -f "$library" ] || ! "$orca_cli" stats "$library" >/dev/null 2>&1; then
         "$repository/scripts/design-fixture.sh" "$library" >/dev/null
     fi
 else
@@ -384,8 +387,8 @@ exec 4>"$runtime/pointer"
 echo "move $((width - 1)) 0" >&4
 
 ORCA_OUTPUT_DEVICE=$device PIPEWIRE_REMOTE=$pipewire_remote \
-    ORCA_LISTENBRAINZ_URL=http://127.0.0.1:9 ORCA_MUSICBRAINZ_URL=http://127.0.0.1:9 \
-    ORCA_ACOUSTID_URL=http://127.0.0.1:9 ORCA_COVERARTARCHIVE_URL=${ORCA_HEADLESS_COVERARTARCHIVE_URL:-http://127.0.0.1:9} \
+    ORCA_LISTENBRAINZ_URL=http://127.0.0.1:9 ORCA_MUSICBRAINZ_URL=${ORCA_HEADLESS_MUSICBRAINZ_URL:-http://127.0.0.1:9} \
+    ORCA_ACOUSTID_URL=${ORCA_HEADLESS_ACOUSTID_URL:-http://127.0.0.1:9} ORCA_COVERARTARCHIVE_URL=${ORCA_HEADLESS_COVERARTARCHIVE_URL:-http://127.0.0.1:9} \
     ORCA_LRCLIB_URL=http://127.0.0.1:9 ORCA_WIKIDATA_URL=http://127.0.0.1:9 \
     ORCA_WIKIMEDIA_URL=http://127.0.0.1:9 ORCA_WIKIPEDIA_URL=http://127.0.0.1:9 \
     ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:9 \

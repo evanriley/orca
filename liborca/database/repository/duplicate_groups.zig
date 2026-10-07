@@ -106,18 +106,48 @@ pub const DuplicateFile = struct {
     copies: u32,
 };
 
+pub const DuplicateLocation = struct {
+    root_path: []const u8 = "",
+    volume_key: []const u8 = "",
+    uri: []const u8 = "",
+};
+
+pub const RankedFile = struct {
+    file: DuplicateFile,
+    location: DuplicateLocation,
+};
+
 /// Whether `a` is the better copy to keep: lossless over lossy, then the higher
-/// sample rate, the higher bit depth, the larger file, and the lower file id.
-pub fn keepsBefore(_: void, a: DuplicateFile, b: DuplicateFile) bool {
-    if (a.lossless != b.lossless) return a.lossless;
-    const a_rate = a.sample_rate orelse 0;
-    const b_rate = b.sample_rate orelse 0;
+/// sample rate, the higher bit depth, the larger file, then the location that
+/// sorts first byte-wise, and the lower file id only when all of those agree.
+pub fn keepsBefore(_: void, a: RankedFile, b: RankedFile) bool {
+    if (a.file.lossless != b.file.lossless) return a.file.lossless;
+    const a_rate = a.file.sample_rate orelse 0;
+    const b_rate = b.file.sample_rate orelse 0;
     if (a_rate != b_rate) return a_rate > b_rate;
-    const a_depth = a.bit_depth orelse 0;
-    const b_depth = b.bit_depth orelse 0;
+    const a_depth = a.file.bit_depth orelse 0;
+    const b_depth = b.file.bit_depth orelse 0;
     if (a_depth != b_depth) return a_depth > b_depth;
-    if (a.size_bytes != b.size_bytes) return a.size_bytes > b.size_bytes;
-    return a.file_id < b.file_id;
+    if (a.file.size_bytes != b.file.size_bytes) return a.file.size_bytes > b.file.size_bytes;
+    inline for (.{ "root_path", "volume_key", "uri" }) |field| {
+        switch (std.mem.order(u8, @field(a.location, field), @field(b.location, field))) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+    }
+    return a.file.file_id < b.file.file_id;
+}
+
+/// The bytes removing every copy of `ranked`, the kept one first, but the kept
+/// one frees: each file's size once per location, one fewer for the kept file.
+pub fn redundantBytes(ranked: []const DuplicateFile) u64 {
+    var bytes: u64 = 0;
+    for (ranked, 0..) |file, index| {
+        const redundant = if (index == 0) file.copies - 1 else file.copies;
+        bytes +|= @as(u64, @intCast(file.size_bytes)) *| redundant;
+    }
+    return bytes;
 }
 
 /// Connects `links` into groups. A link to a file id never seen elsewhere is
@@ -222,7 +252,7 @@ pub const DuplicateMergeResult = struct {
     kept_file_ids: []i64 = &.{},
 };
 
-const duplicate_links_sql = "SELECT library_health_issues.file_id, library_health_issues.related_file_id,\n" ++
+pub const duplicate_links_sql = "SELECT library_health_issues.file_id, library_health_issues.related_file_id,\n" ++
     "       EXISTS (SELECT 1 FROM files AS related WHERE related.id = library_health_issues.related_file_id),\n" ++
     "       library_health_issues.kind, library_health_issues.similarity\n" ++
     health.visible_issues_sql ++ "\n" ++
@@ -239,6 +269,16 @@ const duplicate_file_sql =
     \\FROM files WHERE files.id = ?1;
 ;
 
+const duplicate_location_sql =
+    \\SELECT COALESCE(library_roots.path, ''), volumes.stable_key, locations.uri
+    \\FROM locations
+    \\JOIN volumes ON volumes.id = locations.volume_id
+    \\LEFT JOIN library_roots ON library_roots.id = locations.root_id
+    \\WHERE locations.file_id = ?1 AND locations.state <> 'missing'
+    \\ORDER BY CASE locations.state WHEN 'present' THEN 0 ELSE 1 END, locations.id
+    \\LIMIT 1;
+;
+
 pub const DuplicateGroupRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
@@ -246,11 +286,50 @@ pub const DuplicateGroupRepository = struct {
     /// Every visible duplicate issue, grouped. Reads each such issue once, so
     /// its cost grows with the duplicates in the Library, not its size.
     pub fn grouping(self: *const DuplicateGroupRepository, allocator: std.mem.Allocator) !DuplicateGrouping {
+        return self.groupingOf(allocator, .{ .exact_duplicate, .identical_audio, .likely_duplicate });
+    }
+
+    /// The groups the visible issues of `kind` alone make.
+    pub fn groupingOfKind(self: *const DuplicateGroupRepository, allocator: std.mem.Allocator, kind: HealthIssueKind) !DuplicateGrouping {
+        return self.groupingOf(allocator, .{ kind, kind, kind });
+    }
+
+    /// The bytes removing every copy but the kept one of each group of `kind`
+    /// would free, as `redundantBytes` counts them.
+    pub fn reclaimableBytes(self: *const DuplicateGroupRepository, allocator: std.mem.Allocator, kind: HealthIssueKind) !u64 {
+        var grouped = try self.groupingOfKind(allocator, kind);
+        defer grouped.deinit();
+        var bytes: u64 = 0;
+        for (grouped.groups) |members| {
+            const files = try self.rankFiles(allocator, members);
+            defer allocator.free(files);
+            bytes +|= redundantBytes(files);
+        }
+        return bytes;
+    }
+
+    /// The files of `members` that exist, the copy to keep first. Caller-owned.
+    pub fn rankFiles(self: *const DuplicateGroupRepository, allocator: std.mem.Allocator, members: DuplicateGroupMembers) ![]DuplicateFile {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var candidates: std.ArrayList(RankedFile) = .empty;
+        for (members.file_ids) |file_id| {
+            const found = try self.file(file_id) orelse continue;
+            try candidates.append(arena.allocator(), .{
+                .file = found,
+                .location = try self.location(arena.allocator(), file_id),
+            });
+        }
+        std.mem.sort(RankedFile, candidates.items, {}, keepsBefore);
+        const files = try allocator.alloc(DuplicateFile, candidates.items.len);
+        for (candidates.items, files) |candidate, *slot| slot.* = candidate.file;
+        return files;
+    }
+
+    fn groupingOf(self: *const DuplicateGroupRepository, allocator: std.mem.Allocator, kinds: [3]HealthIssueKind) !DuplicateGrouping {
         var statement = try self.db.prepare(duplicate_links_sql);
         defer statement.deinit();
-        try statement.bindInt64(1, @backingInt(HealthIssueKind.exact_duplicate));
-        try statement.bindInt64(2, @backingInt(HealthIssueKind.identical_audio));
-        try statement.bindInt64(3, @backingInt(HealthIssueKind.likely_duplicate));
+        for (kinds, 1..) |kind, index| try statement.bindInt64(@intCast(index), @backingInt(kind));
         var links: std.ArrayList(DuplicateLink) = .empty;
         defer links.deinit(allocator);
         while (try statement.step() == .row) {
@@ -284,6 +363,26 @@ pub const DuplicateGroupRepository = struct {
             .bit_depth = optionalInt64(statement, 3),
             .size_bytes = @max(statement.columnInt64(4), 0),
             .copies = @intCast(@max(@min(statement.columnInt64(6), std.math.maxInt(u32)), 1)),
+        };
+    }
+
+    pub fn location(
+        self: *const DuplicateGroupRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !DuplicateLocation {
+        var statement = try self.db.prepare(duplicate_location_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return .{};
+        const root_path = try allocator.dupe(u8, statement.columnText(0));
+        errdefer allocator.free(root_path);
+        const volume_key = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(volume_key);
+        return .{
+            .root_path = root_path,
+            .volume_key = volume_key,
+            .uri = try allocator.dupe(u8, statement.columnText(2)),
         };
     }
 
@@ -605,10 +704,17 @@ test "the suggested copy to keep is lossless first, then higher rate, then deepe
     var same = larger;
     same.file_id = 3;
 
-    var copies = [_]DuplicateFile{ base, lossless, high_rate, deeper, larger, same };
-    std.mem.sort(DuplicateFile, &copies, {}, keepsBefore);
+    var copies = [_]RankedFile{
+        .{ .file = base, .location = .{} },
+        .{ .file = lossless, .location = .{} },
+        .{ .file = high_rate, .location = .{} },
+        .{ .file = deeper, .location = .{} },
+        .{ .file = larger, .location = .{} },
+        .{ .file = same, .location = .{} },
+    };
+    std.mem.sort(RankedFile, &copies, {}, keepsBefore);
     var order: [copies.len]i64 = undefined;
-    for (copies, &order) |copy, *id| id.* = copy.file_id;
+    for (copies, &order) |copy, *id| id.* = copy.file.file_id;
     try testing.expectEqualSlices(i64, &.{ 3, 8, 7, 6, 5, 1 }, &order);
 }
 

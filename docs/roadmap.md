@@ -1,6 +1,7 @@
 # Roadmap
 
-What Orca does today, what must hold before 1.0, and what is deferred.
+What Orca does today, its known issues, what 1.0 requires, and what is
+deferred.
 "Works" means reachable from `orca-cli` or `orca-gtk` through the public
 runtime path, per the rule in [architecture.md](architecture.md).
 
@@ -18,9 +19,6 @@ watching of the music folders, so new, changed and removed files show up
 without a rescan. `liborca` builds for aarch64
 macOS; there is no macOS app, audio output or filesystem watcher.
 
-Features are frozen until 1.0. The work is the [release gates](#release-gates)
-below.
-
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`
 versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
@@ -37,7 +35,7 @@ names each `Runtime` method the C ABI does not reach and why.
   are skipped by path and storage identity; commits are bounded and
   cancellable.
 - File and Location identity keyed by stable volume identifiers (filesystem
-  UUID, including device-mapper volumes, or a persisted volume marker).
+  UUID, including device-mapper volumes, or an existing volume marker).
 - Projection into artists, releases, recordings and tracks, with bounded
   browse pages by artist, release, track and genre. Releases filter by
   format, review state, year, artwork and type, and Tracks by year, format,
@@ -392,86 +390,28 @@ To release:
 
 ## Known issues
 
-Small defects that are not yet scheduled:
+Each fix adds a test that fails without it, or a headless screenshot for a
+display-only defect, and removes its entry.
 
-- A file that leaves a Release loses its Track id when another folder on that
-  Release projects first and one of its files states the old position:
-  that folder prunes the Track, and the leaving file gets a new one.
-- A FLAC seek past the end of the stream fails as a decode error, while WAV
-  clamps to the last frame; the other decoders are unchecked.
-- A `technical_anomaly` Health issue for a displaced track position is
-  never cleared once the position is fixed; only dismissing it hides it.
-- `orca-cli` exits 0 after printing usage for a wrong argument count.
-- A tag write that fails before it reaches a file, such as when its
-  backup directory already exists, records no `TagWriteFailure`, so
-  `orca-cli` and `orca-gtk` fall back to a message without a reason.
-- `orca-cli` runs every command but `duplicates` and `analyze-library` on an
-  arena, so a cold scan holds memory for every file until it exits.
-- The scanner skips symbolic links to files without counting them.
-- Among duplicate copies of the same format, sample rate, bit depth and
-  size, Duplicates suggests keeping the one the scanner found first, which
-  depends on the order the filesystem lists the folder.
-- A release ID tag that names a release MusicBrainz does not return is
-  looked up again on every match run of the Library.
-- On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
-  root writes `.orca-volume-id` at the mount point.
+- A pause resets an output's stall count, so a stuck output can cost the
+  other outputs up to 128 ms after resume.
+- Recovery that finishes an interrupted undo does not check that the files it
+  restores are writable.
+- The check for SQLite connections open before the lock replacement is
+  installed reads SQLite's memory accounting. It sees nothing when SQLite is
+  built without memory statistics, and refuses a host that holds SQLite
+  memory with no connection open.
 - On macOS, which has no OFD locks, opening and closing a Library's
   database, `-wal` or `-shm` file from another part of the same process
   drops SQLite's POSIX locks on it. A second Orca process can then
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
-- When `orca-gtk` starts on Now Playing, the cover-tinted backdrop is
-  sometimes not drawn, and stays missing. The race is likely in
-  `updateBackdrop` and `sourcePainted` in `apps/linux/art.zig`.
-- On the Match Review page, the Best candidate and confidence columns start
-  at a different position on each row. `matchRow` in
-  `apps/linux/matches.zig` splits each row's width between two expanding
-  boxes, and the width left over depends on that row's action buttons, such
-  as Accept or "Review · 1 track needs pairing".
-- A file whose fingerprint fails, and a Track without a title or artist that
-  MusicBrainz cannot search, are examined again by every matching run. A
-  failed fingerprint is decoded again.
-- Undecodable files are examined again by every analysis run: a library of
-  WavPack or APE files pays two 64 KiB reads per file per run.
-- Matching has no offline setting, and `orca-gtk` has none for scrobbling.
-  Without a network, matching uses cached answers and stops at the first
-  Track it has none for.
-- Listens carry `submission_client` but not `media_player`.
-- MusicBrainz finds nothing for a Track whose artist tag joins several
-  artists with commas, such as "Pa Salieu, Black Sherif"; AcoustID can still
-  match it by fingerprint.
-- An AcoustID candidate without a title is scored on length and fingerprint
-  alone, so for a tagged Track it can rank level with a candidate whose title
-  and artist match. Several recording IDs sharing one AcoustID fingerprint
-  rank by how closely their artist credit matches the Track's.
-- The NixOS and Home Manager modules default `programs.orca.package` to the
-  build from Orca's pinned nixpkgs. NixOS loads the host's GPU drivers from
-  `/run/opengl-driver` into the app, and those need a glibc at least as new
-  as the one they were built against. A system newer than Orca's
-  `flake.lock` therefore leaves `orca-gtk` without a Vulkan device, and GTK
-  renders in software. To examine: build the default from the consumer's
-  `pkgs` when it has `zig_0_17`, and document `inputs.nixpkgs.follows` and
-  nixGL for `nix run` outside NixOS.
-- Re-identifying a Release turns its pending album correction into
-  single-file corrections, which can then be accepted one at a time and
-  leave the album's positions half-moved until the rest are accepted.
-- In a Release of more than 512 Tracks, verified a page at a time, a file
-  that still disagrees is checked again only while the Release has a stale
-  file left when its page is reached, though the job's total counted it.
-- `zig build pipewire-live-smoke` opens the first device on the user's
-  PipeWire server rather than a silent sink.
-- A credential store that is unavailable, or a credential too large for the
-  C ABI's buffer, stops the listen worker with an error, while AcoustID
-  lookups take it as no key (they fall back to the application key) and a
-  submission as no user key (`needs_user_key`). Whether AcoustID should fail
-  instead is undecided.
 
 ## Deferred formats
 
-The formats above cover nearly every library. These wait until after 1.0, and
-are sniffed or not recognized until then:
+The formats above cover nearly every library. These are deferred, and are
+sniffed or not recognized until they are supported:
 
 - WavPack, Monkey's Audio (APE), TTA and Musepack.
 - DSD (DSF and DFF), which also needs DSD-to-PCM conversion or native DSD
@@ -483,6 +423,7 @@ are sniffed or not recognized until then:
 
 ## Later
 
+- Ratings read from and written to tags (POPM, FMPS_RATING).
 - More identification sources: ListenBrainz's `/1/metadata/lookup` would match
   what MusicBrainz and AcoustID miss, but needs the user's token and must share
   the listen worker's gateway.

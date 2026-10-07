@@ -77,8 +77,9 @@ disagrees with the published serial, or an anchor ahead of the frame count,
 marks a torn read and the sample is dropped. Nothing is locked.
 
 The clock Zone is the first attached Zone with an active output. Promoting a
-replacement stamps a new epoch. Position hints reach hosts through the
-telemetry channel at roughly 10 Hz.
+replacement re-seeks the Player to the position already heard, which stamps a
+new epoch without skipping the audio decoded ahead. Position hints reach hosts
+through the telemetry channel at roughly 10 Hz.
 
 ## Zones
 
@@ -303,8 +304,10 @@ Stream creation and destruction stay on the control side. Output requests
 translate robust, interactive, custom or explicit latency targets into PipeWire
 node latency. Timing snapshots report sample time, monotonic host time,
 callback quantum, queued and converted frames, and non-negative graph and
-device delay. `zig build pipewire-live-smoke` verifies a short silent stream
-against the current user's server; normal tests need no live audio service.
+device delay. `zig build pipewire-live-smoke -- ID` verifies a short silent stream
+on the silent sink whose device id `scripts/silent-sink.sh` printed (or
+`ORCA_TEST_DEVICE`); it refuses a missing, unknown or non-virtual device.
+Normal tests need no live audio service.
 
 ### Stream rate
 
@@ -574,5 +577,6 @@ behind it, such as a file loaded with `playerLoadFile`, records nothing.
 The history lives on the control lane in memory only; a new runtime starts
 empty. It never records a listen: listens come only from the Player's
 `ListenTracker`. `playerQueueHistory` reads raw entries,
-`playerQueueHistoryTracks` reads them as `TrackSummary` rows, and
+`playerQueueHistoryTracks` reads them as rows carrying each entry's
+`TrackSummary`, null for a Track that left its Library or a closed Library, and
 `playerClearQueueHistory` empties the ring.

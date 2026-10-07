@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const optionalInt64 = @import("../columns.zig").optionalInt64;
 
+const DuplicateGroupRepository = @import("duplicate_groups.zig").DuplicateGroupRepository;
 const WriteLane = @import("write_lane.zig").WriteLane;
 const ReleaseArtworkRepository = @import("release_artwork.zig").ReleaseArtworkRepository;
 
@@ -215,26 +216,6 @@ pub const health_summary_sql = "SELECT library_health_issues.kind, max(severity)
     \\ORDER BY max(severity) DESC, library_health_issues.kind;
 ;
 
-/// The bytes the visible issues of one duplicate kind, ?1, could free. A file
-/// with no related file holds its duplicates as further locations of its own
-/// row, each a copy. A file with one is a copy unless no lower-numbered file
-/// is linked to it by an issue of the kind in either direction, which makes it
-/// the copy that is kept.
-pub const health_reclaimable_sql = "SELECT COALESCE(sum(max(files.size_bytes, 0) * CASE\n" ++
-    \\    WHEN library_health_issues.related_file_id IS NULL THEN max((
-    \\        SELECT count(*) FROM locations
-    \\        WHERE locations.file_id = files.id AND locations.state <> 'missing') - 1, 0)
-    \\    WHEN library_health_issues.related_file_id < library_health_issues.file_id
-    \\      OR EXISTS (SELECT 1 FROM library_health_issues AS linked
-    \\                 WHERE linked.related_file_id = library_health_issues.file_id
-    \\                   AND linked.kind = library_health_issues.kind
-    \\                   AND linked.file_id < library_health_issues.file_id) THEN 1
-    \\    ELSE 0 END), 0)
-    \\
-++ visible_issues_sql ++ "\n" ++
-    \\  AND library_health_issues.kind = ?1;
-;
-
 /// The visible issues of one kind.
 pub const HealthKindSummary = struct {
     kind: HealthIssueKind,
@@ -248,8 +229,8 @@ pub const HealthKindSummary = struct {
     /// `identical_audio` and `likely_duplicate` it is the size of the
     /// redundant copies only, what removing them would free: of a kept copy
     /// and two duplicates of 10 MB each, 20 MB. The kept copy of a group is
-    /// the lowest-numbered file in it, and a second location of one file is a
-    /// copy of it.
+    /// the one Duplicates suggests keeping, and a second location of one file
+    /// is a copy of it.
     bytes: u64,
 };
 
@@ -459,7 +440,7 @@ pub const HealthIssueRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 
-    pub fn summary(self: *const HealthIssueRepository) !HealthSummary {
+    pub fn summary(self: *const HealthIssueRepository, allocator: std.mem.Allocator) !HealthSummary {
         var statement = try self.db.prepare(health_summary_sql);
         defer statement.deinit();
         var result: HealthSummary = .{};
@@ -480,18 +461,14 @@ pub const HealthIssueRepository = struct {
             result.len += 1;
         }
         for (result.buffer[0..result.len]) |*entry| switch (entry.kind) {
-            .exact_duplicate, .identical_audio, .likely_duplicate => entry.bytes = try self.reclaimable(entry.kind),
+            .exact_duplicate, .identical_audio, .likely_duplicate => entry.bytes = try self.duplicateGroups().reclaimableBytes(allocator, entry.kind),
             else => {},
         };
         return result;
     }
 
-    fn reclaimable(self: *const HealthIssueRepository, kind: HealthIssueKind) !u64 {
-        var statement = try self.db.prepare(health_reclaimable_sql);
-        defer statement.deinit();
-        try statement.bindInt64(1, @backingInt(kind));
-        if (try statement.step() != .row) return error.SqlFailed;
-        return @intCast(statement.columnInt64(0));
+    fn duplicateGroups(self: *const HealthIssueRepository) DuplicateGroupRepository {
+        return .{ .db = self.db, .write_lane = self.write_lane };
     }
 
     /// The file behind an issue, or null when it does not exist.

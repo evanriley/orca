@@ -52,6 +52,8 @@ pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const QueueHistoryEntry = queue_history.QueueHistoryEntry;
 pub const QueueTrack = runtime_status.QueueTrack;
 pub const QueueTrackPage = runtime_status.QueueTrackPage;
+pub const QueueHistoryTrack = runtime_queue.QueueHistoryTrack;
+pub const QueueHistoryTrackPage = runtime_queue.QueueHistoryTrackPage;
 pub const QueueHistoryReason = queue_history.QueueHistoryReason;
 pub const RestoreMode = runtime_resume.RestoreMode;
 pub const RestoreOutcome = runtime_resume.RestoreOutcome;
@@ -461,6 +463,7 @@ pub const SubmissionOutcome = library_pass.acoustid_submission.Outcome;
 
 pub const SubmissionStats = job_worker.SubmissionStats;
 pub const TagWriteFailure = job_worker.TagWriteFailure;
+pub const TagWriteFailureFile = job_worker.TagWriteFailureFile;
 pub const TagWriteFailureReason = job_worker.TagWriteFailureReason;
 pub const ScanStats = job_worker.ScanStats;
 pub const ScanStage = job_worker.ScanStage;
@@ -826,7 +829,7 @@ pub const OrcaRuntime = struct {
     /// Files that still owe the default loudness and fingerprint measurement.
     pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
-            analysis_service.analysisSelectors(.{}),
+            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins()),
         );
     }
 
@@ -2139,7 +2142,7 @@ pub const OrcaRuntime = struct {
 
     /// Each kind with a visible issue: how many, and the highest severity.
     pub fn libraryHealthSummary(self: *OrcaRuntime, library: LibraryHandle) !database.HealthSummary {
-        return (try libraryDatabase(self, library)).health_issues.summary();
+        return (try libraryDatabase(self, library)).health_issues.summary(self.allocator);
     }
 
     /// How many Tracks have no present or unverified copy of their file.
@@ -2634,15 +2637,16 @@ pub const OrcaRuntime = struct {
         return runtime_queue.playerQueueHistory(self, player, offset, output);
     }
 
-    /// `playerQueueHistory` as the rows a host displays, newest first. An
-    /// entry whose Library is closed or whose Track is gone is left out.
+    /// `playerQueueHistory` as the rows a host displays, newest first. Row `n`
+    /// is history entry `offset + n`; an entry whose Library is closed or
+    /// whose Track left it keeps its row with a null `track`.
     pub fn playerQueueHistoryTracks(
         self: *OrcaRuntime,
         player: PlayerHandle,
         allocator: std.mem.Allocator,
         offset: u32,
         limit: u32,
-    ) !database.TrackPage {
+    ) !QueueHistoryTrackPage {
         return runtime_queue.playerQueueHistoryTracks(self, player, allocator, offset, limit);
     }
 
@@ -3274,7 +3278,8 @@ pub const OrcaRuntime = struct {
     /// Fingerprints every file whose recording ID came from an accepted match
     /// or an edit and sends it to AcoustID, as the user whose key the
     /// credential store holds under `org.acoustid`/`user-key`. Fails with
-    /// `needs_user_key` or `invalid_user_key` without marking anything sent.
+    /// `needs_user_key`, `credential_unavailable` or `invalid_user_key`
+    /// without marking anything sent.
     /// Queued like `startLibraryMatching` beside a maintenance unit.
     pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
         return runtime_jobs.startAcoustIdSubmission(self, library);
@@ -3289,6 +3294,11 @@ pub const OrcaRuntime = struct {
     /// Files an AcoustID submission would send now, fingerprints permitting.
     pub fn libraryAcoustIdSubmittableCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return runtime_jobs.libraryAcoustIdSubmittableCount(self, library);
+    }
+
+    /// Files and recording IDs AcoustID has accepted from this Library.
+    pub fn libraryAcoustIdSubmittedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return runtime_jobs.libraryAcoustIdSubmittedCount(self, library);
     }
 
     /// The files an AcoustID submission would send, by file id after `cursor`.
@@ -3380,10 +3390,9 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.jobReconcileRoot(self, job_handle);
     }
 
-    /// Which file a failed tag write stopped at and why, once the job has
-    /// finished; null while it runs, after it succeeded, or when it failed
-    /// before reaching a file. `error.NotATagWriteJob` for a job of another
-    /// kind.
+    /// Why a failed tag write failed and the file it stopped at, if any, once
+    /// the job has finished; null while it runs or after it succeeded.
+    /// `error.NotATagWriteJob` for a job of another kind.
     pub fn jobTagWriteFailure(self: *OrcaRuntime, job_handle: JobHandle) !?TagWriteFailure {
         return runtime_jobs.jobTagWriteFailure(self, job_handle);
     }
@@ -3477,9 +3486,11 @@ pub const OrcaRuntime = struct {
     /// resolution, which is the one thing frontends here must never do.
     ///
     /// Returned in queue order, so entry `n` of the result is queue position
-    /// `offset + n`, and a shuffled queue reads as the order it will play. An
-    /// entry whose Track was removed from the Library keeps its row with a
-    /// null `track`.
+    /// `offset + n`, and a shuffled queue reads as the order it will play.
+    /// Each entry is read from the Library its `TrackRef` names, which is not
+    /// the bound one when it was queued before the Player was bound to another.
+    /// An entry whose Library is closed or whose Track left it keeps its row
+    /// with a null `track`.
     pub fn playerQueueTracks(
         self: *OrcaRuntime,
         player: PlayerHandle,

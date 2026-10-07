@@ -195,9 +195,9 @@ fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     return frames;
 }
 
-fn seek(context_ptr: *anyopaque, frame: u64) !void {
+fn seek(context_ptr: *anyopaque, requested: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    if (frame > context.total_frames) return error.SeekOutOfRange;
+    const frame = @min(requested, context.total_frames);
     const index = frame / frame_frames;
     context.offset = file_header_bytes + index * context.full_frame_bytes;
     context.skip_frames = frame - index * frame_frames;
@@ -318,5 +318,6 @@ test "seeking into either frame of a QOA stream decodes exactly what a sequentia
             tail[0 .. frames * 2],
         );
     }
-    try std.testing.expectError(error.SeekOutOfRange, decoder.seek(9_601));
+    try decoder.seek(9_601);
+    try std.testing.expectEqual(@as(usize, 0), try decodeAll(&decoder, tail));
 }

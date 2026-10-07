@@ -1,11 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-10-06
+
+Ships Library schema version 1, unchanged from 0.1.0. Breaking for the Zig
+API: `TagWriteFailure.file` is optional. `orca-cli` exits 2 instead of 0 on a
+usage error. The C ABI only adds.
 
 ### Added
 
 - A binary cache at [orca.cachix.org](https://orca.cachix.org) for the flake's
   package, named in the flake's `nixConfig` and filled by CI from `main`.
+- `libraryAcoustIdSubmittedCount` and `orca_library_acoustid_submitted_count`
+  return how many files and recording IDs AcoustID has accepted from a
+  Library. Settings › Matching shows it under the AcoustID status row, and
+  `orca-cli submit-acoustid` prints `submitted_total=`.
 
 ### Changed
 
@@ -107,6 +115,160 @@
   device stays eligible. `sample_processing` stays until audio processed under
   earlier settings has played, instead of clearing while that audio is still
   queued.
+- A file that leaves a Release keeps its Track id, with its queue entries,
+  lyrics and user genres, when another folder of that Release projects first
+  and one of its files now states the leaving file's old position. That folder
+  parks the Track instead of deleting it, and the projection run then projects
+  the leaving file's folder, even when the run's scope did not include it,
+  which seats the Track where the file now lands.
+- A `technical_anomaly` Health issue for a displaced track position is cleared
+  by the next projection that no longer displaces the file, as after a retag to
+  a free number or to another album, or that finds the file unreadable,
+  instead of staying until dismissed.
+- `orca-cli` exits with status 2 and prints the usage to standard error when
+  given no command, an unknown command or a wrong argument count, instead of
+  exiting 0. `orca-cli --help` prints the usage to standard output and exits 0.
+- `orca-cli` runs every command's runtime on the general-purpose allocator
+  instead of the process arena, so a cold scan no longer holds memory for
+  every file until it exits. In a Debug build the allocator reports leaks at
+  exit.
+- Every failed tag write reports a `TagWriteFailure`, including one that fails
+  before reaching a file. `TagWriteFailure.file` (a `TagWriteFailureFile`) is
+  null then, and `orca_tag_write_failure` has `file_id` and `action_index` 0.
+  New reasons `backup_exists` (`ORCA_TAG_WRITE_FAILURE_BACKUP_EXISTS`) for a
+  backup directory another write created after planning, and
+  `recovery_failed` (`ORCA_TAG_WRITE_FAILURE_RECOVERY_FAILED`) for an earlier
+  interrupted write that could not be finished first; a file whose format
+  stopped being writable after planning reports `changed_since_plan` at that
+  file. `orca-cli write-tags` prints `failed - REASON -` and `orca-gtk` names
+  the reason.
+- Among duplicate copies of equal format, sample rate, bit depth and size,
+  Duplicates ranks and suggests keeping by location (library root path,
+  volume, then path) instead of the order the scanner found them, so the
+  suggestion and the copy order no longer depend on the order the filesystem
+  lists a folder. The duplicate bytes of the health summary free the same
+  copies, where they counted the lowest-numbered file of a group as kept.
+- Seeking to or past the end of a stream no longer fails for FLAC, Ogg
+  Vorbis, Opus, AIFF, QOA, MP3 and MP4 (AAC and ALAC); every decoder clamps the
+  target to the stream length, as WAV does, and the next read is end of stream.
+  Seeking to the end of a FLAC track, which the Player does when a seek lands
+  on the last frame, no longer fails as a decode error.
+- Results stored for a file with no recorded channel count no longer feed
+  album gain or count as a finished measurement. The next analysis pass
+  measures the file again and records its channel count, or, at more than two
+  channels, discards the results and raises `missing_analysis`.
+- On the Match Review page, the Best candidate and confidence columns now
+  start at the same position on every row. Every row's action buttons share one
+  width, so a long "Review · 3 tracks need pairing" button no longer shifts the
+  columns of its row.
+- Queue history keeps an entry whose Track left the Library in its place.
+  `playerQueueHistoryTracks` returns a `QueueHistoryTrackPage` whose rows carry
+  the position, Track id, end time, reason and a summary that is null for a
+  removed Track, and `orca_player_query_queue_history` passes such an entry
+  with `removed` set and only `id` filled instead of skipping it. The Queue
+  page's History shows it dimmed as "Removed from library".
+- Queue and history pages read each entry from the Library it was queued
+  from. A Player bound to another Library keeps the earlier Library's entries,
+  which were looked up in the new Library and showed another Track or none;
+  an entry of a closed Library reads as removed.
+- `orca-gtk` offers only Remove from Queue and Save Queue as Playlist… for an
+  Up Next entry whose Track left the Library, and no menu for such an entry
+  in History or as the playing row. Play Next, Play Later, Love and the album
+  and artist links are gone from it, and Shift+Return and L do nothing on it.
+- A Track whose file is recorded with more than two channels, or with no
+  channel count, shows no loudness even when results are stored for it: the
+  loudness column is empty, the loudness sort places it with the unmeasured
+  Tracks, the Track details carry no loudness, and a playlist's formats count
+  it as not analyzed.
+- A MusicBrainz search finds a Track whose artist tag joins several artists
+  with commas, such as "Pa Salieu, Black Sherif". When the whole tag finds
+  nothing, the search is asked once more for a recording credited to any of
+  the first eight names; an artist whose name holds commas, such as "Earth,
+  Wind & Fire", still matches on the whole name in one request.
+- `zig build pipewire-live-smoke` opens only the silent sink whose device id
+  is given (`-- ID` or `ORCA_TEST_DEVICE`, from `scripts/silent-sink.sh`) and
+  refuses a missing, unknown or non-virtual device instead of opening the
+  first device on the PipeWire server.
+- When the clock Zone's output is lost and another Zone takes over, playback
+  resumes at the position already heard. It previously skipped the audio
+  decoded ahead, which could drop the end of a track and its gapless
+  transition.
+- Listens and now-playing updates sent to ListenBrainz name the media player
+  and its version (`media_player`, `media_player_version`), taken from the
+  client identity, as well as the submission client.
+- `orca-gtk` draws the cover-tinted backdrop on Now Playing even when the
+  cover cache drops the cover before the backdrop is composed, which a large
+  library could do at start-up, and redraws a backdrop dropped from the cache
+  when its page is shown again.
+- Library analysis no longer reads a file no decoder can decode, such as
+  WavPack or APE, a damaged file, or a file with more than two channels, on
+  every run. The verdict is stored against the file's content hash and the
+  decoders that refused it, so the file is examined again only when its bytes
+  change or a decoder for it is added. Such files no longer count towards the
+  files left to analyze. A file that could not be read is still examined again
+  on the next run.
+- A scan or reconcile counts the symbolic links its walk passes over, to a
+  file, a directory or nothing, in `ScanStats.symlinks_skipped`; it still does
+  not follow them. `orca-cli scan`, `reconcile` and `watch` print
+  `symlinks_skipped=N` and the Job's Activity summary reads "N symbolic links
+  skipped" when it is not zero. C hosts read it through
+  `orca_library_scan_stats_v3`.
+- Matching no longer examines a Track without a title or an artist again on
+  every run, or decodes again a file whose bytes could not be fingerprinted.
+  The Track is passed over until its title and artist are both set, and is
+  still counted in `insufficient_evidence`. The file is not offered to
+  AcoustID until its bytes change. Re-identify searches and fingerprints both
+  again. A file that could not be opened or read is still tried on the next
+  run.
+- A library match run no longer selects, counts and looks up from the cache,
+  on every run, a tagged release ID that MusicBrainz does not have. The
+  release is passed over while its refusal is cached for 7 days, and is asked
+  again once the refusal expires, the release ID changes or its Release is
+  re-identified. A lookup that failed with an outage or timeout is still
+  retried on the next run.
+- Adding or relocating a root on a mount with no filesystem UUID, such as NFS,
+  SMB or tmpfs, no longer writes `.orca-volume-id` at the mount point. The root
+  binds to its own `root:<id>` volume. A root bound to an existing marker keeps
+  its volume; once the marker is gone, relocating the root to its own path
+  rebinds it to `root:<id>`.
+- The NixOS and Home Manager modules build the default `programs.orca.package`
+  against the system's nixpkgs when it provides `zig_0_17`, so the GPU drivers
+  under `/run/opengl-driver` meet a glibc at least as new as their own and
+  `orca-gtk` keeps its Vulkan device. The README documents
+  `inputs.orca.inputs.nixpkgs.follows` and nixGL for `nix run` outside NixOS.
+- An AcoustID submission whose user key cannot be read from the credential
+  store, or is too large for the C ABI's buffer, fails with the new outcome
+  `credential_unavailable` (`ORCA_SUBMISSION_OUTCOME_CREDENTIAL_UNAVAILABLE`)
+  instead of `needs_user_key`. `orca-gtk` and `orca-cli` report it.
+- A matching or verify job that cannot reach the network no longer stops at
+  the first Track without a cached answer. It sends no further request,
+  matches every Track its cache answers, leaves the rest eligible for the next
+  run, and ends `failed` with `unavailable` set. An outage that gives up after
+  its retries still stops the job.
+- `orca-gtk` says "Paused because the output device stopped working" when the
+  engine pauses a Player after every output failed, and Play then requests the
+  output again instead of staying paused on the failed one. Match Album with no
+  match says "No album match found" instead of "No release ID to fetch its
+  cover". `scripts/headless-gui.sh` points MusicBrainz and AcoustID at
+  `ORCA_HEADLESS_MUSICBRAINZ_URL` and `ORCA_HEADLESS_ACOUSTID_URL` when they
+  are set.
+- A match candidate without a title or artist scores below one whose title
+  and artist match a tagged Track, instead of being judged on its length and
+  fingerprint alone. An AcoustID recording named in part under one
+  fingerprint takes its title, artists, length and release groups from where
+  the same answer names it in full, so recordings sharing a fingerprint rank
+  on all their evidence rather than on their artist credit. AcoustID answers
+  cached before this, which may lack those fields, are asked again.
+- Re-identifying a Release keeps its pending album correction whole. A search
+  that finds a grouped recording again leaves its proposal in the group with
+  the release, positions and release values the group was formed on, and
+  Match Album's release vote leaves a grouped proposal on that release, so no
+  correction of the group can be accepted alone.
+- Verification decides once per Release, before its first page, whether the
+  Release's files that still disagree are verified again: they are when it
+  has a stale or unverified file then. A Release of more than 512 Tracks
+  verifies them on every page, so `verified` reaches the `total_units` the job
+  counted.
 
 ## 0.1.0 - 2026-10-06
 

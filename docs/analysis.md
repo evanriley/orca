@@ -26,10 +26,17 @@ mono, resampled to 11,025 Hz by libsamplerate (`resampler.SampleRate`,
 base64 fingerprint and the whole file's length; a shorter file is fingerprinted
 whole. Chromaprint is built without its own LGPL resampler; see
 [architecture.md](architecture.md#dependencies-and-licences). A decode error
-while reading the window fails the fingerprint; nothing is cached or sent and
-it is tried again next time. A unit test holds Orca's fingerprint of
-`fixtures/audio/fingerprint-reference.mp3` to at least 95 % bit agreement with
-`fpcalc`'s.
+while reading the window fails the fingerprint and nothing is sent. When every
+read of the file succeeded, the file did not change during the decode, and the
+error is the bytes' own rather than cancellation, memory or a missing codec or
+fingerprinter, the failure is recorded as kind 5 under the same algorithm,
+version and parameter hash, keyed by the file's quick hash, with the error name
+as its result. Matching does not offer AcoustID a file whose recorded quick hash
+has such a row ([providers.md](providers.md#what-is-searched)); a file that
+could not be opened or read is tried again next time. A later fingerprint of
+the file deletes the row, and a new failure replaces it. A unit test holds
+Orca's fingerprint of `fixtures/audio/fingerprint-reference.mp3` to at least
+95 % bit agreement with `fpcalc`'s.
 
 A fingerprint is stored in `analysis_results` as kind 3, `orca.chromaprint`
 version 1, under a parameter hash of the algorithm, the converter and the window
@@ -74,6 +81,28 @@ re-selects the file, and there is no force mode. `analysis_results` is
 `repository.unanalyzed_predicate` is the one definition shared by the page
 query and the count that gives the job its denominator.
 
+A file the decoders refused is excused. When every byte of a file was read and
+no decoder took them, or they hold more than two channels, the pass stores a
+verdict in `analysis_results` as kind
+4, `orca.decoder-set`, keyed like a measurement: `source_identity` is the
+content hash of the refused bytes, `parameter_hash` is a Blake3 hash of the
+registered decoders (each format and decoder name, in format order;
+`analysis.service.decoderSetHash`) and `algorithm_version` is
+`undecodable_algorithm_version`. Its result is the decoder's error name. While
+that row matches the file's recorded content hash, the file is neither selected
+nor counted. Changed bytes, a decoder registered for another format (a WavPack
+decoder, for example) or a version bump select it again. The version is bumped
+when a decoder starts accepting content it refused without its format or name
+changing, and when analysis starts taking more than two channels. A verdict is
+not a measurement: no loudness reader and no release member lookup reads kind
+4.
+
+A stored loudness counts as a measurement only for a file recorded with at most
+two channels (`measurableChannels` in `database/repository/analysis.zig`). A
+file recorded with more than two channels, or with no channel count, has no
+loudness in Track listings, the loudness sort, Track details or a playlist's
+analyzed count, whatever is stored for it.
+
 ### Outcomes
 
 A batch commits in one bounded transaction.
@@ -93,7 +122,12 @@ runs before the cache lookup, so a stored result is never reused for such a
 file. A file recorded with more than two channels that still holds results,
 as a Library analysed before the limit holds them, is selected by the pass,
 which deletes all its results (and with them its `file_loudness` row) in the
-same transaction. Results are
+same transaction. A file with no recorded channel count that holds results is
+selected too: the pass measures it again and records the decoded count in
+`files.channels`, or, at more than two channels, deletes its results as
+above. After deleting the results of a file with more than two channels, the
+pass stores the undecodable verdict for the bytes it read in the same
+transaction, so later runs skip the file until its bytes change. Results are
 keyed by the content hash of the bytes decoded, taken in a second sequential
 read beside the decode, and the same transaction records that hash on the file
 (see [database.md](database.md#schema)).
@@ -113,8 +147,20 @@ past damage its decoder reports through `Decoder.damage`: an AIFF whose COMM
 declares more frames than SSND holds, a WAV data chunk that ends inside a frame,
 or a FLAC stream with frame errors, a short final block or an MD5 mismatch.
 Playback of the same file continues. The issue's details name the error or the
-damage, and the file stays unanalysed, so every pass decodes it again. The pass never raises `unreadable_file`, which
-belongs to the property backfill.
+damage. A file whose format no decoder takes (an unrecognised container such as
+APE, or WavPack, which Orca detects but cannot decode) is counted with the
+declined files and raises no health issue. Either way, when every read
+succeeded, the pass records the file's content hash and the undecodable
+verdict under the checks a measurement passes, and later runs skip the file
+(see [What "already analyzed" means](#what-already-analyzed-means)). The
+`corrupt_audio` issue stays until a run that decodes the file clears it.
+
+`analysis.service.Service.examineFile` tells a refusal from a failure: it reads
+the file through a wrapper that records any failed read, and a decoder error
+counts as a refusal only when no read had failed. A failed read, a missing or
+inaccessible file, cancellation and a file that changes during the decode
+record no verdict, so the next run examines the file again. A read that fails during the decode still raises `corrupt_audio`. The
+pass never raises `unreadable_file`, which belongs to the property backfill.
 
 ### Threads
 
@@ -196,8 +242,8 @@ an album stay as mastered. `TrackSourceOpener.openTrack` computes it at open
 from one bounded statement over the entry's Release
 (`AnalysisCacheRepository.visitReleaseMembers`); nothing is cached per Release,
 so re-analysing or moving a Track cannot leave a stale figure. A member whose
-file is recorded with more than two channels reads as having no stored
-measurement, whatever is stored for it.
+file is recorded with more than two channels, or with no channel count, reads
+as having no stored measurement, whatever is stored for it.
 
 The album's integrated loudness is a duration-weighted energy mean,
 `10·log10(Σ dᵢ·10^(Lᵢ/10) / Σ dᵢ)`, over the Tracks' integrated loudness `Lᵢ`
@@ -348,15 +394,18 @@ identical-audio links), `verdict` and `bytes_redundant`, what removing every
 copy but the suggested one frees. `verdict`, a `DuplicateVerdict`, is the
 weakest kind among the group's links; the C ABI carries it as an
 `orca_health_issue_kind` in `orca_duplicate_group_view.verdict`.
-`libraryDuplicateGroupTotals` sums the groups and their bytes, which can differ
-from [By kind](#by-kind) because that counts the lowest-numbered file as the
-kept copy.
+`libraryDuplicateGroupTotals` sums the groups and their bytes. It keeps the same
+copy as [By kind](#by-kind) but can still differ from it: By kind groups the
+links of one kind at a time, while a group joins files across kinds and through
+other files.
 
 `Runtime.libraryDuplicateGroup` (`orca-cli duplicates DATABASE --group=ID`)
 returns a group's files, the suggested copy first: the lossless over the lossy,
 then the higher sample rate, the higher bit depth and the larger file, then the
-lower file id. Each `DuplicateCopy` holds the lowest Track id the file backs,
-that Track's `TrackDetails` with this file's format, size, path and loudness,
+location its details show, by library root path, volume and path compared
+byte-wise, so the order does not depend on the order files were scanned; the
+lower file id decides only when those agree too. Each `DuplicateCopy` holds the
+lowest Track id the file backs, that Track's `TrackDetails` with this file's format, size, path and loudness,
 the number of playlists holding its recording, and its present locations.
 
 Three actions resolve a group. None writes, moves or deletes a file.
@@ -476,10 +525,13 @@ calls it. The rules live in `analysis/health.zig`.
 | `unreadable_file` | warning | property backfill | the file could not be opened or its header would not read |
 | `recording_mismatch` | warning | verification | AcoustID hears another recording and a correction was proposed |
 
-A file not analysed yet has no row; the analysis job's count of files still
-owing work says that. The duplicate kinds name the other file in
-`related_file_id`, which becomes null when that file is deleted; the issue
-stays. A copy at a second location of one file has no related file.
+The projection settles its kinds for every file it projects: an issue is
+recorded while its condition holds and deleted once it does not, and a file
+with an `unreadable_file` issue loses them all. A file not analysed yet has no
+row; the analysis job's count of files still owing work says that. The
+duplicate kinds name the other file in `related_file_id`, which becomes null
+when that file is deleted; the issue stays. A copy at a second location of one
+file has no related file.
 
 `recording_mismatch` is raised by `recordVerifications` in the transaction that
 stores the verification, only when the outcome is `disagrees` and a pending
@@ -504,7 +556,8 @@ the page and count leave out an issue whose dismissal holds the hash the file
 still has, so the issue shows again once the file's bytes change. A file never
 hashed is dismissed under a null hash and stays hidden. The issue row is
 untouched, and `libraryRestoreHealthIssue` (`orca-cli health-restore`) drops the
-dismissal. A dismissal goes with its file.
+dismissal. Deleting an issue keeps its dismissal, so an issue raised again
+while the file keeps that hash stays hidden. A dismissal goes with its file.
 
 ### By kind
 
@@ -513,9 +566,11 @@ dismissal. A dismissal goes with its file.
 non-dismissed issue, holding its count, highest severity, `files` and their
 summed `bytes`, ordered by severity then kind. The counts sum to
 `libraryHealthIssueCount`. For the duplicate kinds, `bytes` is what removing the
-redundant copies would free: the kept copy is the lowest-numbered file of a
-group, and a duplicate held as a second location of one file row counts its size
-once per present location beyond the first. `libraryHealthIssuePageOfKind`
+redundant copies would free: the kept copy is the one Duplicates suggests
+keeping (see [Duplicate detection](#duplicate-detection)), taken within the
+groups the links of that kind make, and a duplicate held as a second
+location of one file row counts its size once per present location beyond the
+first. `libraryHealthIssuePageOfKind`
 (`orca-cli health --kind=KIND`) pages the issues of one kind in the order of
 `libraryHealthIssuePage`. `libraryArtworkProblemReleasePage` and
 `libraryArtworkProblemReleaseCount`

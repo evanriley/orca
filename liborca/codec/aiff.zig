@@ -210,8 +210,7 @@ fn decodeInteger(encoding: Encoding, bytes: []const u8) i32 {
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    if (frame > context.layout.frames) return error.SeekOutOfRange;
-    context.position = frame;
+    context.position = @min(frame, context.layout.frames);
 }
 
 fn damage(context_ptr: *anyopaque) ?decoder_api.Damage {

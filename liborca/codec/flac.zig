@@ -58,6 +58,7 @@ const Context = struct {
     /// unreadable frame can account for.
     max_block_frames: u64,
     stream_errors_seen: u64 = 0,
+    at_end: bool = false,
     damage: ?decoder_api.Damage = null,
 
     fn recordDamage(self: *Context, found: decoder_api.Damage) void {
@@ -218,7 +219,7 @@ fn readFramesAs(
 ) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     const capacity = output.len / context.channels;
-    if (capacity == 0) return 0;
+    if (capacity == 0 or context.at_end) return 0;
     var produced: u32 = 0;
     const frames_before = context.frames_decoded;
     const status = read(
@@ -262,8 +263,14 @@ fn readFramesAs(
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    if (orca_flac_decoder_seek(context.native, frame) != ok) return error.FlacSeekFailed;
     context.sought = true;
+    if (context.declared_frames != 0 and frame >= context.declared_frames) {
+        context.at_end = true;
+        context.frames_decoded = context.declared_frames;
+        return;
+    }
+    if (orca_flac_decoder_seek(context.native, frame) != ok) return error.FlacSeekFailed;
+    context.at_end = false;
     // Absolute, so the declared-total comparison survives a seek.
     context.frames_decoded = frame;
     context.stream_errors_seen = orca_flac_decoder_stream_errors(context.native);

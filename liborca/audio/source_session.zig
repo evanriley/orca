@@ -613,3 +613,45 @@ test "a decoded block is scaled when a loudness correction changed any of its fr
     off.current.replay_gain = .{ .track = .{ .gain = 0.25 } };
     try std.testing.expect(!(try off.readBlock(&samples, .{ .mode = .off })).scaled);
 }
+test "a FLAC seek to or past its last frame ends the entry and advances to the successor" {
+    const storage = @import("../storage/source.zig");
+    const registry = @import("../codec/registry.zig").CodecRegistry.builtins();
+    const path = "fixtures/audio/generated-reference.flac";
+    var current_file = try storage.LocalFileSource.open(std.testing.io, path);
+    defer current_file.close();
+    var next_file = try storage.LocalFileSource.open(std.testing.io, path);
+    defer next_file.close();
+    var sources = SourceQueue.init(SourceSession.init(try registry.openDetected(
+        std.testing.allocator,
+        current_file.readable(),
+    )));
+    defer sources.deinit();
+    const total = sources.current.decoder.frame_count.?;
+    try sources.primeNext(SourceSession.init(try registry.openDetected(
+        std.testing.allocator,
+        next_file.readable(),
+    )));
+    const current_serial = sources.current_entry_serial;
+
+    var samples: [64 * 2]f32 = undefined;
+    try sources.seek(total);
+    try std.testing.expect(sources.current.eof);
+    const block = try sources.readBlock(&samples, .{ .mode = .off });
+    try std.testing.expectEqual(@as(usize, 64), block.frames);
+    try std.testing.expect(block.entry_serial != current_serial);
+
+    var session = SourceSession.init(try registry.openDetected(
+        std.testing.allocator,
+        current_file.readable(),
+    ));
+    defer session.deinit();
+    for ([_]u64{ total, total + 1, std.math.maxInt(u64) }) |target| {
+        try session.seek(target);
+        try std.testing.expect(session.eof);
+        try std.testing.expectEqual(@as(usize, 0), try session.readFrames(&samples, .{ .mode = .off }));
+        try std.testing.expectEqual(@as(?decoder_api.Damage, null), session.decoder.damage());
+        try session.seek(0);
+        try std.testing.expect(!session.eof);
+        try std.testing.expect(try session.readFrames(&samples, .{ .mode = .off }) > 0);
+    }
+}

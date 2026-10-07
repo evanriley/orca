@@ -231,7 +231,11 @@ Track, Match Again) looks up the releases the tags name once its Track walk
 finishes without stopping. It takes, 64 at a time in release ID order, each
 distinct release a Track's release ID in effect names, from fully, partially
 and mixed tagged Releases alike, unless the Release with that Track dismissed
-it or it has a snapshot younger than the 30-day cache. Each lookup stores a
+it, it has a snapshot younger than the 30-day cache, or MusicBrainz refused its
+lookup (a `404` included) within the 7 days the refusal is cached. A refused
+release is selected again once its refusal expires, under a changed release ID,
+or by re-identifying its Release; an outage or timeout records nothing, so the
+next run asks again. Each lookup stores a
 whole snapshot or none, through the same gateway, cache and back-off as every
 other request. A Release-scope run (Match Album) reads each unread candidate
 before its best one. A cancelled, offline or busy run stops at the release it
@@ -897,14 +901,29 @@ re-observes them and returns `error.MutationGroupAlreadyUndone`. Orca's values
 survive both directions.
 
 A write that fails rolls its group back as recovery does and ends the Job
-`failed`. `Runtime.jobTagWriteFailure(job)` returns a `TagWriteFailure`: the
-file it stopped at, its index in the plan's actions, and a
-`TagWriteFailureReason` (`permission_denied`, `read_only_file_system`,
-`no_space`, `changed_since_plan`, `other` or `file_read_only`, C value
-`ORCA_TAG_WRITE_FAILURE_FILE_READ_ONLY` (5)). It returns null while the Job
-runs, after success, or when the write failed before reaching a file;
+`failed`. `Runtime.jobTagWriteFailure(job)` returns a `TagWriteFailure` for
+every failed write: a `TagWriteFailureReason` and, as `file`, the file it
+stopped at and its index in the plan's actions, or null when it failed before
+reaching a file. The reasons are:
+
+| Reason | C value | Failed when |
+| --- | --- | --- |
+| `permission_denied` | 0 | Orca may not create or replace files in the file's folder or the backup directory |
+| `read_only_file_system` | 1 | the file or the backup directory is on a read-only file system |
+| `no_space` | 2 | the disk had no room for the stage or the backup |
+| `changed_since_plan` | 3 | the file's identity, or its format, changed after planning |
+| `other` | 4 | any other error, such as a journal write that failed |
+| `file_read_only` | 5 | the file is [read-only](#read-only-files) |
+| `backup_exists` | 6 | the plan's backup directory was created after planning, by another write; no file |
+| `recovery_failed` | 7 | the recovery the write runs first failed, as for a folder that is missing; no file |
+
+A failure with no file leaves every file as it was, and `backup_exists`,
+`recovery_failed` and a `changed_since_plan` format change journal nothing for
+the plan.
+`jobTagWriteFailure` returns null while the Job runs or after success, and
 `error.NotATagWriteJob` for another kind of Job. The C ABI's
-`orca_job_tag_write_failure` fills an `orca_tag_write_failure` and returns
+`orca_job_tag_write_failure` fills an `orca_tag_write_failure`, with `file_id`
+and `action_index` 0 when there is no file, and returns
 `ORCA_STATUS_NOT_FOUND` for null and `ORCA_STATUS_INVALID_ARGUMENT` for another
 kind of Job.
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const content_hash = @import("../storage/content_hash.zig");
 const content_measurements = @import("content_measurements.zig");
 const ContentMeasurements = content_measurements.ContentMeasurements;
@@ -17,9 +18,8 @@ pub const VolumeOptions = struct {
     /// volume use this; nothing else should.
     stable_key: ?[]const u8 = null,
     label: []const u8 = "",
-    /// Whether a volume with no filesystem UUID may have an identifier written
-    /// to its mount root. Off unless a user explicitly added this root.
-    allow_persist: bool = false,
+    /// Where the platform adapter reads the host's volumes from.
+    platform_options: platform.volume.Options = .{},
     /// Whether to consult the platform adapter at all. Off exercises the
     /// root-derived fallback on a host whose storage is perfectly
     /// identifiable.
@@ -243,7 +243,7 @@ pub const LibraryDatabase = struct {
             self.allocator,
             io,
             path,
-            .{ .allow_persist = options.allow_persist },
+            options.platform_options,
         ) catch null;
         if (resolved) |resolution| {
             defer resolution.deinit(self.allocator);
@@ -268,8 +268,8 @@ pub const LibraryDatabase = struct {
 
     /// Register a Library root and the volume it lives on.
     ///
-    /// When the platform can name the volume — a filesystem UUID, or an
-    /// identifier persisted at the mount root — the root is bound to that
+    /// When the platform can name the volume — a filesystem UUID, or the
+    /// identifier in a marker at the mount root — the root is bound to that
     /// volume. When it cannot, the root itself becomes the identity
     /// (`root:<library_roots.id>`): weaker, because it cannot recognize the
     /// same storage arriving under a different path, but stable for as long as
@@ -364,7 +364,7 @@ pub const LibraryDatabase = struct {
             null;
         defer if (lock) |*held| held.release(io);
         const resolved = if (options.stable_key == null and options.use_platform_adapter)
-            platform.volume.stableKey(self.allocator, io, path, .{ .allow_persist = options.allow_persist }) catch null
+            platform.volume.stableKey(self.allocator, io, path, options.platform_options) catch null
         else
             null;
         defer if (resolved) |resolution| resolution.deinit(self.allocator);
@@ -685,7 +685,7 @@ fn addKindFixture(library: *LibraryDatabase) ![3]i64 {
 }
 
 fn expectSummary(library: *LibraryDatabase, expected: []const repository.HealthKindSummary) !void {
-    const summary = try library.health_issues.summary();
+    const summary = try library.health_issues.summary(std.testing.allocator);
     try std.testing.expectEqualSlices(repository.HealthKindSummary, expected, summary.items());
 }
 
@@ -700,7 +700,7 @@ test "the health summary counts each kind's visible issues and names the highest
         .{ .kind = .missing_track_number, .severity = .information, .count = 2, .files = 2, .bytes = 200 },
     });
     var total: u64 = 0;
-    for ((try library.health_issues.summary()).items()) |entry| total += entry.count;
+    for ((try library.health_issues.summary(std.testing.allocator)).items()) |entry| total += entry.count;
     try std.testing.expectEqual(try library.health_issues.count(), total);
 }
 
@@ -711,7 +711,7 @@ fn addSizedHealthFile(library: *LibraryDatabase, uri: []const u8, size_bytes: i6
 }
 
 fn summaryOf(library: *LibraryDatabase, kind: repository.HealthIssueKind) !?repository.HealthKindSummary {
-    const summary = try library.health_issues.summary();
+    const summary = try library.health_issues.summary(std.testing.allocator);
     for (summary.items()) |entry| if (entry.kind == kind) return entry;
     return null;
 }
@@ -757,7 +757,7 @@ test "duplicate bytes in the health summary count only the redundant copies, not
     try library.health_issues.replaceFile(resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
     try library.health_issues.replaceFile(resembled, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = also_resembles }});
     try library.health_issues.replaceFile(also_resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
-    try std.testing.expectEqual(@as(u64, 35_000), (try summaryOf(&library, .likely_duplicate)).?.bytes);
+    try std.testing.expectEqual(@as(u64, 9_000), (try summaryOf(&library, .likely_duplicate)).?.bytes);
 
     const same_audio = try addSizedHealthFile(&library, "music/same-audio.wav", 50_000);
     const same_audio_flac = try addSizedHealthFile(&library, "music/same-audio.flac", 20_000);
@@ -778,11 +778,38 @@ test "duplicate bytes in the health summary count only the redundant copies, not
     try std.testing.expectEqual(@as(u64, 2 * ten_megabytes + 7_000), (try summaryOf(&library, .exact_duplicate)).?.bytes);
 }
 
+test "duplicate bytes in the health summary free the copy that Duplicates would not keep, whatever the file ids" {
+    var library = try openHealthLibrary("summary-keeper");
+    defer library.close();
+    const lossy_small = try library.files.create(.{ .codec = "mp3", .size_bytes = 500 });
+    _ = try library.locations.upsert(.{ .file_id = lossy_small, .volume_id = LibraryDatabase.null_volume, .uri = "music/0.mp3" });
+    const lossless_large = try library.files.create(.{ .codec = "flac", .size_bytes = 7_000 });
+    _ = try library.locations.upsert(.{ .file_id = lossless_large, .volume_id = LibraryDatabase.null_volume, .uri = "music/1.flac" });
+    try library.health_issues.replaceFile(lossy_small, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = lossless_large }});
+    try library.health_issues.replaceFile(lossless_large, &.{.{ .kind = .identical_audio, .severity = .warning, .related_file_id = lossy_small }});
+    try std.testing.expectEqual(@as(u64, 500), (try summaryOf(&library, .identical_audio)).?.bytes);
+}
+
+test "duplicate bytes in the health summary keep one copy of a group whose best file is not the one the others link to" {
+    var library = try openHealthLibrary("summary-keeper-star");
+    defer library.close();
+    const hub = try library.files.create(.{ .codec = "mp3", .size_bytes = 1_000 });
+    _ = try library.locations.upsert(.{ .file_id = hub, .volume_id = LibraryDatabase.null_volume, .uri = "music/hub.mp3" });
+    const best = try library.files.create(.{ .codec = "flac", .size_bytes = 3_000 });
+    _ = try library.locations.upsert(.{ .file_id = best, .volume_id = LibraryDatabase.null_volume, .uri = "music/best.flac" });
+    const other = try library.files.create(.{ .codec = "flac", .size_bytes = 2_000 });
+    _ = try library.locations.upsert(.{ .file_id = other, .volume_id = LibraryDatabase.null_volume, .uri = "music/other.flac" });
+    try library.health_issues.replaceFile(hub, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = best }});
+    try library.health_issues.replaceFile(best, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = hub }});
+    try library.health_issues.replaceFile(other, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = hub }});
+    try std.testing.expectEqual(@as(u64, 3_000), (try summaryOf(&library, .exact_duplicate)).?.bytes);
+}
+
 test "dismissed issues count toward neither the files nor the bytes of the health summary" {
     var library = try openHealthLibrary("summary-sizes-dismissed");
     defer library.close();
-    const kept = try addSizedHealthFile(&library, "music/kept.flac", 6_000);
-    const copy = try addSizedHealthFile(&library, "music/copy.flac", 6_000);
+    const kept = try addSizedHealthFile(&library, "music/a-kept.flac", 6_000);
+    const copy = try addSizedHealthFile(&library, "music/b-copy.flac", 6_000);
     const loud = try addSizedHealthFile(&library, "music/loud.flac", 2_000);
     try library.health_issues.replaceFile(kept, &.{
         .{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = copy },
@@ -795,7 +822,7 @@ test "dismissed issues count toward neither the files nor the bytes of the healt
     try library.health_issues.dismiss(loud, .clipping);
     try expectSummary(&library, &.{
         .{ .kind = .clipping, .severity = .warning, .count = 1, .files = 1, .bytes = 6_000 },
-        .{ .kind = .exact_duplicate, .severity = .warning, .count = 1, .files = 1, .bytes = 0 },
+        .{ .kind = .exact_duplicate, .severity = .warning, .count = 1, .files = 1, .bytes = 6_000 },
     });
 }
 
@@ -993,13 +1020,12 @@ test "listing, counting and summarising health issues reach kinds, dismissals an
     try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN library_health_issues USING COVERING INDEX library_health_by_kind") != null);
 }
 
-test "duplicate bytes reach one kind's issues and their links through indexes and never scan files" {
+test "duplicate links reach one kind's issues through an index and never scan files" {
     var library = try openHealthLibrary("reclaimable-plan");
     defer library.close();
-    const plan = try queryPlan(&library, @import("repository/health.zig").health_reclaimable_sql);
+    const plan = try queryPlan(&library, repository.duplicate_groups.duplicate_links_sql);
     defer std.testing.allocator.free(plan);
-    try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH library_health_issues USING INDEX library_health_by_kind (kind=?)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan, "library_health_by_related") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "library_health_by_kind") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN health_dismissals") == null);
 }
@@ -1869,6 +1895,66 @@ test "a root on unidentifiable storage becomes its own volume identity" {
     try std.testing.expectEqual(@as(usize, 2), roots.items.len);
     try std.testing.expectEqualStrings("/music/unidentified", roots.items[0].path);
     try std.testing.expect(roots.items[0].enabled);
+}
+
+fn expectRootKey(library: *LibraryDatabase, binding: RootBinding) !void {
+    const key = (try library.volumes.stableKey(std.testing.allocator, binding.volume_id)).?;
+    defer std.testing.allocator.free(key);
+    var expected: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "root:{d}", .{binding.root_id}), key);
+}
+
+fn expectNoVolumeMarker(directory: std.Io.Dir) !void {
+    for ([_][]const u8{ ".orca-volume-id", "share/.orca-volume-id", "share/music/.orca-volume-id" }) |marker| {
+        try std.testing.expectError(error.FileNotFound, directory.access(std.testing.io, marker, .{}));
+    }
+}
+
+test "adding a root on a mount with no filesystem UUID binds it to the root and writes no marker" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const host = try platform.volume.TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-uuidless-root?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const options: VolumeOptions = .{ .platform_options = host.options() };
+
+    const first = try library.ensureRoot(std.testing.io, music, options);
+    try expectRootKey(&library, first);
+    try expectNoVolumeMarker(temporary.dir);
+    const second = try library.ensureRoot(std.testing.io, music, options);
+    try std.testing.expectEqual(first.root_id, second.root_id);
+    try std.testing.expectEqual(first.volume_id, second.volume_id);
+    try expectNoVolumeMarker(temporary.dir);
+}
+
+test "relocating a root onto a mount with no filesystem UUID binds it to the root and writes no marker" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const host = try platform.volume.TestHost.create(std.testing.allocator, std.testing.io, temporary.dir);
+    defer host.deinit();
+    const music = try host.path("share/music");
+    defer std.testing.allocator.free(music);
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-relocate-uuidless?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const root = try library.ensureRoot(std.testing.io, "/music/moved-away", .{ .stable_key = "uuid:old-drive" });
+
+    const relocated = try library.relocateRoot(std.testing.io, root.root_id, music, .{ .platform_options = host.options() });
+    try std.testing.expectEqual(root.root_id, relocated.root_id);
+    try expectRootKey(&library, relocated);
+    try expectNoVolumeMarker(temporary.dir);
 }
 
 test "scan runs take a fresh generation per root and record how they ended" {
@@ -3307,6 +3393,21 @@ test "a Track's proposals come most confident first, old payloads included, and 
     try std.testing.expectError(error.PageOutOfRange, library.identification_proposals.pendingForTrack(std.testing.allocator, track, 0));
 }
 
+const test_fingerprint_failures: repository.AnalysisSelector = .{
+    .kind = 5,
+    .algorithm_id = "orca.chromaprint",
+    .algorithm_version = 1,
+    .parameter_hash = @splat(7),
+};
+
+fn setQuickHashDigest(library: *LibraryDatabase, file_id: i64, digest: *const [32]u8) !void {
+    var statement = try library.database.prepare("UPDATE files SET quick_hash = ?1 WHERE id = ?2;");
+    defer statement.deinit();
+    try statement.bindBlob(1, digest);
+    try statement.bindInt64(2, file_id);
+    if (try statement.step() != .done) return error.SqlFailed;
+}
+
 test "matching selects a Track until each provider in scope has answered for its file, and never one with a recording id" {
     var library = try openFeedbackLibrary("unidentified");
     defer library.close();
@@ -3325,17 +3426,17 @@ test "matching selects a Track until each provider in scope has answered for its
     const matched = try addFeedbackTrack(&library, "Matched", try addRecording(&library), null);
     _ = try proposals.acceptProposal(std.testing.allocator, try putProposal(&library, try playFileOf(&library, matched), match_mbid, 0.9, match_payload));
 
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, false, null));
-    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, .unidentified, true, null));
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, true, 2));
-    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, .unidentified, false, null));
-    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, .unidentified, false, null));
-    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, .unidentified, true, null));
-    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, .unidentified, false, 0, 2);
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, null, null));
+    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, .unidentified, &test_fingerprint_failures, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, &test_fingerprint_failures, 2));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, .unidentified, null, null));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, .unidentified, null, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, .unidentified, &test_fingerprint_failures, null));
+    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, .unidentified, null, 0, 2);
     defer only.deinit();
     try std.testing.expectEqual(@as(usize, 1), only.items.len);
     try std.testing.expectEqual(two_files, only.items[0].track_id);
-    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, true, 0, 2);
+    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, &test_fingerprint_failures, 0, 2);
     defer first.deinit();
     try std.testing.expectEqual(@as(usize, 2), first.items.len);
     try std.testing.expectEqual(untagged, first.items[0].track_id);
@@ -3344,7 +3445,7 @@ test "matching selects a Track until each provider in scope has answered for its
     try std.testing.expectEqual(@as(?[]u8, null), first.items[0].path);
     try std.testing.expectEqual(two_files, first.items[1].track_id);
     try std.testing.expectEqual(try playFileOf(&library, two_files), first.items[1].file_id);
-    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, true, first.items[1].track_id, 2);
+    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, &test_fingerprint_failures, first.items[1].track_id, 2);
     defer rest.deinit();
     try std.testing.expectEqual(@as(usize, 1), rest.items.len);
     try std.testing.expectEqual(musicbrainz_answered, rest.items[0].track_id);
@@ -3354,7 +3455,7 @@ test "matching selects a Track until each provider in scope has answered for its
         .title = "Untagged",
         .musicbrainz_recording_id = rival_mbid,
     } });
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, true, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, &test_fingerprint_failures, null));
 }
 
 test "re-identify selects every Track in scope with a play file, with the recording id in effect, whatever was answered" {
@@ -3365,10 +3466,10 @@ test "re-identify selects every Track in scope with a play file, with the record
     const both_answered = try addFeedbackTrack(&library, "Both Answered", try addRecording(&library), null);
     _ = try proposals.recordSearch(std.testing.allocator, try playFileOf(&library, both_answered), .{ .musicbrainz = true, .acoustid = true }, &.{});
 
-    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = tagged }, .unidentified, true, null));
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .every, true, null));
-    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = tagged }, .every, false, null));
-    const page = try proposals.unidentifiedPage(std.testing.allocator, .library, .every, false, 0, 10);
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = tagged }, .unidentified, &test_fingerprint_failures, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .every, &test_fingerprint_failures, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = tagged }, .every, null, null));
+    const page = try proposals.unidentifiedPage(std.testing.allocator, .library, .every, null, 0, 10);
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 2), page.items.len);
     try std.testing.expectEqual(tagged, page.items[0].track_id);
@@ -3377,6 +3478,58 @@ test "re-identify selects every Track in scope with a play file, with the record
     try std.testing.expectEqual(both_answered, page.items[1].track_id);
     try std.testing.expectEqual(@as(?[]u8, null), page.items[1].recording_mbid);
     try std.testing.expect(page.items[1].needs_musicbrainz);
+}
+
+test "matching passes over a Track with no title or artist for MusicBrainz and bytes that failed to fingerprint for AcoustID, until either changes" {
+    var library = try openFeedbackLibrary("unsearchable");
+    defer library.close();
+    const proposals = &library.identification_proposals;
+    const failures = &test_fingerprint_failures;
+    const untitled = try addFeedbackTrack(&library, " \t", try addRecording(&library), null);
+    const undecodable = try addFeedbackTrack(&library, "Undecodable", try addRecording(&library), null);
+    const file = try playFileOf(&library, undecodable);
+    const failed_bytes: [32]u8 = @splat(1);
+    try setQuickHashDigest(&library, file, &failed_bytes);
+    try library.analysis_cache.put(.{
+        .file_id = file,
+        .kind = failures.kind,
+        .algorithm_id = failures.algorithm_id,
+        .algorithm_version = failures.algorithm_version,
+        .parameter_hash = failures.parameter_hash,
+        .source_identity = failed_bytes,
+    }, "CorruptFrame");
+
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.library, .unidentified, null, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unsearchableCount(.library, null));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unsearchableCount(.library, failures));
+    const page = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, failures, 0, 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expect(!page.items[0].needs_musicbrainz and page.items[0].needs_acoustid);
+    try std.testing.expect(page.items[1].needs_musicbrainz and !page.items[1].needs_acoustid);
+    var other_parameters = test_fingerprint_failures;
+    other_parameters.parameter_hash = @splat(8);
+    const retaken = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = undecodable }, .unidentified, &other_parameters, 0, 10);
+    defer retaken.deinit();
+    try std.testing.expect(retaken.items[0].needs_acoustid);
+
+    _ = try proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &.{});
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = undecodable }, .unidentified, failures, null));
+    const changed_bytes: [32]u8 = @splat(2);
+    try setQuickHashDigest(&library, file, &changed_bytes);
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = undecodable }, .unidentified, failures, null));
+
+    _ = try proposals.recordSearch(std.testing.allocator, try playFileOf(&library, untitled), .{ .acoustid = true }, &.{});
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = untitled }, .unidentified, failures, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unsearchableCount(.{ .track = untitled }, failures));
+    var sql: [96]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET title = 'Titled' WHERE id = {d};", .{untitled}, 0));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = untitled }, .unidentified, failures, null));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unsearchableCount(.{ .track = untitled }, failures));
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET artist = '' WHERE id = {d};", .{untitled}, 0));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = untitled }, .unidentified, failures, null));
+
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .every, failures, null));
 }
 
 fn proposalScalar(library: *LibraryDatabase, comptime column: []const u8, proposal_id: i64) !i64 {
@@ -3609,6 +3762,8 @@ test "a recording id and the matching selection are looked up by key, never by s
         try queryPlan(&library, repository.unidentified_release_page_sql),
         try queryPlan(&library, repository.reidentify_page_sql),
         try queryPlan(&library, repository.reidentify_release_page_sql),
+        try queryPlan(&library, repository.unsearchable_count_sql),
+        try queryPlan(&library, repository.unsearchable_release_count_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
@@ -3631,6 +3786,7 @@ test "verification selects its files by Release, Track and key, never by scannin
         try queryPlan(&library, repository.verifiable_track_page_sql),
         try queryPlan(&library, repository.verifiable_releases_sql),
         try queryPlan(&library, repository.verifiable_count_sql),
+        try queryPlan(&library, repository.verifiable_release_due_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
@@ -3640,6 +3796,7 @@ test "verification selects its files by Release, Track and key, never by scannin
         try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
     }
     for (plans[0..4]) |plan| try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN tracks") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[5], "SCAN tracks") == null);
 }
 
 test "a change is offered only once it has stood for two seconds, and the count includes it before" {
@@ -4342,9 +4499,9 @@ test "a playlist's formats count each codec and the entries measured for their f
     try library.database.exec(
         \\INSERT INTO artists(name) SELECT DISTINCT artist FROM tracks;
         \\UPDATE tracks SET artist_id = (SELECT id FROM artists WHERE artists.name = tracks.artist);
-        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = 2
         \\    WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('One', 'Two'));
-        \\UPDATE files SET codec = 'alac', content_hash = x'02', content_hash_algorithm = 1
+        \\UPDATE files SET codec = 'alac', content_hash = x'02', content_hash_algorithm = 1, channels = 2
         \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Three');
         \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
         \\    SELECT preferred_file_id, x'01', -14.0 FROM tracks WHERE title = 'One';
@@ -4385,6 +4542,32 @@ test "a playlist's formats count each codec and the entries measured for their f
     try std.testing.expectEqual(@as(u64, 1), smart_summary.artist_count);
     try std.testing.expect(!smart_summary.mixed_artists);
 }
+test "a playlist's formats count an entry whose file has no channel count or more than two channels as not analyzed" {
+    var library = try openFeedbackLibrary("playlist-formats-channels");
+    defer library.close();
+    const stereo = try addSmartTrack(&library, "Stereo", "Nick Drake");
+    const unknown = try addSmartTrack(&library, "Unknown", "Nick Drake");
+    const surround = try addSmartTrack(&library, "Surround", "Nick Drake");
+    const unmeasured = try addSmartTrack(&library, "Unmeasured", "Nick Drake");
+    try library.database.exec(
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = 2
+        \\    WHERE id IN (SELECT preferred_file_id FROM tracks WHERE title IN ('Stereo', 'Unmeasured'));
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = NULL
+        \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Unknown');
+        \\UPDATE files SET codec = 'flac', content_hash = x'01', content_hash_algorithm = 1, channels = 6
+        \\    WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Surround');
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs)
+        \\    SELECT preferred_file_id, x'01', -14.0 FROM tracks WHERE title IN ('Stereo', 'Unknown', 'Surround');
+    );
+    const manual = try library.playlists.create("Manual");
+    _ = try library.playlists.insert(manual, &.{ stereo, unknown, surround, unmeasured }, null);
+
+    const formats = try library.playlists.formats(std.testing.allocator, manual, .{ .now = 0, .seed = 0 });
+    defer formats.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), formats.analyzed);
+    try std.testing.expectEqual(@as(u64, 3), formats.unanalyzed);
+}
+
 test "a smart playlist lists one Track per matching recording in its rules' order up to its limit and refuses entry edits" {
     var library = try openFeedbackLibrary("playlist-smart");
     defer library.close();

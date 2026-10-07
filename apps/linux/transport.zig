@@ -236,6 +236,10 @@ fn readDevices(self: *App, detail: liborca.DiscoveryDetail) void {
 /// Opens an output if the Player has none. Returns false when no backend or
 /// device is available, which is a real condition, not an error to swallow.
 pub fn ensureOutput(self: *App) bool {
+    if (outputFailed(self)) {
+        self.runtime.destroyZone(self.zone.?) catch {};
+        self.zone = null;
+    }
     if (self.zone != null) return true;
     const zone = self.runtime.playerOpenDefaultOutput(
         self.player,
@@ -1021,6 +1025,12 @@ fn signalPathSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
+fn outputFailed(self: *App) bool {
+    const zone = self.zone orelse return false;
+    const stats = self.runtime.zoneStats(zone) catch return false;
+    return stats.output_state == .failed;
+}
+
 fn outputReady(self: *App) bool {
     const zone = self.zone orelse return false;
     const stats = self.runtime.zoneStats(zone) catch return false;
@@ -1267,6 +1277,8 @@ pub fn tick(self: *App) void {
         self.shown_transport = status.transport;
         if (transport_changed and status.transport == .playing and self.signal_path_draining)
             armSignalPathSettle(self);
+        if (transport_changed and status.transport == .paused and outputFailed(self))
+            self.toast("Paused because the output device stopped working");
         self.mpris.notify();
     }
 }

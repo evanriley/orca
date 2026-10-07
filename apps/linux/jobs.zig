@@ -494,7 +494,7 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
     });
     var album_buffer: [160]u8 = undefined;
     const cover: [:0]const u8 = switch (result.cover_art) {
-        .no_release_id => if (result.matched == 0 or result.accepted != 0)
+        .no_release_id => if (result.accepted != 0)
             "No release ID to fetch its cover"
         else
             return albumOutcome(self, &album_buffer, .album, moved_to orelse release_id),
@@ -669,6 +669,7 @@ fn submissionFinished(self: *App, quiet: bool, state_value: liborca.JobState, st
     if (state_value != .succeeded) return if (!quiet or result.outcome == .invalid_user_key) self.toast(switch (result.outcome) {
         .needs_user_key => "Save your AcoustID key in Settings first",
         .invalid_user_key => "AcoustID did not accept your key",
+        .credential_unavailable => "Could not read your AcoustID key from the system keyring",
         .cancelled => "Stopped",
         .busy => "AcoustID is in use by another Orca process; try again once it finishes",
         .completed, .needs_client_key, .invalid_client_key, .unavailable => "AcoustID could not be reached; try again later",
@@ -774,6 +775,8 @@ fn tagWriteFailedText(failure: ?liborca.TagWriteFailure) [:0]const u8 {
         .changed_since_plan => "Writing tags failed: a file changed after the write was planned. The files were left as they were.",
         .other => "Writing tags failed; the files were left as they were",
         .file_read_only => "Writing tags failed: a file is read-only. The files were left as they were.",
+        .backup_exists => "Writing tags failed: another write took its backup folder. Try again. The files were left as they were.",
+        .recovery_failed => "Writing tags failed: an earlier interrupted write could not be finished, as when its drive is not connected. The files were left as they were.",
     };
 }
 

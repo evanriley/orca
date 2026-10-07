@@ -459,6 +459,14 @@ pub const PlayerEngine = struct {
         self.seek_reopens += 1;
     }
 
+    fn seekHeardPosition(self: *PlayerEngine) void {
+        _ = self.player.seek(self.player.position_frames.load(.acquire)) catch {
+            self.decode_errors += 1;
+            if (self.player.sources) |*sources| sources.current.eof = true;
+            _ = self.player.stampEpoch();
+        };
+    }
+
     fn seekLoadedSource(self: *PlayerEngine, frame: u64) void {
         _ = self.player.seekCurrent(frame) catch {
             // A decoder that cannot seek ends its entry rather than stalling the
@@ -904,8 +912,10 @@ pub const PlayerEngine = struct {
                     self.clock_zone = runtime_zone;
                     // Promotion only: the newly promoted Zone's frame counter
                     // starts at zero, so the timeline is rebased under a fresh
-                    // epoch. The first Zone to open needs no rebase.
-                    if (had_clock_zone) _ = self.player.stampEpoch();
+                    // epoch. The first Zone to open needs no rebase. The new
+                    // epoch retires every prepared block, so the source goes
+                    // back to the heard position rather than skipping them.
+                    if (had_clock_zone) self.seekHeardPosition();
                     break;
                 }
             }
@@ -2944,6 +2954,92 @@ test "a gapless boundary one frame into a prepared block moves identity and posi
 test "a gapless boundary on a prepared block's last frame moves identity and position there" {
     try expectGaplessBoundaryInsideBlock(frames_per_block - 1, true);
     try expectGaplessBoundaryInsideBlock(frames_per_block - 1, false);
+}
+
+const InternalReseek = enum { clock_zone_promotion, stop_after_current, output_reopen };
+
+fn expectGaplessBoundaryAfterInternalReseek(reseek: InternalReseek) !void {
+    const allocator = std.testing.allocator;
+    const first_frames: u64 = 8 * frames_per_block + 232;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = first_frames },
+        .{ .track_id = 11, .frames = 16 * frames_per_block },
+    });
+    defer harness.deinit();
+    const other_zone = try harness.addZone(2);
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    var pass: usize = 0;
+    while (pass < 512) : (pass += 1) {
+        harness.step(32);
+        const audible = harness.player.audible_entry_serial.load(.acquire);
+        if (audible != 0 and harness.player.entrySerial() != audible) break;
+    }
+    harness.step(0);
+    const first_serial = harness.player.audible_entry_serial.load(.acquire);
+    try std.testing.expect(harness.player.entrySerial() != first_serial);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    var heard = harness.player.snapshot().position_frames;
+    try std.testing.expect(heard > 0 and heard < first_frames);
+
+    switch (reseek) {
+        .clock_zone_promotion => {
+            liveStreamFor(&harness.backend, harness.runtime_zone).?.markLost();
+            harness.step(0);
+            try std.testing.expectEqual(other_zone, harness.engine.clock_zone.?);
+        },
+        .stop_after_current => {
+            harness.engine.quiesce();
+            harness.engine.setStopAfterCurrent(true);
+            harness.engine.release();
+            harness.step(0);
+            try std.testing.expectEqual(@as(u64, 1), harness.engine.seek_reopens);
+            harness.engine.quiesce();
+            harness.engine.setStopAfterCurrent(false);
+            harness.engine.release();
+        },
+        .output_reopen => {
+            const opens_before = harness.backend.opens;
+            liveStreamFor(&harness.backend, other_zone).?.markLost();
+            harness.step(0);
+            other_zone.recovery_wait_ns = 0;
+            harness.step(0);
+            try std.testing.expectEqual(opens_before + 1, harness.backend.opens);
+            try std.testing.expectEqual(zone_model.OutputState.active, other_zone.outputState());
+            try std.testing.expectEqual(harness.runtime_zone, harness.engine.clock_zone.?);
+        },
+    }
+
+    var heard_serial = first_serial;
+    pass = 0;
+    while (pass < 64 * frames_per_block and harness.queue.cursorPosition() == 0) : (pass += 1) {
+        harness.step(1);
+        harness.step(0);
+        if (harness.queue.cursorPosition() != 0) break;
+        const position = harness.player.snapshot().position_frames;
+        try std.testing.expect(position == heard or position == heard + 1);
+        heard = position;
+        heard_serial = harness.player.audible_entry_serial.load(.acquire);
+    }
+    try std.testing.expectEqual(first_frames, heard);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    const successor_serial = harness.player.audible_entry_serial.load(.acquire);
+    try std.testing.expect(successor_serial != heard_serial);
+    try std.testing.expectEqual(@as(u64, 1), harness.player.snapshot().position_frames);
+    try std.testing.expectEqual(successor_serial, harness.engine.clock_zone.?.rendered_entry_serial.load(.monotonic));
+}
+
+test "a gapless boundary after the clock Zone's output is lost and another Zone takes over moves identity at the successor's first frame" {
+    try expectGaplessBoundaryAfterInternalReseek(.clock_zone_promotion);
+}
+
+test "a gapless boundary after stop after current re-opens the entry heard and is disarmed moves identity at the successor's first frame" {
+    try expectGaplessBoundaryAfterInternalReseek(.stop_after_current);
+}
+
+test "a gapless boundary after an output is lost and reopened moves identity at the successor's first frame" {
+    try expectGaplessBoundaryAfterInternalReseek(.output_reopen);
 }
 
 test "an entry that ends with a prepared block keeps that block when its successor is already primed" {

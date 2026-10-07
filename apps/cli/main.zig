@@ -7,6 +7,11 @@ pub fn main(init: std.process.Init) void {
         var stderr_buffer: [256]u8 = undefined;
         var stderr_file_writer: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &stderr_buffer);
         const stderr = &stderr_file_writer.interface;
+        if (err == error.Usage) {
+            writeHelp(stderr) catch {};
+            stderr.flush() catch {};
+            std.process.exit(usage_exit_status);
+        }
         stderr.print("orca-cli: {s}\n", .{describe(err)}) catch {};
         stderr.flush() catch {};
         std.process.exit(1);
@@ -67,6 +72,7 @@ fn describe(err: anyerror) []const u8 {
         error.ListenBrainzInUse => "ListenBrainz is in use by another Orca process; try again once it finishes",
         error.InvalidAcoustIdKey => "the AcoustID application key is empty, too long or contains spaces; rebuild with -Dacoustid-key=KEY",
         error.NeedsAcoustIdUserKey => "set ORCA_ACOUSTID_USER_KEY to your AcoustID user key (https://acoustid.org/api-key)",
+        error.AcoustIdUserKeyUnreadable => "the AcoustID user key could not be read from the credential store",
         error.InvalidAcoustIdUserKey => "AcoustID does not accept the user key in ORCA_ACOUSTID_USER_KEY",
         error.InvalidAcoustIdClientKey => "AcoustID does not accept the application key; rebuild with -Dacoustid-key=KEY",
         error.SubmissionStopped => "submission stopped early: AcoustID could not be reached or kept refusing requests; run submit-acoustid again to continue",
@@ -148,6 +154,8 @@ fn describe(err: anyerror) []const u8 {
     };
 }
 
+const usage_exit_status = 2;
+
 fn run(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -156,22 +164,30 @@ fn run(init: std.process.Init) !void {
     var stdout_file_writer: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
+        try writeHelp(stdout);
+        try stdout.flush();
+        return;
+    }
+
     const command = if (args.len > 1) findCommand(args[1], args.len - 2) else null;
     if (command) |found| {
         try found.run(.{
             .allocator = allocator,
+            .gpa = init.gpa,
             .io = init.io,
             .environ = init.environ_map,
             .stdout = stdout,
             .arguments = args[2..],
         });
-    } else try writeHelp(stdout);
+    } else return error.Usage;
 
     try stdout.flush();
 }
 
 const Context = struct {
     allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     io: std.Io,
     environ: *std.process.Environ.Map,
     stdout: *std.Io.Writer,
@@ -959,7 +975,7 @@ fn printVersion(context: Context) !void {
 }
 
 fn runDemo(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
 
     const request_id = try runtime.submit(.create_player);
@@ -983,7 +999,7 @@ fn scanRoot(context: Context) !void {
     const stdout = context.stdout;
     if (context.arguments.len == 3 and !std.mem.eql(u8, context.arguments[2], "--reprobe")) return error.UnknownOption;
     const reprobe_all = context.arguments.len == 3;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     // Re-adding a registered root would rebind it to whatever volume its path
@@ -1054,7 +1070,7 @@ fn estimateFolder(context: Context) !void {
 }
 
 fn addRoot(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const binding = try bindRoot(&runtime, library_handle, context, try absolutePath(context, context.arguments[1]));
@@ -1096,7 +1112,7 @@ fn registeredRootId(runtime: *liborca.Runtime, library: liborca.LibraryHandle, p
 /// Walks a registered root, or only the given directories under it, and marks
 /// missing only the files under what it walked.
 fn reconcileRoot(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const directories = context.arguments[2..];
@@ -1112,7 +1128,7 @@ fn watchLibrary(context: Context) !void {
     const stdout = context.stdout;
     const options = try parseJobOptions(context.arguments[1..], &.{ .quiet, .max_delay, .once, .limit, .maintenance, .pause_after, .resume_after });
     const limit_ms: u64 = options.limit orelse 10 * 60 * 1000;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     if (options.maintenance_ms != null) {
         try identifyOrca(&runtime);
@@ -1315,7 +1331,7 @@ fn runJobs(context: Context) !void {
         } else return error.UnknownOption;
     }
     if (history == (starts.items.len != 0)) return error.JobsNeedStartOrHistory;
-    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     if (history) return printJobHistory(allocator, &runtime, context.stdout, library, filter, limit, offset);
@@ -1409,7 +1425,7 @@ fn printJobHistory(
 /// `orca-cli retry-job DATABASE HISTORY_ID`
 fn retryJob(context: Context) !void {
     const history_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     try configureArtistInfo(context.allocator, &runtime, context.environ);
@@ -1427,7 +1443,7 @@ fn retryJob(context: Context) !void {
 /// after a metadata edit or a provider acceptance, and it is why the
 /// projection is a pass of its own rather than part of the scanner.
 fn projectLibrary(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const job_handle = try runtime.startLibraryProjection(library_handle);
@@ -1574,7 +1590,7 @@ fn parseThreads(text: []const u8) !u16 {
 fn backfillProperties(context: Context) !void {
     const stdout = context.stdout;
     const options = try parseJobOptions(context.arguments[1..], &.{ .force, .cancel_after });
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const job_handle = try runtime.startLibraryPropertyBackfill(library_handle, .{
@@ -1594,9 +1610,7 @@ fn backfillProperties(context: Context) !void {
 fn analyzeLibrary(context: Context) !void {
     const stdout = context.stdout;
     const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .threads, .cancel_after });
-    // Not the process arena: it would keep every decoded file's buffers
-    // until the run ends.
-    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var request: liborca.AnalysisRequest = .{ .threads = options.threads };
@@ -1628,9 +1642,7 @@ fn findDuplicates(context: Context) !void {
     const stdout = context.stdout;
     const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
     const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
-    // Not the process arena: the pass frees a fingerprint per comparison, and
-    // an arena would keep every one of them.
-    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try runtime.openLibrary(context.io, database_path);
     var request: liborca.DuplicateScanRequest = .{};
@@ -1649,7 +1661,7 @@ fn checkConsistency(context: Context) !void {
     const stdout = context.stdout;
     const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
     const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
-    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try runtime.openLibrary(context.io, database_path);
     var request: liborca.ConsistencyRequest = .{};
@@ -1692,7 +1704,7 @@ fn listMetadataIssues(context: Context) !void {
             if (std.mem.eql(u8, argument, "--limit")) limit = value else offset = value;
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var page = try runtime.libraryMetadataIssuePage(library, context.allocator, category, limit, offset);
@@ -1739,7 +1751,7 @@ fn applyMetadataIssue(context: Context) !void {
             tracks = try parseTrackIds(context.allocator, argument["--tracks=".len..]);
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const changed = try runtime.libraryApplyMetadataIssues(library, &.{.{
@@ -1752,7 +1764,7 @@ fn applyMetadataIssue(context: Context) !void {
 
 fn skipMetadataIssue(context: Context) !void {
     const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     try runtime.librarySkipMetadataIssue(library, group_id);
@@ -1773,7 +1785,7 @@ fn listDuplicateGroups(context: Context) !void {
             if (std.mem.eql(u8, argument, "--limit")) limit = value else offset = value;
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var page = try runtime.libraryDuplicateGroupPage(library, context.allocator, limit, offset);
@@ -1794,7 +1806,7 @@ fn listDuplicateGroups(context: Context) !void {
 }
 
 fn showDuplicateGroup(context: Context, group_id: i64) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var copies = try runtime.libraryDuplicateGroup(library, context.allocator, group_id);
@@ -1831,7 +1843,7 @@ fn showDuplicateGroup(context: Context, group_id: i64) !void {
 fn mergeDuplicate(context: Context) !void {
     const keep = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const from = try std.fmt.parseInt(i64, context.arguments[2], 10);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const merged = try runtime.libraryMergeDuplicateMetadata(library, keep, from);
@@ -1847,7 +1859,7 @@ fn mergeDuplicate(context: Context) !void {
 fn keepBothDuplicates(context: Context) !void {
     const file_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const other_file_id = try std.fmt.parseInt(i64, context.arguments[2], 10);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryKeepBoth(library, file_id, other_file_id);
@@ -1856,7 +1868,7 @@ fn keepBothDuplicates(context: Context) !void {
 
 fn ignoreDuplicateGroup(context: Context) !void {
     const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryIgnoreDuplicateGroup(library, group_id);
@@ -1864,7 +1876,7 @@ fn ignoreDuplicateGroup(context: Context) !void {
 }
 
 fn analyzeFile(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const result = try runtime.libraryAnalyzeFile(library_handle, context.io, try absolutePath(context, context.arguments[1]));
@@ -1908,7 +1920,7 @@ fn listHealthIssues(context: Context) !void {
         }
     }
     if (summary and (kind != null or offset != null)) return error.SummaryWithPage;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try runtime.openLibrary(context.io, database_path);
     if (albums) {
@@ -1950,7 +1962,7 @@ fn listHealthIssues(context: Context) !void {
 }
 
 fn printLibraryStats(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const stats = try runtime.libraryStats(library_handle);
@@ -1986,7 +1998,7 @@ fn listenSettings(context: Context) !void {
             clear = true;
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     if (policy) |value| try runtime.librarySetListenPolicy(library, value);
@@ -2011,7 +2023,7 @@ fn providerCache(context: Context) !void {
         (if (std.mem.eql(u8, context.arguments[1], "--clear")) true else return error.UnknownOption)
     else
         false;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const size = if (clear) try runtime.libraryClearCache(library) else try runtime.libraryCacheSize(library);
@@ -2024,7 +2036,7 @@ fn providerCache(context: Context) !void {
 }
 
 fn listProviderSources(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     for (runtime.providerSources()) |source| {
         try context.stdout.print("{s}\t{s}\t{s}\t{s}\t{s}", .{ @tagName(source.id), source.name, source.url, source.licence, source.supplies });
@@ -2048,7 +2060,7 @@ fn printOptionalStat(stdout: *std.Io.Writer, key: []const u8, value: ?i64) !void
 fn dismissHealthIssue(context: Context) !void {
     const file_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const kind = std.meta.stringToEnum(liborca.HealthIssueKind, context.arguments[2]) orelse return error.UnknownHealthKind;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryDismissHealthIssue(library, file_id, kind);
@@ -2058,7 +2070,7 @@ fn dismissHealthIssue(context: Context) !void {
 fn restoreHealthIssue(context: Context) !void {
     const file_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const kind = std.meta.stringToEnum(liborca.HealthIssueKind, context.arguments[2]) orelse return error.UnknownHealthKind;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryRestoreHealthIssue(library, file_id, kind);
@@ -2066,7 +2078,7 @@ fn restoreHealthIssue(context: Context) !void {
 }
 
 fn listRoots(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var page = try runtime.libraryRootPage(library_handle, 512, 0);
@@ -2094,7 +2106,7 @@ fn printRoot(stdout: *std.Io.Writer, root: liborca.LibraryRoot) !void {
 /// what they leave unable to play, and whether each Release named can play.
 fn showAvailability(context: Context) !void {
     const stdout = context.stdout;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const availability = try runtime.libraryAvailability(library, context.io);
@@ -2120,7 +2132,7 @@ fn showAvailability(context: Context) !void {
 /// or one folder's subfolders with their totals and then its files.
 fn listFolders(context: Context) !void {
     const stdout = context.stdout;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     if (context.arguments.len == 1) {
@@ -2222,7 +2234,7 @@ fn playFolder(context: Context) !void {
         } else return error.UnknownOption;
     }
 
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     const library = try openBrowseLibrary(context.allocator, io, &runtime, context.arguments[0]);
@@ -2276,7 +2288,7 @@ fn playFolder(context: Context) !void {
 }
 
 fn removeRoot(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2288,7 +2300,7 @@ fn removeRoot(context: Context) !void {
 }
 
 fn relocateRoot(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2300,7 +2312,7 @@ fn relocateRoot(context: Context) !void {
 }
 
 fn undoTagWrite(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const group = try std.fmt.parseInt(u64, context.arguments[1], 10);
@@ -2317,7 +2329,7 @@ fn pruneBackups(context: Context) !void {
         if (!std.mem.startsWith(u8, option, "--older-than=")) return error.UnknownOption;
         break :days try std.fmt.parseInt(u64, option["--older-than=".len..], 10);
     } else 0;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const pruned = try runtime.pruneTagWriteBackups(
@@ -2356,7 +2368,7 @@ fn showChanges(context: Context) !void {
     if (forms > 1 or (force and export_path == null)) return error.UnknownOption;
     if (limit == 0 or limit > 512) return error.PageOutOfRange;
 
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     if (group_id) |id| return printChangeDetail(context, &runtime, library, id);
@@ -2395,7 +2407,7 @@ fn exportChanges(context: Context, runtime: *liborca.Runtime, library: liborca.L
 }
 
 fn listDevices(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     var devices: [32]liborca.Device = undefined;
     const count = try runtime.enumerateOutputDevices(&devices, .capabilities);
@@ -2439,7 +2451,7 @@ fn playFile(context: Context) !void {
         try std.fmt.parseInt(u64, context.arguments[1], 10)
     else
         0;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const player = try runtime.createPlayer();
     const zone = try runtime.createZone();
@@ -2483,7 +2495,7 @@ fn requireOutput(runtime: *liborca.Runtime, zone: liborca.ZoneHandle) !void {
 }
 
 fn acceptMatch(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const proposal_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2492,7 +2504,7 @@ fn acceptMatch(context: Context) !void {
 }
 
 fn applyMatchedRelease(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2519,7 +2531,7 @@ fn applyMatchedRelease(context: Context) !void {
 }
 
 fn markReleaseReviewed(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2529,7 +2541,7 @@ fn markReleaseReviewed(context: Context) !void {
 }
 
 fn unmarkReleaseReviewed(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2539,7 +2551,7 @@ fn unmarkReleaseReviewed(context: Context) !void {
 
 fn printReleaseAlignment(context: Context) !void {
     const stdout = context.stdout;
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2580,7 +2592,7 @@ fn printReleaseAlignment(context: Context) !void {
 }
 
 fn pairTrack(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2591,7 +2603,7 @@ fn pairTrack(context: Context) !void {
 }
 
 fn unpairTrack(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2613,7 +2625,7 @@ fn parseReleaseFields(argument: []const u8) !liborca.ReleaseFieldSet {
 }
 
 fn dismissMatch(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const proposal_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -2625,7 +2637,7 @@ fn acceptConfidentMatches(context: Context) !void {
     const option = context.arguments[1];
     if (!std.mem.startsWith(u8, option, "--min-score=")) return error.UnknownOption;
     const minimum = try std.fmt.parseFloat(f32, option["--min-score=".len..]);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const acceptance = try runtime.libraryAcceptConfidentMatches(library, minimum);
@@ -2952,7 +2964,7 @@ fn playTracks(context: Context) !void {
     if (id_list == null and options.playlist_id == null) return error.NoTrackIds;
 
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     const library = try runtime.openLibrary(io, database_path);
@@ -3165,7 +3177,7 @@ fn resumePlayback(context: Context) !void {
         } else return error.UnknownOption;
     }
 
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     const library = try openBrowseLibrary(context.allocator, io, &runtime, context.arguments[0]);
@@ -3545,7 +3557,7 @@ fn editTracks(context: Context) !void {
     }
 
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try runtime.openLibrary(io, database_path);
     if (genres) |names| {
@@ -3577,7 +3589,7 @@ fn showTrackFields(context: Context) !void {
     const stdout = context.stdout;
     var ids = try parseTrackIds(allocator, context.arguments[1]);
     defer ids.deinit(allocator);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const states = try runtime.libraryTrackFieldStates(library, ids.items);
@@ -3622,7 +3634,7 @@ fn writeTags(context: Context) !void {
     }
 
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try runtime.openLibrary(io, database_path);
     const plan = try runtime.planTagWrite(library, io, ids.items);
@@ -3657,7 +3669,11 @@ fn writeTags(context: Context) !void {
     const job_handle = try runtime.startTagWrite(library, plan.plan_id, digest);
     awaitJob(&runtime, stdout, job_handle, null) catch |err| {
         if (err == error.JobFailed) if (try runtime.jobTagWriteFailure(job_handle)) |failure| {
-            try stdout.print("failed\t{d}\t{t}\t{s}\n", .{ failure.file_id, failure.reason, plan.files[failure.action_index].path });
+            if (failure.file) |file| {
+                try stdout.print("failed\t{d}\t{t}\t{s}\n", .{ file.file_id, failure.reason, plan.files[file.action_index].path });
+            } else {
+                try stdout.print("failed\t-\t{t}\t-\n", .{failure.reason});
+            }
             try stdout.flush();
         };
         return err;
@@ -3687,7 +3703,7 @@ fn showTrack(context: Context) !void {
     const database_path_argument = context.arguments[0];
     const id_argument = context.arguments[1];
     const track_id = try std.fmt.parseInt(i64, id_argument, 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const details = (try runtime.libraryTrackDetails(library, track_id)) orelse
@@ -3944,7 +3960,7 @@ fn scrobble(context: Context) !void {
     var credentials: EnvironmentCredentials = try .init(allocator, environ);
     defer credentials.deinit(allocator);
 
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     try runtime.setCredentialStore(credentials.store());
@@ -4020,7 +4036,7 @@ fn setFeedback(context: Context) !void {
         return error.UnknownOption;
     var ids = try parseTrackIds(allocator, id_list);
     defer ids.deinit(allocator);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const change = try runtime.librarySetFeedback(library, ids.items, feedback);
@@ -4043,7 +4059,7 @@ fn setRating(context: Context) !void {
         return error.UnknownOption;
     var ids = try parseTrackIds(allocator, context.arguments[1]);
     defer ids.deinit(allocator);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const change = try runtime.librarySetRating(library, ids.items, rating);
@@ -4060,7 +4076,7 @@ fn setReleaseLove(context: Context) !void {
         return error.UnknownOption;
     var ids = try parseTrackIds(allocator, context.arguments[1]);
     defer ids.deinit(allocator);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const change = try runtime.librarySetReleaseLove(library, ids.items, loved);
@@ -4077,7 +4093,7 @@ fn setArtistLove(context: Context) !void {
         return error.UnknownOption;
     var ids = try parseTrackIds(allocator, context.arguments[1]);
     defer ids.deinit(allocator);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const change = try runtime.librarySetArtistLove(library, ids.items, loved);
@@ -4112,7 +4128,7 @@ fn listPlaylists(context: Context) !void {
             }
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     while (true) {
@@ -4165,7 +4181,7 @@ fn showPlaylist(context: Context) !void {
     const options = try parseBrowseOptions(context.arguments[2..]);
     if (options.artist_id != null or options.release_id != null or options.filter.len != 0 or
         options.genre_id != null or options.descending or options.sort != null) return error.UnknownOption;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const playlist = try runtime.libraryPlaylist(library, playlist_id);
@@ -4227,7 +4243,7 @@ fn updatePlaylist(context: Context) !void {
     if (tags_given) update.tags = tags.items;
     if (update.description == null and update.pinned == null and update.loved == null and update.tags == null)
         return error.NoPlaylistUpdate;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryUpdatePlaylist(library, playlist_id, update);
@@ -4246,7 +4262,7 @@ fn readRulesFile(context: Context, path: []const u8) ![]u8 {
 fn createSmartPlaylist(context: Context) !void {
     const allocator = context.allocator;
     const rules = try readRulesFile(context, context.arguments[2]);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const playlist_id = try runtime.libraryCreateSmartPlaylist(library, context.arguments[1], rules);
@@ -4257,7 +4273,7 @@ fn smartPlaylistRules(context: Context) !void {
     const allocator = context.allocator;
     const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const replacement = if (context.arguments.len == 3) try readRulesFile(context, context.arguments[2]) else null;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     if (replacement) |rules| try runtime.librarySetSmartPlaylistRules(library, playlist_id, rules);
@@ -4276,7 +4292,7 @@ fn smartPlaylistCount(context: Context) !void {
         sample_limit = try std.fmt.parseInt(u32, argument["--sample=".len..], 10);
     }
     const rules = try readRulesFile(context, context.arguments[1]);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const preview = try runtime.librarySmartPlaylistPreview(library, allocator, rules, sample_limit);
@@ -4291,7 +4307,7 @@ fn smartPlaylistCount(context: Context) !void {
 
 fn createPlaylist(context: Context) !void {
     const allocator = context.allocator;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const playlist_id = try runtime.libraryCreatePlaylist(library, context.arguments[1]);
@@ -4301,7 +4317,7 @@ fn createPlaylist(context: Context) !void {
 fn renamePlaylist(context: Context) !void {
     const allocator = context.allocator;
     const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryRenamePlaylist(library, playlist_id, context.arguments[2]);
@@ -4310,7 +4326,7 @@ fn renamePlaylist(context: Context) !void {
 fn deletePlaylist(context: Context) !void {
     const allocator = context.allocator;
     const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryDeletePlaylist(library, playlist_id);
@@ -4326,7 +4342,7 @@ fn addToPlaylist(context: Context) !void {
         if (!std.mem.startsWith(u8, argument, "--at=")) return error.UnknownOption;
         at = try std.fmt.parseInt(u32, argument["--at=".len..], 10);
     }
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const insertion = try runtime.libraryPlaylistInsert(library, playlist_id, ids.items, at);
@@ -4345,7 +4361,7 @@ fn removeFromPlaylist(context: Context) !void {
         try positions.append(allocator, try std.fmt.parseInt(u32, trimmed, 10));
     }
     if (positions.items.len == 0) return error.NoPositions;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const removed = try runtime.libraryPlaylistRemove(library, playlist_id, positions.items);
@@ -4357,7 +4373,7 @@ fn moveInPlaylist(context: Context) !void {
     const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const from = try std.fmt.parseInt(u32, context.arguments[2], 10);
     const to = try std.fmt.parseInt(u32, context.arguments[3], 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     try runtime.libraryPlaylistMove(library, playlist_id, from, to);
@@ -4371,7 +4387,7 @@ fn importPlaylist(context: Context) !void {
         if (!std.mem.startsWith(u8, argument, "--name=")) return error.UnknownOption;
         name = argument["--name=".len..];
     }
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const imported = try runtime.libraryImportPlaylist(library, context.io, context.arguments[1], name);
@@ -4396,7 +4412,7 @@ fn exportPlaylist(context: Context) !void {
             options.replace = true;
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const exported = try runtime.libraryExportPlaylist(library, context.io, playlist_id, context.arguments[2], options);
@@ -4450,7 +4466,7 @@ fn matchLibrary(context: Context) !void {
     if (options.batch_size) |batch_size| request.batch_size = batch_size;
     if (options.limit) |limit| request.limit = limit;
     if (options.no_fingerprints) request.fingerprints = false;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     if (environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
@@ -4563,7 +4579,7 @@ fn fetchCoverArt(context: Context) !void {
     const stdout = context.stdout;
     const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const command = try CoverArtCommand.parse(context.arguments[2..]);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     try configureCoverArtArchive(allocator, &runtime, context.environ);
@@ -4676,7 +4692,7 @@ fn showArtistInfo(context: Context) !void {
         } else return error.UnknownOption;
     }
     if (!fetch and (options.force or options.offline or options.include_releases)) return error.UnknownOption;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     if (fetch) {
         try identifyOrca(&runtime);
@@ -4773,7 +4789,7 @@ fn writeRelatedArtists(runtime: *liborca.Runtime, stdout: *std.Io.Writer, librar
 /// `orca-cli related DATABASE ARTIST_ID`
 fn showRelatedArtists(context: Context) !void {
     const artist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     try writeRelatedArtists(&runtime, context.stdout, library, artist_id);
@@ -4798,7 +4814,7 @@ fn showReleaseInfo(context: Context) !void {
         } else return error.UnknownOption;
     }
     if (!fetch and (options.force or options.offline)) return error.UnknownOption;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     if (fetch) {
         try identifyOrca(&runtime);
@@ -4835,7 +4851,7 @@ fn showReleaseInfo(context: Context) !void {
 
 /// `orca-cli genre-fill DATABASE [on|off]`
 fn genreFill(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     if (context.arguments.len == 2) {
@@ -4867,7 +4883,7 @@ fn fillGenres(context: Context) !void {
             options.limit = try std.fmt.parseInt(u32, context.arguments[index], 10);
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     try configureArtistInfo(allocator, &runtime, context.environ);
@@ -4889,7 +4905,7 @@ fn saveArtistPhoto(context: Context) !void {
     const argument = context.arguments[2];
     if (!std.mem.startsWith(u8, argument, "--out=")) return error.UnknownOption;
     const path = argument["--out=".len..];
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
     const photo = (try runtime.libraryArtistPhoto(library, artist_id)) orelse return error.NoArtistPhoto;
@@ -4906,7 +4922,7 @@ fn saveRelatedArtistPhoto(context: Context) !void {
     const argument = context.arguments[2];
     if (!std.mem.startsWith(u8, argument, "--out=")) return error.UnknownOption;
     const path = argument["--out=".len..];
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
     const photo = (try runtime.libraryRelatedArtistPhoto(library, context.arguments[1])) orelse return error.NoArtistPhoto;
@@ -4934,7 +4950,7 @@ fn saveReleaseGroupCover(context: Context) !void {
     const argument = context.arguments[2];
     if (!std.mem.startsWith(u8, argument, "--out=")) return error.UnknownOption;
     const path = argument["--out=".len..];
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
     _ = try runtime.libraryRequestArtwork(library, io, .{ .release_group = mbid[0..36].* });
@@ -4955,7 +4971,7 @@ fn showLyrics(context: Context) !void {
     const stdout = context.stdout;
     const track_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const options = try parseJobOptions(context.arguments[2..], &.{.fetch});
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     if (options.fetch) {
         try identifyOrca(&runtime);
@@ -5029,7 +5045,7 @@ fn verifyLibrary(context: Context) !void {
     };
     if (options.batch_size) |batch_size| request.batch_size = batch_size;
     if (options.limit) |limit| request.limit = limit;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     if (context.environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
@@ -5070,7 +5086,7 @@ fn verifyLibrary(context: Context) !void {
 fn listCorrections(context: Context) !void {
     const stdout = context.stdout;
     const options = try parseBrowseOptions(context.arguments[1..]);
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const page = try runtime.libraryCorrectionGroups(library, context.allocator, options.limit, options.offset);
@@ -5095,7 +5111,7 @@ fn writePosition(stdout: *std.Io.Writer, disc: anytype, track: anytype) !void {
 }
 
 fn acceptCorrection(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -5104,7 +5120,7 @@ fn acceptCorrection(context: Context) !void {
 }
 
 fn dismissCorrection(context: Context) !void {
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
@@ -5119,7 +5135,7 @@ fn printFingerprint(context: Context) !void {
     const database_path_argument = context.arguments[0];
     const id_argument = context.arguments[1];
     const track_id = try std.fmt.parseInt(i64, id_argument, 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const outcome = try runtime.libraryTrackFingerprint(library, io, track_id) orelse return error.NoPresentFile;
@@ -5137,14 +5153,17 @@ fn submitAcoustId(context: Context) !void {
     const options = try parseJobOptions(option_arguments, &.{.dry_run});
     var credentials: EnvironmentCredentials = try .init(allocator, environ);
     defer credentials.deinit(allocator);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
     try runtime.setCredentialStore(credentials.store());
     try configureAcoustId(allocator, &runtime, environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     try stdout.print("{d} files to submit\n", .{try runtime.libraryAcoustIdSubmittableCount(library)});
-    if (options.dry_run) return listSubmittable(&runtime, library, stdout);
+    if (options.dry_run) {
+        try stdout.print("submitted_total={d}\n", .{try runtime.libraryAcoustIdSubmittedCount(library)});
+        return listSubmittable(&runtime, library, stdout);
+    }
     try stdout.flush();
 
     const job_handle = try runtime.startAcoustIdSubmission(library);
@@ -5164,11 +5183,13 @@ fn submitAcoustId(context: Context) !void {
             stats.requests,
         },
     );
+    try stdout.print("submitted_total={d}\n", .{try runtime.libraryAcoustIdSubmittedCount(library)});
     try stdout.flush();
     return switch (stats.outcome) {
         .completed, .cancelled => {},
         .needs_user_key => error.NeedsAcoustIdUserKey,
         .invalid_user_key => error.InvalidAcoustIdUserKey,
+        .credential_unavailable => error.AcoustIdUserKeyUnreadable,
         .needs_client_key, .invalid_client_key => error.InvalidAcoustIdClientKey,
         .unavailable => error.SubmissionStopped,
         .busy => error.AcoustIdInUse,
@@ -5228,7 +5249,7 @@ fn listReleaseMatches(context: Context) !void {
             offset = try std.fmt.parseInt(u32, argument["--offset=".len..], 10);
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const buckets: []const liborca.ReleaseMatchBucket = if (bucket) |one| &.{one} else &.{ .confident, .needs_review, .unmatched };
@@ -5272,7 +5293,7 @@ fn reviewReleaseMatch(context: Context) !void {
             candidate = argument["--candidate=".len..];
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(context.allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     switch (action orelse return error.MissingReleaseAction) {
@@ -5320,7 +5341,7 @@ fn listTrackMatches(context: Context) !void {
     const database_path_argument = context.arguments[0];
     const id_argument = context.arguments[1];
     const track_id = try std.fmt.parseInt(i64, id_argument, 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const page = try runtime.libraryMatchProposals(library, track_id, 512);
@@ -5420,7 +5441,7 @@ fn showArtwork(context: Context) !void {
     if (release_id == null and (kind != null or set_path != null or clear)) return error.UnknownOption;
     if (set_path != null and clear) return error.UnknownOption;
 
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     if (set_path) |path| {
@@ -5472,7 +5493,7 @@ fn listGenres(context: Context) !void {
         .name => .name,
         .track_count => .track_count,
     };
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     var page = try runtime.libraryGenrePage(library, .{
@@ -5506,7 +5527,7 @@ fn showGenre(context: Context) !void {
     const allocator = context.allocator;
     const stdout = context.stdout;
     const genre_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const genre = (try runtime.libraryGenre(library, genre_id)) orelse return error.GenreNotFound;
@@ -5543,7 +5564,7 @@ fn listArtists(context: Context) !void {
         } else try option_arguments.append(allocator, argument);
     }
     const options = try parseBrowseOptions(option_arguments.items);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const sort: liborca.ArtistSort = if (options.sort != null and std.mem.eql(u8, options.sort.?, "loved"))
@@ -5599,7 +5620,7 @@ fn loadCovers(context: Context) !void {
     const database_path_argument = context.arguments[0];
     const option_arguments = context.arguments[1..];
     const options = try parseBrowseOptions(option_arguments);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     var page = try runtime.libraryReleasePage(library, .{
@@ -5738,7 +5759,7 @@ fn listReleases(context: Context) !void {
         std.meta.stringToEnum(liborca.ReleaseSort, key) orelse return error.UnknownOption
     else
         .title;
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const query: liborca.ReleaseQuery = .{
@@ -5820,7 +5841,7 @@ fn searchLibrary(context: Context) !void {
             }
         } else return error.UnknownOption;
     }
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     var results = try runtime.librarySearch(library, context.arguments[1], limits);
@@ -5930,7 +5951,7 @@ fn listTracks(context: Context) !void {
     defer browse_arguments.deinit(allocator);
     const filters = try parseTrackFilters(context.arguments[1..], &browse_arguments, allocator);
     const options = try parseBrowseOptions(browse_arguments.items);
-    var runtime = liborca.Runtime.init(allocator);
+    var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const query: liborca.TrackQuery = .{
@@ -6206,7 +6227,7 @@ fn printScanCounters(
     stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
-        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d} missing={d}\n",
+        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d} missing={d}",
         .{
             stats.files_seen,
             stats.changed,
@@ -6217,4 +6238,6 @@ fn printScanCounters(
             stats.marked_missing,
         },
     );
+    if (stats.symlinks_skipped != 0) try stdout.print(" symlinks_skipped={d}", .{stats.symlinks_skipped});
+    try stdout.writeAll("\n");
 }

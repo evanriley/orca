@@ -300,7 +300,7 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   [metadata.md](metadata.md).
 - Jobs: `orca_library_start_scan`, `orca_library_start_projection`,
   `orca_library_start_reconcile`, `orca_library_start_analysis`,
-  `orca_job_snapshot_get`, `orca_job_cancel`, `orca_library_scan_stats_v2`,
+  `orca_job_snapshot_get`, `orca_job_cancel`, `orca_library_scan_stats_v3`,
   `orca_job_origin_get`, `orca_job_reconcile_root`. Scan progress has `has_total
   = 0` until the count of files is done. See [analysis.md](analysis.md#threads).
 - Watching: `orca_library_watch`, `orca_library_unwatch`,
@@ -319,7 +319,9 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_player_queue_move`, `orca_player_query_queue_tracks`,
   `orca_player_query_queue_history`, `orca_player_save_queue_as_playlist`.
   `orca_player_query_queue_tracks` calls back once per queue position from
-  `offset`; an entry whose Track was removed from the Library sets
+  `offset`, reading each entry from the Library it was queued from, and
+  `orca_player_query_queue_history` once per history entry from `offset`. An
+  entry whose Track left its Library, or whose Library is closed, sets
   `orca_track_view.removed` and carries only its `id`. The entry playing and
   the one lined up after it cannot be removed or moved
   (`ORCA_STATUS_INVALID_STATE`). A Track on an unavailable root fails with
@@ -382,8 +384,11 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   writes the library, never a file.
 - AcoustID submission: `orca_library_start_acoustid_submission`,
   `orca_job_submission_stats`, `orca_library_acoustid_submittable_count`,
+  `orca_library_acoustid_submitted_count`,
   `orca_library_query_acoustid_submittable`. It cannot run beside a matching
-  job. A missing user key is `ORCA_SUBMISSION_OUTCOME_NEEDS_USER_KEY`.
+  job. A missing user key is `ORCA_SUBMISSION_OUTCOME_NEEDS_USER_KEY`; a
+  credential callback answering `UNAVAILABLE` or `TOO_LARGE` is
+  `ORCA_SUBMISSION_OUTCOME_CREDENTIAL_UNAVAILABLE`.
 - Idle maintenance: `orca_library_set_maintenance`,
   `orca_library_maintenance_status`. Units start from `orca_runtime_pump` as
   `ORCA_JOB_KIND_METADATA_LOOKUP` jobs the host never started. See
@@ -406,6 +411,12 @@ processed audio still playing. While a view is on screen and playback runs, it
 re-reads the path every 250 ms until that processing clears. It also re-reads
 it up to eight times after an output starts or the popover opens while the
 device has not reported its rate or format.
+
+The Queue page shows an entry whose Track left the Library as "Removed from
+library", dimmed, in its own position in Up Next and History, and Now Playing
+does the same in its Up Next list. Its Up Next menu offers only Remove from
+Queue and Save Queue as Playlist…; it has no Track menu, Play Next or Love, and
+activating it does not play.
 
 Run it from the tree:
 
@@ -509,14 +520,16 @@ The first argument is the page (`albums`, `artists`, `tracks`, `genres`,
 each. The PNG is written once two consecutive frames match.
 
 The library is `ORCA_LIBRARY` when set, else `fixtures/library/design.db`, which
-`scripts/design-fixture.sh` builds when missing. The app opens a copy named
-`Main.db`, so a run never changes it. With `ORCA_HEADLESS_LIBRARY=settings` and
-`ORCA_HEADLESS_CONFIG`, the app opens in place the library that directory's
+`scripts/design-fixture.sh` builds when missing or when this build cannot
+open it. The app opens a copy named `Main.db`, so a run never changes it. With
+`ORCA_HEADLESS_LIBRARY=settings` and `ORCA_HEADLESS_CONFIG`, the app opens in place the library that directory's
 `orca/settings.ini` chooses, and the `db:` step is refused. Settings start empty
 and are discarded with the session; set `ORCA_HEADLESS_CONFIG` to a directory to
 keep them as `XDG_CONFIG_HOME` across runs. `ORCA_HEADLESS_TMPDIR` (default
 `/tmp`) holds the runtime directory; a path inside the user's runtime directory,
-or one too long for a Wayland socket, is refused.
+or one too long for a Wayland socket, is refused. `ORCA_HEADLESS_MUSICBRAINZ_URL`,
+`ORCA_HEADLESS_ACOUSTID_URL` and `ORCA_HEADLESS_COVERARTARCHIVE_URL` point those
+providers at another server, such as a local mock, instead of the closed port.
 
 ## Listening from a host
 

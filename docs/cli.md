@@ -4,7 +4,11 @@ This file covers `orca-cli`, the command-line client of liborca's public Zig
 API: build and verification commands, every `orca-cli` command with its output
 format, environment variables, playlist and rating commands, and how to verify
 playback without real audio hardware. Running `orca-cli` with no command, an
-unknown command or a wrong argument count prints the usage.
+unknown command or a wrong argument count prints the usage to standard error
+and exits with status 2. `orca-cli --help` prints it to standard output and
+exits 0. A command that fails, including one given an unknown option or a bad
+option value, prints `orca-cli: REASON` to standard error and exits with
+status 1.
 
 ## Build and verification commands
 
@@ -37,7 +41,7 @@ zig build run -- demo
 zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown), then `rates=44100-384000 depths=16,24,32 channels=2 state=active|suspended|unavailable`, or `rates=- depths=- channels=- state=unknown` when PipeWire did not answer within 500 ms; the silent sink is virtual
 
 # library
-zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file again, skipping none; `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters
+zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file again, skipping none; `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters, ending in `symlinks_skipped=N` when the walk passed over symbolic links
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
 zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N volume= last_seen_at=
 zig build run -- availability DATABASE [RELEASE_ID...]   # offline_roots= unavailable_tracks= unavailable_releases=, an `offline` line per root, then release= available=yes|no
@@ -90,7 +94,7 @@ zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers v
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--album=…] [--album-artist=…] [--date=…] [--track=N] [--disc=N] [--compilation=0|1] [--recording-id=MBID] [--composer=…] [--comment=…] [--explicit=yes|no|clean] [--genre=A;B] [--clear=FIELD]…   # library only; no edits lists the values held; FIELD is a metadata field name such as album_artist or musicbrainz_recording_id, or genre
 zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|chosen|embedded|folder|fetched file= mime= tracks=N/M`
-zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS; `skip FILE_ID REASON PATH` for each file left out, `failed FILE_ID REASON PATH` for the file a failed write stopped at; a read-only file is never changed (file_read_only)
+zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS; `skip FILE_ID REASON PATH` for each file left out, `failed FILE_ID REASON PATH` for the file a failed write stopped at, or `failed - REASON -` when it failed before reaching a file; a read-only file is never changed (file_read_only)
 zig build run -- undo-tags DATABASE GROUP   # refuses, changing nothing, while a file to restore is read-only
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes cannot be undone
 zig build run -- changes DATABASE [--limit N] [--offset N]   # tag writes newest first: group= written_at= files= state=applied|undoing|undone|rolled_back|failed|needs_reconciliation can_undo=yes|no expired=yes|no title=; reads the journal only
@@ -189,7 +193,8 @@ zig build run -- release-group-cover DATABASE MBID --out=PATH   # a release grou
 zig build run -- release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline] [--lang=xx]   # description=, release-group=, outcome=
 
 # AcoustID submission of recording IDs from accepted matches or edits -- user key
-# from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing
+# from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing;
+# prints submitted_total=, the files and recording IDs AcoustID has accepted
 zig build run -- submit-acoustid DATABASE [--dry-run]
 ```
 
@@ -237,11 +242,13 @@ not hold the default sink.
 headless sway session, drives it and saves screenshots; it never opens a window
 on the desktop.
 
-Host-dependent checks excluded from the normal test run:
+Host-dependent checks excluded from the normal test run. `ID` is the device id
+printed by `scripts/silent-sink.sh`; the smoke also reads `ORCA_TEST_DEVICE`, and
+refuses a missing, unknown or non-virtual device:
 
 ```sh
 zig build dependency-smoke      # Linux foreign-library linking pattern
-zig build pipewire-live-smoke   # opens a short silent stream on the user's PipeWire server
+zig build pipewire-live-smoke -- ID   # opens a short stream on the silent sink ID
 ```
 
 Unit and integration tests need no audio server. The C ABI smoke test
