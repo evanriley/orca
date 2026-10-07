@@ -411,6 +411,21 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
+- The scanner skips a directory entry whose type the filesystem does not
+  report (`DT_UNKNOWN`) and does not count it, so on such a filesystem the
+  files and folders behind those entries are never scanned.
+- `libraryStats` takes `last_analysis_at` from the newest `analysis_results`
+  row of any kind, so a fingerprint stored by matching or a kind 4 verdict
+  counts as an analysis measurement.
+- Matching and AcoustID submission fingerprint a file with more than two
+  channels and store a kind 3 row for it, beside the verdict that records no
+  measurement for that file.
+- `orca-gtk` logs `Gtk-CRITICAL: Allocation width too small. Tried to
+  allocate 183x716, but AdwBin/GtkStack needs at least 214x716` at start,
+  and has logged `gtk_scrolled_window_get_vadjustment` and
+  `gtk_adjustment_get_value` assertions.
+- `watch_smoke` in `tests/c_abi_smoke.c` returns 210 when `./.zig-cache` does
+  not exist, as in a fresh tree built with `--cache-dir` elsewhere.
 
 ## Deferred formats
 
