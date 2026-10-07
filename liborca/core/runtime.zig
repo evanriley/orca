@@ -87,6 +87,7 @@ pub const MetadataIssueChoice = runtime_consistency.MetadataIssueChoice;
 pub const MetadataIssueStatus = runtime_consistency.MetadataIssueStatus;
 pub const MetadataIssueApplication = runtime_consistency.MetadataIssueApplication;
 pub const PlayStats = database.PlayStats;
+pub const AudioFeatures = database.AudioFeatures;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
 pub const RatingChange = database.RatingChange;
@@ -2093,6 +2094,14 @@ pub const OrcaRuntime = struct {
     /// How often the Track's file has been heard, and when last.
     pub fn libraryTrackPlayStats(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !PlayStats {
         return runtime_listens.libraryTrackPlayStats(self, library, track_id);
+    }
+
+    /// The tempo, key, onset rate, spectral centroid and Library-relative
+    /// energy the analysis estimated for the bytes the Track's file holds
+    /// now, or null when the Track does not exist or those bytes were not
+    /// measured. Read from the database alone.
+    pub fn libraryTrackAudioFeatures(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !?AudioFeatures {
+        return (try libraryDatabase(self, library)).audio_features.trackFeatures(track_id);
     }
 
     /// The Library's counts and sizes, and when it was last scanned and

@@ -22,10 +22,15 @@ state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
 [metadata.md](metadata.md#tag-write-files)). A Library with no file (in-memory)
 has none of them.
 
-`PRAGMA user_version` selects the schema. The current version is 1, created in
-one transaction by the `baseline` step. A database at version 0 gets the whole
-schema, version 1 opens unchanged, and any other `user_version`, negative or
-newer, is refused with `error.SchemaVersionTooNew` and left untouched.
+`PRAGMA user_version` selects the schema. The current version is 2. Each
+version has one step in `migrations.steps`: `baseline` creates version 1 and
+`v2` adds to it without rebuilding any table. `migrations.apply` runs every step
+after the database's version, and sets the new version, in one transaction, so
+a failed step leaves the database at its old version. A database at version 0
+gets the whole schema, version 1 is upgraded in place, version 2 opens
+unchanged, and any other `user_version`, negative or newer, is refused with
+`error.SchemaVersionTooNew` and left untouched. A Library at version 2 cannot be
+opened by Orca 0.2.0 or earlier.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
 
@@ -346,6 +351,23 @@ The tables by purpose; keys are those that carry identity or a contract.
   result, kept by triggers on `analysis_results` and counted only while its
   `source_identity` equals the file's content hash and the file records at most
   two channels.
+- `file_audio_features`: one row per file of tempo (`tempo_bpm`,
+  `tempo_confidence`), key (`key_pitch` 0–11 with C as 0, `key_mode` 0 major or
+  1 minor, `key_confidence`) and the energy inputs `onset_rate` and
+  `centroid_hz`, with the `source_identity` of the bytes measured. A NULL tempo
+  or key is an estimate below its confidence floor; `key_pitch` and `key_mode`
+  are NULL together. Triggers on `analysis_results` keep it: a kind 6
+  `orca.audio-features` version 1 result under the default parameter hash,
+  inserted or with its result updated, replaces the file's row with the decoded
+  fields, and deleting the result deletes the row with the same
+  `source_identity`. A result that is not 40 bytes, lacks the `ORAF` version 1
+  header, sets an unknown flag or holds a pitch above 11 or a mode above 1
+  leaves the file without a row; a valid result with no estimates stores a row
+  of NULLs. The row counts only while its `source_identity` equals the file's
+  content hash and the file records at most two channels. Energy is computed
+  from it at read time ([analysis.md](analysis.md#audio-features));
+  `file_audio_features_by_onset_rate`, `file_audio_features_by_centroid` and
+  `file_loudness_by_lufs` count the ranks it needs.
 - `library_health_issues`: issues keyed by file and kind. `related_file_id` is
   the other file of a duplicate and `similarity` the fingerprint score behind a
   `likely_duplicate`. `health_dismissals` `(file_id, kind)` stores the
@@ -412,6 +434,42 @@ are stored by number, so new states are appended and never reordered
 - `provider_cache`: a row whose `status` is not `200` is a refusal, answered as
   refused until it expires and never used as an answer.
 
+### Recommendations
+
+- `recommendation_feedback`: "Not for me", one row per Recording with
+  `created_at` and `expires_at`; `recommendation_feedback_by_expiry` serves
+  pruning of expired rows.
+- `daily_mixes`: one row per mix of the current day, `ordinal` unique and from
+  0. `kind` is 0 for a genre mix built around `genre_id` (NULL once that Genre
+  is gone) and 1 for the rarely-played mix. `local_day` is the local day the mix
+  was made for and `generated_at` the Unix time it was made. The explanation is
+  `signals` (a bit set of the scoring signals used) and the `left_out_*` counts
+  of candidates left out by reason (`recent`, `not_for_me`, `hated`, `live`,
+  `other_mix`, `diversity`); the makeup is `favorite_count`,
+  `rarely_played_count` and `never_played_count`.
+- `daily_mix_artists` (`WITHOUT ROWID`): a mix's top Artists by `position`,
+  going with the mix or the Artist.
+- `daily_mix_entries` (`WITHOUT ROWID`): a mix's Recordings by `position`,
+  going with the mix or the Recording; `daily_mix_entries_by_recording` serves
+  both cascades and removing a Recording from the day's mixes. Each entry has
+  up to two reason parts, `reason1_*` and `reason2_*`, each a `kind` and two
+  integer arguments `a` and `b`; a NULL kind is no part, and the second part
+  needs the first. Kinds are stored by number, so new kinds are appended and
+  never reordered:
+
+  | Kind | Reason | `a` | `b` |
+  | --- | --- | --- | --- |
+  | 0 | played | play count | last played, Unix seconds |
+  | 1 | loved | | |
+  | 2 | same artist | | |
+  | 3 | related artist | | |
+  | 4 | shared genre | Genre id | |
+  | 5 | often after | Recording or Artist id | 0 Recording, 1 Artist |
+  | 6 | similar sound | flags: 1 tempo, 2 key, 4 energy | |
+  | 7 | never played | | |
+  | 8 | rarely played | play count | |
+  | 9 | added | added at, Unix seconds | |
+
 ### Settings and history
 
 - `library_settings` (`WITHOUT ROWID`): the Library's own settings, never
@@ -426,7 +484,8 @@ are stored by number, so new states are appended and never reordered
 because a Track id changes when an edit reprojects it. `UNIQUE(file_id,
 started_at)` makes recording idempotent. A listen snapshots the title, artist,
 album, duration and recording MBID heard, and `ON DELETE SET NULL` on `file_id`
-and `recording_id` keeps it when its file or Recording goes.
+and `recording_id` keeps it when its file or Recording goes. `listens_by_time`
+orders listens by `started_at` across files.
 
 `recording_play_stats` holds each Recording's play count and latest
 `started_at`, keyed on `recordings.id` so plays follow the song. Two invariants
@@ -659,11 +718,11 @@ position of zero or a gone Track deletes the row ([api.md](api.md)).
 ## Backups and maintenance
 
 The Library file holds state that exists nowhere else: Orca values and locks,
-listens, ratings, feedback, playlists and loves. Everything derived (projection,
-analysis results, fetched provider data) is rebuilt by a scan, the analysis pass
-and provider jobs. Tag-write backups under `<database>.orca-backups` are pruned
-through `prunableBackups` and `clearBackupPath`
-([metadata.md](metadata.md#pruning-backups)).
+listens, ratings, feedback, "Not for me", playlists and loves. Everything
+derived (projection, analysis results, fetched provider data) is rebuilt by a
+scan, the analysis pass and provider jobs. Tag-write backups under
+`<database>.orca-backups` are pruned through `prunableBackups` and
+`clearBackupPath` ([metadata.md](metadata.md#pruning-backups)).
 
 ## Tests and benchmarks
 

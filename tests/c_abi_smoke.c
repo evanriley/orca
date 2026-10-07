@@ -5732,6 +5732,19 @@ int main(int argc, char **argv) {
                                       &play_stats) != ORCA_STATUS_OK ||
         play_stats.play_count != 0 || play_stats.has_last_played_at != 0)
         return 249;
+
+    /* The analysis stored every fixture's audio features; all are too short
+     * for a tempo or key. */
+    orca_audio_features features;
+    memset(&features, 0xff, sizeof features);
+    if (orca_library_track_audio_features(runtime, library, capture.first_playable_id,
+                                          &features) != ORCA_STATUS_OK ||
+        features.has_tempo != 0 || features.has_key != 0 || features.has_energy > 1 ||
+        (features.has_energy && (features.energy < 0.0 || features.energy > 1.0)))
+        return 620;
+    if (orca_library_track_audio_features(runtime, library, 999999999, &features) !=
+        ORCA_STATUS_NOT_FOUND)
+        return 621;
     uint64_t listens = 1;
     if (orca_library_listens_recorded(runtime, library, &listens) != ORCA_STATUS_OK ||
         listens != 0)

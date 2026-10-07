@@ -827,6 +827,36 @@ typedef struct orca_play_stats {
     uint8_t reserved[7];
 } orca_play_stats;
 
+typedef enum orca_key_mode {
+    ORCA_KEY_MODE_MAJOR = 0,
+    ORCA_KEY_MODE_MINOR = 1,
+} orca_key_mode;
+
+/* What the analysis estimated of the audio a Track plays. Every value is an
+ * approximation; present none as exact. Each `has_*` flag says whether its
+ * values are known. `tempo_confidence` and `key_confidence` run from 0 to 1.
+ * `key_pitch` is the tonic's pitch class, C = 0 through B = 11, and
+ * `key_mode` an orca_key_mode. `onset_rate` is note onsets per second and
+ * `centroid_hz` the mean spectral centroid. `energy`, 0 to 1, is the mean of
+ * the file's percentile ranks in the Library by integrated loudness, onset
+ * rate and centroid, over those it has, so it moves as the Library changes. */
+typedef struct orca_audio_features {
+    double tempo_bpm;
+    double tempo_confidence;
+    double key_confidence;
+    double onset_rate;
+    double centroid_hz;
+    double energy;
+    uint8_t key_pitch;
+    uint8_t key_mode;
+    uint8_t has_tempo;
+    uint8_t has_key;
+    uint8_t has_onset_rate;
+    uint8_t has_centroid;
+    uint8_t has_energy;
+    uint8_t reserved[1];
+} orca_audio_features;
+
 typedef struct orca_artist_totals {
     /* Summed over the Tracks `track_count` counts; a Track with no known
      * duration adds 0. */
@@ -2512,6 +2542,15 @@ orca_status orca_library_track_play_stats(
     orca_handle library,
     int64_t track_id,
     orca_play_stats *output
+);
+/* Writes the audio features the analysis estimated for the bytes the Track's
+ * file holds now. Reads the database alone. NOT_FOUND when no such Track
+ * exists or those bytes were not measured. */
+orca_status orca_library_track_audio_features(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    orca_audio_features *output
 );
 /* Listens recorded since the Library was opened: one atomic load, so a host
  * may poll it every tick to learn when to reread its history. */

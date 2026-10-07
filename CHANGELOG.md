@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Audio features: analysis estimates each file's tempo, key, onset rate and
+  spectral centroid, and `libraryTrackAudioFeatures`,
+  `orca_library_track_audio_features` and `orca-cli features` read them for a
+  Track with an energy figure ranked within the Library. The next analysis run
+  decodes every file once to measure them and reuses its other stored results.
+  Tempo comes from a mean-removed onset autocorrelation tempogram and key from
+  a harmonic pitch-salience chroma matched against the Albrecht–Shanahan
+  profiles. `zig build analysis-bench` times one file's analysis.
+
+### Changed
+
+- Library schema version 2. Opening a version 1 Library upgrades it in place
+  in one transaction, keeping every row, and adds an index on listen time and
+  tables for audio features, "Not for me" feedback and Daily Mixes. An
+  upgraded Library cannot be opened by 0.2.0.
+
 ## 0.2.0 - 2026-10-06
 
 Ships Library schema version 1, unchanged from 0.1.0. Breaking for the Zig

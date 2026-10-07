@@ -9,8 +9,8 @@ consistency pass and the health issue kinds.
 wants: integrated loudness (a gated ITU-R BS.1770 mean summing every channel's
 K-weighted energy with weight 1.0), a ReplayGain figure derived from it, sample
 peak, RMS, clipped samples, leading, trailing and total silence, a bucketed
-waveform, a temporal fingerprint with a decoded-audio hash, and the AcoustID
-fingerprint. `library/analysis_pass.zig` measures every file in a Library, so
+waveform, a temporal fingerprint with a decoded-audio hash, the AcoustID
+fingerprint and [audio features](#audio-features). `library/analysis_pass.zig` measures every file in a Library, so
 ReplayGain on playback and duplicate detection always have a measurement.
 Only mono and stereo are measured: a file with more than two channels fails
 with `UnsupportedChannelCount`, because equal channel weights would misstate a
@@ -50,6 +50,84 @@ fingerprint files the pass has not reached as they need them;
 `Runtime.libraryTrackFingerprint` and `orca-cli fingerprint` take one for a
 single Track.
 
+## Audio features
+
+`analysis/audio_features.zig` estimates a file's tempo, key, onset rate and
+spectral centroid in the same decode as the other measurements. It reads the
+first 600 s, mixes them to mono and resamples to 11,025 Hz with its own
+streaming polyphase Kaiser-windowed sinc filter (passband to 80 % of the lower
+Nyquist frequency, 60 dB stopband). Audio shorter than 15 s, or with no frame
+above a mean square of 1e-8, stores a result with every estimate unknown.
+
+- **Spectrum.** 2048-sample Hann frames every 512 samples (about 21.5 frames
+  per second), transformed by the KissFFT that Chromaprint vendors.
+- **Onset strength.** A 128-band mel spectrogram in decibels; each frame's
+  value is the mean positive difference from the previous frame across bands.
+- **Tempo.** An autocorrelation tempogram of the onset strength. Every fourth
+  frame centres an 8 s window; the window's mean is subtracted before its Hann
+  taper, and its autocorrelation is divided by its lag-0 value plus 1, so a
+  window whose onset strength barely varies contributes almost nothing. The
+  windows' mean is the tempogram. Each lag between 50 and 220 bpm whose own
+  value is positive scores its value plus half the value at twice the lag,
+  weighted by a log-normal prior centred on 130 bpm with a spread of 0.6
+  octaves. The best lag, refined by parabolic interpolation, is the tempo.
+  Its confidence is the tempogram's value at that lag minus its lowest value
+  in the range, capped at 1: 0 for a flat tempogram, 1 for a strict pulse.
+  Below 0.15 the tempo is unknown.
+- **Key.** 8192-sample Hann frames every 4096 samples with a mean square above
+  1e-8, binned to thirds of a semitone from E1. Each pitch's salience is the
+  sum of its first four harmonics, weighted 1, 0.8, 0.64 and 0.512. The
+  salience of pitches between 55 Hz and 2 kHz folds into a chroma vector
+  normalised to its loudest pitch class, and the file's mean chroma is
+  correlated with the Albrecht–Shanahan major and minor profiles in all twelve
+  rotations. The best match is the key; its confidence is the margin of its
+  correlation over the second best. The key is unknown only when no frame is
+  loud enough or the chroma is flat.
+- **Onset rate.** Peaks of the onset strength that exceed the mean of their
+  five-frame neighbourhood by 7 % of the envelope's range, at least two frames
+  apart, per second of audio read.
+- **Centroid.** The mean over audible frames of the magnitude-weighted mean
+  frequency, in hertz.
+
+Tempo and onset strength follow the algorithms of librosa (ISC licence)
+without copying its code. The differences:
+
+- The mel spectrogram is floored at a fixed -100 dB instead of librosa's
+  `top_db` relative to the loudest frame, so it streams.
+- Each tempogram window is mean-removed and normalised with a floor. librosa
+  normalises the raw window, whose positive mean dominates every lag and
+  leaves a nearly flat tempogram with no usable confidence.
+- The prior is centred on 130 bpm with 0.6 octaves instead of 120 bpm with
+  one octave, a lag must have positive autocorrelation of its own, and half
+  the value at twice the lag is added. Together these favour the beat level
+  that tagged tempos use over its double or half.
+- The tempogram is sampled at every fourth frame instead of every frame.
+- Onset peaks are picked with the constants above rather than librosa's
+  time-based windows.
+
+A result is stored in `analysis_results` as kind 6, `orca.audio-features`
+version 1, under a parameter hash of the stopband, window length and minimum
+length, and the content hash of the bytes measured. The stored result is 40
+bytes: `ORAF`, a format version, flags for which estimates are known, then the
+estimates as scaled little-endian integers. Triggers copy a result under the
+default parameter hash into `file_audio_features`
+([database.md](database.md#analysis-and-health)). A file with no features
+stored for its bytes owes work, so a Library whose files hold only the other
+measurements has every file decoded once by its next analysis run, which
+reuses the other stored results.
+
+`Runtime.libraryTrackAudioFeatures`, `orca_library_track_audio_features` and
+`orca-cli features` read a Track's features from its preferred file, under the
+file's recorded content hash. Energy is not stored: each read computes it as
+the mean of the file's percentile ranks in the Library by integrated loudness,
+onset rate and centroid, over those it has, so it moves as the Library
+changes. Every value is an estimate from a fixed algorithm, not a
+measurement of the recording's intent; a frontend presents none of them as
+exact.
+
+`zig build -Doptimize=ReleaseFast analysis-bench -- FILE` times one file's
+analysis with and without the features.
+
 ## The pass
 
 `library/analysis_pass.zig` measures every file in a Library that has not been
@@ -63,15 +141,15 @@ decode.
 
 ### What "already analyzed" means
 
-The selection key is the analysis cache key minus the file, for each of the two
-measurements the pass stores, the diagnostics and the temporal fingerprint
-(`analysis.service.analysisSelectors`):
+The selection key is the analysis cache key minus the file, for each of the
+three measurements the pass stores, the diagnostics, the temporal fingerprint
+and the audio features (`analysis.service.analysisSelectors`):
 
 ```
 kind, algorithm_id, algorithm_version, parameter_hash   +   source_identity
 ```
 
-A file owes work when, for either measurement, no `analysis_results` row exists
+A file owes work when, for any of the three measurements, no `analysis_results` row exists
 under that key with `source_identity = files.content_hash` and
 `files.content_hash_algorithm = 1`. A file with no recorded content hash always
 owes work. A changed byte stream (a scan that sees a changed inode, size or
@@ -108,7 +186,8 @@ analyzed count, whatever is stored for it.
 A batch commits in one bounded transaction.
 
 Measured files store the encoded diagnostics and temporal fingerprint; the
-AcoustID fingerprint unless the audio is too short; the decoded-audio hash in
+AcoustID fingerprint unless the audio is too short; the audio features unless
+their analyzer failed; the decoded-audio hash in
 `files.audio_hash` with its tier in `files.audio_hash_tier` (the only identity
 rung that survives Orca's own tag writes; see
 [the audio hash](#the-audio-hash)); `corrupt_audio` cleared; and `clipping`,
@@ -161,6 +240,16 @@ counts as a refusal only when no read had failed. A failed read, a missing or
 inaccessible file, cancellation and a file that changes during the decode
 record no verdict, so the next run examines the file again. A read that fails during the decode still raises `corrupt_audio`. The
 pass never raises `unreadable_file`, which belongs to the property backfill.
+
+Before a batch's decodes, the job's thread reads each file's stored
+diagnostics, temporal fingerprint, AcoustID fingerprint and audio features
+under its recorded content hash. When some but not all three measurements are
+stored, it hands them to the thread that measures the file.
+`Service.examineFile` reuses a stored result only when the content hash of the
+bytes it opens is the one the results were stored under, decodes the file
+once, and measures and stores only what is missing; issues and the audio hash
+come from the reused and measured results alike. A file selected with all
+three stored, and a file analysed on request, is measured whole.
 
 ### Threads
 

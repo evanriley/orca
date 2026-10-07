@@ -257,7 +257,9 @@ header; the Zig counterparts are in [api.md](api.md#surface).
 - Search and details: `orca_library_search` (hits grouped by kind, at most 50
   per kind through `orca_search_limits`, text at most 256 bytes),
   `orca_library_track_get`, `orca_library_track_details_v3`,
-  `orca_library_track_play_stats`, `orca_library_listens_recorded`,
+  `orca_library_track_play_stats`, `orca_library_track_audio_features`
+  (`ORCA_STATUS_NOT_FOUND` for an unknown or unmeasured Track; `has_*` flags
+  mark the known values), `orca_library_listens_recorded`,
   `orca_library_unanalyzed_count`, `orca_library_backfill_pending`.
 - Listen settings: `orca_library_set_listen_policy`,
   `orca_library_set_listen_recording`, `orca_library_clear_listens` (keeps

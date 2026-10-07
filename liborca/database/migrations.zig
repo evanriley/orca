@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 
-pub const current_version = 1;
+pub const current_version = 2;
 
 const baseline =
     \\CREATE TABLE volumes (
@@ -1106,7 +1106,172 @@ const baseline =
     \\CREATE INDEX job_history_finished ON job_history(finished_at, id);
 ;
 
-const steps = [_][:0]const u8{baseline};
+const v2 =
+    \\CREATE INDEX listens_by_time ON listens(started_at);
+    \\
+    \\CREATE TABLE file_audio_features (
+    \\    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    \\    source_identity BLOB NOT NULL,
+    \\    tempo_bpm REAL,
+    \\    tempo_confidence REAL,
+    \\    key_pitch INTEGER CHECK (key_pitch IS NULL OR key_pitch BETWEEN 0 AND 11),
+    \\    key_mode INTEGER CHECK (key_mode IS NULL OR key_mode IN (0, 1)),
+    \\    key_confidence REAL,
+    \\    onset_rate REAL,
+    \\    centroid_hz REAL,
+    \\    CHECK ((key_pitch IS NULL) = (key_mode IS NULL))
+    \\);
+    \\CREATE INDEX file_audio_features_by_tempo ON file_audio_features(tempo_bpm);
+    \\CREATE INDEX file_audio_features_by_onset_rate ON file_audio_features(onset_rate);
+    \\CREATE INDEX file_audio_features_by_centroid ON file_audio_features(centroid_hz);
+    \\CREATE TRIGGER analysis_results_features_ai AFTER INSERT ON analysis_results
+    \\WHEN new.kind = 6 AND new.algorithm_id = 'orca.audio-features'
+    \\  AND new.algorithm_version = 1
+    \\  AND new.parameter_hash = X'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E'
+    \\BEGIN
+    \\    DELETE FROM file_audio_features WHERE file_id = new.file_id;
+    \\    INSERT INTO file_audio_features(file_id, source_identity, tempo_bpm, tempo_confidence,
+    \\        key_pitch, key_mode, key_confidence, onset_rate, centroid_hz)
+    \\SELECT file_id, source_identity,
+    \\       CASE WHEN present & 1 THEN tempo / 1000.0 END,
+    \\       CASE WHEN present & 1 THEN tempo_confidence / 1000000.0 END,
+    \\       CASE WHEN present & 2 THEN key_pitch END,
+    \\       CASE WHEN present & 2 THEN key_mode END,
+    \\       CASE WHEN present & 2 THEN key_confidence / 1000000.0 END,
+    \\       CASE WHEN present & 4 THEN onset_rate / 1000000.0 END,
+    \\       CASE WHEN present & 8 THEN centroid / 1000.0 END
+    \\FROM (SELECT file_id, source_identity,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 13, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 14, 1)) - 1) + ((instr('0123456789ABCDEF', substr(digits, 15, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 16, 1)) - 1) << 8) AS present,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 17, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 18, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 19, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 20, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 21, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 22, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 23, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 24, 1)) - 1) << 24) AS tempo,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 25, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 26, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 27, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 28, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 29, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 30, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 31, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 32, 1)) - 1) << 24) AS tempo_confidence,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 33, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 34, 1)) - 1) AS key_pitch,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 35, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 36, 1)) - 1) AS key_mode,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 41, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 42, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 43, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 44, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 45, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 46, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 47, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 48, 1)) - 1) << 24) AS key_confidence,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 49, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 50, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 51, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 52, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 53, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 54, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 55, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 56, 1)) - 1) << 24) AS onset_rate,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 57, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 58, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 59, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 60, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 61, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 62, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 63, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 64, 1)) - 1) << 24) AS centroid
+    \\      FROM (SELECT new.file_id AS file_id, new.source_identity AS source_identity, hex(new.result) AS digits
+    \\            WHERE length(new.result) = 40 AND substr(new.result, 1, 6) = X'4F5241460100'))
+    \\WHERE present & ~15 = 0 AND key_pitch < 12 AND key_mode <= 1;
+    \\END;
+    \\CREATE TRIGGER analysis_results_features_au AFTER UPDATE OF result ON analysis_results
+    \\WHEN new.kind = 6 AND new.algorithm_id = 'orca.audio-features'
+    \\  AND new.algorithm_version = 1
+    \\  AND new.parameter_hash = X'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E'
+    \\BEGIN
+    \\    DELETE FROM file_audio_features WHERE file_id = new.file_id;
+    \\    INSERT INTO file_audio_features(file_id, source_identity, tempo_bpm, tempo_confidence,
+    \\        key_pitch, key_mode, key_confidence, onset_rate, centroid_hz)
+    \\SELECT file_id, source_identity,
+    \\       CASE WHEN present & 1 THEN tempo / 1000.0 END,
+    \\       CASE WHEN present & 1 THEN tempo_confidence / 1000000.0 END,
+    \\       CASE WHEN present & 2 THEN key_pitch END,
+    \\       CASE WHEN present & 2 THEN key_mode END,
+    \\       CASE WHEN present & 2 THEN key_confidence / 1000000.0 END,
+    \\       CASE WHEN present & 4 THEN onset_rate / 1000000.0 END,
+    \\       CASE WHEN present & 8 THEN centroid / 1000.0 END
+    \\FROM (SELECT file_id, source_identity,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 13, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 14, 1)) - 1) + ((instr('0123456789ABCDEF', substr(digits, 15, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 16, 1)) - 1) << 8) AS present,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 17, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 18, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 19, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 20, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 21, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 22, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 23, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 24, 1)) - 1) << 24) AS tempo,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 25, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 26, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 27, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 28, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 29, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 30, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 31, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 32, 1)) - 1) << 24) AS tempo_confidence,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 33, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 34, 1)) - 1) AS key_pitch,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 35, 1)) - 1) << 4) + (instr('0123456789ABCDEF', substr(digits, 36, 1)) - 1) AS key_mode,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 41, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 42, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 43, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 44, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 45, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 46, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 47, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 48, 1)) - 1) << 24) AS key_confidence,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 49, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 50, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 51, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 52, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 53, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 54, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 55, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 56, 1)) - 1) << 24) AS onset_rate,
+    \\           ((instr('0123456789ABCDEF', substr(digits, 57, 1)) - 1) << 4) + ((instr('0123456789ABCDEF', substr(digits, 58, 1)) - 1) << 0) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 59, 1)) - 1) << 12) + ((instr('0123456789ABCDEF', substr(digits, 60, 1)) - 1) << 8) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 61, 1)) - 1) << 20) + ((instr('0123456789ABCDEF', substr(digits, 62, 1)) - 1) << 16) +
+    \\               ((instr('0123456789ABCDEF', substr(digits, 63, 1)) - 1) << 28) + ((instr('0123456789ABCDEF', substr(digits, 64, 1)) - 1) << 24) AS centroid
+    \\      FROM (SELECT new.file_id AS file_id, new.source_identity AS source_identity, hex(new.result) AS digits
+    \\            WHERE length(new.result) = 40 AND substr(new.result, 1, 6) = X'4F5241460100'))
+    \\WHERE present & ~15 = 0 AND key_pitch < 12 AND key_mode <= 1;
+    \\END;
+    \\CREATE TRIGGER analysis_results_features_ad AFTER DELETE ON analysis_results
+    \\WHEN old.kind = 6 AND old.algorithm_id = 'orca.audio-features'
+    \\  AND old.algorithm_version = 1
+    \\  AND old.parameter_hash = X'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E'
+    \\BEGIN
+    \\    DELETE FROM file_audio_features WHERE file_id = old.file_id AND source_identity = old.source_identity;
+    \\END;
+    \\
+    \\CREATE TABLE recommendation_feedback (
+    \\    recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    created_at INTEGER NOT NULL,
+    \\    expires_at INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX recommendation_feedback_by_expiry ON recommendation_feedback(expires_at);
+    \\
+    \\CREATE TABLE daily_mixes (
+    \\    id INTEGER PRIMARY KEY,
+    \\    ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 0),
+    \\    kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+    \\    genre_id INTEGER REFERENCES genres(id) ON DELETE SET NULL,
+    \\    name TEXT NOT NULL,
+    \\    local_day INTEGER NOT NULL,
+    \\    generated_at INTEGER NOT NULL,
+    \\    signals INTEGER NOT NULL DEFAULT 0 CHECK (signals >= 0),
+    \\    left_out_recent INTEGER NOT NULL DEFAULT 0 CHECK (left_out_recent >= 0),
+    \\    left_out_not_for_me INTEGER NOT NULL DEFAULT 0 CHECK (left_out_not_for_me >= 0),
+    \\    left_out_hated INTEGER NOT NULL DEFAULT 0 CHECK (left_out_hated >= 0),
+    \\    left_out_live INTEGER NOT NULL DEFAULT 0 CHECK (left_out_live >= 0),
+    \\    left_out_other_mix INTEGER NOT NULL DEFAULT 0 CHECK (left_out_other_mix >= 0),
+    \\    left_out_diversity INTEGER NOT NULL DEFAULT 0 CHECK (left_out_diversity >= 0),
+    \\    favorite_count INTEGER NOT NULL DEFAULT 0 CHECK (favorite_count >= 0),
+    \\    rarely_played_count INTEGER NOT NULL DEFAULT 0 CHECK (rarely_played_count >= 0),
+    \\    never_played_count INTEGER NOT NULL DEFAULT 0 CHECK (never_played_count >= 0)
+    \\);
+    \\
+    \\CREATE TABLE daily_mix_artists (
+    \\    mix_id INTEGER NOT NULL REFERENCES daily_mixes(id) ON DELETE CASCADE,
+    \\    position INTEGER NOT NULL CHECK (position >= 0),
+    \\    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    \\    PRIMARY KEY(mix_id, position)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX daily_mix_artists_by_artist ON daily_mix_artists(artist_id);
+    \\
+    \\CREATE TABLE daily_mix_entries (
+    \\    mix_id INTEGER NOT NULL REFERENCES daily_mixes(id) ON DELETE CASCADE,
+    \\    position INTEGER NOT NULL CHECK (position >= 0),
+    \\    recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    reason1_kind INTEGER CHECK (reason1_kind IS NULL OR reason1_kind BETWEEN 0 AND 9),
+    \\    reason1_a INTEGER NOT NULL DEFAULT 0,
+    \\    reason1_b INTEGER NOT NULL DEFAULT 0,
+    \\    reason2_kind INTEGER CHECK (reason2_kind IS NULL OR reason2_kind BETWEEN 0 AND 9),
+    \\    reason2_a INTEGER NOT NULL DEFAULT 0,
+    \\    reason2_b INTEGER NOT NULL DEFAULT 0,
+    \\    CHECK (reason2_kind IS NULL OR reason1_kind IS NOT NULL),
+    \\    PRIMARY KEY(mix_id, position)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX daily_mix_entries_by_recording ON daily_mix_entries(recording_id);
+;
+
+const steps = [_][:0]const u8{ baseline, v2 };
 
 comptime {
     std.debug.assert(steps.len == current_version);
@@ -1827,4 +1992,168 @@ test "an audio hash tier is 1 or 2" {
         \\UPDATE files SET audio_hash = X'CC', audio_hash_tier = 2 WHERE id = 2;
     );
     try std.testing.expectError(error.SqlFailed, db.exec("UPDATE files SET audio_hash_tier = 3 WHERE id = 1;"));
+}
+
+fn atBaseline() !sqlite.Database {
+    const db = try sqlite.Database.open(":memory:");
+    errdefer db.close();
+    try db.exec(baseline);
+    try db.exec("PRAGMA user_version=1;");
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two');
+        \\INSERT INTO files(id, recording_id, audio_format, size_bytes) VALUES (1, 1, 1, 10), (2, 2, 1, 10);
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist)
+        \\VALUES (1, 1, 100, 1000, 'One', 'A'), (1, 1, 200, 1000, 'One', 'A'), (2, 2, 300, 1000, 'Two', 'B');
+        \\INSERT INTO feedback(recording_id, score, updated_at) VALUES (1, 1, 0), (2, -1, 0);
+        \\INSERT INTO ratings VALUES (1, 80, 0);
+        \\INSERT INTO playlists(id, name, created_at, updated_at) VALUES (1, 'Mix', 0, 0);
+        \\INSERT INTO playlist_entries VALUES (1, 0, 1, 0), (1, 1, 2, 0);
+    );
+    return db;
+}
+
+fn expectBaselineRowsKept(db: sqlite.Database) !void {
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM ratings;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM playlists;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM playlist_entries;"));
+}
+
+const v2_objects_count_sql =
+    \\SELECT count(*) FROM sqlite_master WHERE name IN (
+    \\    'listens_by_time', 'file_audio_features', 'file_audio_features_by_tempo',
+    \\    'file_audio_features_by_onset_rate', 'file_audio_features_by_centroid',
+    \\    'analysis_results_features_ai', 'analysis_results_features_au', 'analysis_results_features_ad',
+    \\    'recommendation_feedback', 'recommendation_feedback_by_expiry', 'daily_mixes',
+    \\    'daily_mix_artists', 'daily_mix_artists_by_artist', 'daily_mix_entries',
+    \\    'daily_mix_entries_by_recording');
+;
+
+test "a version 1 library upgrades to version 2 keeping its rows and gaining the recommendation tables" {
+    const db = try atBaseline();
+    defer db.close();
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 15), try scalar(db, v2_objects_count_sql));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
+}
+
+test "a failing version 2 step rolls back and leaves the library at version 1" {
+    const db = try atBaseline();
+    defer db.close();
+    try db.exec("CREATE INDEX daily_mix_entries_by_recording ON listens(title);");
+
+    try std.testing.expectError(error.SqlFailed, apply(db));
+
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, v2_objects_count_sql));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM sqlite_master WHERE name = 'listens_by_time';"));
+}
+
+test "audio features need a known key and follow their file" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec("INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10);");
+
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_features(file_id, source_identity, key_pitch, key_mode) VALUES (1, X'00', 12, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_features(file_id, source_identity, key_pitch, key_mode) VALUES (1, X'00', 0, 2);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_features(file_id, source_identity, key_pitch) VALUES (1, X'00', 3);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_features(file_id, source_identity) VALUES (2, X'00');"));
+    try db.exec("INSERT INTO file_audio_features(file_id, source_identity, tempo_bpm, key_pitch, key_mode) VALUES (1, X'00', 120.0, 9, 1);");
+    try db.exec("DELETE FROM files WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_features;"));
+}
+
+fn expectFeatureRows(db: sqlite.Database, expected: []const u8) !void {
+    var statement = try db.prepare(
+        "SELECT group_concat(coalesce(row, ''), ';') FROM (SELECT file_id || ',' || source || ',' || " ++
+            "coalesce(tempo_bpm, '-') || ',' || coalesce(tempo_confidence, '-') || ',' || " ++
+            "coalesce(key_pitch, '-') || ',' || coalesce(key_mode, '-') || ',' || coalesce(key_confidence, '-') || ',' || " ++
+            "coalesce(onset_rate, '-') || ',' || coalesce(centroid_hz, '-') AS row FROM (" ++
+            "SELECT file_id, hex(source_identity) AS source, tempo_bpm, tempo_confidence, key_pitch, key_mode, " ++
+            "key_confidence, onset_rate, centroid_hz FROM file_audio_features ORDER BY file_id));",
+    );
+    defer statement.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+    try std.testing.expectEqualStrings(expected, statement.columnText(0));
+}
+
+test "an audio features result written, rewritten or removed keeps the file's features row, and malformed or foreign results are ignored" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec(
+        \\INSERT INTO files(id, size_bytes, quick_hash) VALUES
+        \\    (1, 100, x'01'), (2, 100, x'02'), (3, 100, x'03'), (4, 100, x'04'),
+        \\    (5, 100, x'05'), (6, 100, x'06'), (7, 100, x'07'), (8, 100, x'08');
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (1, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'01',
+        \\        x'4F52414601000F00B4D6010090D0030002010000A0860100A0252600DDE31600400D030000000000'),
+        \\    (2, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'02',
+        \\        CAST(x'4F52414601000000' || zeroblob(32) AS BLOB)),
+        \\    (3, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'03',
+        \\        CAST(x'4F52414401000000' || zeroblob(32) AS BLOB)),
+        \\    (4, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'04',
+        \\        CAST(x'4F52414602000000' || zeroblob(32) AS BLOB)),
+        \\    (5, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'05',
+        \\        CAST(x'4F52414601000000' || zeroblob(31) AS BLOB)),
+        \\    (6, 6, 'orca.audio-features', 1, zeroblob(32), x'06',
+        \\        CAST(x'4F52414601000000' || zeroblob(32) AS BLOB)),
+        \\    (7, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'07',
+        \\        CAST(x'4F52414601001000' || zeroblob(32) AS BLOB)),
+        \\    (8, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'08',
+        \\        CAST(x'4F52414601000200' || zeroblob(8) || x'0C00' || zeroblob(22) AS BLOB));
+    );
+    try expectFeatureRows(db, "1,01,120.5,0.25,2,1,0.1,2.5,1500.125;2,02,-,-,-,-,-,-,-");
+
+    try db.exec(
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (1, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'01',
+        \\        x'4F5241460100040000000000000000000000000000000000605B030000000000400D030000000000')
+        \\ON CONFLICT DO UPDATE SET result = excluded.result;
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (2, 6, 'orca.audio-features', 1, x'8D91D6D7138EB255B30DD8F82BF8B042B0E78E5FE59C0A12EECD4861CB7D5C0E', x'2b',
+        \\        CAST(x'4F52414601000800' || zeroblob(20) || x'40420F00' || zeroblob(8) AS BLOB));
+    );
+    try expectFeatureRows(db, "1,01,-,-,-,-,-,0.22,-;2,2B,-,-,-,-,-,-,1000.0");
+
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 2 AND source_identity = x'02';");
+    try expectFeatureRows(db, "1,01,-,-,-,-,-,0.22,-;2,2B,-,-,-,-,-,-,1000.0");
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 2;");
+    try expectFeatureRows(db, "1,01,-,-,-,-,-,0.22,-");
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 1; DELETE FROM files WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_features;"));
+}
+
+test "a daily mix keeps one row per ordinal, its artists and entries go with it, and an entry goes with its recording" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two');
+        \\INSERT INTO artists(id, name) VALUES (1, 'A');
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Hip Hop', 'hip hop');
+        \\INSERT INTO daily_mixes(id, ordinal, kind, genre_id, name, local_day, generated_at) VALUES (1, 0, 0, 1, 'Hip Hop Mix', 20000, 0);
+        \\INSERT INTO daily_mix_artists VALUES (1, 0, 1);
+        \\INSERT INTO daily_mix_entries(mix_id, position, recording_id, reason1_kind, reason1_a, reason1_b) VALUES (1, 0, 1, 0, 42, 1700000000);
+        \\INSERT INTO daily_mix_entries(mix_id, position, recording_id) VALUES (1, 1, 2);
+        \\INSERT INTO recommendation_feedback VALUES (2, 0, 100);
+    );
+
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mixes(ordinal, kind, name, local_day, generated_at) VALUES (0, 1, 'Rarely played', 20000, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mixes(ordinal, kind, name, local_day, generated_at) VALUES (1, 2, 'Other', 20000, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mix_entries(mix_id, position, recording_id, reason1_kind) VALUES (1, 2, 1, 10);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mix_entries(mix_id, position, recording_id, reason2_kind) VALUES (1, 2, 1, 0);"));
+
+    try db.exec("DELETE FROM genres WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mixes WHERE genre_id IS NULL;"));
+    try db.exec("DELETE FROM recordings WHERE id = 2;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mix_entries;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM recommendation_feedback;"));
+    try db.exec("DELETE FROM daily_mixes WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM daily_mix_entries;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM daily_mix_artists;"));
 }

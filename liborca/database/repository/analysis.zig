@@ -30,21 +30,21 @@ pub const AnalysisSelector = struct {
 };
 
 /// The measurements a library-wide analysis takes together, and the verdict
-/// that excuses a file from them. A file owes the analysis while either
-/// measurement is missing, so bumping either algorithm's version re-selects
+/// that excuses a file from them. A file owes the analysis while any
+/// measurement is missing, so bumping any algorithm's version re-selects
 /// every file, unless the decoders it would run have already refused its
 /// bytes.
 pub const AnalysisSelectors = struct {
-    measurements: [2]AnalysisSelector,
+    measurements: [3]AnalysisSelector,
     undecodable: AnalysisSelector,
 };
 
 /// The `files` rows that still owe a library-wide analysis.
 ///
 /// One string, shared by `FileRepository.unanalyzedPage`, `unanalyzedCount`
-/// and the plan test that proves neither is a table scan. Parameters ?3 to ?6
-/// and ?7 to ?10 are the two measurements and ?11 to ?14 the undecodable
-/// verdict; ?1 and ?2 stay the caller's cursor and limit, as they are for
+/// and the plan test that proves neither is a table scan. Parameters ?3 to ?6,
+/// ?7 to ?10 and ?11 to ?14 are the three measurements and ?15 to ?18 the
+/// undecodable verdict; ?1 and ?2 stay the caller's cursor and limit, as they are for
 /// every other page in this file.
 ///
 /// This is an anti-join against `analysis_results`' own primary key rather
@@ -96,15 +96,23 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.parameter_hash = ?10
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
-    \\OR ((files.channels IS NULL OR files.channels >
-++ max_supported_channels_sql ++
-    \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id)))
-    \\AND NOT EXISTS (SELECT 1 FROM analysis_results
+    \\OR NOT EXISTS (SELECT 1 FROM analysis_results
     \\    WHERE analysis_results.file_id = files.id
     \\      AND analysis_results.kind = ?11
     \\      AND analysis_results.algorithm_id = ?12
     \\      AND analysis_results.algorithm_version = ?13
     \\      AND analysis_results.parameter_hash = ?14
+    \\      AND analysis_results.source_identity = files.content_hash
+    \\      AND files.content_hash_algorithm = 1)
+    \\OR ((files.channels IS NULL OR files.channels >
+++ max_supported_channels_sql ++
+    \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id)))
+    \\AND NOT EXISTS (SELECT 1 FROM analysis_results
+    \\    WHERE analysis_results.file_id = files.id
+    \\      AND analysis_results.kind = ?15
+    \\      AND analysis_results.algorithm_id = ?16
+    \\      AND analysis_results.algorithm_version = ?17
+    \\      AND analysis_results.parameter_hash = ?18
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
 ;
@@ -390,11 +398,12 @@ pub fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const Analys
     try bindAnalysisSelectorAt(statement, 3, selector);
 }
 
-/// Binds ?3 to ?14 of `unanalyzed_predicate`.
+/// Binds ?3 to ?18 of `unanalyzed_predicate`.
 pub fn bindAnalysisSelectors(statement: sqlite.Statement, selectors: *const AnalysisSelectors) !void {
     try bindAnalysisSelectorAt(statement, 3, &selectors.measurements[0]);
     try bindAnalysisSelectorAt(statement, 7, &selectors.measurements[1]);
-    try bindAnalysisSelectorAt(statement, 11, &selectors.undecodable);
+    try bindAnalysisSelectorAt(statement, 11, &selectors.measurements[2]);
+    try bindAnalysisSelectorAt(statement, 15, &selectors.undecodable);
 }
 
 pub fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {
