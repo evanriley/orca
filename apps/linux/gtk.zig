@@ -413,6 +413,7 @@ pub extern fn g_date_time_add_days(datetime: *GDateTime, days: c_int) ?*GDateTim
 pub extern fn g_date_time_format(datetime: *GDateTime, format: [*:0]const u8) ?[*:0]u8;
 pub extern fn g_date_time_unref(datetime: *GDateTime) void;
 pub extern fn g_date_time_difference(end: *GDateTime, begin: *GDateTime) i64;
+pub extern fn g_date_time_get_utc_offset(datetime: *GDateTime) i64;
 pub extern fn g_utf8_casefold(text: [*]const u8, length: isize) ?[*:0]u8;
 pub extern fn g_utf8_strup(text: [*]const u8, length: isize) ?[*:0]u8;
 
@@ -837,6 +838,7 @@ pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
 pub const ACCESSIBLE_PROPERTY_LABEL: c_int = 4;
+pub const ACCESSIBLE_PROPERTY_VALUE_TEXT: c_int = 18;
 pub extern fn gtk_accessible_update_property(accessible: *Accessible, first_property: c_int, ...) void;
 pub const ACCESSIBLE_STATE_EXPANDED: c_int = 3;
 pub extern fn gtk_accessible_update_state(accessible: *Accessible, first_state: c_int, ...) void;

@@ -30,6 +30,13 @@
 - `libraryRecordingSummary` and `orca_library_recording_get` read a
   Recording's title and artist credit; `orca-cli radio` names the Recording
   an `often_after` reason cites.
+- orca-gtk Library Radio: Start Radio in the Track, album, artist and Queue
+  row menus and a Radio button in the player bar; the Queue page shows the
+  Radio's status, its picks with their reasons, Play next and Less like this;
+  a Radio panel steers explore, focus filters, unplayed, recent-play and live
+  picks and undoes feedback. Settings › Listening gains Radio & Daily Mixes
+  and Show listening stats on Home.
+- `scripts/headless-gui.sh` takes the output size from `ORCA_HEADLESS_SIZE`.
 - Discovery settings: `libraryDiscoverySettings`,
   `setLibraryDiscoverySettings` and their C ABI counterparts read and store
   Radio auto-continue, unplayed picks, the recent-play avoid window and the

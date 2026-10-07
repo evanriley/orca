@@ -16,6 +16,8 @@ const playlists = @import("playlists.zig");
 const settings = @import("settings.zig");
 const page_ui = @import("page.zig");
 const transport = @import("transport.zig");
+const radio = @import("radio.zig");
+const radio_reason = @import("radio_reason.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -24,6 +26,9 @@ const now_cover_pixels: c_int = 56;
 const history_capacity = liborca.queue_history_capacity;
 const origin_capacity = 256;
 const unavailable_opacity = 0.55;
+const radio_cover_pixels: c_int = 40;
+const max_radio_rows = liborca.max_radio_reported_picks;
+const reason_capacity = 192;
 
 pub const State = struct {
     now_store: ?*gtk.ListStore = null,
@@ -39,7 +44,7 @@ pub const State = struct {
     history_list: ?*gtk.Widget = null,
     history_toggle: ?*gtk.Widget = null,
     history_shown: bool = true,
-    next_first: u32 = 0,
+    next_positions: [app.page_size]u32 = undefined,
     next_count: usize = 0,
     next_ms: i64 = 0,
     next_complete: bool = false,
@@ -53,6 +58,23 @@ pub const State = struct {
     shown_shuffle: ?bool = null,
     shown_serial: u32 = std.math.maxInt(u32),
     shown_minute: i64 = 0,
+    next_title: ?*gtk.Label = null,
+    next_hint: ?*gtk.Widget = null,
+    radio_store: ?*gtk.ListStore = null,
+    radio_section: ?*gtk.Widget = null,
+    radio_list: ?*gtk.Widget = null,
+    radio_title: ?*gtk.Label = null,
+    status: ?*gtk.Widget = null,
+    status_text: ?*gtk.Label = null,
+    clear_button: ?*gtk.Widget = null,
+    stop_button: ?*gtk.Widget = null,
+    options_button: ?*gtk.Widget = null,
+    radio_positions: [max_radio_rows]u32 = undefined,
+    radio_entries: [max_radio_rows]u64 = undefined,
+    radio_reasons: [max_radio_rows][reason_capacity]u8 = undefined,
+    radio_reason_lens: [max_radio_rows]usize = undefined,
+    radio_count: usize = 0,
+    shown_radio: u32 = std.math.maxInt(u32),
 };
 
 fn state(data: ?*anyopaque) *App {
@@ -251,7 +273,7 @@ fn playedText(buffer: []u8, elapsed_ms: i64) [:0]const u8 {
 fn nextPosition(self: *App, item: *anyopaque) ?u32 {
     const row = gtk.gtk_list_item_get_position(gtk.cast(gtk.ListItem, item));
     if (row >= self.queue.next_count) return null;
-    return self.queue.next_first + row;
+    return self.queue.next_positions[row];
 }
 
 fn removeAt(self: *App, item: *anyopaque) void {
@@ -278,8 +300,12 @@ fn trackMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) 
 }
 
 fn queueContext(self: *App, item: *anyopaque) bool {
-    const track = trackOf(item) orelse return false;
     const position = nextPosition(self, item) orelse return false;
+    return queueContextAt(self, item, position);
+}
+
+fn queueContextAt(self: *App, item: *anyopaque, position: u32) bool {
+    const track = trackOf(item) orelse return false;
     if (!setTrackContext(self, .queue, track)) return false;
     self.context.queue_position = position;
     return true;
@@ -307,16 +333,20 @@ fn inLibrary(item: *anyopaque) bool {
 fn nextActivated(_: ?*anyopaque, row: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (row >= self.queue.next_count) return;
+    jump(self, self.queue.next_positions[row]);
+}
+
+fn jump(self: *App, position: u32) void {
     if (!transport.ensureOutput(self)) return self.toast("No audio output is available");
-    self.runtime.playerQueueJump(self.player, self.queue.next_first + row) catch return;
+    self.runtime.playerQueueJump(self.player, position) catch return;
     self.mpris.notify();
     self.requestTick();
 }
 
-fn focusedItem(self: *App) ?*anyopaque {
+fn focusedItem(self: *App, list_widget: ?*gtk.Widget) ?*anyopaque {
     const window = self.window orelse return null;
     var widget = gtk.gtk_window_get_focus(window) orelse return null;
-    const list = self.queue.next_list orelse return null;
+    const list = list_widget orelse return null;
     while (widget != list) {
         if (gtk.g_object_get_data(widget, "orca-list-item")) |item| return item;
         if (gtk.gtk_widget_get_parent(widget) == list) {
@@ -334,20 +364,166 @@ fn nextKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint, 
     switch (keyval) {
         gtk.KEY_Delete, gtk.KEY_KP_Delete => {
             if (held != 0) return gtk.false_;
-            removeAt(self, focusedItem(self) orelse return gtk.false_);
+            removeAt(self, focusedItem(self, self.queue.next_list) orelse return gtk.false_);
         },
         gtk.KEY_Return, gtk.KEY_KP_Enter => {
             if (held != gtk.MODIFIER_SHIFT) return gtk.false_;
-            const item = focusedItem(self) orelse return gtk.false_;
+            const item = focusedItem(self, self.queue.next_list) orelse return gtk.false_;
             if (!inLibrary(item)) return gtk.false_;
             playNext(self, nextPosition(self, item) orelse return gtk.false_);
         },
         gtk.KEY_l, gtk.KEY_L => {
             if (held & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT) != 0) return gtk.false_;
-            const item = focusedItem(self) orelse return gtk.false_;
+            const item = focusedItem(self, self.queue.next_list) orelse return gtk.false_;
             const track = trackOf(item) orelse return gtk.false_;
             if (!track.inLibrary()) return gtk.false_;
             feedback.toggle(self, .{ .track_id = track.id(), .recording_id = track.recordingId(), .feedback = track.feedback() });
+        },
+        else => return gtk.false_,
+    }
+    return gtk.true_;
+}
+
+fn setupRadio(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(row, "queue-row");
+    gtk.gtk_widget_add_css_class(row, "radio-row");
+    const cover = art.newCover(self, art.iconPlaceholder(radio_cover_pixels), radio_cover_pixels);
+    gtk.gtk_widget_add_css_class(cover, "radio-row-cover");
+    gtk.gtk_widget_set_valign(cover, gtk.ALIGN_CENTER);
+    const middle = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, middle), gtk.true_);
+    gtk.gtk_widget_set_hexpand(middle, gtk.true_);
+    const reason = label("radio-reason");
+    gtk.gtk_widget_set_valign(reason, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(reason, "Why this track");
+    append(middle, &.{ stacked("queue-title", "queue-artist", 1), reason });
+    const duration = numericLabel("queue-duration");
+    gtk.gtk_widget_set_size_request(duration, 48, -1);
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 2);
+    gtk.gtk_widget_add_css_class(actions, "radio-row-actions");
+    gtk.gtk_widget_set_halign(actions, gtk.ALIGN_END);
+    gtk.gtk_widget_set_size_request(actions, 70, -1);
+    append(actions, &.{
+        radioAction(self, item.?, "orca-next-symbolic", "Play next", gtk.callback(radioPlayNextClicked)),
+        radioAction(self, item.?, "orca-minus-symbolic", "Less like this", gtk.callback(radioLessClicked)),
+    });
+    append(row, &.{ cover, middle, duration, actions });
+    gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
+    gtk.g_object_set_data(row, "orca-list-item", item);
+    menu.onSecondaryClick(row, radioMenu, self);
+}
+
+fn radioAction(self: *App, item: *anyopaque, icon: [*:0]const u8, tooltip: [*:0]const u8, handler: gtk.GCallback) *gtk.Widget {
+    const button = gtk.gtk_button_new_from_icon_name(icon);
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "radio-row-action");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(button, tooltip);
+    gtk.gtk_widget_set_focus_on_click(button, gtk.false_);
+    gtk.g_object_set_data(button, "orca-list-item", item);
+    _ = gtk.signalConnect(button, "clicked", handler, self);
+    return button;
+}
+
+fn bindRadio(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const track = trackOf(item.?) orelse return;
+    const row = gtk.gtk_list_item_get_child(gtk.cast(gtk.ListItem, item.?)) orelse return;
+    const cover = gtk.gtk_widget_get_first_child(row) orelse return;
+    const middle = gtk.gtk_widget_get_next_sibling(cover) orelse return;
+    const labels = gtk.gtk_widget_get_first_child(middle) orelse return;
+    const reason = gtk.gtk_widget_get_next_sibling(labels) orelse return;
+    const duration = gtk.gtk_widget_get_next_sibling(middle) orelse return;
+    const actions = gtk.gtk_widget_get_next_sibling(duration) orelse return;
+    var buffer: [1024]u8 = undefined;
+    showStacked(labels, track.title(), artistAndAlbum(&buffer, track));
+    dimUnlessInLibrary(labels, track);
+    const index = radioIndex(self, item.?);
+    const reason_text: [:0]const u8 = if (index) |value| self.queue.radio_reasons[value][0..self.queue.radio_reason_lens[value] :0] else "";
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, reason), reason_text.ptr);
+    var time: [32]u8 = undefined;
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, duration), track.durationText(&time).ptr);
+    const play_next = gtk.gtk_widget_get_first_child(actions) orelse return;
+    const less = gtk.gtk_widget_get_next_sibling(play_next) orelse return;
+    var name: [1024]u8 = undefined;
+    nameButton(play_next, strings.format(&name, "Play {s} next", .{track.title()}));
+    nameButton(less, strings.format(&name, "Less like this: {s}", .{track.title()}));
+    showCover(self, cover, track);
+}
+
+fn nameButton(button: *gtk.Widget, text: [:0]const u8) void {
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, text.ptr, @as(c_int, -1));
+}
+
+fn unbindRadio(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const row = gtk.gtk_list_item_get_child(gtk.cast(gtk.ListItem, item.?)) orelse return;
+    const cover = gtk.gtk_widget_get_first_child(row) orelse return;
+    art.forget(self, cover);
+}
+
+fn radioIndex(self: *App, item: *anyopaque) ?usize {
+    const row = gtk.gtk_list_item_get_position(gtk.cast(gtk.ListItem, item));
+    if (row >= self.queue.radio_count) return null;
+    return row;
+}
+
+fn radioItem(widget: ?*anyopaque) ?*anyopaque {
+    return gtk.g_object_get_data(widget.?, "orca-list-item");
+}
+
+fn radioActivated(_: ?*anyopaque, row: c_uint, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (row >= self.queue.radio_count) return;
+    jump(self, self.queue.radio_positions[row]);
+}
+
+fn radioPlayNext(self: *App, item: *anyopaque) void {
+    const index = radioIndex(self, item) orelse return;
+    playNext(self, self.queue.radio_positions[index]);
+}
+
+fn lessLikeThis(self: *App, item: *anyopaque) void {
+    const index = radioIndex(self, item) orelse return;
+    self.runtime.playerRadioLessLikeThis(self.player, self.queue.radio_entries[index]) catch |err| self.toast(switch (err) {
+        error.QueueEntryInUse => "That track is already lined up",
+        error.RadioNotActive => "Radio is off",
+        else => "Could not mark that track",
+    });
+    invalidate(self);
+    self.mpris.notify();
+    self.requestTick();
+}
+
+fn radioPlayNextClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    radioPlayNext(state(data), radioItem(button) orelse return);
+}
+
+fn radioLessClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    lessLikeThis(state(data), radioItem(button) orelse return);
+}
+
+fn radioMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const row = menu.gestureWidget(gesture);
+    const item = gtk.g_object_get_data(row, "orca-list-item") orelse return;
+    const index = radioIndex(self, item) orelse return;
+    if (queueContextAt(self, item, self.queue.radio_positions[index])) menu.popupQueueEntry(self, row, x, y, inLibrary(item));
+}
+
+fn radioKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    switch (keyval) {
+        gtk.KEY_Delete, gtk.KEY_KP_Delete => {
+            if (held != 0) return gtk.false_;
+            lessLikeThis(self, focusedItem(self, self.queue.radio_list) orelse return gtk.false_);
+        },
+        gtk.KEY_Return, gtk.KEY_KP_Enter => {
+            if (held != gtk.MODIFIER_SHIFT) return gtk.false_;
+            radioPlayNext(self, focusedItem(self, self.queue.radio_list) orelse return gtk.false_);
         },
         else => return gtk.false_,
     }
@@ -592,11 +768,39 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_controller(next_list, keys);
     page.next_list = next_list;
     const next_heading = headingRow("Up Next");
+    page.next_title = gtk.cast(gtk.Label, gtk.gtk_widget_get_first_child(next_heading).?);
     const hint = gtk.gtk_label_new("Drag to reorder");
     gtk.gtk_widget_add_css_class(hint, "queue-heading-meta");
     gtk.gtk_box_append(gtk.cast(gtk.Box, next_heading), hint);
+    page.next_hint = hint;
     const next_section = section(next_heading, next_list, "queue-next-section");
     page.next_section = next_section;
+
+    const radio_store = gtk.g_list_store_new(track_model.getType()).?;
+    page.radio_store = radio_store;
+    const radio_list = newList(self, radio_store, "queue-next-list", gtk.callback(setupRadio), gtk.callback(bindRadio), gtk.callback(unbindRadio));
+    gtk.gtk_list_view_set_single_click_activate(gtk.cast(gtk.ListView, radio_list), gtk.true_);
+    _ = gtk.signalConnect(radio_list, "activate", gtk.callback(radioActivated), self);
+    const radio_keys = gtk.gtk_event_controller_key_new();
+    _ = gtk.signalConnect(radio_keys, "key-pressed", gtk.callback(radioKeyPressed), self);
+    gtk.gtk_widget_add_controller(radio_list, radio_keys);
+    page.radio_list = radio_list;
+    const radio_heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_add_css_class(radio_heading, "queue-heading-row");
+    const radio_icon = gtk.gtk_image_new_from_icon_name("orca-radio-symbolic");
+    gtk.gtk_widget_add_css_class(radio_icon, "radio-heading-icon");
+    const radio_title = gtk.gtk_label_new("Radio");
+    gtk.gtk_widget_add_css_class(radio_title, "queue-heading");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, radio_title), 0.0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, radio_title), gtk.ELLIPSIZE_END);
+    gtk.gtk_widget_set_hexpand(radio_title, gtk.true_);
+    page.radio_title = gtk.cast(gtk.Label, radio_title);
+    const radio_hint = gtk.gtk_label_new("Picks more as you listen");
+    gtk.gtk_widget_add_css_class(radio_hint, "queue-heading-meta");
+    append(radio_heading, &.{ radio_icon, radio_title, radio_hint });
+    const radio_section = section(radio_heading, radio_list, "queue-radio-section");
+    gtk.gtk_widget_set_visible(radio_section, gtk.false_);
+    page.radio_section = radio_section;
 
     const history_list = newList(self, history_store, "queue-history-list", gtk.callback(setupHistory), gtk.callback(bindHistory), null);
     page.history_list = history_list;
@@ -615,7 +819,7 @@ pub fn build(self: *App) *gtk.Widget {
 
     const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 26);
     gtk.gtk_widget_add_css_class(column, "queue-page");
-    append(column, &.{ now_section, next_section, history_section });
+    append(column, &.{ now_section, next_section, radio_section, history_section });
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
@@ -641,6 +845,30 @@ pub fn build(self: *App) *gtk.Widget {
     const clear = headerButton("Clear", null, "Clear the queue", gtk.callback(clearClicked), self);
     gtk.gtk_widget_add_css_class(clear, "queue-clear");
     title.add(clear);
+    page.clear_button = clear;
+    const options = headerButton("Radio Options", "orca-radio-symbolic", "Show the Radio options", gtk.callback(radioOptionsClicked), self);
+    gtk.gtk_widget_set_visible(options, gtk.false_);
+    title.add(options);
+    page.options_button = options;
+    const stop = headerButton("Stop Radio", null, "Stop Radio and remove its picks", gtk.callback(stopRadioClicked), self);
+    gtk.gtk_widget_add_css_class(stop, "queue-clear");
+    gtk.gtk_widget_set_visible(stop, gtk.false_);
+    title.add(stop);
+    page.stop_button = stop;
+
+    const status = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_add_css_class(status, "radio-status");
+    const status_icon = gtk.gtk_image_new_from_icon_name("orca-radio-symbolic");
+    gtk.gtk_widget_add_css_class(status_icon, "radio-status-icon");
+    const status_text = gtk.gtk_label_new(null);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, status_text), 0.0);
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, status_text), gtk.ELLIPSIZE_END);
+    append(status, &.{ status_icon, status_text });
+    gtk.gtk_widget_set_visible(status, gtk.false_);
+    const meta_widget = gtk.cast(gtk.Widget, title.meta);
+    if (gtk.gtk_widget_get_parent(meta_widget)) |text_box| gtk.gtk_box_insert_child_after(gtk.cast(gtk.Box, text_box), status, meta_widget);
+    page.status = status;
+    page.status_text = gtk.cast(gtk.Label, status_text);
 
     const view = page_ui.withTitle(title, body);
 
@@ -650,7 +878,15 @@ pub fn build(self: *App) *gtk.Widget {
     addAction(group, "save", gtk.callback(saveActivated), self);
     gtk.gtk_widget_insert_action_group(view, "queue", gtk.cast(gtk.GActionGroup, group));
     gtk.g_object_unref(group);
-    return view;
+    return radio.wrap(self, view);
+}
+
+fn stopRadioClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    radio.stopClicked(state(data));
+}
+
+fn radioOptionsClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    radio.showOptions(state(data));
 }
 
 fn replace(
@@ -753,17 +989,22 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
 
     var now = rows[0..@min(rows.len, 1)];
     const upcoming = rows[now.len..];
-    page.next_first = status.queue_index + 1;
-    page.next_count = upcoming.len;
     page.next_ms = 0;
     for (upcoming) |row| page.next_ms += if (row.track) |track| track.duration_ms orelse 0 else 0;
+    var added: std.ArrayList(liborca.QueueTrack) = .empty;
+    defer added.deinit(self.allocator);
+    var picked: std.ArrayList(liborca.QueueTrack) = .empty;
+    defer picked.deinit(self.allocator);
+    const radio_status = if (radio.isOn(self)) self.runtime.playerRadio(self.player) catch null else null;
+    split(self, upcoming, radio_status != null, &added, &picked);
     page.next_complete = remainingTracks(status) <= rows.len;
     const current: ?*const liborca.TrackSummary = if (now.len != 0) if (now[0].track) |*track| track else null else null;
     readOrigin(self, status, current);
     if (status.track_id == null) now = &.{};
     page.now_duration_ms = if (now.len != 0) if (current) |track| track.duration_ms orelse 0 else 0 else 0;
     replace(self, now_store, liborca.QueueTrack, now, track_model.queued);
-    replace(self, next_store, liborca.QueueTrack, upcoming, track_model.queued);
+    replace(self, next_store, liborca.QueueTrack, added.items, track_model.queued);
+    if (page.radio_store) |radio_store| replace(self, radio_store, liborca.QueueTrack, picked.items, track_model.queued);
 
     var history_tracks: ?liborca.QueueHistoryTrackPage =
         self.runtime.playerQueueHistoryTracks(self.player, self.allocator, 0, history_capacity) catch null;
@@ -776,14 +1017,128 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
 
     visible(page.now_section, now.len != 0);
     visible(page.next_section, page.next_count != 0);
+    visible(page.radio_section, page.radio_count != 0);
     visible(page.history_section, page.history_count != 0);
-    const anything = now.len != 0 or page.next_count != 0 or page.history_count != 0;
+    const anything = now.len != 0 or page.next_count != 0 or page.radio_count != 0 or page.history_count != 0;
     if (page.body) |body| gtk.gtk_stack_set_visible_child_name(body, if (anything) "list" else "empty");
+    showRadio(self, if (radio_status) |*value| value else null);
     showMeta(self, status);
 }
 
+fn split(
+    self: *App,
+    upcoming: []const liborca.QueueTrack,
+    radio_on: bool,
+    added: *std.ArrayList(liborca.QueueTrack),
+    picked: *std.ArrayList(liborca.QueueTrack),
+) void {
+    const page = &self.queue;
+    page.next_count = 0;
+    page.radio_count = 0;
+    var picks_buffer: [max_radio_rows]liborca.RadioQueuePick = undefined;
+    const picks_count = if (radio_on) self.runtime.playerRadioPicks(self.player, &picks_buffer) catch 0 else 0;
+    const picks = picks_buffer[0..picks_count];
+    added.ensureTotalCapacity(self.allocator, upcoming.len) catch return;
+    picked.ensureTotalCapacity(self.allocator, @min(upcoming.len, max_radio_rows)) catch return;
+    const clock = localClock();
+    for (upcoming) |row| {
+        if (pickAt(picks, row.position)) |pick| if (page.radio_count < max_radio_rows) {
+            const index = page.radio_count;
+            page.radio_positions[index] = row.position;
+            page.radio_entries[index] = pick.entry_id;
+            page.radio_reason_lens[index] = formatReason(self, &page.radio_reasons[index], pick.reason, clock).len;
+            picked.appendAssumeCapacity(row);
+            page.radio_count += 1;
+            continue;
+        };
+        page.next_positions[page.next_count] = row.position;
+        added.appendAssumeCapacity(row);
+        page.next_count += 1;
+    }
+}
+
+fn pickAt(picks: []const liborca.RadioQueuePick, position: u32) ?*const liborca.RadioQueuePick {
+    for (picks) |*pick| if (pick.position == position) return pick;
+    return null;
+}
+
+fn localClock() radio_reason.Clock {
+    const now = gtk.g_date_time_new_now_local() orelse return .{ .now_s = 0, .utc_offset_s = 0 };
+    defer gtk.g_date_time_unref(now);
+    return .{
+        .now_s = gtk.g_date_time_to_unix(now),
+        .utc_offset_s = @divTrunc(gtk.g_date_time_get_utc_offset(now), std.time.us_per_s),
+    };
+}
+
+fn formatReason(self: *App, buffer: *[reason_capacity]u8, reason: liborca.PickReason, clock: radio_reason.Clock) [:0]const u8 {
+    var first: [256]u8 = undefined;
+    var second: [256]u8 = undefined;
+    const names: [2][]const u8 = .{ reasonName(self, &first, reason.first), reasonName(self, &second, reason.second) };
+    return radio_reason.format(buffer, reason, names, clock);
+}
+
+fn reasonName(self: *App, buffer: []u8, maybe_part: ?liborca.ReasonPart) []const u8 {
+    const part = maybe_part orelse return "";
+    const library = self.library orelse return "";
+    switch (radio_reason.lookup(part)) {
+        .none => return "",
+        .artist => |artist_id| {
+            const artist = (self.runtime.libraryArtist(library, artist_id) catch null) orelse return "";
+            defer artist.deinit(self.allocator);
+            return strings.terminated(buffer, artist.name);
+        },
+        .genre => |genre_id| {
+            const genre = (self.runtime.libraryGenre(library, genre_id) catch null) orelse return "";
+            defer genre.deinit(self.allocator);
+            return strings.terminated(buffer, genre.name);
+        },
+        .recording => |recording_id| {
+            const recording = (self.runtime.libraryRecordingSummary(library, recording_id) catch null) orelse return "";
+            defer recording.deinit(self.allocator);
+            return strings.terminated(buffer, recording.title);
+        },
+    }
+}
+
+fn radioSource(buffer: []u8, status: *const liborca.RadioStatus) [:0]const u8 {
+    return switch (status.seed) {
+        .decade => |year| strings.format(buffer, "Radio · from the {d}s", .{@as(u64, @intCast(@max(year, 0)))}),
+        .loved => "Radio · from your loved tracks",
+        .recent => "Radio · from your recent listening",
+        else => strings.format(buffer, "Radio · from {s}", .{status.title()}),
+    };
+}
+
+fn statusText(buffer: []u8, status: *const liborca.RadioStatus, queued: usize) [:0]const u8 {
+    return switch (status.state) {
+        .active => if (queued == 0)
+            "Radio is on · picking from your library as you listen"
+        else
+            strings.format(buffer, "Radio is on · continues after your {d} queued {s}", .{ queued, if (queued == 1) "track" else "tracks" }),
+        .paused_by_repeat => "Radio is paused while Repeat is on",
+        .exhausted => "Radio has run out of picks · try exploring further or removing a focus",
+        .full => "Radio is paused · the queue is full",
+    };
+}
+
+fn showRadio(self: *App, status: ?*const liborca.RadioStatus) void {
+    const page = &self.queue;
+    const on = status != null;
+    if (page.next_title) |title| gtk.gtk_label_set_text(title, if (on) "Up Next · you added" else "Up Next");
+    visible(page.next_hint, !on);
+    visible(page.status, on);
+    if (page.meta) |meta| visible(gtk.cast(gtk.Widget, meta), !on);
+    visible(page.clear_button, !on);
+    visible(page.stop_button, on);
+    const value = status orelse return;
+    var buffer: [1024]u8 = undefined;
+    if (page.radio_title) |title| gtk.gtk_label_set_text(title, radioSource(&buffer, value).ptr);
+    if (page.status_text) |text| gtk.gtk_label_set_text(text, statusText(&buffer, value, page.next_count).ptr);
+}
+
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
-    for ([_]?*gtk.ListStore{ self.queue.now_store, self.queue.next_store, self.queue.history_store }) |store|
+    for ([_]?*gtk.ListStore{ self.queue.now_store, self.queue.next_store, self.queue.radio_store, self.queue.history_store }) |store|
         if (store) |value| {
             _ = feedback.replaceRows(value, changed, change);
         };
@@ -795,6 +1150,7 @@ pub fn invalidate(self: *App) void {
     self.queue.shown_index = std.math.maxInt(u32);
     self.queue.shown_shuffle = null;
     self.queue.shown_serial = std.math.maxInt(u32);
+    self.queue.shown_radio = std.math.maxInt(u32);
 }
 
 pub fn tick(self: *App) void {
@@ -819,7 +1175,9 @@ pub fn tick(self: *App) void {
         status.queue_index == page.shown_index and
         status.shuffle == page.shown_shuffle and
         status.entry_serial == page.shown_serial and
+        self.radio.revision == page.shown_radio and
         !stale_times) return;
+    page.shown_radio = self.radio.revision;
     page.shown_length = status.queue_length;
     page.shown_index = status.queue_index;
     page.shown_shuffle = status.shuffle;

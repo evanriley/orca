@@ -42,6 +42,7 @@ const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
 const nowplaying = @import("nowplaying.zig");
 const queue = @import("queue.zig");
+const radio = @import("radio.zig");
 const palette = @import("palette.zig");
 const page_ui = @import("page.zig");
 const parametric = @import("parametric.zig");
@@ -258,6 +259,7 @@ pub const TransportControls = struct {
     play: ?*gtk.Widget = null,
     next: ?*gtk.Widget = null,
     repeat: ?*gtk.Widget = null,
+    radio: ?*gtk.Widget = null,
     scale: ?*gtk.Widget = null,
     elapsed: ?*gtk.Label = null,
     total: ?*gtk.Label = null,
@@ -535,6 +537,7 @@ pub const App = struct {
 
     scrobbling: bool = false,
     announce_now_playing: bool = false,
+    home_stats: bool = true,
     listening_controls: ListeningControls = .{},
 
     sound_controls: SoundControls = .{},
@@ -624,6 +627,7 @@ pub const App = struct {
     repeat_mode: liborca.RepeatMode = .off,
 
     queue: queue.State = .{},
+    radio: radio.State = .{},
     queue_count: ?*gtk.Label = null,
     queue_visible: bool = false,
 
@@ -1011,6 +1015,7 @@ pub const App = struct {
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
         if (self.volume_settle_timer != 0) _ = gtk.g_source_remove(self.volume_settle_timer);
         if (self.signal_path_settle_timer != 0) _ = gtk.g_source_remove(self.signal_path_settle_timer);
+        if (self.radio.explore_timer != 0) _ = gtk.g_source_remove(self.radio.explore_timer);
         self.tracks.deinit();
         self.track_filters_ui.deinit(self.allocator);
         self.album_filters_ui.deinit(self.allocator);

@@ -12,6 +12,7 @@ const window = @import("window.zig");
 const strings = @import("strings.zig");
 const preferences = @import("preferences.zig");
 const nowplaying = @import("nowplaying.zig");
+const radio = @import("radio.zig");
 const smart_playlist_editor = @import("smart_playlist_editor.zig");
 const metadata_editor = @import("metadata_editor.zig");
 const write_tags = @import("write_tags.zig");
@@ -265,13 +266,16 @@ pub fn fitToPage(self: *App) void {
     const bar = self.top_bar.widget orelse return;
     const view = self.top_bar.view orelse return;
     const playing = self.current_page == .now_playing;
-    const over = playing or shownUnderBarPage(self) != null;
+    const radio_docked = self.current_page == .queue and radio.docked(self);
+    const over = playing or radio_docked or shownUnderBarPage(self) != null;
     setClass(bar, "over-page", over);
     setClass(bar, "over-scrolled", scrolledUnderBar(self));
     if (shownPageRoot(self)) |page_root|
         gtk.gtk_widget_set_margin_top(page_root, if (over) 0 else adw.adw_toolbar_view_get_top_bar_height(view));
     const view_widget = gtk.cast(gtk.Widget, view);
-    gtk.gtk_widget_set_margin_end(barRow(bar, view_widget), if (playing) nowplaying.panelWidth(self) else 0);
+    radio.fitUnderBar(self, if (radio_docked) adw.adw_toolbar_view_get_top_bar_height(view) else 0);
+    const panel_width = if (playing) nowplaying.panelWidth(self) else if (radio_docked) radio.panel_width else 0;
+    gtk.gtk_widget_set_margin_end(barRow(bar, view_widget), panel_width);
     for ([_]?*gtk.Widget{ self.top_bar.back, self.top_bar.forward }) |button|
         if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!playing));
     gtk.gtk_widget_set_visible(bar, @intFromBool(self.current_page != .scan));

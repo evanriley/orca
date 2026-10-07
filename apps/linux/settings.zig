@@ -10,14 +10,14 @@
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
 //! the music folders are watched, whether idle maintenance runs, how many
 //! files Measure Loudness decodes at once, whether lyrics are fetched from
-//! LRCLIB, whether artist info is fetched, whether the queue shows what it
-//! played, what the inspector shows, how albums and artists are sorted and
-//! laid out, which artists the Artists page lists, which columns an album's
-//! tracks show, the volume, the log level, the Appearance tab's choices, and
-//! the libraries Orca can open: their names, paths, last known track counts
-//! and which one opens at launch. Nothing inside a library lives here, and
-//! never the ListenBrainz token or the AcoustID key, which live in the Secret
-//! Service.
+//! LRCLIB, whether artist info is fetched, whether Home shows listening
+//! stats, whether the queue shows what it played, what the inspector shows,
+//! how albums and artists are sorted and laid out, which artists the Artists
+//! page lists, which columns an album's tracks show, the volume, the log
+//! level, the Appearance tab's choices, and the libraries Orca can open:
+//! their names, paths, last known track counts and which one opens at launch.
+//! Nothing inside a library lives here, and never the ListenBrainz token or
+//! the AcoustID key, which live in the Secret Service.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -372,6 +372,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.announce_now_playing = std.mem.eql(u8, std.mem.span(value), "true");
     }
+    if (getString(keys, "listening", "home_stats")) |value| {
+        defer gtk.g_free(value);
+        self.home_stats = !std.mem.eql(u8, std.mem.span(value), "false");
+    }
     if (getString(keys, "listening", "scrobble")) |value| {
         defer gtk.g_free(value);
         if (std.mem.eql(u8, std.mem.span(value), "true")) enableScrobbling(self);
@@ -597,6 +601,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "sound", "crossfeed_enabled", if (crossfeed_on) "true" else "false");
     gtk.g_key_file_set_string(keys, "listening", "scrobble", if (self.scrobbling) "true" else "false");
     gtk.g_key_file_set_string(keys, "listening", "now_playing", if (self.announce_now_playing) "true" else "false");
+    gtk.g_key_file_set_string(keys, "listening", "home_stats", if (self.home_stats) "true" else "false");
     var threshold_buffer: [8]u8 = undefined;
     gtk.g_key_file_set_string(keys, "matching", "accept_confidence", strings.format(&threshold_buffer, "{d}", .{self.match_threshold_percent}).ptr);
     gtk.g_key_file_set_string(keys, "matching", "fingerprints", if (self.match_fingerprints) "true" else "false");

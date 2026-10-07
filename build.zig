@@ -318,6 +318,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         }) });
         test_step.dependOn(&b.addRunArtifact(match_outcome_tests).step);
+        const radio_reason_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/radio_reason.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }) });
+        test_step.dependOn(&b.addRunArtifact(radio_reason_tests).step);
         const queue_menu_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("apps/linux/queue_menu.zig"),
             .target = target,
@@ -399,6 +406,7 @@ pub fn build(b: *std.Build) void {
                 "orca-info-symbolic",         "orca-undo-symbolic",             "orca-alert-symbolic",
                 "orca-pen-symbolic",          "orca-type-symbolic",             "orca-wave-symbolic",
                 "orca-clock-symbolic",        "orca-drive-off-symbolic",        "orca-shield-symbolic",
+                "orca-radio-symbolic",
             }) |icon| {
                 b.installFile(
                     b.fmt("apps/linux/data/{s}.svg", .{icon}),

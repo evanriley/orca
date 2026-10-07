@@ -38,6 +38,7 @@ const activity = @import("activity.zig");
 const details = @import("details.zig");
 const logging = @import("logging.zig");
 const libraries = @import("libraries.zig");
+const radio = @import("radio.zig");
 
 const App = app.App;
 
@@ -2134,6 +2135,94 @@ fn historyCard(self: *App) *gtk.Widget {
     return history.widget;
 }
 
+const avoid_choices = [_]liborca.DiscoveryAvoidDays{ .three_days, .one_day, .seven_days, .none };
+const mix_choices = [_]liborca.DailyMixCount{ .six, .four, .off };
+
+fn discoverySettings(self: *App) liborca.DiscoverySettings {
+    const library = self.library orelse return .{};
+    return self.runtime.libraryDiscoverySettings(library) catch .{};
+}
+
+fn saveDiscoverySettings(self: *App, discovery: liborca.DiscoverySettings) void {
+    const library = self.library orelse return;
+    self.runtime.setLibraryDiscoverySettings(library, discovery) catch return self.toast("Could not change the Radio settings");
+    radio.invalidate(self);
+}
+
+fn radioContinueSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    var discovery = discoverySettings(self);
+    discovery.radio_continue = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    saveDiscoverySettings(self, discovery);
+}
+
+fn radioUnplayedSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    var discovery = discoverySettings(self);
+    discovery.include_unplayed = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    saveDiscoverySettings(self, discovery);
+}
+
+fn avoidPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (selected >= avoid_choices.len) return;
+    var discovery = discoverySettings(self);
+    discovery.avoid_days = avoid_choices[selected];
+    saveDiscoverySettings(self, discovery);
+}
+
+fn mixesPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (selected >= mix_choices.len) return;
+    var discovery = discoverySettings(self);
+    discovery.mix_count = mix_choices[selected];
+    saveDiscoverySettings(self, discovery);
+}
+
+fn homeStatsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.home_stats = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    settings.save(self);
+}
+
+fn radioCard(self: *App) *gtk.Widget {
+    const radio_card = flatCard(
+        "orca-radio-symbolic",
+        "Radio & Daily Mixes",
+        "Built on this computer from your library, listening history and audio analysis. Nothing is sent anywhere.",
+    );
+    const discovery = discoverySettings(self);
+    const has_library = @intFromBool(self.library != null);
+    const library_rows = [_]*gtk.Widget{
+        switchRow("Continue with Radio when the queue ends", "", discovery.radio_continue, gtk.callback(radioContinueSwitched), self),
+        switchRow("Include tracks you've never played", "Up to 1 in 4 picks", discovery.include_unplayed, gtk.callback(radioUnplayedSwitched), self),
+        selectRow(
+            "Avoid tracks played in the last",
+            "",
+            &.{ "3 days", "1 day", "7 days", "Don't avoid", null },
+            @intCast(std.mem.indexOfScalar(liborca.DiscoveryAvoidDays, &avoid_choices, discovery.avoid_days) orelse 0),
+            gtk.callback(avoidPicked),
+            self,
+        ),
+        selectRow(
+            "Daily Mixes",
+            "New mixes each morning",
+            &.{ "6 mixes", "4 mixes", "Off", null },
+            @intCast(std.mem.indexOfScalar(liborca.DailyMixCount, &mix_choices, discovery.mix_count) orelse 0),
+            gtk.callback(mixesPicked),
+            self,
+        ),
+    };
+    for (library_rows) |row| {
+        gtk.gtk_widget_set_sensitive(row, has_library);
+        radio_card.add(row);
+    }
+    radio_card.add(switchRow("Show listening stats on Home", "", self.home_stats, gtk.callback(homeStatsSwitched), self));
+    return radio_card.widget;
+}
+
 fn listeningTab(self: *App) *gtk.Widget {
     const listenbrainz = flatCard("orca-wave-symbolic", "ListenBrainz", "Share what you listen to with your ListenBrainz profile.");
     ListenBrainzToken.add(self, listenbrainz);
@@ -2170,7 +2259,7 @@ fn listeningTab(self: *App) *gtk.Widget {
         self,
     ));
 
-    const view = tab(self, .listening, null, &.{ listenbrainz.widget, lyrics_card.widget, artistInfoCard(self) }, &.{historyCard(self)});
+    const view = tab(self, .listening, null, &.{ listenbrainz.widget, lyrics_card.widget, artistInfoCard(self) }, &.{ radioCard(self), historyCard(self) });
     _ = gtk.signalConnect(view, "map", gtk.callback(listeningMapped), self);
     return view;
 }
@@ -2490,9 +2579,12 @@ fn resetSettings(self: *App) void {
         self.runtime.setGenreFill(library, .{}) catch {};
         self.runtime.librarySetListenPolicy(library, .half_or_four_minutes) catch {};
         self.runtime.librarySetListenRecording(library, true) catch {};
+        self.runtime.setLibraryDiscoverySettings(library, .{}) catch {};
+        radio.invalidate(self);
     }
     self.scrobbling = false;
     self.announce_now_playing = false;
+    self.home_stats = true;
     self.fetch_artist_info = true;
     self.match_threshold_percent = app.default_match_threshold_percent;
     self.match_fingerprints = true;

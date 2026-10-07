@@ -24,6 +24,7 @@ const mpris = @import("mpris.zig");
 const transport = @import("transport.zig");
 const window = @import("window.zig");
 const nowplaying = @import("nowplaying.zig");
+const radio = @import("radio.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const artist_page = @import("artist_page.zig");
@@ -338,6 +339,7 @@ pub fn applyVisibility(self: *App) void {
         update(panel);
     }
     nowplaying.placePanel(self);
+    radio.placePanel(self);
     lyrics.sync(self);
     if (opened_signal_path) transport.refreshSignalPath(self);
 }

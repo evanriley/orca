@@ -442,6 +442,24 @@ does the same in its Up Next list. Its Up Next menu offers only Remove from
 Queue and Save Queue as Playlist…; it has no Track menu, Play Next or Love, and
 activating it does not play.
 
+Library Radio lives on the Queue page. "Start Radio" in the Track, album and
+artist menus, the Queue row menu and the player bar's Radio button (after
+Repeat) start it; the player bar button starts from the playing Track, or from
+recent listening when nothing plays, and stops a running Radio. While Radio is
+on, the Queue header shows its status and Stop Radio, Up Next splits into the
+entries the user added and the Radio picks, each pick with its reason in words,
+Play next and Less like this, and the Radio panel docks beside the page. At
+widths under 1100 px, or while the inspector is open, the panel overlays the
+page instead and the header's Radio Options button opens it. The panel holds
+the on switch, the seed with Change, the Stay close to Explore slider, up to
+four genre, decade or energy focus filters, the unplayed, recent-play and live
+switches, the session's feedback counts with Undo feedback, and a note on the
+signals Radio uses. Every view reads `playerRadio` and `playerRadioPicks` on
+the tick; a control change calls `playerSetRadioOptions`, which replaces only
+the pending picks. Settings › Listening holds Radio & Daily Mixes, stored with
+`setLibraryDiscoverySettings`, and Show listening stats on Home, an `orca-gtk`
+setting in `[listening]`.
+
 Run it from the tree:
 
 ```sh
@@ -521,14 +539,15 @@ acceptable. See [Listening from a host](#listening-from-a-host).
 
 ### Screenshots
 
-`scripts/headless-gui.sh` screenshots `orca-gtk` at 1440x900 without putting a
-window on the desktop. It runs `orca-gtk` in a private headless sway session
-with a private `XDG_RUNTIME_DIR`, a private D-Bus daemon, scratch `HOME` and XDG
-directories, every provider URL pointed at a closed local port, and output
-pinned to `scripts/silent-sink.sh 1`. It aborts unless that device is the
-virtual Orca Silent Test Sink. On exit it signals only the processes it started,
-after checking that `/proc/PID/environ` carries its runtime directory, and
-reports any other process left there.
+`scripts/headless-gui.sh` screenshots `orca-gtk` at 1440x900, or at the
+`WIDTHxHEIGHT` in `ORCA_HEADLESS_SIZE`, without putting a window on the
+desktop. It runs `orca-gtk` in a private headless sway session with a private
+`XDG_RUNTIME_DIR`, a private D-Bus daemon, scratch `HOME` and XDG directories,
+every provider URL pointed at a closed local port, and output pinned to
+`scripts/silent-sink.sh 1`. It aborts unless that device is the virtual Orca
+Silent Test Sink. On exit it signals only the processes it started, after
+checking that `/proc/PID/environ` carries its runtime directory, and reports
+any other process left there.
 
 ```sh
 zig build
