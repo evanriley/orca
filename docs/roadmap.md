@@ -371,19 +371,23 @@ To release:
 1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
    and state the Library schema version it ships.
 2. Set `.version` in `build.zig.zon`.
-3. Commit, and tag the commit with a signed, annotated `vX.Y.Z` tag whose
-   message is that version's section of `CHANGELOG.md`:
+3. Commit on a branch and merge it into `main` through a pull request once CI
+   passes.
+4. Check out the updated `main`, tag the release commit (`RELEASE_COMMIT`
+   below) with a signed, annotated `vX.Y.Z` tag whose message is that
+   version's section of `CHANGELOG.md`, and push the tag:
 
    ```sh
    version=X.Y.Z
    { printf 'Orca %s\n\n' "$version"
      awk -v v="$version" '$1 == "##" { p = ($2 == v); next } p' CHANGELOG.md
-   } | git tag -s "v$version" --cleanup=whitespace -F -
+   } | git tag -s "v$version" --cleanup=whitespace -F - RELEASE_COMMIT
+   git push origin "v$version"
    ```
 
    `--cleanup=whitespace` keeps the `###` headings, which the default
    cleanup removes as comments.
-4. Update Orca's application entry on the AcoustID website to the new
+5. Update Orca's application entry on the AcoustID website to the new
    version. Every lookup and submission sends the version as
    `clientversion`, and the registered details should match what the
    service receives.
