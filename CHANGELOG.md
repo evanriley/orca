@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Library schema version 2. Opening a version 1 Library upgrades it in place
+  in one transaction, keeping every row, and adds an index on listen time and
+  tables for audio features, "Not for me" feedback and Daily Mixes. An
+  upgraded Library cannot be opened by 0.2.0.
+
 ## 0.2.0 - 2026-10-06
 
 Ships Library schema version 1, unchanged from 0.1.0. Breaking for the Zig
