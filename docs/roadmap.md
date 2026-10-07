@@ -496,6 +496,14 @@ sniffed or not recognized until they are supported:
   track, album or artist, scored in `liborca` from local data only (shared
   artist, tags, genre, era, play history and feedback), optionally boosted by
   cached ListenBrainz similar-artist data.
+- Daily mixes: a small set of playlists generated each day from the
+  listening history, each around a theme or genre, mixing tracks played often
+  with ones not played in a long time, shown on a Home or Explore page.
+- Upcoming concerts by artists in the library, on the artist page and in the
+  release calendar, from a provider whose terms allow it.
+- Classical music by composition: works grouped by composer, with each
+  work's recordings and performers, from MusicBrainz work and recording
+  relationships.
 - C ABI functions for what only the Zig API offers. Each is named with its
   reason in `scripts/check-abi-coverage.sh`; the command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump`.
