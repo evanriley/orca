@@ -216,6 +216,24 @@ static void capture_radio(void *context, const orca_radio_preview_view *preview)
     }
 }
 
+typedef struct daily_mixes_capture {
+    size_t calls;
+    size_t count;
+    uint8_t state;
+} daily_mixes_capture;
+
+static void capture_daily_mixes(void *context, const orca_daily_mixes_view *mixes) {
+    daily_mixes_capture *capture = context;
+    capture->calls += 1;
+    capture->count = mixes->count;
+    capture->state = mixes->state;
+}
+
+static void capture_daily_mix_entries(void *context, const orca_daily_mix_entries_view *entries) {
+    size_t *calls = context;
+    *calls += 1 + entries->count;
+}
+
 static void capture_track(void *context, const orca_track_view *track) {
     struct track_capture *capture = context;
     capture->count += 1;
@@ -5968,6 +5986,48 @@ int main(int argc, char **argv) {
     orca_discovery_settings default_discovery = {1, 1, 3, 6, {0}};
     if (orca_library_set_discovery_settings(runtime, library, &default_discovery) != ORCA_STATUS_OK)
         return 628;
+    /* Nothing was played, so a Daily Mixes job clears the mixes and reports
+     * too little history; Not for me, its undo and a reset still apply. */
+    orca_daily_mixes_request mix_request = {2000000000, 3600, 1, {0}};
+    orca_handle mix_job;
+    uint8_t mix_state = 0;
+    if (orca_library_start_daily_mixes(runtime, library, &mix_request, &mix_job) !=
+            ORCA_STATUS_OK ||
+        await_job(runtime, mix_job, &mix_state, 0, 60000) != 1 ||
+        mix_state != ORCA_JOB_SUCCEEDED)
+        return 631;
+    mix_request.force = 2;
+    if (orca_library_start_daily_mixes(runtime, library, &mix_request, &mix_job) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 632;
+    daily_mixes_capture daily = {0, 1, 255};
+    if (orca_library_daily_mixes(runtime, library, 2000000000, 3600, &daily,
+                                 capture_daily_mixes) != ORCA_STATUS_OK ||
+        daily.calls != 1 || daily.count != 0 ||
+        daily.state != ORCA_DAILY_MIXES_STATE_NOT_ENOUGH_HISTORY)
+        return 633;
+    size_t mix_entry_calls = 0;
+    if (orca_library_daily_mix_entries(runtime, library, 999999999, &mix_entry_calls,
+                                       capture_daily_mix_entries) != ORCA_STATUS_NOT_FOUND ||
+        mix_entry_calls != 0)
+        return 634;
+    if (orca_library_not_for_me(runtime, library, capture.first_playable_id, 2000000000) !=
+            ORCA_STATUS_OK ||
+        orca_library_not_for_me(runtime, library, 999999999, 2000000000) !=
+            ORCA_STATUS_NOT_FOUND)
+        return 635;
+    if (orca_library_clear_not_for_me(runtime, library, capture.first_playable_id) !=
+            ORCA_STATUS_OK ||
+        orca_library_not_for_me(runtime, library, capture.first_playable_id, 2000000000) !=
+            ORCA_STATUS_OK ||
+        orca_library_reset_recommendations(runtime, library) != ORCA_STATUS_OK)
+        return 636;
+    int64_t mix_playlist = 0;
+    if (orca_library_save_daily_mix(runtime, library, 999999999, "Mix", 3, &mix_playlist) !=
+            ORCA_STATUS_NOT_FOUND ||
+        mix_playlist != 0)
+        return 637;
+
     uint64_t listens = 1;
     if (orca_library_listens_recorded(runtime, library, &listens) != ORCA_STATUS_OK ||
         listens != 0)

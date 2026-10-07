@@ -2,8 +2,9 @@
 
 This file covers how `library/discovery.zig` ranks Library Recordings
 against a seed, the reasons it gives, the discovery settings, the Radio
-preview and Library Radio on a Player. Radio and Daily Mixes share this scoring. Everything is computed from
-the Library database: no network, no providers.
+preview, Library Radio on a Player and Daily Mixes
+(`library/daily_mixes.zig`). Radio and Daily Mixes share this scoring.
+Everything is computed from the Library database: no network, no providers.
 
 ## Seeds and the seed profile
 
@@ -284,3 +285,123 @@ user-queued entries, "less like this" and skips, and the pending count.
 in playback order, each with its entry id, position, Track, Recording and
 reasons. The C ABI counterparts are in
 [frontends.md](frontends.md#surface).
+
+## Daily Mixes
+
+`library/daily_mixes.zig` makes up to six mixes a mix day from the Library's
+listening history and stores them in `daily_mixes`, `daily_mix_artists` and
+`daily_mix_entries` ([database.md](database.md)).
+
+### Mix day
+
+A mix day starts at 04:00 local time. The mix day of `now_s` at
+`utc_offset_s` (seconds east of UTC) is
+`floor((now_s + utc_offset_s - 4 h) / 1 day)`, counted from the Unix epoch;
+before 04:00 it is still the previous day. The mix day the stored mixes were
+made for is kept in the `mixes.generated_day` setting.
+
+### Generation
+
+`Runtime.startDailyMixes(library, .{ now_s, utc_offset_s, force })` starts a
+`daily_mixes` Job ([control-plane.md](control-plane.md#jobs)). It runs in this
+order:
+
+1. `mixes.count` 0 clears the stored mixes and forgets the mix day.
+2. Without `force`, stored mixes from this mix day or a later one are kept.
+3. Fewer than 30 listens up to `now_s`, or listens on fewer than 3 local
+   calendar days, clear the stored mixes and forget the mix day, so the next
+   run checks again.
+4. Otherwise the day's mixes replace the stored ones.
+
+Another `mixes.count` takes effect at the next forced run or mix day.
+
+Each outcome finishes the Job as succeeded; `libraryDailyMixes` reports the
+resulting state. Every write replaces all stored rows in one transaction, so
+a failed or cancelled run leaves the previous mixes intact. Frontends start
+the Job when they start and when Home opens; liborca has no timer.
+
+### Clusters
+
+The 50 Artists with the most listens in the 30 days before `now_s` (a listen
+counts for the Artist of its Recording's lowest-id Track) are grouped by each
+Artist's most frequent first genre. Clusters are ordered by their listens,
+then genre id. A cluster qualifies with at least 2 Artists, or with at least
+40 candidates by its Artists. The first `mixes.count` − 1 qualifying clusters
+become genre mixes, named after the genre; "Rarely played" comes last when it
+has candidates. Fewer qualifying clusters make fewer genre mixes.
+
+A genre mix ranks candidates with the shared scoring core against a cluster
+profile: the cluster's Artists at 1.0 and their related Artists, the genre
+pinned at 1, and the years, audio features and co-listening of the Artists'
+Tracks. Never-played Recordings are candidates whatever
+`radio.include_unplayed` says. "Rarely played" ranks Recordings with plays
+but none in the last 365 days by play count times 1 + jitter / 2.
+
+The jitter seed is a hash of the mix day and the mix's position, so one mix
+day always produces the same mixes from the same Library.
+
+### Filling a mix
+
+Each mix takes at most 25 entries and 90 minutes, best first. A pick that
+would run past 90 minutes is passed over; an unknown duration counts as 0. A
+pool with enough candidates reaches 60 minutes.
+
+A genre mix aims for 15 favorites (loved, rated 80 or more, or 3 or more
+plays with one in the last 180 days), 6 rarely played (1 or 2 plays, or none
+in 180 days) and 4 never played. Each pick comes from the class furthest
+below its target; a class with nothing left is filled from the next class
+furthest below its target. "Rarely played" takes its candidates in order.
+
+Left out of every mix:
+
+- Recordings on live Releases, hated Recordings and Recordings marked Not for
+  me;
+- Recordings played within `discovery.avoid_days`, unless no candidate is left
+  without them, as in Radio;
+- Recordings an earlier mix of the day holds;
+- picks that would break the Picking rules: no more than 2 consecutive by one
+  Artist, no more than 2 from one Release in any 10. Mixes never relax them.
+
+Each mix stores the counts left out by reason: `recent`, `not_for_me`,
+`hated` and `live` over the Recordings of its Artists (for "Rarely played",
+of its candidates), each Recording under the first that applies;
+`other_mix` and `diversity` over its ranked candidates.
+
+### Stored data
+
+Per mix: its position, kind (0 genre, 1 Rarely played), genre id, name, mix
+day, generation time, up to 4 top Artists (by 30-day listens for a genre mix,
+by play count for "Rarely played"), the left-out counts, the makeup counts by
+class, and `signals`: bit n is set when reason kind n names at least one of
+its entries. Per entry: its position, Recording and `PickReason`, with the
+kinds and numbering of [Reasons](#reasons); each reason is true of the
+entry.
+
+### Reading and feedback
+
+- `libraryDailyMixes(library, now_s, utc_offset_s)` returns the state
+  (`ready`, `not_enough_history`, `off`, `not_generated`), the generation
+  time and mix day, and at most 6 mixes, each with its id, position, kind,
+  name, genre id, up to 4 Artist ids and names (names at most 256 bytes),
+  entry count and total duration, signals, left-out and makeup counts, and
+  up to 4 Release ids for a cover mosaic.
+- `libraryDailyMixEntries(library, mix_id, output)` returns at most 25
+  entries of either kind in position order, each with the Recording's
+  lowest-id Track with a present file, the Recording, the Track's duration
+  and the reasons. `UnknownDailyMix` for an unknown mix.
+- `libraryNotForMe(library, track_id, now_s)` marks the Track's Recording in
+  `recommendation_feedback` until `now_s` + 90 days; marking it again
+  restarts the 90 days. Radio leaves it out, and mix reads leave it out at
+  once without deleting the entry, so
+  `libraryClearNotForMe(library, track_id)` puts it back in place.
+- `libraryResetRecommendations(library)` deletes every Not for me mark.
+  Radio session feedback is not stored and is unaffected.
+- `librarySaveDailyMix(library, mix_id, name)` creates a manual playlist
+  holding the entries `libraryDailyMixEntries` returns, in order, and returns
+  its id. Names follow `libraryCreatePlaylist`.
+
+Entry counts, durations, entries and saved playlists leave out Recordings
+with an unexpired Not for me mark and Recordings with no present file.
+
+The C ABI counterparts are in [frontends.md](frontends.md#surface), and
+`orca-cli mixes` lists and prints mixes ([cli.md](cli.md)).

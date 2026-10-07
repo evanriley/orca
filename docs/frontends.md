@@ -283,6 +283,17 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   a session return `ORCA_STATUS_INVALID_STATE` without one. Picks arrive from
   a worker that wakes the host; the next `orca_runtime_pump` adds them. See
   [discovery.md](discovery.md#library-radio).
+- Daily Mixes: `orca_library_start_daily_mixes` (an
+  `orca_daily_mixes_request`; a Job of kind `ORCA_JOB_KIND_DAILY_MIXES`;
+  `ORCA_STATUS_INVALID_ARGUMENT` for `force` above 1),
+  `orca_library_daily_mixes` (one callback-scoped `orca_daily_mixes_view`
+  with an `orca_daily_mixes_state` and up to 6 `orca_daily_mix_view`s),
+  `orca_library_daily_mix_entries` (up to 25 entries with reasons in one
+  callback-scoped `orca_daily_mix_entries_view`), `orca_library_not_for_me`,
+  `orca_library_clear_not_for_me`, `orca_library_reset_recommendations` and
+  `orca_library_save_daily_mix` (writes the new playlist id).
+  `ORCA_STATUS_NOT_FOUND` for an unknown mix or Track. See
+  [discovery.md](discovery.md#daily-mixes).
 - Listen settings: `orca_library_set_listen_policy`,
   `orca_library_set_listen_recording`, `orca_library_clear_listens` (keeps
   ratings and loves).

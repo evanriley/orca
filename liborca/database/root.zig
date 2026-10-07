@@ -196,6 +196,7 @@ pub const setting_radio_continue = repository.setting_radio_continue;
 pub const setting_radio_include_unplayed = repository.setting_radio_include_unplayed;
 pub const setting_discovery_avoid_days = repository.setting_discovery_avoid_days;
 pub const setting_mixes_count = repository.setting_mixes_count;
+pub const setting_mixes_generated_day = repository.setting_mixes_generated_day;
 pub const GenreSummary = repository.GenreSummary;
 pub const GenrePage = repository.GenrePage;
 pub const GenreSort = repository.GenreSort;

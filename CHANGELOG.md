@@ -4,6 +4,15 @@
 
 ### Added
 
+- Daily Mixes: `startDailyMixes` (Job kind `daily_mixes`),
+  `libraryDailyMixes`, `libraryDailyMixEntries`, `libraryNotForMe`,
+  `libraryClearNotForMe`, `libraryResetRecommendations`,
+  `librarySaveDailyMix`, their `orca_library_*` C ABI counterparts and
+  `orca-cli mixes` make up to five genre mixes from the Artists played in the
+  last 30 days and a Rarely played mix once a mix day (from 04:00 local),
+  each 25 tracks within 90 minutes with true reasons, no repeats across mixes
+  and counts of what was left out. Not for me hides a Recording for 90 days
+  and can be undone in place; a mix saves as a playlist.
 - Audio features: analysis estimates each file's tempo, key, onset rate and
   spectral centroid, and `libraryTrackAudioFeatures`,
   `orca_library_track_audio_features` and `orca-cli features` read them for a

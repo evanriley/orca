@@ -28,6 +28,7 @@ const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_radio = @import("runtime_radio.zig");
+const runtime_mixes = @import("runtime_mixes.zig");
 const runtime_resume = @import("runtime_resume.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const storage = @import("../storage/root.zig");
@@ -112,6 +113,18 @@ pub const radio_sound_energy = library_pass.discovery.sound_energy;
 pub const DiscoverySettings = library_pass.discovery.Settings;
 pub const DiscoveryAvoidDays = library_pass.discovery.AvoidDays;
 pub const DailyMixCount = library_pass.discovery.MixCount;
+pub const DailyMixesRequest = job_worker.DailyMixesRequest;
+pub const DailyMixes = library_pass.daily_mixes.DailyMixes;
+pub const DailyMix = library_pass.daily_mixes.Mix;
+pub const DailyMixArtist = library_pass.daily_mixes.MixArtist;
+pub const DailyMixKind = library_pass.daily_mixes.Kind;
+pub const DailyMixesState = library_pass.daily_mixes.State;
+pub const DailyMixLeftOut = library_pass.daily_mixes.LeftOutCounts;
+pub const DailyMixMakeup = library_pass.daily_mixes.Makeup;
+pub const DailyMixEntry = library_pass.daily_mixes.Entry;
+pub const max_daily_mixes = library_pass.daily_mixes.max_mixes;
+pub const max_daily_mix_entries = library_pass.daily_mixes.max_entries;
+pub const daily_mix_not_for_me_days = library_pass.daily_mixes.not_for_me_days;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
 pub const RatingChange = database.RatingChange;
@@ -2160,6 +2173,48 @@ pub const OrcaRuntime = struct {
 
     pub fn setLibraryDiscoverySettings(self: *OrcaRuntime, library: LibraryHandle, settings: DiscoverySettings) !void {
         return runtime_radio.setLibraryDiscoverySettings(self, library, settings);
+    }
+
+    /// Starts a `daily_mixes` Job that makes the day's Daily Mixes, or keeps
+    /// the stored ones when they are from this mix day and `force` is not
+    /// set. A mix day starts at 04:00 local time. A failed or cancelled Job
+    /// leaves the stored mixes as they were.
+    pub fn startDailyMixes(self: *OrcaRuntime, library: LibraryHandle, request: DailyMixesRequest) !JobHandle {
+        return runtime_mixes.startDailyMixes(self, library, request);
+    }
+
+    /// The stored Daily Mixes, at most `max_daily_mixes`, and whether there
+    /// are any to show at `now_s`.
+    pub fn libraryDailyMixes(self: *OrcaRuntime, library: LibraryHandle, now_s: i64, utc_offset_s: i64) !DailyMixes {
+        return runtime_mixes.libraryDailyMixes(self, library, now_s, utc_offset_s);
+    }
+
+    /// Writes a Daily Mix's entries in order into `output`, leaving out
+    /// Recordings marked Not for me; at most `max_daily_mix_entries`.
+    pub fn libraryDailyMixEntries(self: *OrcaRuntime, library: LibraryHandle, mix_id: i64, output: []DailyMixEntry) !usize {
+        return runtime_mixes.libraryDailyMixEntries(self, library, mix_id, output);
+    }
+
+    /// Leaves the Track's Recording out of Radio and Daily Mixes for
+    /// `daily_mix_not_for_me_days` from `now_s`.
+    pub fn libraryNotForMe(self: *OrcaRuntime, library: LibraryHandle, track_id: i64, now_s: i64) !void {
+        return runtime_mixes.libraryNotForMe(self, library, track_id, now_s);
+    }
+
+    /// Undoes `libraryNotForMe`; a Daily Mix shows the entry where it was.
+    pub fn libraryClearNotForMe(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !void {
+        return runtime_mixes.libraryClearNotForMe(self, library, track_id);
+    }
+
+    /// Forgets every Not for me in the Library.
+    pub fn libraryResetRecommendations(self: *OrcaRuntime, library: LibraryHandle) !void {
+        return runtime_mixes.libraryResetRecommendations(self, library);
+    }
+
+    /// Saves a Daily Mix's entries, as `libraryDailyMixEntries` lists them,
+    /// as a new manual playlist and returns its id.
+    pub fn librarySaveDailyMix(self: *OrcaRuntime, library: LibraryHandle, mix_id: i64, name: []const u8) !i64 {
+        return runtime_mixes.librarySaveDailyMix(self, library, mix_id, name);
     }
 
     /// Starts a Library Radio session on a Player bound to `library`,

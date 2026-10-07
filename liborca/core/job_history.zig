@@ -79,7 +79,7 @@ pub const RetryRequest = union(enum) {
                 .missing_genres => |limit| .{ .genre_fill = .{ .limit = limit, .offline = info.offline } },
                 .release => null,
             },
-            .mutation, .lyrics, .artist_info => null,
+            .mutation, .lyrics, .artist_info, .daily_mixes => null,
         };
     }
 
@@ -197,6 +197,7 @@ fn writeSummary(worker: *const JobWorker, writer: *std.Io.Writer) !void {
             try parts.count(stats.files_seen, "release", "releases");
             try parts.optional(stats.changed, "metadata issues");
         },
+        .daily_mixes => try parts.count(worker.scanStats().changed, "mix", "mixes"),
         .metadata_lookup => |matching| {
             const stats = worker.matchStats();
             if (matching.lookups) try parts.count(stats.tracks_examined, "track", "tracks");

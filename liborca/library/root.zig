@@ -13,6 +13,7 @@ pub const release_alignment = @import("release_alignment.zig");
 pub const release_apply = @import("release_apply.zig");
 pub const property_backfill = @import("property_backfill.zig");
 pub const consistency_pass = @import("consistency_pass.zig");
+pub const daily_mixes = @import("daily_mixes.zig");
 pub const discovery = @import("discovery.zig");
 pub const scanner = @import("scanner.zig");
 pub const smart_playlist = @import("smart_playlist.zig");
@@ -55,6 +56,7 @@ test {
     _ = @import("release_apply.zig");
     _ = @import("property_backfill.zig");
     _ = @import("consistency_pass.zig");
+    _ = @import("daily_mixes.zig");
     _ = @import("discovery.zig");
     _ = @import("scanner.zig");
     _ = @import("smart_playlist.zig");

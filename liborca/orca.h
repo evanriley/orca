@@ -168,6 +168,8 @@ typedef enum orca_job_kind {
     /* Finding where a Release's tracks disagree about its metadata. The
      * ABI cannot start this Job yet; a history entry can name it. */
     ORCA_JOB_KIND_CONSISTENCY = 12,
+    /* Making the day's Daily Mixes: orca_library_start_daily_mixes. */
+    ORCA_JOB_KIND_DAILY_MIXES = 13,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -1088,6 +1090,117 @@ typedef struct orca_discovery_settings {
     uint8_t mix_count;
     uint8_t reserved[4];
 } orca_discovery_settings;
+
+/* What orca_library_start_daily_mixes is asked. `now_s` is Unix seconds and
+ * `utc_offset_s` the local offset east of UTC; a mix day starts at 04:00
+ * local time. `force` 1 makes new mixes even when the stored ones are from
+ * this mix day. */
+typedef struct orca_daily_mixes_request {
+    int64_t now_s;
+    int64_t utc_offset_s;
+    uint8_t force;
+    uint8_t reserved[7];
+} orca_daily_mixes_request;
+
+typedef enum orca_daily_mixes_state {
+    ORCA_DAILY_MIXES_STATE_READY = 0,
+    /* Fewer than 30 listens, or listens on fewer than 3 local days. */
+    ORCA_DAILY_MIXES_STATE_NOT_ENOUGH_HISTORY = 1,
+    /* mix_count is 0. */
+    ORCA_DAILY_MIXES_STATE_OFF = 2,
+    /* Enough history, but no mixes are stored for this mix day yet. */
+    ORCA_DAILY_MIXES_STATE_NOT_GENERATED = 3,
+} orca_daily_mixes_state;
+
+typedef enum orca_daily_mix_kind {
+    /* Made for Artists sharing a genre and named after it. */
+    ORCA_DAILY_MIX_KIND_GENRE = 0,
+    /* Recordings played before but not in the last 365 days. */
+    ORCA_DAILY_MIX_KIND_RARELY_PLAYED = 1,
+} orca_daily_mix_kind;
+
+typedef struct orca_daily_mix_artist {
+    int64_t id;
+    orca_string_view name;
+} orca_daily_mix_artist;
+
+/* One stored Daily Mix. `artists` holds `artist_count` (at most 4) Artists,
+ * most played first; `cover_release_ids` holds `cover_count` (at most 4)
+ * distinct Releases of its first entries. `entry_count` and `duration_ms`
+ * leave out Recordings marked Not for me; an unknown duration adds 0.
+ * `signals` has bit n set when orca_reason_kind n names one of its entries.
+ * The left_out_ counts are the Recordings left out when it was made, by
+ * reason; the _count fields are its entries by class when it was made:
+ * favorites (loved, rated 80 or more, or played 3 or more times recently),
+ * rarely played, and never played. */
+typedef struct orca_daily_mix_view {
+    int64_t id;
+    int64_t genre_id;
+    orca_string_view name;
+    orca_daily_mix_artist artists[4];
+    int64_t cover_release_ids[4];
+    uint64_t duration_ms;
+    uint32_t entry_count;
+    uint32_t signals;
+    uint32_t left_out_recent;
+    uint32_t left_out_not_for_me;
+    uint32_t left_out_hated;
+    uint32_t left_out_live;
+    uint32_t left_out_other_mix;
+    uint32_t left_out_diversity;
+    uint32_t favorite_count;
+    uint32_t rarely_played_count;
+    uint32_t never_played_count;
+    uint8_t ordinal;
+    uint8_t kind; /* orca_daily_mix_kind */
+    uint8_t has_genre_id;
+    uint8_t artist_count;
+    uint8_t cover_count;
+    uint8_t reserved[3];
+} orca_daily_mix_view;
+
+/* `mixes` holds `count` (at most 6) mixes in order, valid only for the
+ * duration of the callback. `generated_at` (Unix s) and `local_day` (mix days
+ * since the Unix epoch) are set when mixes are stored. */
+typedef struct orca_daily_mixes_view {
+    const orca_daily_mix_view *mixes;
+    size_t count;
+    int64_t generated_at;
+    int64_t local_day;
+    uint8_t state; /* orca_daily_mixes_state */
+    uint8_t has_generated_at;
+    uint8_t has_local_day;
+    uint8_t reserved[5];
+} orca_daily_mixes_view;
+
+typedef void (*orca_daily_mixes_callback)(
+    void *context,
+    const orca_daily_mixes_view *mixes
+);
+
+/* An entry of a Daily Mix: the Recording and the Track of it to play. The
+ * first `reason_count` (0 to 2) of `reasons` are true of it. */
+typedef struct orca_daily_mix_entry_view {
+    int64_t track_id;
+    int64_t recording_id;
+    int64_t duration_ms;
+    orca_reason_part reasons[2];
+    uint8_t reason_count;
+    uint8_t has_duration;
+    uint8_t reserved[6];
+} orca_daily_mix_entry_view;
+
+/* `entries` holds `count` (at most 25) entries in order, valid only for the
+ * duration of the callback. */
+typedef struct orca_daily_mix_entries_view {
+    const orca_daily_mix_entry_view *entries;
+    size_t count;
+} orca_daily_mix_entries_view;
+
+typedef void (*orca_daily_mix_entries_callback)(
+    void *context,
+    const orca_daily_mix_entries_view *entries
+);
 
 typedef struct orca_artist_totals {
     /* Summed over the Tracks `track_count` counts; a Track with no known
@@ -2819,6 +2932,70 @@ orca_status orca_library_set_discovery_settings(
     orca_runtime *runtime,
     orca_handle library,
     const orca_discovery_settings *settings
+);
+/* Starts an ORCA_JOB_KIND_DAILY_MIXES job that makes the day's Daily Mixes
+ * and replaces the stored ones in one transaction. It keeps the stored mixes
+ * when they are from this mix day and `force` is 0, and clears them when
+ * mix_count is 0 or the history is too short; orca_library_daily_mixes then
+ * reports the state. Never touches the network. A failed or cancelled job
+ * leaves the stored mixes as they were. INVALID_ARGUMENT for `force` above 1. */
+orca_status orca_library_start_daily_mixes(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_daily_mixes_request *request,
+    orca_handle *job
+);
+/* Invokes the callback once with the stored Daily Mixes and the state for
+ * the mix day of `now_s` at `utc_offset_s`. Reads the database alone. */
+orca_status orca_library_daily_mixes(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_daily_mixes_callback callback
+);
+/* Invokes the callback once with a Daily Mix's entries in order, leaving out
+ * Recordings marked Not for me and those with no present file. Reads the
+ * database alone. NOT_FOUND for an unknown mix. */
+orca_status orca_library_daily_mix_entries(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t mix_id,
+    void *context,
+    orca_daily_mix_entries_callback callback
+);
+/* Leaves the Track's Recording out of Daily Mixes, at once, and out of Radio
+ * for 90 days from `now_s`; marking it again restarts the 90 days. NOT_FOUND
+ * for an unknown Track. */
+orca_status orca_library_not_for_me(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    int64_t now_s
+);
+/* Undoes orca_library_not_for_me: the entry returns to its place in its mix.
+ * NOT_FOUND for an unknown Track. */
+orca_status orca_library_clear_not_for_me(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id
+);
+/* Clears every Not for me mark in the Library. */
+orca_status orca_library_reset_recommendations(
+    orca_runtime *runtime,
+    orca_handle library
+);
+/* Saves a Daily Mix's entries, as orca_library_daily_mix_entries lists them,
+ * as a new manual playlist and writes its id. Names as for
+ * orca_library_create_playlist. NOT_FOUND for an unknown mix. */
+orca_status orca_library_save_daily_mix(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t mix_id,
+    const char *name,
+    size_t name_length,
+    int64_t *playlist_id
 );
 /* Listens recorded since the Library was opened: one atomic load, so a host
  * may poll it every tick to learn when to reread its history. */

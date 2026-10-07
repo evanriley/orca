@@ -477,8 +477,11 @@ are stored by number, so new states are appended and never reordered
 ### Settings and history
 
 - `library_settings` (`WITHOUT ROWID`): the Library's own settings, never
-  credentials: `listens.policy`, `listens.record`, and `genre_fill.musicbrainz`
-  (`0` disables; absent is on).
+  credentials: `listens.policy`, `listens.record`, `genre_fill.musicbrainz`
+  (`0` disables; absent is on), the discovery settings
+  ([discovery.md](discovery.md#settings)) and `mixes.generated_day`, the mix
+  day the stored Daily Mixes were made for
+  ([discovery.md](discovery.md#mix-day)).
 - `job_history`: one row per finished host Job
   ([control-plane.md](control-plane.md#history)).
 

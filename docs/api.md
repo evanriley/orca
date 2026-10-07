@@ -539,6 +539,31 @@ section lists the entry points, errors and limits.
   session; it is never saved. With `radio_continue` on, a Player that starts
   the last entry of a queue that does not repeat starts a `recent` session.
   See [discovery.md](discovery.md#library-radio).
+- `startDailyMixes(library, DailyMixesRequest{ now_s, utc_offset_s, force })`
+  starts a `daily_mixes` Job that makes the mix day's Daily Mixes unless they
+  exist and `force` is false. It takes no Library slot, is not pausable and
+  keeps no history; its progress counts the mixes made, and it succeeds when
+  mixes are off or history is too short.
+- `libraryDailyMixes(library, now_s, utc_offset_s)` returns `DailyMixes`: a
+  `DailyMixesState` (`ready`, `not_enough_history`, `off`, `not_generated`),
+  `generated_at`, `local_day` and `items()`, up to `max_daily_mixes` (6)
+  `DailyMix`es. Each has its id, `ordinal`, `DailyMixKind` (`genre`,
+  `rarely_played`), `name()`, `genre_id`, `mixArtists()` (up to 4
+  `DailyMixArtist`s), `entry_count`, `duration_ms`, `signals`,
+  `DailyMixLeftOut`, `DailyMixMakeup` and `coverReleases()` (up to 4 Release
+  ids).
+- `libraryDailyMixEntries(library, mix_id, output)` fills up to
+  `max_daily_mix_entries` (25) `DailyMixEntry`s (Track, Recording, duration,
+  reason) in order and returns how many; `error.UnknownDailyMix` for an
+  unknown mix.
+- `libraryNotForMe(library, track_id, now_s)` hides the Track's Recording from
+  Radio and Daily Mixes for `daily_mix_not_for_me_days` (90) days
+  (`error.TrackNotFound` for an unknown or Recording-less Track);
+  `libraryClearNotForMe(library, track_id)` undoes it and
+  `libraryResetRecommendations(library)` clears every mark.
+- `librarySaveDailyMix(library, mix_id, name)` saves the mix's shown entries
+  as a manual playlist and returns its id.
+  See [discovery.md](discovery.md#daily-mixes).
 
 ### Playlists
 

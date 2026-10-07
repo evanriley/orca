@@ -34,6 +34,8 @@ pub const Kind = enum {
     release_info,
     /// Finding where a Release's tracks disagree about its metadata.
     consistency,
+    /// Making the day's Daily Mixes.
+    daily_mixes,
     dummy,
 };
 
