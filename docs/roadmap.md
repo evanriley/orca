@@ -371,19 +371,23 @@ To release:
 1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
    and state the Library schema version it ships.
 2. Set `.version` in `build.zig.zon`.
-3. Commit, and tag the commit with a signed, annotated `vX.Y.Z` tag whose
-   message is that version's section of `CHANGELOG.md`:
+3. Commit on a branch and merge it into `main` through a pull request once CI
+   passes.
+4. Check out the updated `main`, tag the release commit (`RELEASE_COMMIT`
+   below) with a signed, annotated `vX.Y.Z` tag whose message is that
+   version's section of `CHANGELOG.md`, and push the tag:
 
    ```sh
    version=X.Y.Z
    { printf 'Orca %s\n\n' "$version"
      awk -v v="$version" '$1 == "##" { p = ($2 == v); next } p' CHANGELOG.md
-   } | git tag -s "v$version" --cleanup=whitespace -F -
+   } | git tag -s "v$version" --cleanup=whitespace -F - RELEASE_COMMIT
+   git push origin "v$version"
    ```
 
    `--cleanup=whitespace` keeps the `###` headings, which the default
    cleanup removes as comments.
-4. Update Orca's application entry on the AcoustID website to the new
+5. Update Orca's application entry on the AcoustID website to the new
    version. Every lookup and submission sends the version as
    `clientversion`, and the registered details should match what the
    service receives.
@@ -407,6 +411,21 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
+- The scanner skips a directory entry whose type the filesystem does not
+  report (`DT_UNKNOWN`) and does not count it, so on such a filesystem the
+  files and folders behind those entries are never scanned.
+- `libraryStats` takes `last_analysis_at` from the newest `analysis_results`
+  row of any kind, so a fingerprint stored by matching or a kind 4 verdict
+  counts as an analysis measurement.
+- Matching and AcoustID submission fingerprint a file with more than two
+  channels and store a kind 3 row for it, beside the verdict that records no
+  measurement for that file.
+- `orca-gtk` logs `Gtk-CRITICAL: Allocation width too small. Tried to
+  allocate 183x716, but AdwBin/GtkStack needs at least 214x716` at start,
+  and has logged `gtk_scrolled_window_get_vadjustment` and
+  `gtk_adjustment_get_value` assertions.
+- `watch_smoke` in `tests/c_abi_smoke.c` returns 210 when `./.zig-cache` does
+  not exist, as in a fresh tree built with `--cache-dir` elsewhere.
 
 ## Deferred formats
 
@@ -470,11 +489,21 @@ sniffed or not recognized until they are supported:
   artist's MusicBrainz ID leaves the machine), cached for a week. The
   endpoint is experimental, so a failed lookup hides the list.
 - A release calendar of new and upcoming releases by artists in the library,
-  from ListenBrainz's `/1/explore/fresh-releases`, fetched at most daily.
+  from ListenBrainz's `/1/explore/fresh-releases`, fetched at most daily, with
+  filters drawn from local data: the most-played artists, loved artists, a
+  genre, or artists heard within a period.
 - Radio and mixes from the library: a queue that keeps extending from a seed
   track, album or artist, scored in `liborca` from local data only (shared
   artist, tags, genre, era, play history and feedback), optionally boosted by
   cached ListenBrainz similar-artist data.
+- Daily mixes: a small set of playlists generated each day from the
+  listening history, each around a theme or genre, mixing tracks played often
+  with ones not played in a long time, shown on a Home or Explore page.
+- Upcoming concerts by artists in the library, on the artist page and in the
+  release calendar, from a provider whose terms allow it.
+- Classical music by composition: works grouped by composer, with each
+  work's recordings and performers, from MusicBrainz work and recording
+  relationships.
 - C ABI functions for what only the Zig API offers. Each is named with its
   reason in `scripts/check-abi-coverage.sh`; the command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump`.
