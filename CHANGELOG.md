@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-10-06
+
+Ships Library schema version 1, unchanged from 0.1.0. Breaking for the Zig
+API: `TagWriteFailure.file` is optional. `orca-cli` exits 2 instead of 0 on a
+usage error. The C ABI only adds.
 
 ### Added
 
