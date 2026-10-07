@@ -51,6 +51,10 @@
 
 ### Fixed
 
+- A Job or query reading the Library no longer fails with an aborted
+  statement when another Job runs the first missing-location sweep, cache
+  clear or root removal: the scratch tables those use now exist from open
+  instead of being created on the shared connection mid-read.
 - The test output backend's `close` waits for a render callback in progress,
   as real backends do, so a test can no longer release an audio block twice
   when its output reopens for a new format.

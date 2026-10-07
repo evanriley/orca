@@ -39,6 +39,10 @@ lock; when another process holds it, recovery is deferred to the next holder.
 - The primary connection uses WAL and `synchronous=NORMAL`. Every connection
   sets `foreign_keys=ON`, a five-second busy timeout and SQLite's full-mutex
   mode.
+- The primary connection creates the scratch TEMP tables of sweeps, cache
+  clears and root removal when it opens, and those paths only empty and fill
+  them. A TEMP schema change on a connection expires every statement prepared
+  on it, which aborts a read in progress on another thread.
 - One write lane (`std.Io.Mutex`, futex-backed, not a spinlock) serializes
   complete write transactions. A scan holds it across one bounded 256-row
   transaction while UI threads read.

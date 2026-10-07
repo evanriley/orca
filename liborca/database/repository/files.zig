@@ -1189,10 +1189,7 @@ pub const FileRepository = struct {
         defer self.write_lane.release();
         try self.db.exec("SAVEPOINT sweep;");
         errdefer self.db.exec("ROLLBACK TO sweep; RELEASE sweep;") catch {};
-        try self.db.exec(
-            \\CREATE TEMP TABLE IF NOT EXISTS swept_cover_releases(id INTEGER PRIMARY KEY);
-            \\DELETE FROM temp.swept_cover_releases;
-        );
+        try self.db.exec("DELETE FROM temp.swept_cover_releases;");
         _ = try scope.run(self.db, sql.covers);
         const marked = try scope.run(self.db, sql.mark);
         _ = try scope.run(self.db, sql.forget);

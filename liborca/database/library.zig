@@ -131,6 +131,12 @@ pub const LibraryDatabase = struct {
             null;
         errdefer if (walk_lock_path) |lock_path| allocator.free(lock_path);
         try migrations.apply(database);
+        try database.exec(
+            \\CREATE TEMP TABLE IF NOT EXISTS swept_cover_releases(id INTEGER PRIMARY KEY);
+            \\CREATE TEMP TABLE IF NOT EXISTS cleared_cover_releases(id INTEGER PRIMARY KEY);
+            \\CREATE TEMP TABLE IF NOT EXISTS forgotten_files(id INTEGER PRIMARY KEY);
+            \\CREATE TEMP TABLE IF NOT EXISTS forgotten_recordings(id INTEGER PRIMARY KEY);
+        );
         var journal: repository.MutationJournalRepository = .{
             .db = database,
             .write_lane = write_lane,
@@ -4807,4 +4813,73 @@ fn absoluteTestPath(comptime format: []const u8, args: anytype) ![]u8 {
     const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
     defer std.testing.allocator.free(current);
     return std.fs.path.resolve(std.testing.allocator, &.{ current, relative });
+}
+
+const MidStepProbe = struct {
+    library: LibraryDatabase,
+    statement: sqlite.Statement,
+    read_root_id: i64,
+    removable_root_id: i64,
+
+    fn begin(comptime name: []const u8) !MidStepProbe {
+        var library = try LibraryDatabase.open(
+            std.testing.allocator,
+            std.testing.io,
+            "file:orca-test-mid-step-" ++ name ++ "?mode=memory&cache=shared",
+        );
+        errdefer library.close();
+        const read_binding = try library.ensureRoot(std.testing.io, "/music", .{ .stable_key = "uuid:mid-step-read" });
+        const removable_binding = try library.ensureRoot(std.testing.io, "/other", .{ .stable_key = "uuid:mid-step-removable" });
+        for (0..4) |index| {
+            const file = try library.files.create(.{ .size_bytes = 1 });
+            const binding = if (index < 3) read_binding else removable_binding;
+            var uri: [32]u8 = undefined;
+            _ = try library.locations.upsert(.{
+                .file_id = file,
+                .volume_id = binding.volume_id,
+                .root_id = binding.root_id,
+                .uri = try std.fmt.bufPrint(&uri, "/music/{d}.flac", .{index}),
+                .last_seen_generation = 1,
+            });
+        }
+        var statement = try library.database.prepare(
+            \\SELECT files.id, (SELECT count(*) FROM locations WHERE locations.file_id = files.id)
+            \\FROM files WHERE files.id IN (SELECT value FROM json_each('[1,2,3]'));
+        );
+        errdefer statement.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+        return .{
+            .library = library,
+            .statement = statement,
+            .read_root_id = read_binding.root_id,
+            .removable_root_id = removable_binding.root_id,
+        };
+    }
+
+    fn finish(self: *MidStepProbe) !void {
+        defer self.library.close();
+        defer self.statement.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try self.statement.step());
+        try std.testing.expectEqual(sqlite.Step.row, try self.statement.step());
+        try std.testing.expectEqual(sqlite.Step.done, try self.statement.step());
+    }
+};
+
+test "a read in progress survives the first missing-location sweep" {
+    var probe = try MidStepProbe.begin("sweep");
+    _ = try probe.library.files.markMissingBelowGeneration(probe.read_root_id, 2);
+    try probe.finish();
+}
+
+test "a read in progress survives the first fetched-cache clear" {
+    var probe = try MidStepProbe.begin("cache-clear");
+    _ = try probe.library.fetched_cache.clear();
+    try probe.finish();
+}
+
+test "a read in progress survives a root removal" {
+    var probe = try MidStepProbe.begin("root-removal");
+    const removal = try probe.library.library_roots.remove(std.testing.allocator, probe.removable_root_id);
+    removal.deinit();
+    try probe.finish();
 }
