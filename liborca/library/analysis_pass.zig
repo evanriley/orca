@@ -1967,8 +1967,10 @@ test "analysis examines a file with more than two channels once and again only w
 test "analysis examines a file that could not be read again on the next run" {
     var fixture = try Fixture.init("file:orca-analysis-unreadable-retry?mode=memory&cache=shared");
     defer fixture.deinit();
-    try fixture.directory.dir.createDir(testing.io, "song.flac", .default_dir);
+    try fixture.writeBytes("song.flac", "");
     const file_id = try fixture.record("song.flac");
+    try fixture.directory.dir.deleteFile(testing.io, "song.flac");
+    try fixture.directory.dir.createDir(testing.io, "song.flac", .default_dir);
 
     var pass = fixture.pass();
     for (0..2) |_| {
