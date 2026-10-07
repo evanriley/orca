@@ -69,6 +69,7 @@ pub const SortDirection = database.SortDirection;
 pub const TrackPage = database.TrackPage;
 pub const TrackSummary = database.TrackSummary;
 pub const TrackDetails = runtime.TrackDetails;
+pub const AudioFeatures = runtime.AudioFeatures;
 pub const TrackFieldStates = runtime.TrackFieldStates;
 pub const TrackFieldState = runtime.TrackFieldState;
 pub const EditableTrackField = runtime.EditableTrackField;

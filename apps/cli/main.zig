@@ -347,6 +347,7 @@ const commands = [_]Command{
     .{ .name = "releases", .usage = "releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--sort-as-written] [--letters | --totals | --async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
+    .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{
         .name = "artwork",
@@ -5141,6 +5142,27 @@ fn printFingerprint(context: Context) !void {
     const outcome = try runtime.libraryTrackFingerprint(library, io, track_id) orelse return error.NoPresentFile;
     defer outcome.fingerprint.deinit();
     try stdout.print("DURATION={d}\nFINGERPRINT={s}\n", .{ outcome.fingerprint.durationSeconds(), outcome.fingerprint.encoded });
+}
+
+fn showAudioFeatures(context: Context) !void {
+    const stdout = context.stdout;
+    const track_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const features = try runtime.libraryTrackAudioFeatures(library, track_id) orelse return error.NotAnalyzed;
+    const pitch_names = [_][]const u8{ "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    if (features.tempo) |tempo|
+        try printDetail(stdout, "tempo", "{d:.1} bpm confidence={d:.2}", .{ tempo.bpm, tempo.confidence })
+    else
+        try printDetail(stdout, "tempo", "{s}", .{"-"});
+    if (features.key) |key|
+        try printDetail(stdout, "key", "{s} {t} confidence={d:.2}", .{ pitch_names[key.pitch], key.mode, key.confidence })
+    else
+        try printDetail(stdout, "key", "{s}", .{"-"});
+    try printOptionalDetail(stdout, "onset rate", "{d:.2} /s", features.onset_rate);
+    try printOptionalDetail(stdout, "centroid", "{d:.0} Hz", features.centroid_hz);
+    try printOptionalDetail(stdout, "energy", "{d:.2}", features.energy);
 }
 
 fn submitAcoustId(context: Context) !void {

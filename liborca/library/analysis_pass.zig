@@ -78,11 +78,15 @@ const Measurement = struct {
         /// The identity of the location measured, which it had from open to
         /// the last byte read.
         read_identity: database.StorageIdentityKey,
-        diagnostics_bytes: []u8,
-        fingerprint_bytes: []u8,
-        /// Null when the audio is too short to fingerprint or Chromaprint
+        /// Each encoded result to store, null when it was already stored for
+        /// these bytes and reused rather than measured again.
+        diagnostics_bytes: ?[]u8,
+        fingerprint_bytes: ?[]u8,
+        /// Also null when the audio is too short to fingerprint or Chromaprint
         /// failed; the other measurements are stored regardless.
         chromaprint_bytes: ?[]u8,
+        /// Also null when the features analyzer failed.
+        features_bytes: ?[]u8,
         /// ORAH over the decoded samples: tier 4 of the identity cascade,
         /// and the only tier that survives Orca writing a tag into the file.
         audio_hash: analysis.fingerprint.AudioHash,
@@ -136,10 +140,13 @@ const Measurement = struct {
 
         fn deinit(self: Outcome, allocator: std.mem.Allocator) void {
             switch (self) {
-                .measured => |value| {
-                    allocator.free(value.diagnostics_bytes);
-                    allocator.free(value.fingerprint_bytes);
-                    if (value.chromaprint_bytes) |bytes| allocator.free(bytes);
+                .measured => |value| inline for (.{
+                    value.diagnostics_bytes,
+                    value.fingerprint_bytes,
+                    value.chromaprint_bytes,
+                    value.features_bytes,
+                }) |encoded| {
+                    if (encoded) |bytes| allocator.free(bytes);
                 },
                 .undecodable, .unreadable, .unsupported_channels, .skipped => {},
             }
@@ -171,6 +178,9 @@ const Batch = struct {
     pass: *const LibraryAnalysis,
     codecs: *const codec.CodecRegistry,
     items: []const database.repository.AnalysisCandidate,
+    /// What is already stored for each item, read before any thread starts,
+    /// since no thread but the coordinator touches SQLite.
+    stored: []const ?analysis.service.StoredResults,
     /// Null for a file no thread claimed.
     slots: []?(anyerror!Measurement.Outcome),
     next: std.atomic.Value(usize) = .init(0),
@@ -181,7 +191,8 @@ const Batch = struct {
             const index = self.next.fetchAdd(1, .monotonic);
             if (index >= self.items.len) return;
             if (self.pass.current_item) |current| current.set(self.items[index].uri);
-            const outcome = self.pass.measure(io, self.codecs, self.items[index]);
+            const stored = if (self.stored[index]) |*results| results else null;
+            const outcome = self.pass.measure(io, self.codecs, self.items[index], stored);
             self.slots[index] = outcome;
             if (outcome) |_| {
                 if (self.pass.progress) |counter| _ = counter.fetchAdd(1, .release);
@@ -268,6 +279,9 @@ pub const LibraryAnalysis = struct {
         const slots = try self.allocator.alloc(?(anyerror!Measurement.Outcome), page_limit);
         defer self.allocator.free(slots);
         @memset(slots, null);
+        const stored = try self.allocator.alloc(?analysis.service.StoredResults, page_limit);
+        defer self.allocator.free(stored);
+        @memset(stored, null);
         const helpers = try self.allocator.alloc(std.Thread, @min(threads, page_limit) - 1);
         defer self.allocator.free(helpers);
         var measurements: std.ArrayList(Measurement) = .empty;
@@ -293,10 +307,17 @@ pub const LibraryAnalysis = struct {
             if (page.items.len == 0) break;
             cursor = page.items[page.items.len - 1].id;
 
+            defer for (stored[0..page.items.len]) |*results| {
+                if (results.*) |value| self.freeStored(value);
+                results.* = null;
+            };
+            for (page.items, stored[0..page.items.len]) |item, *results|
+                results.* = try self.loadStored(item);
             var batch: Batch = .{
                 .pass = self,
                 .codecs = codecs,
                 .items = page.items,
+                .stored = stored[0..page.items.len],
                 .slots = slots[0..page.items.len],
             };
             defer batch.deinitSlots(self.allocator);
@@ -339,6 +360,46 @@ pub const LibraryAnalysis = struct {
         return analysis.service.analysisSelectors(self.parameters, self.codecs orelse &builtin_codecs);
     }
 
+    /// The results already stored for the bytes the Library records for
+    /// `candidate`, when some but not all of them are. A file re-selected with
+    /// all of them, or measured again on request, is decoded whole.
+    fn loadStored(
+        self: *const LibraryAnalysis,
+        candidate: database.repository.AnalysisCandidate,
+    ) !?analysis.service.StoredResults {
+        if (self.only_file_id != null) return null;
+        const source_identity = candidate.content_hash orelse return null;
+        var results: analysis.service.StoredResults = .{ .source_identity = source_identity };
+        errdefer self.freeStored(results);
+        results.diagnostics = try self.analysis_cache.get(
+            self.allocator,
+            analysis.service.diagnosticsKey(candidate.id, source_identity, self.parameters),
+        );
+        results.fingerprint = try self.analysis_cache.get(
+            self.allocator,
+            analysis.service.fingerprintKey(candidate.id, source_identity),
+        );
+        results.chromaprint = try self.analysis_cache.get(
+            self.allocator,
+            analysis.chromaprint.cacheKey(candidate.id, source_identity, .{}),
+        );
+        results.features = try self.analysis_cache.get(
+            self.allocator,
+            analysis.service.featuresKey(candidate.id, source_identity),
+        );
+        if (results.complete()) {
+            self.freeStored(results);
+            return null;
+        }
+        return results;
+    }
+
+    fn freeStored(self: *const LibraryAnalysis, results: analysis.service.StoredResults) void {
+        inline for (.{ results.diagnostics, results.fingerprint, results.chromaprint, results.features }) |encoded| {
+            if (encoded) |bytes| self.allocator.free(bytes);
+        }
+    }
+
     fn isCancelled(self: *const LibraryAnalysis) bool {
         const token = self.cancellation orelse return false;
         return token.checkpoint();
@@ -366,6 +427,7 @@ pub const LibraryAnalysis = struct {
         io: std.Io,
         codecs: *const codec.CodecRegistry,
         candidate: database.repository.AnalysisCandidate,
+        stored: ?*const analysis.service.StoredResults,
     ) !Measurement.Outcome {
         if (candidate.uri.len == 0) return .skipped;
         const recorded = candidate.quick_hash orelse return .skipped;
@@ -393,7 +455,7 @@ pub const LibraryAnalysis = struct {
             .cache = null,
             .cancellation = self.cancellation,
         };
-        const examined = service.examineFile(null, candidate.uri, self.parameters) catch |err|
+        const examined = service.examineFile(null, candidate.uri, self.parameters, stored) catch |err|
             switch (err) {
                 error.Cancelled, error.OutOfMemory => return err,
                 // A read failed while the decoders were looking for a format,
@@ -437,20 +499,31 @@ pub const LibraryAnalysis = struct {
         const read_identity = filedIdentity(candidate, measured.source_identity, measured.storage_identity) orelse
             return .skipped;
 
-        const diagnostics_bytes = try analysis.encoding.encode(
-            self.allocator,
-            measured.diagnostics,
-        );
-        errdefer self.allocator.free(diagnostics_bytes);
-        const fingerprint_bytes = try analysis.fingerprint.encode(
-            self.allocator,
-            measured.fingerprint,
-        );
-        errdefer self.allocator.free(fingerprint_bytes);
-        const chromaprint_bytes = if (measured.chromaprint) |value|
+        const fresh = measured.measured;
+        const diagnostics_bytes = if (fresh.diagnostics)
+            try analysis.encoding.encode(self.allocator, measured.diagnostics)
+        else
+            null;
+        errdefer if (diagnostics_bytes) |bytes| self.allocator.free(bytes);
+        const fingerprint_bytes = if (fresh.fingerprint)
+            try analysis.fingerprint.encode(self.allocator, measured.fingerprint)
+        else
+            null;
+        errdefer if (fingerprint_bytes) |bytes| self.allocator.free(bytes);
+        const chromaprint_bytes = if (!fresh.chromaprint)
+            null
+        else if (measured.chromaprint) |value|
             try value.encode(self.allocator)
         else
             null;
+        errdefer if (chromaprint_bytes) |bytes| self.allocator.free(bytes);
+        const features_bytes = if (!fresh.features)
+            null
+        else if (measured.features) |value|
+            try self.allocator.dupe(u8, &value.encode())
+        else
+            null;
+        errdefer if (features_bytes) |bytes| self.allocator.free(bytes);
         return .{ .measured = .{
             .source_identity = measured.source_identity,
             .quick_hash = recorded,
@@ -459,6 +532,7 @@ pub const LibraryAnalysis = struct {
             .diagnostics_bytes = diagnostics_bytes,
             .fingerprint_bytes = fingerprint_bytes,
             .chromaprint_bytes = chromaprint_bytes,
+            .features_bytes = features_bytes,
             .audio_hash = measured.fingerprint.audio_hash,
             .has_loudness = measured.diagnostics.replay_gain_db != null,
             .integrated_lufs = measured.diagnostics.integrated_lufs,
@@ -495,28 +569,16 @@ pub const LibraryAnalysis = struct {
                     continue;
                 }
                 try self.files.recordUnknownChannelsLocked(measurement.file_id, value.channels);
-                try self.analysis_cache.putLocked(
-                    analysis.service.diagnosticsKey(
-                        measurement.file_id,
-                        value.source_identity,
-                        self.parameters,
-                    ),
-                    value.diagnostics_bytes,
-                );
-                try self.analysis_cache.putLocked(
-                    analysis.service.fingerprintKey(
-                        measurement.file_id,
-                        value.source_identity,
-                    ),
-                    value.fingerprint_bytes,
-                );
-                if (value.chromaprint_bytes) |bytes| {
-                    try self.analysis_cache.putLocked(
-                        analysis.chromaprint.cacheKey(measurement.file_id, value.source_identity, .{}),
-                        bytes,
-                    );
+                const results = [_]struct { ?[]u8, database.AnalysisCacheKey }{
+                    .{ value.diagnostics_bytes, analysis.service.diagnosticsKey(measurement.file_id, value.source_identity, self.parameters) },
+                    .{ value.fingerprint_bytes, analysis.service.fingerprintKey(measurement.file_id, value.source_identity) },
+                    .{ value.chromaprint_bytes, analysis.chromaprint.cacheKey(measurement.file_id, value.source_identity, .{}) },
+                    .{ value.features_bytes, analysis.service.featuresKey(measurement.file_id, value.source_identity) },
+                };
+                for (results) |entry| if (entry[0]) |bytes| {
+                    try self.analysis_cache.putLocked(entry[1], bytes);
                     result.bytes_stored += bytes.len;
-                }
+                };
                 try self.files.setAudioHashLocked(
                     measurement.file_id,
                     &value.audio_hash.digest,
@@ -541,8 +603,6 @@ pub const LibraryAnalysis = struct {
                     .missing_analysis,
                     analysis.health.missingAnalysis(value.integrated_lufs),
                 );
-                result.bytes_stored += value.diagnostics_bytes.len +
-                    value.fingerprint_bytes.len;
                 if (value.has_loudness) {
                     result.changed += 1;
                 } else {
@@ -854,8 +914,8 @@ test "an analysis measures every file once and a second pass has nothing left to
     try testing.expectEqual(@as(u64, 2), first.changed + first.unchanged);
     try testing.expectEqual(@as(u64, 0), first.errors);
     try testing.expect(first.bytes_stored > 0);
-    // Both measurements, for both files.
-    try testing.expectEqual(@as(i64, 4), try scalar(
+    // Every measurement, for both files.
+    try testing.expectEqual(@as(i64, 6), try scalar(
         fixture.library.database,
         "SELECT count(*) FROM analysis_results;",
     ));
@@ -1444,6 +1504,65 @@ test "the pass stores the AcoustID fingerprint, so taking it again decodes nothi
     defer fresh.fingerprint.deinit();
     try testing.expectEqualStrings(fresh.fingerprint.encoded, cached.fingerprint.encoded);
     try testing.expectEqual(fresh.fingerprint.duration_ms, cached.fingerprint.duration_ms);
+}
+
+test "a library analysed before audio features is selected once and decoded only for them" {
+    var fixture = try Fixture.init("file:orca-analysis-features-backfill?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("fingerprint-reference.mp3", "song.mp3");
+    const clipped = try sineWav(2);
+    defer testing.allocator.free(clipped);
+    try fixture.writeBytes("clipped.wav", clipped);
+    _ = try fixture.record("song.mp3");
+    const clipped_id = try fixture.record("clipped.wav");
+
+    var pass = fixture.pass();
+    _ = try pass.run();
+    const features_kind = analysis.audio_features.cache_kind;
+    const others_sql = std.fmt.comptimePrint(
+        "SELECT group_concat(file_id || ':' || kind || ':' || created_at || ':' || hex(result), ',') " ++
+            "FROM (SELECT * FROM analysis_results WHERE kind <> {d} ORDER BY file_id, kind);",
+        .{features_kind},
+    );
+    const others_before = try columnTextOwned(&fixture, others_sql);
+    defer testing.allocator.free(others_before);
+    try testing.expectEqual(@as(i64, 1), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM analysis_results WHERE kind = 3;",
+    ));
+
+    try fixture.library.database.exec(std.fmt.comptimePrint(
+        "DELETE FROM analysis_results WHERE kind = {d};",
+        .{features_kind},
+    ));
+    try fixture.library.database.exec("DELETE FROM library_health_issues;");
+    try testing.expectEqual(@as(u64, 2), try fixture.library.files.unanalyzedCount(pass.selectors()));
+
+    const second = try pass.run();
+    try testing.expectEqual(@as(u64, 2), second.files_seen);
+    try testing.expectEqual(@as(u64, 0), second.errors);
+    try testing.expectEqual(@as(u64, 2 * analysis.audio_features.Features.encoded_size), second.bytes_stored);
+    const others_after = try columnTextOwned(&fixture, others_sql);
+    defer testing.allocator.free(others_after);
+    try testing.expectEqualStrings(others_before, others_after);
+    try testing.expectEqual(@as(i64, 2), try scalar(
+        fixture.library.database,
+        std.fmt.comptimePrint("SELECT count(*) FROM analysis_results WHERE kind = {d};", .{features_kind}),
+    ));
+    const kinds = try issueKinds(&fixture.library, clipped_id);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{.clipping}, kinds);
+
+    const third = try pass.run();
+    try testing.expectEqual(@as(u64, 0), third.files_seen);
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
+}
+
+fn columnTextOwned(fixture: *Fixture, sql: [:0]const u8) ![]u8 {
+    var statement = try fixture.library.database.prepare(sql);
+    defer statement.deinit();
+    if (try statement.step() != .row) return error.TestUnexpectedResult;
+    return testing.allocator.dupe(u8, statement.columnText(0));
 }
 
 test "an analysis refuses zero threads" {

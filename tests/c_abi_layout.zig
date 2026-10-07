@@ -42,6 +42,7 @@ const struct_pairs = .{
     .{ c_api.TrackSummaryView, c.orca_track_summary_view },
     .{ c_api.TrackDetailsView, c.orca_track_details_view },
     .{ c_api.PlayStatsView, c.orca_play_stats },
+    .{ c_api.AudioFeaturesView, c.orca_audio_features },
     .{ c_api.ArtistTotalsView, c.orca_artist_totals },
     .{ c_api.ChangeCount, c.orca_change_count },
     .{ c_api.PlaylistView, c.orca_playlist_view },
@@ -209,6 +210,13 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_ARTIST_INFO_OUTCOME_";
         pub const Tag = core.runtime.ArtistInfoOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_KEY_MODE_";
+        pub const Tag = database.AudioFeatures.Mode;
         pub fn produce(tag: Tag) ?i64 {
             return @backingInt(tag);
         }

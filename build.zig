@@ -487,6 +487,20 @@ pub fn build(b: *std.Build) void {
     run_dsp_benchmark.addPassthruArgs();
     const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
     dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
+
+    const analysis_benchmark = b.addExecutable(.{
+        .name = "orca-analysis-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/analysis.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }),
+    });
+    const run_analysis_benchmark = b.addRunArtifact(analysis_benchmark);
+    run_analysis_benchmark.addPassthruArgs();
+    const analysis_benchmark_step = b.step("analysis-bench", "Time the analysis of one file with and without audio features");
+    analysis_benchmark_step.dependOn(&run_analysis_benchmark.step);
 }
 
 fn abiVersion(header: []const u8) u32 {

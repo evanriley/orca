@@ -393,6 +393,13 @@ section lists the entry points, errors and limits.
   `libraryUnpairReleaseTrack` restores the replaced values
   (`error.TrackNotPaired`); `libraryReleaseTrackPairings` returns at most 512.
   See [metadata.md](metadata.md#pairing-a-track).
+- `libraryTrackAudioFeatures(library, track_id)` returns the `AudioFeatures`
+  of the file a Track plays: optional `tempo` (`bpm`, `confidence`), `key`
+  (`pitch` 0–11 with C as 0, `mode` `major` or `minor`, `confidence`),
+  `onset_rate`, `centroid_hz` and `energy`, 0 to 1 and relative to the Library.
+  Null when the Track does not exist or its file's bytes have not been
+  measured. Every value is approximate; see
+  [analysis.md](analysis.md#audio-features).
 - `libraryTrackFingerprint(library, io, track_id)` returns a `TrackFingerprint`
   of the file a Track plays, decoding up to two minutes on the caller's thread
   when uncached; null without a present file.

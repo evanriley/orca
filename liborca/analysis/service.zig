@@ -4,6 +4,7 @@ const database = @import("../database/root.zig");
 const scanner = @import("../library/scanner.zig");
 const content_hash = @import("../storage/content_hash.zig");
 const storage = @import("../storage/root.zig");
+const audio_features = @import("audio_features.zig");
 const chromaprint = @import("chromaprint.zig");
 const diagnostics = @import("diagnostics.zig");
 const encoding = @import("encoding.zig");
@@ -81,8 +82,35 @@ pub fn analysisSelectors(
     codecs: *const codec.CodecRegistry,
 ) database.repository.AnalysisSelectors {
     return .{
-        .measurements = .{ diagnosticsSelector(parameters), fingerprintSelector() },
+        .measurements = .{ diagnosticsSelector(parameters), fingerprintSelector(), featuresSelector() },
         .undecodable = undecodableSelector(codecs),
+    };
+}
+
+/// The audio features measurement under the default
+/// `audio_features.Parameters`, the only parameters the Library's
+/// `file_audio_features` triggers recognise.
+pub fn featuresSelector() database.repository.AnalysisSelector {
+    return .{
+        .kind = audio_features.cache_kind,
+        .algorithm_id = audio_features.algorithm_id,
+        .algorithm_version = audio_features.algorithm_version,
+        .parameter_hash = audio_features.parameterHash(.{}),
+    };
+}
+
+pub fn featuresKey(
+    file_id: i64,
+    source_identity: content_hash.Digest,
+) database.AnalysisCacheKey {
+    const selector = featuresSelector();
+    return .{
+        .file_id = file_id,
+        .kind = selector.kind,
+        .algorithm_id = selector.algorithm_id,
+        .algorithm_version = selector.algorithm_version,
+        .parameter_hash = selector.parameter_hash,
+        .source_identity = source_identity,
     };
 }
 
@@ -176,8 +204,13 @@ pub const Analysis = struct {
     fingerprint: fingerprint.Result,
     /// The AcoustID fingerprint under the default `chromaprint.Parameters`.
     /// Null when the audio is too short to fingerprint, when Chromaprint
-    /// failed, or on a cache hit that stored none.
+    /// failed, or when none was stored and this call did not decode.
     chromaprint: ?chromaprint.Fingerprint,
+    /// Tempo, key, onset rate and centroid under the default
+    /// `audio_features.Parameters`. Null only when the analyzer failed.
+    features: ?audio_features.Features,
+    /// Which results this call measured rather than took from storage.
+    measured: Measured,
     cache_hit: bool,
     /// Frames decoded, or null on a cache hit, which decodes nothing.
     decoded_frames: ?u64,
@@ -191,9 +224,52 @@ pub const Analysis = struct {
     storage_identity: storage.StorageIdentity,
     channels: u16,
 
+    pub const Measured = struct {
+        diagnostics: bool = false,
+        fingerprint: bool = false,
+        chromaprint: bool = false,
+        features: bool = false,
+    };
+
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
         self.fingerprint.deinit();
+        if (self.chromaprint) |value| value.deinit();
+    }
+};
+
+/// Results already stored for one file's bytes, each null when none is.
+/// `examineFile` reuses them only when `source_identity` is the content hash
+/// of the bytes it opens.
+pub const StoredResults = struct {
+    source_identity: content_hash.Digest,
+    diagnostics: ?[]const u8 = null,
+    fingerprint: ?[]const u8 = null,
+    chromaprint: ?[]const u8 = null,
+    features: ?[]const u8 = null,
+
+    /// Whether these hold every result a decode would otherwise be needed
+    /// for. A missing AcoustID fingerprint never forces a decode: audio too
+    /// short for one never has one.
+    pub fn complete(self: StoredResults) bool {
+        return self.diagnostics != null and self.fingerprint != null and self.features != null;
+    }
+};
+
+/// Results reused rather than measured, decoded and owned.
+const Reused = struct {
+    diagnostics: ?diagnostics.Result = null,
+    fingerprint: ?fingerprint.Result = null,
+    chromaprint: ?chromaprint.Fingerprint = null,
+    features: ?audio_features.Features = null,
+
+    fn complete(self: Reused) bool {
+        return self.diagnostics != null and self.fingerprint != null and self.features != null;
+    }
+
+    fn deinit(self: Reused) void {
+        if (self.diagnostics) |value| value.deinit();
+        if (self.fingerprint) |value| value.deinit();
         if (self.chromaprint) |value| value.deinit();
     }
 };
@@ -289,25 +365,30 @@ pub const Service = struct {
         defer local.close();
         var watch: ReadWatch = .{ .source = local.readable() };
         var source_identity: ?content_hash.Digest = null;
-        return self.analyzeOpen(file_id, path, parameters, &local, &watch, &source_identity);
+        return self.analyzeOpen(file_id, path, parameters, null, &local, &watch, &source_identity);
     }
 
     /// `analyzeFile`, except that bytes the decoders refuse are an answer
     /// rather than an error, with the content hash they were refused for.
     /// A read that fails, cancellation and a file that changes underneath the
     /// analysis are still errors: none of them says anything about the bytes.
+    ///
+    /// Each of `stored` that decodes is reused instead of measured when the
+    /// bytes opened are the ones it names, and the file is decoded only for
+    /// what is missing.
     pub fn examineFile(
         self: Service,
         file_id: ?i64,
         path: []const u8,
         parameters: diagnostics.Parameters,
+        stored: ?*const StoredResults,
     ) !Examination {
         if (self.cancelled()) return error.Cancelled;
         var local = try storage.LocalFileSource.open(self.io, path);
         defer local.close();
         var watch: ReadWatch = .{ .source = local.readable() };
         var source_identity: ?content_hash.Digest = null;
-        const analysis = self.analyzeOpen(file_id, path, parameters, &local, &watch, &source_identity) catch |err| {
+        const analysis = self.analyzeOpen(file_id, path, parameters, stored, &local, &watch, &source_identity) catch |err| {
             if (!watch.refused) return err;
             const storage_identity = local.readable().identity();
             const refused_identity = source_identity orelse try self.hashSource(&local);
@@ -334,6 +415,7 @@ pub const Service = struct {
         file_id: ?i64,
         path: []const u8,
         parameters: diagnostics.Parameters,
+        stored: ?*const StoredResults,
         local: *const storage.LocalFileSource,
         watch: *ReadWatch,
         hashed: *?content_hash.Digest,
@@ -348,50 +430,65 @@ pub const Service = struct {
         const diagnostics_key = diagnosticsKey(file_id orelse 0, source_identity, parameters);
         const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
         const chromaprint_key = chromaprint.cacheKey(file_id orelse 0, source_identity, .{});
-        if (if (file_id == null) null else self.cache) |cache| {
-            const cached_diagnostics = try self.loadDiagnostics(cache, diagnostics_key);
-            const cached_fingerprint = try self.loadFingerprint(cache, fingerprint_key);
-            if (cached_diagnostics != null and cached_fingerprint != null) {
-                errdefer cached_diagnostics.?.deinit();
-                errdefer cached_fingerprint.?.deinit();
-                const cached_chromaprint = try self.loadChromaprint(cache, chromaprint_key);
-                errdefer if (cached_chromaprint) |value| value.deinit();
-                if (self.cancelled()) return error.Cancelled;
-                try self.verifyIdentity(path, initial_identity);
-                return .{
-                    .diagnostics = cached_diagnostics.?,
-                    .fingerprint = cached_fingerprint.?,
-                    .chromaprint = cached_chromaprint,
-                    .cache_hit = true,
-                    .decoded_frames = null,
-                    .source_identity = source_identity,
-                    .storage_identity = initial_identity,
-                    .channels = decoder.format.channels,
-                };
-            }
-            if (cached_diagnostics) |result| result.deinit();
-            if (cached_fingerprint) |result| result.deinit();
+        const features_key = featuresKey(file_id orelse 0, source_identity);
+        const cache = if (file_id == null) null else self.cache;
+
+        var from_cache: StoredResults = .{ .source_identity = source_identity };
+        defer self.freeStored(from_cache);
+        if (cache) |value| {
+            from_cache.diagnostics = try value.get(self.allocator, diagnostics_key);
+            from_cache.fingerprint = try value.get(self.allocator, fingerprint_key);
+            from_cache.chromaprint = try value.get(self.allocator, chromaprint_key);
+            from_cache.features = try value.get(self.allocator, features_key);
+        }
+        var reused: Reused = .{};
+        errdefer reused.deinit();
+        if (if (cache == null) stored else &from_cache) |results| {
+            if (std.mem.eql(u8, &results.source_identity, &source_identity))
+                reused = self.decodeStored(results);
+        }
+        if (reused.complete()) {
+            if (self.cancelled()) return error.Cancelled;
+            try self.verifyIdentity(path, initial_identity);
+            return .{
+                .diagnostics = reused.diagnostics.?,
+                .fingerprint = reused.fingerprint.?,
+                .chromaprint = reused.chromaprint,
+                .features = reused.features,
+                .measured = .{},
+                .cache_hit = true,
+                .decoded_frames = null,
+                .source_identity = source_identity,
+                .storage_identity = initial_identity,
+                .channels = decoder.format.channels,
+            };
         }
 
-        var analyzer = try diagnostics.Analyzer.init(
+        const measured: Analysis.Measured = .{
+            .diagnostics = reused.diagnostics == null,
+            .fingerprint = reused.fingerprint == null,
+            .chromaprint = reused.chromaprint == null,
+            .features = reused.features == null,
+        };
+        var analyzer: ?diagnostics.Analyzer = if (measured.diagnostics) try diagnostics.Analyzer.init(
             self.allocator,
             decoder.format.sample_rate,
             decoder.format.channels,
             decoder.frame_count,
             parameters,
-        );
-        defer analyzer.deinit();
+        ) else null;
+        defer if (analyzer) |*value| value.deinit();
         const integer_source = decoder.hasIntegerSamples();
-        var fingerprinter = try fingerprint.Analyzer.init(
+        var fingerprinter: ?fingerprint.Analyzer = if (measured.fingerprint) try fingerprint.Analyzer.init(
             self.allocator,
             decoder.format.sample_rate,
             decoder.format.channels,
             if (integer_source) .lossless_integer else .decoded_float,
-        );
-        defer fingerprinter.deinit();
-        // This analyzer never reads the source, so none of its errors is a
-        // decode error: each costs the AcoustID fingerprint, never the file.
-        var acoustid: ?chromaprint.Analyzer = chromaprint.Analyzer.init(
+        ) else null;
+        defer if (fingerprinter) |*value| value.deinit();
+        // Neither analyzer reads the source, so none of their errors is a
+        // decode error: each costs its own result, never the file.
+        var acoustid: ?chromaprint.Analyzer = if (!measured.chromaprint) null else chromaprint.Analyzer.init(
             self.allocator,
             decoder.format.sample_rate,
             decoder.format.channels,
@@ -401,6 +498,16 @@ pub const Service = struct {
             else => null,
         };
         defer if (acoustid) |*value| value.deinit();
+        var features: ?audio_features.Analyzer = if (!measured.features) null else audio_features.Analyzer.init(
+            self.allocator,
+            decoder.format.sample_rate,
+            decoder.format.channels,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
+        defer if (features) |*value| value.deinit();
         const chunk_samples = 4096 * @as(usize, decoder.format.channels);
         const samples = try self.allocator.alloc(f32, chunk_samples);
         defer self.allocator.free(samples);
@@ -419,14 +526,18 @@ pub const Service = struct {
                 const integer_chunk = integers[0..chunk.len];
                 for (chunk, integer_chunk) |*sample, integer|
                     sample.* = codec.decoder.integerSampleToFloat(integer);
-                try fingerprinter.processIntegers(integer_chunk);
+                if (fingerprinter) |*value| try value.processIntegers(integer_chunk);
             } else {
-                try fingerprinter.process(chunk);
+                if (fingerprinter) |*value| try value.process(chunk);
             }
-            try analyzer.process(chunk);
+            if (analyzer) |*value| try value.process(chunk);
             if (acoustid) |*value| value.process(chunk) catch {
                 value.deinit();
                 acoustid = null;
+            };
+            if (features) |*value| value.process(chunk) catch {
+                value.deinit();
+                features = null;
             };
             completed_frames += frames;
             if (self.progress) |callback| callback.update(callback.context, .{
@@ -437,37 +548,39 @@ pub const Service = struct {
         }
         if (self.cancelled()) return error.Cancelled;
         if (decoder.damage()) |damage| return watch.decoderFailed(damage);
-        const result = try analyzer.finish();
-        errdefer result.deinit();
-        const fingerprint_result = try fingerprinter.finish();
-        errdefer fingerprint_result.deinit();
-        const acoustid_result: ?chromaprint.Fingerprint = if (acoustid) |*value|
-            value.finish(completed_frames, decoder.frame_count) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => null,
-            }
-        else
-            null;
-        errdefer if (acoustid_result) |value| value.deinit();
+        if (analyzer) |*value| reused.diagnostics = try value.finish();
+        if (fingerprinter) |*value| reused.fingerprint = try value.finish();
+        if (acoustid) |*value| reused.chromaprint = value.finish(completed_frames, decoder.frame_count) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
+        if (features) |*value| reused.features = value.finish() catch null;
 
         try self.verifyIdentity(path, initial_identity);
-        if (if (file_id == null) null else self.cache) |cache| {
-            const bytes = try encoding.encode(self.allocator, result);
-            defer self.allocator.free(bytes);
-            try cache.put(diagnostics_key, bytes);
-            const fingerprint_bytes = try fingerprint.encode(self.allocator, fingerprint_result);
-            defer self.allocator.free(fingerprint_bytes);
-            try cache.put(fingerprint_key, fingerprint_bytes);
-            if (acoustid_result) |value| {
-                const chromaprint_bytes = try value.encode(self.allocator);
-                defer self.allocator.free(chromaprint_bytes);
-                try cache.put(chromaprint_key, chromaprint_bytes);
+        if (cache) |value| {
+            if (measured.diagnostics) {
+                const bytes = try encoding.encode(self.allocator, reused.diagnostics.?);
+                defer self.allocator.free(bytes);
+                try value.put(diagnostics_key, bytes);
             }
+            if (measured.fingerprint) {
+                const bytes = try fingerprint.encode(self.allocator, reused.fingerprint.?);
+                defer self.allocator.free(bytes);
+                try value.put(fingerprint_key, bytes);
+            }
+            if (measured.chromaprint) if (reused.chromaprint) |result| {
+                const bytes = try result.encode(self.allocator);
+                defer self.allocator.free(bytes);
+                try value.put(chromaprint_key, bytes);
+            };
+            if (measured.features) if (reused.features) |result| try value.put(features_key, &result.encode());
         }
         return .{
-            .diagnostics = result,
-            .fingerprint = fingerprint_result,
-            .chromaprint = acoustid_result,
+            .diagnostics = reused.diagnostics.?,
+            .fingerprint = reused.fingerprint.?,
+            .chromaprint = reused.chromaprint,
+            .features = reused.features,
+            .measured = measured,
             .cache_hit = false,
             .decoded_frames = completed_frames,
             .source_identity = source_identity,
@@ -487,34 +600,19 @@ pub const Service = struct {
             return error.SourceChangedDuringAnalysis;
     }
 
-    fn loadDiagnostics(
-        self: Service,
-        cache: *database.AnalysisCacheRepository,
-        key: database.AnalysisCacheKey,
-    ) !?diagnostics.Result {
-        const bytes = (try cache.get(self.allocator, key)) orelse return null;
-        defer self.allocator.free(bytes);
-        return encoding.decode(self.allocator, bytes) catch null;
+    fn freeStored(self: Service, results: StoredResults) void {
+        inline for (.{ results.diagnostics, results.fingerprint, results.chromaprint, results.features }) |bytes| {
+            if (bytes) |value| self.allocator.free(value);
+        }
     }
 
-    fn loadFingerprint(
-        self: Service,
-        cache: *database.AnalysisCacheRepository,
-        key: database.AnalysisCacheKey,
-    ) !?fingerprint.Result {
-        const bytes = (try cache.get(self.allocator, key)) orelse return null;
-        defer self.allocator.free(bytes);
-        return fingerprint.decode(self.allocator, bytes) catch null;
-    }
-
-    fn loadChromaprint(
-        self: Service,
-        cache: *database.AnalysisCacheRepository,
-        key: database.AnalysisCacheKey,
-    ) !?chromaprint.Fingerprint {
-        const bytes = (try cache.get(self.allocator, key)) orelse return null;
-        defer self.allocator.free(bytes);
-        return chromaprint.Fingerprint.decode(self.allocator, bytes) catch null;
+    fn decodeStored(self: Service, results: *const StoredResults) Reused {
+        var reused: Reused = .{};
+        if (results.diagnostics) |bytes| reused.diagnostics = encoding.decode(self.allocator, bytes) catch null;
+        if (results.fingerprint) |bytes| reused.fingerprint = fingerprint.decode(self.allocator, bytes) catch null;
+        if (results.chromaprint) |bytes| reused.chromaprint = chromaprint.Fingerprint.decode(self.allocator, bytes) catch null;
+        if (results.features) |bytes| reused.features = audio_features.Features.decode(bytes) catch null;
+        return reused;
     }
 };
 
@@ -603,6 +701,41 @@ test "the library keeps the integrated loudness a default analysis stores, as th
     try std.testing.expectEqual(expected, @as(f32, @floatCast(statement.columnDouble(0))));
 }
 
+test "the library keeps the audio features a default analysis stores, under the hash its triggers recognise" {
+    const allocator = std.testing.allocator;
+    var library = try database.LibraryDatabase.open(
+        allocator,
+        std.testing.io,
+        "file:orca-analysis-features?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.resolveOrCreateFile(
+        std.testing.io,
+        "fixtures/audio/generated-reference.flac",
+        .{ .stable_key = "test:features" },
+    );
+    const features: audio_features.Features = .{
+        .analysed_ms = 30_000,
+        .tempo = .{ .bpm = 121.5, .confidence = 0.5 },
+        .key = .{ .pitch = 4, .mode = .major, .confidence = 0.25 },
+        .onset_rate = 1.5,
+        .centroid_hz = 900.25,
+    };
+    try library.analysis_cache.put(featuresKey(binding.file_id, @splat(0x11)), &features.encode());
+
+    var statement = try library.database.prepare(
+        "SELECT tempo_bpm, key_pitch, key_mode, onset_rate, centroid_hz FROM file_audio_features WHERE file_id = ?1;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, binding.file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    try std.testing.expectEqual(@as(f64, 121.5), statement.columnDouble(0));
+    try std.testing.expectEqual(@as(i64, 4), statement.columnInt64(1));
+    try std.testing.expectEqual(@as(i64, 0), statement.columnInt64(2));
+    try std.testing.expectEqual(@as(f64, 1.5), statement.columnDouble(3));
+    try std.testing.expectEqual(@as(f64, 900.25), statement.columnDouble(4));
+}
+
 test "the AcoustID fingerprint taken in the analysis decode is the one a standalone fingerprint takes" {
     const allocator = std.testing.allocator;
     const codecs = codec.CodecRegistry.builtins();
@@ -638,6 +771,57 @@ test "audio too short to fingerprint is still measured, without an AcoustID fing
     defer analysis.deinit();
     try std.testing.expect(analysis.chromaprint == null);
     try std.testing.expect(analysis.fingerprint.signatures.len > 0);
+}
+
+test "stored results for the same bytes are reused and only the missing ones are measured" {
+    const allocator = std.testing.allocator;
+    const path = "fixtures/audio/fingerprint-reference.mp3";
+    const codecs = codec.CodecRegistry.builtins();
+    const service: Service = .{ .allocator = allocator, .io = std.testing.io, .codecs = &codecs };
+    const full = (try service.examineFile(null, path, .{}, null)).analyzed;
+    defer full.deinit();
+    try std.testing.expectEqual(Analysis.Measured{
+        .diagnostics = true,
+        .fingerprint = true,
+        .chromaprint = true,
+        .features = true,
+    }, full.measured);
+
+    const diagnostics_bytes = try encoding.encode(allocator, full.diagnostics);
+    defer allocator.free(diagnostics_bytes);
+    const fingerprint_bytes = try fingerprint.encode(allocator, full.fingerprint);
+    defer allocator.free(fingerprint_bytes);
+    const chromaprint_bytes = try full.chromaprint.?.encode(allocator);
+    defer allocator.free(chromaprint_bytes);
+    const features_bytes = full.features.?.encode();
+    var stored: StoredResults = .{
+        .source_identity = full.source_identity,
+        .diagnostics = diagnostics_bytes,
+        .fingerprint = fingerprint_bytes,
+        .chromaprint = chromaprint_bytes,
+    };
+
+    const partial = (try service.examineFile(null, path, .{}, &stored)).analyzed;
+    defer partial.deinit();
+    try std.testing.expectEqual(Analysis.Measured{ .features = true }, partial.measured);
+    try std.testing.expect(!partial.cache_hit);
+    try std.testing.expectEqual(full.decoded_frames, partial.decoded_frames);
+    try std.testing.expectEqual(full.diagnostics.integrated_lufs, partial.diagnostics.integrated_lufs);
+    try std.testing.expect(full.fingerprint.audio_hash.eql(partial.fingerprint.audio_hash));
+    try std.testing.expectEqualStrings(full.chromaprint.?.encoded, partial.chromaprint.?.encoded);
+    try std.testing.expectEqual(features_bytes, partial.features.?.encode());
+
+    stored.features = &features_bytes;
+    const complete = (try service.examineFile(null, path, .{}, &stored)).analyzed;
+    defer complete.deinit();
+    try std.testing.expectEqual(Analysis.Measured{}, complete.measured);
+    try std.testing.expect(complete.cache_hit);
+    try std.testing.expectEqual(@as(?u64, null), complete.decoded_frames);
+
+    stored.source_identity = @splat(0x5a);
+    const other_bytes = (try service.examineFile(null, path, .{}, &stored)).analyzed;
+    defer other_bytes.deinit();
+    try std.testing.expectEqual(full.measured, other_bytes.measured);
 }
 
 const TestFiles = struct {
@@ -892,19 +1076,19 @@ test "examining bytes the decoders refuse is a verdict on them, and a failed rea
 
     const wavpack_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/song.wv", .{files.directory.sub_path});
     defer allocator.free(wavpack_path);
-    const wavpack = try service.examineFile(null, wavpack_path, .{});
+    const wavpack = try service.examineFile(null, wavpack_path, .{}, null);
     try std.testing.expectEqual(error.CodecUnavailable, wavpack.undecodable.reason);
     try std.testing.expectEqual(try content_hash.fromPath(std.testing.io, wavpack_path), wavpack.undecodable.source_identity);
 
     const broken_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/broken.flac", .{files.directory.sub_path});
     defer allocator.free(broken_path);
-    const broken = try service.examineFile(null, broken_path, .{});
+    const broken = try service.examineFile(null, broken_path, .{}, null);
     try std.testing.expect(broken.undecodable.reason != error.CodecUnavailable);
     try std.testing.expect(broken.undecodable.reason != error.UnsupportedAudioFormat);
 
     const folder_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/folder.flac", .{files.directory.sub_path});
     defer allocator.free(folder_path);
-    try std.testing.expectError(error.IsDir, service.examineFile(null, folder_path, .{}));
+    try std.testing.expectError(error.IsDir, service.examineFile(null, folder_path, .{}, null));
 }
 
 test "the decoder set's hash changes when a decoder is registered for another format" {

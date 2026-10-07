@@ -32,6 +32,7 @@ scripts/headless-audio.sh zig build test   # tests against a private PipeWire an
 zig build run -- --version    # orca-cli
 zig build bench               # 500k-track persistence benchmark
 zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
+zig build -Doptimize=ReleaseFast analysis-bench -- FILE [ITERATIONS]   # one file's analysis with and without audio features
 ```
 
 ## CLI commands
@@ -84,6 +85,7 @@ zig build run -- artists DATABASE [--album-artists] [--filter TEXT] [--genre ID]
 zig build run -- releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--loved] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--sort-as-written] [--letters | --totals | --async] [--limit N] [--offset N]   # each line ends `format=FLAC 24/96`, `lossless`, `reviews=N`; --own needs --artist and leaves out appearances; --letters prints `letter count offset` (title or artist sort), --totals `count= artists= bytes=`; --async reads the page and count on the browse loader
 zig build run -- tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [--limit N] [--offset N]   # KEY includes rating, loved, play_count, last_played, year, loudness, bitrate, path, album_artist, genre; lines end `lufs= kbps= path=`; a search ranks by relevance; --totals prints `count= duration_ms=`, a search's with --filter; --async reads them on the browse loader
 zig build run -- track DATABASE ID   # includes `composer:` and `comment:`, `-` when none
+zig build run -- features DATABASE TRACK_ID   # estimated `tempo:` BPM bpm confidence=, `key:` PITCH major|minor confidence=, `onset rate:` per second, `centroid:` Hz, `energy:` 0 to 1 within the Library; `-` when unknown; NotAnalyzed for an unknown or unmeasured Track
 zig build run -- search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]   # kind, id, title, subtitle, releases= tracks= year= duration_ms= artist= reason=name|tracks_by|main_genre_of count=, then `top KIND ID TITLE`; each word a word prefix, no syntax
 zig build run -- genres DATABASE [--filter TEXT] [--sort name|tracks] [--limit N] [--offset N]
 zig build run -- genre DATABASE ID   # counts, top artists, most played releases

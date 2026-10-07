@@ -799,6 +799,23 @@ pub const PlayStatsView = extern struct {
     _reserved: [7]u8 = @splat(0),
 };
 
+pub const AudioFeaturesView = extern struct {
+    tempo_bpm: f64,
+    tempo_confidence: f64,
+    key_confidence: f64,
+    onset_rate: f64,
+    centroid_hz: f64,
+    energy: f64,
+    key_pitch: u8,
+    key_mode: u8,
+    has_tempo: u8,
+    has_key: u8,
+    has_onset_rate: u8,
+    has_centroid: u8,
+    has_energy: u8,
+    _reserved: [1]u8 = @splat(0),
+};
+
 pub const HealthIssueView = extern struct {
     kind: u8,
     severity: u8,
@@ -3138,6 +3155,35 @@ pub export fn orca_library_track_play_stats(
         .play_count = stats.play_count,
         .last_played_at = stats.last_played_at orelse 0,
         .has_last_played_at = @intFromBool(stats.last_played_at != null),
+    };
+    return .ok;
+}
+
+pub export fn orca_library_track_audio_features(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    output: ?*AudioFeaturesView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const found = box.runtime.libraryTrackAudioFeatures(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    const features = found orelse return box.reject(@src(), .not_found, "no audio features for this track");
+    destination.* = .{
+        .tempo_bpm = if (features.tempo) |tempo| tempo.bpm else 0,
+        .tempo_confidence = if (features.tempo) |tempo| tempo.confidence else 0,
+        .key_confidence = if (features.key) |key| key.confidence else 0,
+        .onset_rate = features.onset_rate orelse 0,
+        .centroid_hz = features.centroid_hz orelse 0,
+        .energy = features.energy orelse 0,
+        .key_pitch = if (features.key) |key| key.pitch else 0,
+        .key_mode = if (features.key) |key| @backingInt(key.mode) else 0,
+        .has_tempo = @intFromBool(features.tempo != null),
+        .has_key = @intFromBool(features.key != null),
+        .has_onset_rate = @intFromBool(features.onset_rate != null),
+        .has_centroid = @intFromBool(features.centroid_hz != null),
+        .has_energy = @intFromBool(features.energy != null),
     };
     return .ok;
 }
@@ -9366,6 +9412,9 @@ test "a Track the Library does not hold is not found, and its callback never run
     try std.testing.expectEqual(Status.ok, orca_library_track_play_stats(runtime, library, 2, &stats));
     try std.testing.expectEqual(@as(u64, 0), stats.play_count);
     try std.testing.expectEqual(@as(u8, 0), stats.has_last_played_at);
+    var features: AudioFeaturesView = undefined;
+    try std.testing.expectEqual(Status.not_found, orca_library_track_audio_features(runtime, library, 1, &features));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_audio_features(runtime, library, 1, null));
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
