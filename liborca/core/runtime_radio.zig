@@ -691,19 +691,23 @@ pub fn samplePlayer(self: *OrcaRuntime, object_value: *PlayerObject) void {
 }
 
 fn noteContinue(self: *OrcaRuntime, object_value: *PlayerObject) void {
-    const opener = object_value.opener orelse return;
-    const library_object = self.libraries.get(opener.library) catch return;
-    if (!library_object.radio_continue) return;
-    const queue = object_value.queue;
-    if (queue.repeat != .off or queue.isEmpty()) return;
-    if (object_value.player.sources == null) return;
-    if (object_value.player.state.load(.acquire) != .playing) return;
-    const last = queue.len() - 1;
-    if (queue.cursorPosition() != last) return;
-    const last_id = queue.idAt(last) orelse return;
+    const last_id = continueEntry(self, object_value) orelse return;
     if (object_value.radio_continue_after == last_id) return;
     object_value.radio_continue_after = last_id;
     object_value.radio_continue_wanted = true;
+}
+
+fn continueEntry(self: *OrcaRuntime, object_value: *PlayerObject) ?u64 {
+    const opener = object_value.opener orelse return null;
+    const library_object = self.libraries.get(opener.library) catch return null;
+    if (!library_object.radio_continue) return null;
+    const queue = object_value.queue;
+    if (queue.repeat != .off or queue.isEmpty()) return null;
+    if (object_value.player.sources == null) return null;
+    if (object_value.player.state.load(.acquire) != .playing) return null;
+    const last = queue.len() - 1;
+    if (queue.cursorPosition() != last) return null;
+    return queue.idAt(last);
 }
 
 /// Control lane, from `pump`: applies finished top-ups, starts wanted ones
@@ -716,6 +720,8 @@ pub fn pumpRadio(self: *OrcaRuntime) void {
         const session = object_value.radio orelse {
             if (!object_value.radio_continue_wanted) continue;
             object_value.radio_continue_wanted = false;
+            const wanted = continueEntry(self, object_value) orelse continue;
+            if (object_value.radio_continue_after != wanted) continue;
             const opener = object_value.opener orelse continue;
             const player: PlayerHandle = .{
                 .index = @intCast(index),

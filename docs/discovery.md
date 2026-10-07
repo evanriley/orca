@@ -268,8 +268,10 @@ calls leave it. A top-up in flight is joined.
 
 With `radio.continue` on, repeat off and no session, a Player playing the last
 entry of its queue starts a `recent` session with the default options once per
-last entry; `RadioStatus.continued` marks it. A continued session whose first
-top-up finds nothing ends. Stopping Radio does not start one for the entry
+last entry; `RadioStatus.continued` marks it. The condition is checked again
+when the runtime starts the session, so a queue replaced, stopped or moved off
+its last entry in between starts none. A continued session whose first top-up
+finds nothing ends. Stopping Radio does not start one for the entry
 playing then.
 
 ### Status

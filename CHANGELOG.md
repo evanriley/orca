@@ -58,6 +58,8 @@
   audible for one output callback. A `next` or `jump` in that window now ends
   the entry being heard in queue history, and now-playing no longer briefly
   names no Track.
+- `radio.continue` no longer starts Radio after the queue it followed was
+  replaced, stopped or moved off its last entry before the runtime pumped.
 
 ## 0.2.0 - 2026-10-06
 
