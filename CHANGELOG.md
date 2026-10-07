@@ -12,6 +12,28 @@
   Tempo comes from a mean-removed onset autocorrelation tempogram and key from
   a harmonic pitch-salience chroma matched against the Albrecht–Shanahan
   profiles. `zig build analysis-bench` times one file's analysis.
+- Radio preview: `libraryRadioPreview`, `orca_library_radio_preview` and
+  `orca-cli radio` rank the Recordings a Radio from a Track, Release, Artist,
+  genre, decade or loved seed would play, with true reasons and each scoring
+  component, without a Player. Scoring weighs Artist, genre, tempo, key and
+  energy, co-listening, era, taste and jitter, moving from close to the seed
+  to exploring as `explore` rises. One pick in four at most is a Recording
+  never played while played ones remain; after that never-played Recordings
+  fill the rest, so a Library with little history still returns full lists.
+- Library Radio: `playerStartRadio` and `orca_player_start_radio` play from a
+  seed and keep 8 picks queued after the user's entries, topped up from a
+  worker as tracks finish. Options can change mid-session; "less like this",
+  skips within 30 seconds and undo steer the session; `playerRadio` and
+  `playerRadioPicks` report its state and why each queued pick was chosen.
+  With `radio.continue` on, a queue that runs out continues as a Radio from
+  recent listening.
+- `libraryRecordingSummary` and `orca_library_recording_get` read a
+  Recording's title and artist credit; `orca-cli radio` names the Recording
+  an `often_after` reason cites.
+- Discovery settings: `libraryDiscoverySettings`,
+  `setLibraryDiscoverySettings` and their C ABI counterparts read and store
+  Radio auto-continue, unplayed picks, the recent-play avoid window and the
+  Daily Mix count.
 
 ### Changed
 

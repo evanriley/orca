@@ -30,6 +30,8 @@ for it. `Runtime.setWaker` installs a `HostWaker`
 5. Start a due maintenance unit.
 6. Save the Players whose resume state is due
    ([api.md](api.md#surface), `playerSaveState`).
+7. Apply finished Radio top-ups, start the ones owed and start the sessions
+   `radio.continue` asked for ([discovery.md](discovery.md#library-radio)).
 
 `Runtime.nextPumpTimeoutMs` (`orca_runtime_pump_timeout`) says how long the
 host may sleep. A host's loop pumps, drains events and telemetry, reads the
@@ -62,7 +64,8 @@ These wake the host:
 - a Library's watcher, after it publishes changed directories, an unavailable
   root or the watch limit, and when it stops on an error;
 - a listen worker, after it records or drops a listen, and after it publishes a
-  scrobbler status that differs from the last.
+  scrobbler status that differs from the last;
+- a Radio top-up worker, after it finishes, so the next pump adds its picks.
 
 These do not: a completion or `job_finished` event published during the host's
 own pump, and anything the host changed itself with a direct call. The render
@@ -94,15 +97,19 @@ holds anything. Otherwise it is the soonest of:
   unit's worker has been joined.
 - For a Player with resume state to save, what remains of the 30 second save
   interval, or 0 when a finished long Track waits to be forgotten.
+- 0 for a Radio session owed a top-up or a Player owed a `radio.continue`
+  session, or what remains of the one second retry delay after a top-up
+  failed. A running top-up waits on its worker's wake.
 
 A waker is read by worker threads without a lock, so `setWaker` is refused with
 `error.WorkersRunning` (`ORCA_STATUS_INVALID_STATE`) once any worker thread
 exists: a Player's engine, a job, a listen worker, an artwork loader, a browse
-loader or a Library's watcher. Every such thread registers with `work.Registry`
-before it is spawned, so the registry's count is the test. Hosts install the
-waker right after creating the runtime. The waker is never called after
-`shutdown` or `deinit` returns, because the registry's drain joins every thread
-that raises it and `submit` refuses a runtime that is not running.
+loader, a Radio top-up or a Library's watcher. Every such thread registers
+with `work.Registry` before it is spawned, so the registry's count is the
+test. Hosts install the waker right after creating the runtime. The waker is
+never called after `shutdown` or `deinit` returns, because the registry's
+drain joins every thread that raises it and `submit` refuses a runtime that is
+not running.
 
 ## Jobs
 

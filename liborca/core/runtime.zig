@@ -27,6 +27,7 @@ const runtime_genres = @import("runtime_genres.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
+const runtime_radio = @import("runtime_radio.zig");
 const runtime_resume = @import("runtime_resume.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const storage = @import("../storage/root.zig");
@@ -88,6 +89,29 @@ pub const MetadataIssueStatus = runtime_consistency.MetadataIssueStatus;
 pub const MetadataIssueApplication = runtime_consistency.MetadataIssueApplication;
 pub const PlayStats = database.PlayStats;
 pub const AudioFeatures = database.AudioFeatures;
+pub const RadioSeed = library_pass.discovery.Seed;
+pub const RadioFocus = library_pass.discovery.Focus;
+pub const RadioOptions = library_pass.discovery.RadioOptions;
+pub const RadioSession = library_pass.discovery.Session;
+pub const RadioPreviewSession = runtime_radio.RadioPreviewSession;
+pub const RadioStatus = runtime_radio.RadioStatus;
+pub const RadioState = runtime_radio.RadioState;
+pub const RadioCounts = runtime_radio.RadioCounts;
+pub const RadioQueuePick = runtime_radio.RadioQueuePick;
+pub const max_radio_pending = runtime_radio.max_pending;
+pub const max_radio_reported_picks = runtime_radio.max_reported_picks;
+pub const RadioPick = library_pass.discovery.Pick;
+pub const RadioPicks = library_pass.discovery.Picks;
+pub const RadioComponents = library_pass.discovery.Components;
+pub const PickReason = library_pass.discovery.PickReason;
+pub const ReasonPart = library_pass.discovery.ReasonPart;
+pub const ReasonKind = library_pass.discovery.ReasonKind;
+pub const radio_sound_tempo = library_pass.discovery.sound_tempo;
+pub const radio_sound_key = library_pass.discovery.sound_key;
+pub const radio_sound_energy = library_pass.discovery.sound_energy;
+pub const DiscoverySettings = library_pass.discovery.Settings;
+pub const DiscoveryAvoidDays = library_pass.discovery.AvoidDays;
+pub const DailyMixCount = library_pass.discovery.MixCount;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
 pub const RatingChange = database.RatingChange;
@@ -139,6 +163,8 @@ pub const LibraryObject = struct {
     /// control lane can apply them without SQLite.
     listen_policy: ListenPolicy = .half_or_four_minutes,
     record_listens: bool = true,
+    /// The stored `radio.continue` setting, cached like the listen settings.
+    radio_continue: bool = true,
     /// Null while the Library is not watched, and between a drain and the
     /// re-arm that follows it.
     watch: ?*runtime_watch.LibraryWatch = null,
@@ -206,6 +232,11 @@ pub const PlayerObject = struct {
     listens: providers.listens.ListenTracker = .{},
     history: queue_history.QueueHistory = .{},
     persistence: runtime_resume.State = .{},
+    radio: ?*runtime_radio.Session = null,
+    /// The last entry `radio.continue` already acted on, so the same
+    /// ending never starts a second session.
+    radio_continue_after: ?u64 = null,
+    radio_continue_wanted: bool = false,
 };
 pub const ZoneObject = struct {
     zone: *audio.zone_runtime.ZoneRuntime,
@@ -704,6 +735,7 @@ pub const OrcaRuntime = struct {
         runtime_jobs.finalizeDrainedJobWorkers(self);
         self.releaseDrainedArtworkLoaders();
         self.releaseDrainedBrowseLoaders();
+        runtime_radio.releaseDrainedRadio(self);
         runtime_listens.releaseDrainedListenWorkers(self);
         runtime_watch.releaseDrainedWatchers(self);
         runtime_jobs.freeAllJobWorkers(self);
@@ -753,6 +785,7 @@ pub const OrcaRuntime = struct {
                 .half_or_four_minutes,
             ),
             .record_listens = try library_database.settings.flag(database.setting_listen_recording, true),
+            .radio_continue = (try library_pass.discovery.readSettings(&library_database.settings)).radio_continue,
         });
     }
 
@@ -788,6 +821,7 @@ pub const OrcaRuntime = struct {
             const object_value = if (slot.value) |*value| value else continue;
             const opener = object_value.opener orelse continue;
             if (!opener.library.eql(library)) continue;
+            runtime_radio.endSession(self, object_value);
             runtime_resume.leaveLibrary(self, object_value);
             runtime_queue.forgetAudibleEntry(self, object_value);
             if (object_value.engine) |engine| {
@@ -2104,6 +2138,78 @@ pub const OrcaRuntime = struct {
         return (try libraryDatabase(self, library)).audio_features.trackFeatures(track_id);
     }
 
+    /// Up to `limit` (at most 512) Recordings a Radio from `seed` would
+    /// play, ranked, with each component's value and a true reason. No
+    /// Player is involved; the same `session` ranks the same Library alike.
+    pub fn libraryRadioPreview(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        seed: RadioSeed,
+        options: RadioOptions,
+        limit: usize,
+        session: RadioPreviewSession,
+    ) !RadioPicks {
+        return runtime_radio.libraryRadioPreview(self, library, allocator, seed, options, limit, session);
+    }
+
+    /// The Library's Radio and Daily Mix settings.
+    pub fn libraryDiscoverySettings(self: *OrcaRuntime, library: LibraryHandle) !DiscoverySettings {
+        return runtime_radio.libraryDiscoverySettings(self, library);
+    }
+
+    pub fn setLibraryDiscoverySettings(self: *OrcaRuntime, library: LibraryHandle, settings: DiscoverySettings) !void {
+        return runtime_radio.setLibraryDiscoverySettings(self, library, settings);
+    }
+
+    /// Starts a Library Radio session on a Player bound to `library`,
+    /// replacing any session it had. The playing entry and the user's queued
+    /// entries stay; a Track seed plays first when the Player is idle. Picks
+    /// arrive from a worker and are kept `max_radio_pending` ahead.
+    pub fn playerStartRadio(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        seed: RadioSeed,
+        options: RadioOptions,
+    ) !void {
+        return runtime_radio.playerStartRadio(self, player, library, seed, options);
+    }
+
+    /// Ends the Player's Radio session and removes its picks that have not
+    /// started, except one the engine has already lined up.
+    pub fn playerStopRadio(self: *OrcaRuntime, player: PlayerHandle) !void {
+        return runtime_radio.playerStopRadio(self, player);
+    }
+
+    /// Replaces the pending picks with ones chosen under `options`.
+    pub fn playerSetRadioOptions(self: *OrcaRuntime, player: PlayerHandle, options: RadioOptions) !void {
+        return runtime_radio.playerSetRadioOptions(self, player, options);
+    }
+
+    /// Removes the Radio pick with queue entry id `entry_id`, skipping it
+    /// when it is playing, and steers the rest of the session away from it.
+    pub fn playerRadioLessLikeThis(self: *OrcaRuntime, player: PlayerHandle, entry_id: u64) !void {
+        return runtime_radio.playerRadioLessLikeThis(self, player, entry_id);
+    }
+
+    /// Forgets the session's "less like this" and skip feedback. Removed
+    /// entries stay removed.
+    pub fn playerRadioUndoFeedback(self: *OrcaRuntime, player: PlayerHandle) !void {
+        return runtime_radio.playerRadioUndoFeedback(self, player);
+    }
+
+    /// The Player's Radio session, or null when it has none.
+    pub fn playerRadio(self: *OrcaRuntime, player: PlayerHandle) !?RadioStatus {
+        return runtime_radio.playerRadio(self, player);
+    }
+
+    /// Fills `output` with the session's picks still in the queue, from the
+    /// playing one on, in playback order; at most `max_radio_reported_picks`.
+    pub fn playerRadioPicks(self: *OrcaRuntime, player: PlayerHandle, output: []RadioQueuePick) !usize {
+        return runtime_radio.playerRadioPicks(self, player, output);
+    }
+
     /// The Library's counts and sizes, and when it was last scanned and
     /// analysed.
     pub fn libraryStats(self: *OrcaRuntime, library: LibraryHandle) !database.LibraryStats {
@@ -2303,6 +2409,7 @@ pub const OrcaRuntime = struct {
         try requireRunning(self);
         const destroyed = try self.players.get(player);
         if (destroyed.opener) |opener| runtime_listens.endListen(self, destroyed, opener.library);
+        runtime_radio.endSession(self, destroyed);
         runtime_queue.stopEngine(self, destroyed);
         // Only this Player's workers: draining the registry would cancel other
         // Players' engines and every running job.
@@ -2447,6 +2554,7 @@ pub const OrcaRuntime = struct {
     }
 
     fn freePlayerObject(self: *OrcaRuntime, object_value: PlayerObject) void {
+        if (object_value.radio) |session| runtime_radio.freeSession(self, session);
         if (object_value.opener) |opener| opener.destroy();
         self.allocator.destroy(object_value.dsp);
         self.allocator.destroy(object_value.gain);
@@ -2826,6 +2934,14 @@ pub const OrcaRuntime = struct {
         track_id: i64,
     ) !?database.TrackSummary {
         return runtime_roots.libraryTrackSummary(self, library, track_id);
+    }
+
+    pub fn libraryRecordingSummary(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        recording_id: i64,
+    ) !?database.RecordingSummary {
+        return runtime_roots.libraryRecordingSummary(self, library, recording_id);
     }
 
     /// What the Library recorded about a Track and the file it plays: tags,
@@ -3737,6 +3853,7 @@ pub const OrcaRuntime = struct {
             runtime_watch.watchPumpDueMs(self),
             runtime_maintenance.maintenancePumpDueMs(self),
             runtime_resume.resumePumpDueMs(self),
+            runtime_radio.radioPumpDueMs(self),
         }) |candidate| {
             const value = candidate orelse continue;
             due = if (due) |current| @min(current, value) else value;
@@ -3758,6 +3875,7 @@ pub const OrcaRuntime = struct {
         runtime_watch.pumpWatchers(self);
         runtime_maintenance.pumpMaintenance(self);
         runtime_resume.pumpResume(self);
+        runtime_radio.pumpRadio(self);
     }
 
     /// Executes at most one command on the runtime's serialized logical control
@@ -3842,6 +3960,7 @@ pub const OrcaRuntime = struct {
         self.work_registry.drain();
         self.releaseDrainedArtworkLoaders();
         self.releaseDrainedBrowseLoaders();
+        runtime_radio.releaseDrainedRadio(self);
         runtime_listens.releaseDrainedListenWorkers(self);
         runtime_watch.releaseDrainedWatchers(self);
     }

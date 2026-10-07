@@ -192,6 +192,30 @@ static int playable(const orca_track_view *track) {
     return track->has_file && track->has_duration && track->duration_ms >= PLAYABLE_MIN_MS;
 }
 
+typedef struct radio_capture {
+    size_t calls;
+    size_t count;
+    int64_t seed_track;
+    int valid;
+} radio_capture;
+
+static void capture_radio(void *context, const orca_radio_preview_view *preview) {
+    radio_capture *capture = context;
+    capture->calls += 1;
+    capture->count = preview->count;
+    double weights = preview->weights.artist + preview->weights.genre + preview->weights.audio +
+                     preview->weights.co_listening + preview->weights.era +
+                     preview->weights.taste + preview->weights.jitter;
+    capture->valid = weights > 0.999 && weights < 1.001;
+    for (size_t index = 0; index < preview->count; index += 1) {
+        const orca_radio_pick_view *pick = &preview->picks[index];
+        if (pick->track_id == capture->seed_track || pick->reason_count < 1 ||
+            pick->reason_count > 2 || pick->reasons[0].kind > ORCA_REASON_ADDED ||
+            pick->never_played != 1)
+            capture->valid = 0;
+    }
+}
+
 static void capture_track(void *context, const orca_track_view *track) {
     struct track_capture *capture = context;
     capture->count += 1;
@@ -266,7 +290,9 @@ static void capture_artist_name(void *context, const orca_artist_view *artist) {
 struct summary_capture {
     uint32_t count;
     int64_t track_id;
+    int64_t recording_id;
     uint8_t has_release_id;
+    uint8_t has_recording_id;
 };
 
 static void capture_summary(void *context, const orca_track_summary_view *summary) {
@@ -274,6 +300,21 @@ static void capture_summary(void *context, const orca_track_summary_view *summar
     capture->count += 1;
     capture->track_id = summary->track.id;
     capture->has_release_id = summary->has_release_id;
+    capture->recording_id = summary->recording_id;
+    capture->has_recording_id = summary->has_recording_id;
+}
+
+struct recording_capture {
+    uint32_t count;
+    int64_t id;
+    size_t title_length;
+};
+
+static void capture_recording(void *context, const orca_recording_summary_view *summary) {
+    struct recording_capture *capture = context;
+    capture->count += 1;
+    capture->id = summary->id;
+    capture->title_length = summary->title.length;
 }
 
 struct details_capture {
@@ -1215,6 +1256,135 @@ static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle p
     SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 512, 0, &history,
                                                 capture_history) == ORCA_STATUS_OK);
     SMOKE_CHECK(history.count == 0);
+    return 0;
+}
+
+struct radio_status_capture {
+    uint32_t calls;
+    orca_radio_status_view view;
+    size_t title_length;
+};
+
+static void capture_radio_status(void *context, const orca_radio_status_view *status) {
+    struct radio_status_capture *capture = context;
+    capture->calls += 1;
+    capture->view = *status;
+    capture->title_length = status->title.length;
+}
+
+struct radio_picks_capture {
+    uint32_t calls;
+    size_t count;
+    orca_radio_queue_pick_view picks[32];
+};
+
+static void capture_radio_picks(void *context, const orca_radio_queue_picks_view *picks) {
+    struct radio_picks_capture *capture = context;
+    capture->calls += 1;
+    capture->count = picks->count;
+    for (size_t i = 0; i < picks->count && i < 32; i += 1) capture->picks[i] = picks->picks[i];
+}
+
+static int read_radio(orca_runtime *runtime, orca_handle player,
+                      struct radio_status_capture *status, struct radio_picks_capture *picks) {
+    memset(status, 0, sizeof *status);
+    memset(picks, 0, sizeof *picks);
+    SMOKE_CHECK(orca_player_radio_status(runtime, player, status, capture_radio_status) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_radio_picks(runtime, player, picks, capture_radio_picks) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(picks->calls == 1 && picks->count <= 32);
+    for (size_t i = 0; i < picks->count; i += 1) {
+        SMOKE_CHECK(picks->picks[i].reason_count <= 2 && picks->picks[i].track_id > 0);
+        if (i > 0) SMOKE_CHECK(picks->picks[i].position > picks->picks[i - 1].position);
+    }
+    return 0;
+}
+
+static int await_radio_picks(orca_runtime *runtime, orca_handle player, uint32_t at_least,
+                             struct radio_status_capture *status,
+                             struct radio_picks_capture *picks) {
+    long deadline = now_ms() + 3000;
+    for (;;) {
+        SMOKE_CHECK(read_radio(runtime, player, status, picks) == 0);
+        if (status->calls == 1 && picks->count >= at_least) return 0;
+        SMOKE_CHECK(now_ms() < deadline);
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+    }
+}
+
+static int radio_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
+    struct queued_tracks playable;
+    memset(&playable, 0, sizeof playable);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &playable,
+                                          collect_playable) == ORCA_STATUS_OK);
+    SMOKE_CHECK(playable.count >= 4);
+    int64_t seed_id = playable.ids[0];
+
+    SMOKE_CHECK(orca_player_clear_queue(runtime, player) == ORCA_STATUS_OK);
+    struct radio_status_capture status;
+    struct radio_picks_capture picks;
+    SMOKE_CHECK(read_radio(runtime, player, &status, &picks) == 0);
+    SMOKE_CHECK(status.calls == 0 && picks.count == 0);
+    SMOKE_CHECK(orca_player_radio_less_like_this(runtime, player, 1) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_player_radio_undo_feedback(runtime, player) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_player_set_radio_options(runtime, player, 0) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_player_radio_status(runtime, player, &status, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    orca_radio_seed seed = {999999999, ORCA_RADIO_SEED_TRACK, {0}};
+    SMOKE_CHECK(orca_player_start_radio(runtime, player, 0, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_start_radio(runtime, player, &seed, 0) == ORCA_STATUS_NOT_FOUND);
+    seed.id = seed_id;
+    orca_radio_options options;
+    memset(&options, 0, sizeof options);
+    options.explore = 100;
+    options.focus_count = 5;
+    SMOKE_CHECK(orca_player_start_radio(runtime, player, &seed, &options) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    options.focus_count = 0;
+    SMOKE_CHECK(orca_player_start_radio(runtime, player, &seed, &options) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(await_radio_picks(runtime, player, 2, &status, &picks) == 0);
+    SMOKE_CHECK(status.view.seed.kind == ORCA_RADIO_SEED_TRACK && status.view.seed.id == seed_id);
+    SMOKE_CHECK(status.view.library.index == library.index &&
+                status.view.library.generation == library.generation);
+    SMOKE_CHECK(status.view.options.explore == 100 && status.view.options.focus_count == 0);
+    SMOKE_CHECK(status.title_length > 0 && status.view.continued == 0);
+    SMOKE_CHECK(status.view.state <= ORCA_RADIO_STATE_FULL);
+    SMOKE_CHECK(status.view.picks_added >= 2 && status.view.pending >= 1);
+    SMOKE_CHECK(status.view.less_like_this == 0 && status.view.skips == 0);
+    for (size_t i = 0; i < picks.count; i += 1)
+        SMOKE_CHECK(picks.picks[i].track_id != seed_id && picks.picks[i].recording_id > 0);
+
+    orca_radio_queue_pick_view last = picks.picks[picks.count - 1];
+    SMOKE_CHECK(orca_player_radio_less_like_this(runtime, player, last.entry_id + 1000000) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_player_radio_less_like_this(runtime, player, last.entry_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(read_radio(runtime, player, &status, &picks) == 0);
+    SMOKE_CHECK(status.calls == 1 && status.view.less_like_this == 1);
+    for (size_t i = 0; i < picks.count; i += 1)
+        SMOKE_CHECK(picks.picks[i].entry_id != last.entry_id);
+
+    SMOKE_CHECK(orca_player_radio_undo_feedback(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(read_radio(runtime, player, &status, &picks) == 0);
+    SMOKE_CHECK(status.calls == 1 && status.view.less_like_this == 0);
+
+    options.explore = 0;
+    options.include_live = 2;
+    SMOKE_CHECK(orca_player_set_radio_options(runtime, player, &options) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    options.include_live = 1;
+    SMOKE_CHECK(orca_player_set_radio_options(runtime, player, &options) == ORCA_STATUS_OK);
+    SMOKE_CHECK(await_radio_picks(runtime, player, 1, &status, &picks) == 0);
+    SMOKE_CHECK(status.view.options.explore == 0 && status.view.options.include_live == 1);
+
+    SMOKE_CHECK(orca_player_stop_radio(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(read_radio(runtime, player, &status, &picks) == 0);
+    SMOKE_CHECK(status.calls == 0 && picks.count == 0);
+    SMOKE_CHECK(orca_player_stop_radio(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_clear_queue(runtime, player) == ORCA_STATUS_OK);
     return 0;
 }
 
@@ -5692,6 +5862,19 @@ int main(int argc, char **argv) {
         summary.count != 1 || summary.track_id != capture.first_playable_id ||
         summary.has_release_id != 1)
         return 244;
+    struct recording_capture recording;
+    memset(&recording, 0, sizeof recording);
+    if (summary.has_recording_id != 1 ||
+        orca_library_recording_get(runtime, library, summary.recording_id, &recording,
+                                   capture_recording) != ORCA_STATUS_OK ||
+        recording.count != 1 || recording.id != summary.recording_id ||
+        recording.title_length == 0)
+        return 629;
+    memset(&recording, 0, sizeof recording);
+    if (orca_library_recording_get(runtime, library, 999999999, &recording,
+                                   capture_recording) != ORCA_STATUS_NOT_FOUND ||
+        recording.count != 0)
+        return 630;
     memset(&summary, 0, sizeof summary);
     if (orca_library_track_get(runtime, library, 999999999, &summary, capture_summary) !=
             ORCA_STATUS_NOT_FOUND ||
@@ -5745,6 +5928,46 @@ int main(int argc, char **argv) {
     if (orca_library_track_audio_features(runtime, library, 999999999, &features) !=
         ORCA_STATUS_NOT_FOUND)
         return 621;
+
+    orca_discovery_settings discovery;
+    memset(&discovery, 0xff, sizeof discovery);
+    if (orca_library_discovery_settings(runtime, library, &discovery) != ORCA_STATUS_OK ||
+        discovery.radio_continue != 1 || discovery.include_unplayed != 1 ||
+        discovery.avoid_days != 3 || discovery.mix_count != 6)
+        return 622;
+    orca_discovery_settings invalid_discovery = {1, 1, 2, 6, {0}};
+    if (orca_library_set_discovery_settings(runtime, library, &invalid_discovery) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 623;
+    orca_discovery_settings fewer_mixes = {1, 1, 7, 4, {0}};
+    if (orca_library_set_discovery_settings(runtime, library, &fewer_mixes) != ORCA_STATUS_OK ||
+        orca_library_discovery_settings(runtime, library, &discovery) != ORCA_STATUS_OK ||
+        discovery.avoid_days != 7 || discovery.mix_count != 4)
+        return 624;
+
+    /* Nothing was played, so every pick is a Recording never played. */
+    orca_radio_seed radio_seed = {capture.first_playable_id, ORCA_RADIO_SEED_TRACK, {0}};
+    orca_radio_options radio_options;
+    memset(&radio_options, 0, sizeof radio_options);
+    radio_options.explore = 100;
+    orca_radio_preview_session radio_session = {2000000000, 7, 1, 1, {0}};
+    radio_capture radio = {0, 0, capture.first_playable_id, 0};
+    if (orca_library_radio_preview(runtime, library, &radio_seed, &radio_options, &radio_session,
+                                   8, &radio, capture_radio) != ORCA_STATUS_OK ||
+        radio.calls != 1 || radio.count == 0 || radio.count > 8 || !radio.valid)
+        return 625;
+    radio_seed.id = 999999999;
+    if (orca_library_radio_preview(runtime, library, &radio_seed, NULL, NULL, 8, &radio,
+                                   capture_radio) != ORCA_STATUS_NOT_FOUND ||
+        radio.calls != 1)
+        return 626;
+    radio_seed.kind = 99;
+    if (orca_library_radio_preview(runtime, library, &radio_seed, NULL, NULL, 8, &radio,
+                                   capture_radio) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 627;
+    orca_discovery_settings default_discovery = {1, 1, 3, 6, {0}};
+    if (orca_library_set_discovery_settings(runtime, library, &default_discovery) != ORCA_STATUS_OK)
+        return 628;
     uint64_t listens = 1;
     if (orca_library_listens_recorded(runtime, library, &listens) != ORCA_STATUS_OK ||
         listens != 0)
@@ -6112,6 +6335,7 @@ int main(int argc, char **argv) {
     }
 
     if (queue_smoke(runtime, library, player) != 0) return 1;
+    if (radio_smoke(runtime, library, player) != 0) return 1;
     if (resume_smoke(runtime, library, player) != 0) return 1;
     if (dsp_smoke(runtime, library, player) != 0) return 1;
     if (parametric_smoke(runtime, library, player) != 0) return 1;

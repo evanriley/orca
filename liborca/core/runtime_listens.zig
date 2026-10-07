@@ -7,6 +7,7 @@ const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
 const runtime_queue = @import("runtime_queue.zig");
+const runtime_radio = @import("runtime_radio.zig");
 const runtime_status = @import("runtime_status.zig");
 
 const ClientIdentity = runtime.ClientIdentity;
@@ -677,6 +678,7 @@ pub fn sampleListens(self: *OrcaRuntime) void {
     for (self.players.slots.items) |*slot| {
         const object_value = if (slot.value) |*value| value else continue;
         runtime_queue.observeQueueHistory(object_value, history_now_ms);
+        runtime_radio.samplePlayer(self, object_value);
         const opener = object_value.opener orelse continue;
         const read = runtime_status.readStatus(object_value);
         // Observing an unresolved read as no Track would end the listen in

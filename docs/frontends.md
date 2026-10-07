@@ -261,6 +261,28 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   (`ORCA_STATUS_NOT_FOUND` for an unknown or unmeasured Track; `has_*` flags
   mark the known values), `orca_library_listens_recorded`,
   `orca_library_unanalyzed_count`, `orca_library_backfill_pending`.
+- Radio and discovery: `orca_library_radio_preview` (up to 512 ranked picks
+  for an `orca_radio_seed` in one callback-scoped `orca_radio_preview_view`;
+  NULL `options` or `session` take the defaults; `ORCA_STATUS_NOT_FOUND` for
+  an unknown seed id), `orca_library_discovery_settings`,
+  `orca_library_set_discovery_settings` (`ORCA_STATUS_INVALID_ARGUMENT`,
+  changing nothing, for a value outside its set), `orca_library_recording_get`
+  (a Recording's title and artist credit; `ORCA_STATUS_NOT_FOUND` when
+  unknown). Reason kinds and `ORCA_SOUND_*` flags are in
+  [discovery.md](discovery.md#reasons).
+- Library Radio: `orca_player_start_radio` (NULL `options` takes the defaults;
+  `ORCA_STATUS_INVALID_STATE` for a Player with no Library),
+  `orca_player_stop_radio`, `orca_player_set_radio_options`,
+  `orca_player_radio_less_like_this` (by the `entry_id` of an
+  `orca_radio_queue_pick_view`; `ORCA_STATUS_NOT_FOUND` for an entry that is
+  not a queued pick), `orca_player_radio_undo_feedback`,
+  `orca_player_radio_status` (one callback-scoped `orca_radio_status_view`
+  whose `state` is an `orca_radio_state`, or no callback without a session)
+  and `orca_player_radio_picks` (up to 32 picks in one callback-scoped
+  `orca_radio_queue_picks_view`, `count` 0 without a session). Calls that need
+  a session return `ORCA_STATUS_INVALID_STATE` without one. Picks arrive from
+  a worker that wakes the host; the next `orca_runtime_pump` adds them. See
+  [discovery.md](discovery.md#library-radio).
 - Listen settings: `orca_library_set_listen_policy`,
   `orca_library_set_listen_recording`, `orca_library_clear_listens` (keeps
   ratings and loves).

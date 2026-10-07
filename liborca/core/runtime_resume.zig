@@ -4,6 +4,7 @@ const listen_worker = @import("listen_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_queue = @import("runtime_queue.zig");
+const runtime_radio = @import("runtime_radio.zig");
 const runtime_status = @import("runtime_status.zig");
 
 const LibraryHandle = runtime.LibraryHandle;
@@ -89,6 +90,7 @@ pub fn playerRestoreState(
         return .{ .entries = 0, .index = 0, .position_ms = 0, .skipped_missing = plan.skipped };
 
     rememberAudible(self, object_value) catch {};
+    runtime_radio.endSession(self, object_value);
     const engine = try runtime_queue.ensureEngine(self, player);
     engine.quiesce();
     defer engine.release();

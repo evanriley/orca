@@ -640,6 +640,23 @@ typedef void (*orca_track_summary_callback)(
     const orca_track_summary_view *summary
 );
 
+/* A Recording's title and the artist credit of its first Track; `artist` is
+ * empty when that Track credits none. */
+typedef struct orca_recording_summary_view {
+    int64_t id;
+    orca_string_view title;
+    orca_string_view artist;
+    int64_t artist_id;
+    uint8_t has_artist_id;
+    uint8_t reserved[7];
+} orca_recording_summary_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_recording_summary_callback)(
+    void *context,
+    const orca_recording_summary_view *summary
+);
+
 /* What orca_track_summary_view leaves out, read from the file the Track
  * plays and its recording's listens. */
 typedef struct orca_track_facts_view {
@@ -856,6 +873,221 @@ typedef struct orca_audio_features {
     uint8_t has_energy;
     uint8_t reserved[1];
 } orca_audio_features;
+
+/* Where a Radio starts. `id` of orca_radio_seed is a Track, Release, Artist
+ * or genre id for those kinds, the first year of a decade (1990) for
+ * ORCA_RADIO_SEED_DECADE, and ignored for the others. */
+typedef enum orca_radio_seed_kind {
+    ORCA_RADIO_SEED_TRACK = 0,
+    ORCA_RADIO_SEED_RELEASE = 1,
+    ORCA_RADIO_SEED_ARTIST = 2,
+    ORCA_RADIO_SEED_GENRE = 3,
+    ORCA_RADIO_SEED_DECADE = 4,
+    /* The loved Recordings, with loved Artists in the seed's Artists. */
+    ORCA_RADIO_SEED_LOVED = 5,
+    /* The last five distinct Recordings heard. */
+    ORCA_RADIO_SEED_RECENT = 6,
+} orca_radio_seed_kind;
+
+typedef struct orca_radio_seed {
+    int64_t id;
+    uint8_t kind; /* orca_radio_seed_kind */
+    uint8_t reserved[7];
+} orca_radio_seed;
+
+/* A hard filter on what a Radio may pick. `id` is a genre id, or the first
+ * year of a decade; the energy kinds are the bottom and top third of the
+ * Library's energy and ignore it. Filters of one kind admit a Recording that
+ * matches any of them; filters of different kinds must all match. */
+typedef enum orca_radio_focus_kind {
+    ORCA_RADIO_FOCUS_GENRE = 0,
+    ORCA_RADIO_FOCUS_DECADE = 1,
+    ORCA_RADIO_FOCUS_LOW_ENERGY = 2,
+    ORCA_RADIO_FOCUS_HIGH_ENERGY = 3,
+} orca_radio_focus_kind;
+
+typedef struct orca_radio_focus {
+    int64_t id;
+    uint8_t kind; /* orca_radio_focus_kind */
+    uint8_t reserved[7];
+} orca_radio_focus;
+
+/* `explore` runs from 0, close to the seed, to 100; the default is 35. The
+ * first `focus_count` (at most 4) entries of `focus` apply. Each `has_*` flag
+ * of 0 reads the Library's setting instead of its value: `include_unplayed`
+ * lets one pick in four be a Recording never played, and `avoid_recent`
+ * leaves out what was played within discovery.avoid_days (3 days when that is
+ * 0). `include_live` admits live Releases. */
+typedef struct orca_radio_options {
+    orca_radio_focus focus[4];
+    uint8_t focus_count;
+    uint8_t explore;
+    uint8_t has_include_unplayed;
+    uint8_t include_unplayed;
+    uint8_t has_avoid_recent;
+    uint8_t avoid_recent;
+    uint8_t include_live;
+    uint8_t reserved[1];
+} orca_radio_options;
+
+/* The moment and seed a preview ranks at: the same pair ranks the same
+ * Library the same way. A `has_*` flag of 0 reads the clock, or derives the
+ * seed from the moment. */
+typedef struct orca_radio_preview_session {
+    int64_t now_s;
+    uint64_t seed;
+    uint8_t has_now;
+    uint8_t has_seed;
+    uint8_t reserved[6];
+} orca_radio_preview_session;
+
+/* One value per scoring component, each 0 to 1, or the weights they are
+ * combined with, which sum to 1. */
+typedef struct orca_radio_components {
+    double artist;
+    double genre;
+    double audio;
+    double co_listening;
+    double era;
+    double taste;
+    double jitter;
+} orca_radio_components;
+
+/* Why a Recording was picked. The values are stored in Daily Mixes and never
+ * change. */
+typedef enum orca_reason_kind {
+    ORCA_REASON_PLAYED = 0,         /* a: play count, b: last played, Unix s */
+    ORCA_REASON_LOVED = 1,
+    ORCA_REASON_SAME_ARTIST = 2,    /* a: the Artist */
+    ORCA_REASON_RELATED_ARTIST = 3, /* a: the seed Artist, b: its own Artist */
+    ORCA_REASON_SHARED_GENRE = 4,   /* a: the genre */
+    ORCA_REASON_OFTEN_AFTER = 5,    /* a: a Recording (b 0) or Artist (b 1) */
+    ORCA_REASON_SIMILAR_SOUND = 6,  /* a: ORCA_SOUND_* flags */
+    ORCA_REASON_NEVER_PLAYED = 7,
+    ORCA_REASON_RARELY_PLAYED = 8,  /* a: play count */
+    ORCA_REASON_ADDED = 9,          /* a: when it was added, Unix s */
+} orca_reason_kind;
+
+#define ORCA_SOUND_TEMPO 1
+#define ORCA_SOUND_KEY 2
+#define ORCA_SOUND_ENERGY 4
+
+typedef struct orca_reason_part {
+    int64_t a;
+    int64_t b;
+    uint8_t kind; /* orca_reason_kind */
+    uint8_t reserved[7];
+} orca_reason_part;
+
+/* A ranked pick: `score` combines `components` with the preview's weights.
+ * The first `reason_count` (0 to 2) of `reasons` are true of it, the stronger
+ * first. `never_played` is 1 when it has no plays. */
+typedef struct orca_radio_pick_view {
+    int64_t track_id;
+    int64_t recording_id;
+    int64_t artist_id;
+    int64_t release_id;
+    double score;
+    orca_radio_components components;
+    orca_reason_part reasons[2];
+    uint8_t reason_count;
+    uint8_t has_artist_id;
+    uint8_t has_release_id;
+    uint8_t never_played;
+    uint8_t reserved[4];
+} orca_radio_pick_view;
+
+/* `picks` holds `count` picks, best first, valid only for the duration of
+ * the callback. `relaxed_recent` is 1 when Recordings played within the
+ * avoid window were let back in because nothing else qualified. */
+typedef struct orca_radio_preview_view {
+    const orca_radio_pick_view *picks;
+    size_t count;
+    orca_radio_components weights;
+    uint8_t relaxed_recent;
+    uint8_t reserved[7];
+} orca_radio_preview_view;
+
+typedef void (*orca_radio_preview_callback)(
+    void *context,
+    const orca_radio_preview_view *preview
+);
+
+typedef enum orca_radio_state {
+    ORCA_RADIO_STATE_ACTIVE = 0,
+    /* Repeat is on, so no picks are added until it is turned off. */
+    ORCA_RADIO_STATE_PAUSED_BY_REPEAT = 1,
+    /* Nothing more qualifies under the options and the session's feedback. */
+    ORCA_RADIO_STATE_EXHAUSTED = 2,
+    /* The queue holds as many entries as it can. */
+    ORCA_RADIO_STATE_FULL = 3,
+} orca_radio_state;
+
+/* A Player's Radio session. `title` is the seed's Track or Release title,
+ * Artist or genre name, at most 256 bytes, and empty for the decade, loved
+ * and recent seeds; it is valid only for the duration of the callback.
+ * `options` are as given, with the `has_*` flags kept. The counts cover the
+ * session: picks added, entries the user queued during it, "less like this"
+ * and skipped picks. `pending` is the picks yet to start. `continued` is 1
+ * for a session radio_continue started when the queue ran out. */
+typedef struct orca_radio_status_view {
+    orca_handle library;
+    orca_radio_seed seed;
+    orca_radio_options options;
+    orca_string_view title;
+    uint32_t picks_added;
+    uint32_t user_queued;
+    uint32_t less_like_this;
+    uint32_t skips;
+    uint32_t pending;
+    uint8_t state; /* orca_radio_state */
+    uint8_t continued;
+    uint8_t reserved[2];
+} orca_radio_status_view;
+
+typedef void (*orca_radio_status_callback)(
+    void *context,
+    const orca_radio_status_view *status
+);
+
+/* A Radio pick still in the queue. `entry_id` names the queue entry for as
+ * long as it stays queued, across moves and removals of other entries;
+ * `position` is where it is now. The first `reason_count` (0 to 2) of
+ * `reasons` say why it was picked. */
+typedef struct orca_radio_queue_pick_view {
+    uint64_t entry_id;
+    int64_t track_id;
+    int64_t recording_id;
+    orca_reason_part reasons[2];
+    uint32_t position;
+    uint8_t reason_count;
+    uint8_t reserved[3];
+} orca_radio_queue_pick_view;
+
+/* `picks` holds `count` (at most 32) picks in playback order, valid only for
+ * the duration of the callback. */
+typedef struct orca_radio_queue_picks_view {
+    const orca_radio_queue_pick_view *picks;
+    size_t count;
+} orca_radio_queue_picks_view;
+
+typedef void (*orca_radio_queue_picks_callback)(
+    void *context,
+    const orca_radio_queue_picks_view *picks
+);
+
+/* The Library's Radio and Daily Mix settings. `radio_continue` 1 starts a
+ * Radio from what was heard when the queue ends; `include_unplayed` 1 lets
+ * Radio pick Recordings never played; `avoid_days` (0, 1, 3 or 7) leaves out
+ * what was played that recently; `mix_count` (0, 4 or 6) is how many Daily
+ * Mixes to make. The defaults are 1, 1, 3 and 6. */
+typedef struct orca_discovery_settings {
+    uint8_t radio_continue;
+    uint8_t include_unplayed;
+    uint8_t avoid_days;
+    uint8_t mix_count;
+    uint8_t reserved[4];
+} orca_discovery_settings;
 
 typedef struct orca_artist_totals {
     /* Summed over the Tracks `track_count` counts; a Track with no known
@@ -2508,6 +2740,15 @@ orca_status orca_library_track_get(
     void *context,
     orca_track_summary_callback callback
 );
+/* Invokes the callback once with the Recording's title and artist credit.
+ * NOT_FOUND, without a callback, when no such Recording exists. */
+orca_status orca_library_recording_get(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t recording_id,
+    void *context,
+    orca_recording_summary_callback callback
+);
 /* Invokes the callback once with what the Library recorded about the Track
  * and its file. Reads the database alone. NOT_FOUND, without a callback, when
  * no such Track exists. */
@@ -2551,6 +2792,33 @@ orca_status orca_library_track_audio_features(
     orca_handle library,
     int64_t track_id,
     orca_audio_features *output
+);
+/* Invokes the callback once with up to `limit` (at most 512) Recordings a
+ * Radio from `seed` would play, best first, without a Player. `options` and
+ * `session` may be NULL for the defaults. Reads the database alone.
+ * NOT_FOUND when the seed's Track, Release, Artist or genre does not exist;
+ * INVALID_ARGUMENT for an unknown kind, `explore` above 100, a decade that is
+ * not a multiple of 10, or more than 4 focus entries. */
+orca_status orca_library_radio_preview(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_radio_seed *seed,
+    const orca_radio_options *options,
+    const orca_radio_preview_session *session,
+    uint32_t limit,
+    void *context,
+    orca_radio_preview_callback callback
+);
+orca_status orca_library_discovery_settings(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_discovery_settings *output
+);
+/* INVALID_ARGUMENT, changing nothing, for a value outside its set. */
+orca_status orca_library_set_discovery_settings(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_discovery_settings *settings
 );
 /* Listens recorded since the Library was opened: one atomic load, so a host
  * may poll it every tick to learn when to reread its history. */
@@ -5983,6 +6251,61 @@ orca_status orca_player_next(orca_runtime *runtime, orca_handle player, uint8_t 
 orca_status orca_player_previous(orca_runtime *runtime, orca_handle player, uint8_t *moved);
 orca_status orca_player_clear_queue(orca_runtime *runtime, orca_handle player);
 orca_status orca_player_set_repeat(orca_runtime *runtime, orca_handle player, uint8_t mode);
+/* Starts a Library Radio session from `seed` on a Player bound to a
+ * Library, replacing any session it had; `options` may be NULL for the
+ * defaults. The playing entry and the entries the user queued stay. On an
+ * idle Player a Track seed plays at once and any other seed plays its first
+ * pick when it arrives. Picks are chosen on a worker and kept 8 ahead; while
+ * the session runs, queued Tracks go before the first pick that has not
+ * started. Replacing the queue, restoring state, binding another Library or
+ * closing the Library ends the session; it is not saved. INVALID_STATE for a
+ * Player with no Library; NOT_FOUND for an unknown seed; INVALID_ARGUMENT as
+ * for orca_library_radio_preview. */
+orca_status orca_player_start_radio(
+    orca_runtime *runtime,
+    orca_handle player,
+    const orca_radio_seed *seed,
+    const orca_radio_options *options
+);
+/* Ends the session and removes its picks that have not started, except one
+ * already lined up to play next. Does nothing without a session. */
+orca_status orca_player_stop_radio(orca_runtime *runtime, orca_handle player);
+/* Replaces the picks that have not started with ones chosen under `options`
+ * (NULL for the defaults). INVALID_STATE without a session. */
+orca_status orca_player_set_radio_options(
+    orca_runtime *runtime,
+    orca_handle player,
+    const orca_radio_options *options
+);
+/* Removes the pick with `entry_id`, skipping it when it is playing, and for
+ * the rest of the session excludes its Recording and weighs down its Artist
+ * and first genre. INVALID_STATE without a session or when the pick is
+ * already lined up to play next; NOT_FOUND when `entry_id` is not one of the
+ * session's picks. */
+orca_status orca_player_radio_less_like_this(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint64_t entry_id
+);
+/* Forgets the session's "less like this" and skip feedback and their
+ * counts. Removed entries stay removed. INVALID_STATE without a session. */
+orca_status orca_player_radio_undo_feedback(orca_runtime *runtime, orca_handle player);
+/* Invokes the callback once with the Player's Radio session, or not at all
+ * when it has none. */
+orca_status orca_player_radio_status(
+    orca_runtime *runtime,
+    orca_handle player,
+    void *context,
+    orca_radio_status_callback callback
+);
+/* Invokes the callback once with the session's picks still in the queue,
+ * from the playing one on; `count` is 0 without a session. */
+orca_status orca_player_radio_picks(
+    orca_runtime *runtime,
+    orca_handle player,
+    void *context,
+    orca_radio_queue_picks_callback callback
+);
 orca_status orca_player_set_shuffle(orca_runtime *runtime, orca_handle player, uint8_t enabled);
 /* Linear, 0 to 4. Applied to canonical PCM once, before fanout, so every Zone
  * hears the same level, and it survives a stop/start. */

@@ -101,6 +101,10 @@ pub const Snapshot = struct {
 pub const PlaybackQueue = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(TrackRef) = .empty,
+    /// Each entry's identity, parallel to `entries`: unique for the queue's
+    /// lifetime and kept across moves, inserts, removals and shuffle.
+    ids: std.ArrayList(u64) = .empty,
+    next_id: u64 = 1,
     /// Playback order. Empty means "entry order"; when shuffled it is a
     /// permutation of entry indices. A permutation rather than a random pick
     /// per advance, because random-next has no history and breaks `previous`.
@@ -125,6 +129,7 @@ pub const PlaybackQueue = struct {
 
     pub fn deinit(self: *PlaybackQueue) void {
         self.entries.deinit(self.allocator);
+        self.ids.deinit(self.allocator);
         self.order.deinit(self.allocator);
         self.* = undefined;
     }
@@ -193,6 +198,23 @@ pub const PlaybackQueue = struct {
         return false;
     }
 
+    pub fn idAt(self: *const PlaybackQueue, position: u32) ?u64 {
+        const index = self.entryIndex(position) orelse return null;
+        return self.ids.items[index];
+    }
+
+    pub fn positionOfId(self: *const PlaybackQueue, id: u64) ?u32 {
+        const index = std.mem.indexOfScalar(u64, self.ids.items, id) orelse return null;
+        return self.positionOfEntry(@intCast(index));
+    }
+
+    fn newIds(self: *PlaybackQueue, count: usize) void {
+        for (self.ids.items.len..self.ids.items.len + count) |_| {
+            self.ids.appendAssumeCapacity(self.next_id);
+            self.next_id += 1;
+        }
+    }
+
     pub fn current(self: *const PlaybackQueue) ?TrackRef {
         return self.refAt(self.cursorPosition());
     }
@@ -200,14 +222,17 @@ pub const PlaybackQueue = struct {
     pub fn enqueue(self: *PlaybackQueue, refs: []const TrackRef) !void {
         if (self.entries.items.len + refs.len > capacity) return error.PlaybackQueueFull;
         const first_new: u32 = @intCast(self.entries.items.len);
+        try self.ids.ensureUnusedCapacity(self.allocator, refs.len);
+        if (self.order.items.len != 0) try self.order.ensureUnusedCapacity(self.allocator, refs.len);
         try self.entries.appendSlice(self.allocator, refs);
+        self.newIds(refs.len);
         self.publishCount();
         if (self.order.items.len != 0) {
             // Shuffled: new entries join the tail of the existing permutation
             // rather than being interleaved, so nothing already scheduled moves.
             var index = first_new;
             while (index < self.entries.items.len) : (index += 1)
-                try self.order.append(self.allocator, index);
+                self.order.appendAssumeCapacity(index);
         }
     }
 
@@ -215,8 +240,11 @@ pub const PlaybackQueue = struct {
     pub fn replace(self: *PlaybackQueue, refs: []const TrackRef, start: u32) !void {
         if (refs.len > capacity) return error.PlaybackQueueFull;
         if (refs.len != 0 and start >= refs.len) return error.PositionOutOfRange;
+        try self.ids.ensureTotalCapacity(self.allocator, refs.len);
         self.entries.clearRetainingCapacity();
+        self.ids.clearRetainingCapacity();
         try self.entries.appendSlice(self.allocator, refs);
+        self.newIds(refs.len);
         self.publishCount();
         self.order.clearRetainingCapacity();
         self.setCursor(if (refs.len == 0) 0 else start);
@@ -247,9 +275,12 @@ pub const PlaybackQueue = struct {
             }
         }
         try self.entries.ensureTotalCapacity(self.allocator, refs.len);
+        try self.ids.ensureTotalCapacity(self.allocator, refs.len);
         try self.order.ensureTotalCapacity(self.allocator, if (order) |permutation| permutation.len else 0);
         self.entries.clearRetainingCapacity();
         self.entries.appendSliceAssumeCapacity(refs);
+        self.ids.clearRetainingCapacity();
+        self.newIds(refs.len);
         self.publishCount();
         self.order.clearRetainingCapacity();
         if (order) |permutation| self.order.appendSliceAssumeCapacity(permutation);
@@ -267,15 +298,21 @@ pub const PlaybackQueue = struct {
         if (self.entries.items.len + refs.len > capacity) return error.PlaybackQueueFull;
         if (after >= self.entries.items.len) return error.PositionOutOfRange;
         const count: u32 = @intCast(refs.len);
+        try self.ids.ensureUnusedCapacity(self.allocator, refs.len);
         if (self.order.items.len != 0) {
             const first_new: u32 = @intCast(self.entries.items.len);
             try self.order.ensureUnusedCapacity(self.allocator, refs.len);
             try self.entries.appendSlice(self.allocator, refs);
+            self.newIds(refs.len);
             var index: u32 = 0;
             while (index < count) : (index += 1)
                 self.order.insertAssumeCapacity(after + 1 + index, first_new + index);
         } else {
             try self.entries.insertSlice(self.allocator, after + 1, refs);
+            for (0..refs.len) |offset| {
+                self.ids.insertAssumeCapacity(after + 1 + offset, self.next_id);
+                self.next_id += 1;
+            }
         }
         self.publishCount();
         self.shiftPositions(after + 1, count, .up, pending);
@@ -286,6 +323,7 @@ pub const PlaybackQueue = struct {
     pub fn removeAt(self: *PlaybackQueue, position: u32, pending: ?*u32) !void {
         const index = self.entryIndex(position) orelse return error.PositionOutOfRange;
         _ = self.entries.orderedRemove(index);
+        _ = self.ids.orderedRemove(index);
         if (self.order.items.len != 0) {
             _ = self.order.orderedRemove(position);
             for (self.order.items) |*entry| {
@@ -331,8 +369,10 @@ pub const PlaybackQueue = struct {
         if (from == to) return;
         if (self.order.items.len == count)
             moveItem(u32, self.order.items, from, to)
-        else
+        else {
             moveItem(TrackRef, self.entries.items, from, to);
+            moveItem(u64, self.ids.items, from, to);
+        }
         self.setCursor(movedPosition(self.cursorPosition(), from, to));
         self.decode_position.store(movedPosition(self.decodePosition(), from, to), .release);
         for (&self.serials) |*slot| {
@@ -361,6 +401,7 @@ pub const PlaybackQueue = struct {
 
     pub fn clear(self: *PlaybackQueue) void {
         self.entries.clearRetainingCapacity();
+        self.ids.clearRetainingCapacity();
         self.publishCount();
         self.order.clearRetainingCapacity();
         self.setCursor(0);
@@ -852,4 +893,39 @@ test "restoring refuses an order that is no permutation and a cursor past the en
     var buffer: [8]i64 = undefined;
     try testing.expectEqualSlices(i64, &.{ 1, 2, 3 }, trackIdsInOrder(&queue, &buffer));
     try testing.expectEqual(@as(i64, 2), queue.current().?.track_id);
+}
+
+test "an entry keeps its id across inserts, moves, removals and shuffle, and ids are never reused" {
+    var queue = PlaybackQueue.init(testing.allocator, 42);
+    defer queue.deinit();
+    const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4 });
+    defer testing.allocator.free(refs);
+    try queue.replace(refs, 0);
+    const third = queue.idAt(2).?;
+    try testing.expectEqual(@as(?u32, 2), queue.positionOfId(third));
+
+    const next = try makeRefs(testing.allocator, &.{10});
+    defer testing.allocator.free(next);
+    try queue.insertAfter(0, next, null);
+    try testing.expectEqual(@as(?u32, 3), queue.positionOfId(third));
+    try queue.move(3, 1, null);
+    try testing.expectEqual(@as(?u32, 1), queue.positionOfId(third));
+    try testing.expectEqual(@as(i64, 3), queue.refAt(1).?.track_id);
+
+    const removed = queue.idAt(4).?;
+    try queue.removeAt(4, null);
+    try testing.expectEqual(@as(?u32, null), queue.positionOfId(removed));
+    try queue.enqueue(next);
+    try testing.expect(queue.idAt(queue.len() - 1).? > removed);
+
+    try queue.setShuffle(true);
+    const shuffled = queue.positionOfId(third).?;
+    try testing.expectEqual(@as(i64, 3), queue.refAt(shuffled).?.track_id);
+    try queue.setShuffle(false);
+    try testing.expectEqual(@as(i64, 3), queue.refAt(queue.positionOfId(third).?).?.track_id);
+
+    queue.clear();
+    try testing.expectEqual(@as(?u32, null), queue.positionOfId(third));
+    try queue.enqueue(refs);
+    for (0..4) |position| try testing.expect(queue.idAt(@intCast(position)).? > removed);
 }

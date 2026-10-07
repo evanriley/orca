@@ -488,6 +488,58 @@ section lists the entry points, errors and limits.
   `libraryArtistLoved` reads an Artist's. `librarySetRating(library, track_ids,
   ?u8)` rates the song behind each Track from 1 to 100, or clears it.
 
+### Radio and discovery
+
+- `libraryRadioPreview(library, allocator, seed, options, limit, session)`
+  ranks up to `limit` (at most 512, else `error.RadioLimitTooLarge`)
+  Recordings a Radio from a `RadioSeed` would play, without a Player. Each
+  `RadioPick` carries its Track, Recording, Artist and Release, `score`, the
+  `RadioComponents` values and a `PickReason` of up to two `ReasonPart`s;
+  `RadioPicks.weights` holds the weights used and `relaxed_recent` reports a
+  relaxed avoid window. The caller frees the result with `deinit`.
+  `RadioOptions` sets `explore` (0 to 100, default 35, else
+  `error.InvalidExplore`), up to 4 `RadioFocus` filters, `include_unplayed`,
+  `avoid_recent` and `include_live`. `RadioPreviewSession` fixes `now_s` and
+  the jitter seed; null reads the clock. An unknown Track, Release, Artist or
+  genre fails with `error.UnknownRadioSeed`, a decade that is not a multiple
+  of 10 with `error.InvalidDecade`. Reads the database alone. See
+  [discovery.md](discovery.md).
+- `libraryDiscoverySettings(library)` returns the `DiscoverySettings`:
+  `radio_continue`, `include_unplayed`, `avoid_days` (`DiscoveryAvoidDays`:
+  0, 1, 3 or 7) and `mix_count` (`DailyMixCount`: 0, 4 or 6).
+  `setLibraryDiscoverySettings` stores all four. See
+  [discovery.md](discovery.md#settings).
+- `libraryRecordingSummary(library, recording_id)` returns a
+  `RecordingSummary` with the Recording's title, artist credit and Artist, or
+  null when it does not exist, for naming an `often_after` reason; the caller
+  frees it with `deinit(allocator)`.
+- `playerStartRadio(player, library, seed, options)` starts a Library Radio
+  session on a Player bound to `library`, replacing any it had. The playing
+  entry and the user's queued entries stay; an idle Player plays a Track seed
+  at once, or another seed's first pick when it arrives. Picks are ranked on a
+  worker and kept `max_radio_pending` (8) ahead, topped up from `pump`; an
+  enqueue lands before the first pick not yet committed to. Seed and options
+  fail as for the preview. `playerStopRadio` ends the session and removes its
+  pending picks; `playerSetRadioOptions` replaces them under new options
+  (`error.RadioNotActive` without a session).
+- `playerRadioLessLikeThis(player, entry_id)` removes a pick, skipping it when
+  it plays, and steers the session from its Recording, Artist and first genre
+  (`error.NotARadioPick` for an entry that is not a pick still queued,
+  `error.QueueEntryInUse` for one lined up next). A pick skipped within 30
+  seconds is excluded and its Artist weighed down.
+  `playerRadioUndoFeedback` forgets that feedback; removed entries stay
+  removed.
+- `playerRadio(player)` returns a `RadioStatus` (seed, `title()`, options,
+  `RadioState`, `RadioCounts`, pending picks, `continued`) or null without a
+  session. `playerRadioPicks(player, output)` fills up to
+  `max_radio_reported_picks` (32) `RadioQueuePick`s, each with its queue entry
+  id, position, Track, Recording and reason, in playback order.
+- Replacing the queue, clearing it, restoring state, loading a file, binding
+  another Library, closing the Library and destroying the Player end a
+  session; it is never saved. With `radio_continue` on, a Player that starts
+  the last entry of a queue that does not repeat starts a `recent` session.
+  See [discovery.md](discovery.md#library-radio).
+
 ### Playlists
 
 `libraryPlaylists`, `libraryCreatePlaylist`, `libraryRenamePlaylist`,

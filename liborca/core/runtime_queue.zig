@@ -6,6 +6,7 @@ const queue_history = @import("queue.zig");
 const track_source = @import("track_source.zig");
 const runtime = @import("runtime.zig");
 const runtime_listens = @import("runtime_listens.zig");
+const runtime_radio = @import("runtime_radio.zig");
 const runtime_resume = @import("runtime_resume.zig");
 const runtime_status = @import("runtime_status.zig");
 const runtime_zones = @import("runtime_zones.zig");
@@ -96,6 +97,7 @@ pub fn playerLoadFile(
     const format = owned.decoder.format;
     if (format.channels == 0 or format.channels > audio.zone_runtime.max_channels)
         return error.UnsupportedChannelCount;
+    runtime_radio.endSession(self, try self.players.get(player));
     const engine = try ensureEngine(self, player);
     // The engine is the Player's only decoder; swapping the SourceQueue
     // under it would race its own reads.
@@ -135,6 +137,7 @@ pub fn playerBindLibrary(
 
     const object_value = try self.players.get(player);
     if (object_value.opener) |old| runtime_listens.endListen(self, object_value, old.library);
+    runtime_radio.endSession(self, object_value);
     runtime_resume.leaveLibrary(self, object_value);
     if (object_value.engine) |engine| {
         engine.quiesce();
@@ -192,6 +195,7 @@ pub fn playerPlayTracksBound(
     const refs = try trackRefs(self, library, track_ids);
     defer self.allocator.free(refs);
     runtime_resume.rememberAudible(self, try self.players.get(player)) catch {};
+    runtime_radio.endSession(self, try self.players.get(player));
     const engine = try ensureEngine(self, player);
     engine.quiesce();
     defer engine.release();
@@ -240,8 +244,13 @@ pub fn playerEnqueueTracksBound(
     defer engine.release();
     const object_value = try self.players.get(player);
     const was_idle = object_value.player.sources == null;
-    const first_new = object_value.queue.len();
-    try object_value.queue.enqueue(refs);
+    var first_new = object_value.queue.len();
+    if (runtime_radio.userInsertAfter(object_value)) |after| {
+        const pending: ?*u32 = if (engine.pending_source != null) &engine.pending_position else null;
+        try object_value.queue.insertAfter(after, refs, pending);
+        first_new = after + 1;
+    } else try object_value.queue.enqueue(refs);
+    runtime_radio.noteUserQueued(object_value, refs.len);
     if (!was_idle) engine.refreshSharedRelease();
     if (!was_idle or refs.len == 0) return;
     engine.discardPending();
@@ -263,10 +272,12 @@ pub fn playerQueueJump(self: *OrcaRuntime, player: PlayerHandle, position: u32) 
         countOpenFailure(object_value);
         return err;
     };
+    const left = runtime_radio.audibleEntry(object_value);
     if (engine) |value| value.discardPending();
     endAudibleEntry(self, object_value, .skipped);
     loadOpenedEntry(self, object_value, session, position);
     object_value.player.play();
+    if (left) |value| runtime_radio.noteSkip(object_value, value);
 }
 
 pub fn playerQueueInsertNext(
@@ -288,6 +299,7 @@ pub fn playerQueueInsertNext(
     const committed = if (engine.pending_source != null) engine.pending_position else queue.decodePosition();
     const pending: ?*u32 = if (engine.pending_source != null) &engine.pending_position else null;
     try queue.insertAfter(committed, refs, pending);
+    runtime_radio.noteUserQueued(try self.players.get(player), refs.len);
     engine.refreshSharedRelease();
 }
 
@@ -359,7 +371,10 @@ pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
     const engine = object_value.engine;
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
-    return skipObject(self, object_value, .next);
+    const left = runtime_radio.audibleEntry(object_value);
+    const moved = try skipObject(self, object_value, .next);
+    if (moved) if (left) |value| runtime_radio.noteSkip(object_value, value);
+    return moved;
 }
 
 pub fn playerPrevious(self: *OrcaRuntime, player: PlayerHandle) !bool {
@@ -394,7 +409,7 @@ fn previousObject(self: *OrcaRuntime, object_value: *PlayerObject) !bool {
     return skipObject(self, object_value, .previous);
 }
 
-const SkipDirection = enum { next, previous };
+pub const SkipDirection = enum { next, previous };
 
 fn stepPosition(queue: *const audio.playback_queue.PlaybackQueue, position: u32, direction: SkipDirection) ?u32 {
     return switch (direction) {
@@ -405,7 +420,7 @@ fn stepPosition(queue: *const audio.playback_queue.PlaybackQueue, position: u32,
 
 /// The caller must have quiesced the engine. Nothing moves until an entry has
 /// opened, so a skip whose every candidate fails leaves the old entry playing.
-fn skipObject(self: *OrcaRuntime, object_value: *PlayerObject, direction: SkipDirection) !bool {
+pub fn skipObject(self: *OrcaRuntime, object_value: *PlayerObject, direction: SkipDirection) !bool {
     const queue = object_value.queue;
     const cursor = queue.cursorPosition();
     var candidate = stepPosition(queue, cursor, direction) orelse return false;
@@ -454,6 +469,7 @@ pub fn playerSetShuffle(
 ) !void {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
+    if (object_value.queue.shuffle != enabled) try runtime_radio.beforeShuffleChange(self, object_value);
     if (object_value.engine) |engine| {
         engine.quiesce();
         defer engine.release();
@@ -466,6 +482,7 @@ pub fn playerSetShuffle(
 
 pub fn playerClearQueue(self: *OrcaRuntime, player: PlayerHandle) !void {
     try runtime.requireRunning(self);
+    runtime_radio.endSession(self, try self.players.get(player));
     endAudibleEntry(self, try self.players.get(player), .replaced);
     try self.stopPlayer(player);
     const object_value = try self.players.get(player);
