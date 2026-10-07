@@ -49,6 +49,12 @@
   tables for audio features, "Not for me" feedback and Daily Mixes. An
   upgraded Library cannot be opened by 0.2.0.
 
+### Fixed
+
+- The test output backend's `close` waits for a render callback in progress,
+  as real backends do, so a test can no longer release an audio block twice
+  when its output reopens for a new format.
+
 ## 0.2.0 - 2026-10-06
 
 Ships Library schema version 1, unchanged from 0.1.0. Breaking for the Zig

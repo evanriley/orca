@@ -1171,7 +1171,7 @@ fn liveStreamFor(
     while (index > 0) {
         index -= 1;
         if (backend.streams[index]) |stream| {
-            if (!stream.closed and stream.userdata == runtime_zone.context.userdata())
+            if (!stream.isClosed() and stream.userdata == runtime_zone.context.userdata())
                 return stream;
         }
     }

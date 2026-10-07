@@ -1786,7 +1786,7 @@ test "attaching a Zone to another Player closes its output and reopens it for th
     const previous_stream = backend.liveStream() orelse return error.OutputNeverOpened;
 
     try runtime.attachZone(zone, next);
-    try std.testing.expect(previous_stream.closed);
+    try std.testing.expect(previous_stream.isClosed());
     try awaitZoneActive(&runtime, zone);
     try std.testing.expectEqual(@as(usize, 2), backend.opens);
     const next_stream = backend.liveStream() orelse return error.OutputNeverReopened;
@@ -1821,7 +1821,7 @@ test "re-attaching a Zone to the Player it is already on does not interrupt its 
     const stream = backend.liveStream() orelse return error.OutputNeverOpened;
 
     try runtime.attachZone(zone, player);
-    try std.testing.expect(!stream.closed);
+    try std.testing.expect(!stream.isClosed());
     try std.testing.expectEqual(audio.zone.OutputState.active, try runtime.zoneOutputState(zone));
     try std.testing.expectEqual(@as(usize, 1), backend.opens);
 
