@@ -227,9 +227,9 @@ pub const Player = struct {
     /// A hard load retires every prepared block through the epoch bump, so the
     /// entry that becomes audible *is* the one just loaded. The serial the
     /// callback last published describes audio that no longer exists, and the
-    /// callback republishes only when the audible entry changes — so without
-    /// this the audible cursor would be pinned to a retired entry until the next
-    /// transition.
+    /// callback publishes no serial under the new epoch until its first block
+    /// renders — so without this the audible cursor would name a retired entry
+    /// until then.
     pub fn adoptLoadedEntryAsAudible(self: *Player) void {
         self.audible_entry_serial.store(self.sources.?.current_entry_serial, .release);
     }

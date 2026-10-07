@@ -54,6 +54,10 @@
 - The test output backend's `close` waits for a render callback in progress,
   as real backends do, so a test can no longer release an audio block twice
   when its output reopens for a new format.
+- A skip, jump or other hard load no longer reports the entry it left as
+  audible for one output callback. A `next` or `jump` in that window now ends
+  the entry being heard in queue history, and now-playing no longer briefly
+  names no Track.
 
 ## 0.2.0 - 2026-10-06
 
