@@ -489,7 +489,9 @@ sniffed or not recognized until they are supported:
   artist's MusicBrainz ID leaves the machine), cached for a week. The
   endpoint is experimental, so a failed lookup hides the list.
 - A release calendar of new and upcoming releases by artists in the library,
-  from ListenBrainz's `/1/explore/fresh-releases`, fetched at most daily.
+  from ListenBrainz's `/1/explore/fresh-releases`, fetched at most daily, with
+  filters drawn from local data: the most-played artists, loved artists, a
+  genre, or artists heard within a period.
 - Radio and mixes from the library: a queue that keeps extending from a seed
   track, album or artist, scored in `liborca` from local data only (shared
   artist, tags, genre, era, play history and feedback), optionally boosted by
