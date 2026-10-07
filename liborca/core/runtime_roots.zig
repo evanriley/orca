@@ -310,6 +310,14 @@ pub fn libraryTrackSummary(
     return (try runtime.libraryDatabase(self, library)).tracks.byId(self.allocator, track_id);
 }
 
+pub fn libraryRecordingSummary(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    recording_id: i64,
+) !?database.RecordingSummary {
+    return (try runtime.libraryDatabase(self, library)).recordings.summary(self.allocator, recording_id);
+}
+
 pub fn libraryTrackDetails(
     self: *OrcaRuntime,
     library: LibraryHandle,

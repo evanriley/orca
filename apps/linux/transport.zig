@@ -29,6 +29,7 @@ const lyrics = @import("lyrics.zig");
 const feedback = @import("feedback.zig");
 const preferences = @import("preferences.zig");
 const parametric = @import("parametric.zig");
+const radio = @import("radio.zig");
 
 const App = app.App;
 
@@ -414,6 +415,21 @@ pub fn showRepeat(self: *App, mode: liborca.RepeatMode) void {
         gtk.gtk_widget_add_css_class(button, "engaged");
 }
 
+fn radioClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    radio.toggle(state(data));
+}
+
+/// Shows whether a Radio session is running on the bar's Radio button.
+pub fn showRadio(self: *App, on: bool) void {
+    const button = self.transport_controls.radio orelse return;
+    const name: [*:0]const u8 = if (on) "Radio on" else "Radio off";
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, name, @as(c_int, -1));
+    if (on)
+        gtk.gtk_widget_add_css_class(button, "engaged")
+    else
+        gtk.gtk_widget_remove_css_class(button, "engaged");
+}
+
 fn volumeChanged(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const value = gtk.gtk_adjustment_get_value(gtk.cast(gtk.Adjustment, adjustment));
@@ -591,16 +607,20 @@ pub fn newButtons(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(play, gtk.ALIGN_CENTER);
     const next_button = iconButton("orca-next-symbolic", "Next");
     const repeat = iconButton("orca-repeat-symbolic", "Repeat off / all / one");
+    const radio_button = iconButton("orca-radio-symbolic", "Radio");
     controls.shuffle = shuffle;
     controls.previous = previous_button;
     controls.play = play;
     controls.next = next_button;
     controls.repeat = repeat;
+    controls.radio = radio_button;
     _ = gtk.signalConnect(previous_button, "clicked", gtk.callback(previousClicked), self);
     _ = gtk.signalConnect(play, "clicked", gtk.callback(playClicked), self);
     _ = gtk.signalConnect(next_button, "clicked", gtk.callback(nextClicked), self);
     _ = gtk.signalConnect(repeat, "clicked", gtk.callback(repeatClicked), self);
-    for ([_]*gtk.Widget{ shuffle, previous_button, play, next_button, repeat }) |button|
+    _ = gtk.signalConnect(radio_button, "clicked", gtk.callback(radioClicked), self);
+    showRadio(self, false);
+    for ([_]*gtk.Widget{ shuffle, previous_button, play, next_button, repeat, radio_button }) |button|
         gtk.gtk_box_append(gtk.cast(gtk.Box, buttons), button);
     return buttons;
 }
@@ -641,7 +661,7 @@ fn buildControls(self: *App) *gtk.Widget {
     const buttons = newButtons(self);
     gtk.gtk_box_set_spacing(gtk.cast(gtk.Box, buttons), 14);
     const controls = &self.transport_controls;
-    for ([_]?*gtk.Widget{ controls.shuffle, controls.previous, controls.next, controls.repeat }) |button|
+    for ([_]?*gtk.Widget{ controls.shuffle, controls.previous, controls.next, controls.repeat, controls.radio }) |button|
         gtk.gtk_widget_add_css_class(button.?, "bar-button");
     showRepeat(self, self.repeat_mode);
     const seek = newSeek(self);
@@ -1297,7 +1317,7 @@ fn showFailure(self: *App, failure: ?liborca.PlaybackFailure) void {
     const bar = picker.bar;
     const controls = &self.transport_controls;
     if (self.now_playing_alert) |alert| gtk.gtk_widget_set_visible(alert, @intFromBool(failure != null));
-    for ([_]?*gtk.Widget{ controls.shuffle, controls.repeat }) |button|
+    for ([_]?*gtk.Widget{ controls.shuffle, controls.repeat, controls.radio }) |button|
         if (button) |widget| gtk.gtk_widget_set_visible(widget, @intFromBool(failure == null));
     if (controls.play) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(failure == null));
     if (self.now_playing_art) |cover| {

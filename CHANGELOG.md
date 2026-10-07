@@ -12,6 +12,35 @@
   Tempo comes from a mean-removed onset autocorrelation tempogram and key from
   a harmonic pitch-salience chroma matched against the Albrecht–Shanahan
   profiles. `zig build analysis-bench` times one file's analysis.
+- Radio preview: `libraryRadioPreview`, `orca_library_radio_preview` and
+  `orca-cli radio` rank the Recordings a Radio from a Track, Release, Artist,
+  genre, decade or loved seed would play, with true reasons and each scoring
+  component, without a Player. Scoring weighs Artist, genre, tempo, key and
+  energy, co-listening, era, taste and jitter, moving from close to the seed
+  to exploring as `explore` rises. One pick in four at most is a Recording
+  never played while played ones remain; after that never-played Recordings
+  fill the rest, so a Library with little history still returns full lists.
+- Library Radio: `playerStartRadio` and `orca_player_start_radio` play from a
+  seed and keep 8 picks queued after the user's entries, topped up from a
+  worker as tracks finish. Options can change mid-session; "less like this",
+  skips within 30 seconds and undo steer the session; `playerRadio` and
+  `playerRadioPicks` report its state and why each queued pick was chosen.
+  With `radio.continue` on, a queue that runs out continues as a Radio from
+  recent listening.
+- `libraryRecordingSummary` and `orca_library_recording_get` read a
+  Recording's title and artist credit; `orca-cli radio` names the Recording
+  an `often_after` reason cites.
+- orca-gtk Library Radio: Start Radio in the Track, album, artist and Queue
+  row menus and a Radio button in the player bar; the Queue page shows the
+  Radio's status, its picks with their reasons, Play next and Less like this;
+  a Radio panel steers explore, focus filters, unplayed, recent-play and live
+  picks and undoes feedback. Settings › Listening gains Radio & Daily Mixes
+  and Show listening stats on Home.
+- `scripts/headless-gui.sh` takes the output size from `ORCA_HEADLESS_SIZE`.
+- Discovery settings: `libraryDiscoverySettings`,
+  `setLibraryDiscoverySettings` and their C ABI counterparts read and store
+  Radio auto-continue, unplayed picks, the recent-play avoid window and the
+  Daily Mix count.
 
 ### Changed
 
@@ -19,6 +48,12 @@
   in one transaction, keeping every row, and adds an index on listen time and
   tables for audio features, "Not for me" feedback and Daily Mixes. An
   upgraded Library cannot be opened by 0.2.0.
+
+### Fixed
+
+- The test output backend's `close` waits for a render callback in progress,
+  as real backends do, so a test can no longer release an audio block twice
+  when its output reopens for a new format.
 
 ## 0.2.0 - 2026-10-06
 

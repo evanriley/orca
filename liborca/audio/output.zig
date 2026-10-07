@@ -22,6 +22,8 @@ pub const Output = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// Returns only once no render callback is running and none can start:
+        /// `ZoneRuntime.resetPipe` drains the callback's queue right after.
         close: *const fn (?*anyopaque) void,
         status: *const fn (?*anyopaque) Status,
         latency: *const fn (?*anyopaque, u32, u32) anyerror!zone_model.Latency,
@@ -109,18 +111,29 @@ pub const TestBackend = struct {
 
     pub const max_streams = 8;
 
+    const CallbackState = enum(u8) { idle, rendering, closed };
+
     pub const Stream = struct {
         backend: *TestBackend,
         render: RenderFn,
         userdata: ?*anyopaque,
         request: contract.OpenRequest,
         state: std.atomic.Value(u8) = .init(@backingInt(Status.active)),
-        closed: bool = false,
+        callback: std.atomic.Value(CallbackState) = .init(.idle),
         state_waker: ?work.Waker = null,
 
         /// Drives one render callback exactly as a backend RT thread would.
         pub fn pump(self: *Stream, samples: []f32, frames: u32) void {
+            if (self.callback.cmpxchgStrong(.idle, .rendering, .acquire, .monotonic) != null) {
+                @memset(samples[0 .. frames * self.request.format.channels], 0);
+                return;
+            }
             self.render(self.userdata, samples.ptr, frames, self.request.format.channels);
+            self.callback.store(.idle, .release);
+        }
+
+        pub fn isClosed(self: *const Stream) bool {
+            return self.callback.load(.acquire) == .closed;
         }
 
         pub fn markLost(self: *Stream) void {
@@ -146,7 +159,7 @@ pub const TestBackend = struct {
         while (index > 0) {
             index -= 1;
             if (self.streams[index]) |stream| {
-                if (!stream.closed) return stream;
+                if (!stream.isClosed()) return stream;
             }
         }
         return null;
@@ -222,7 +235,10 @@ pub const TestBackend = struct {
 
     fn closeStream(context: ?*anyopaque) void {
         const stream: *Stream = @ptrCast(@alignCast(context.?));
-        stream.closed = true;
+        while (stream.callback.cmpxchgWeak(.idle, .closed, .acquire, .monotonic)) |seen| {
+            if (seen == .closed) return;
+            std.Thread.yield() catch {};
+        }
     }
 
     fn streamStatus(context: ?*anyopaque) Status {
@@ -305,4 +321,59 @@ test "the test backend hands out independently closable streams" {
     try std.testing.expectEqual(Status.active, second.status());
     first.close();
     second.close();
+}
+
+test "closing a test stream waits for its in-flight callback and silences later pumps" {
+    var backend: TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    const Probe = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        closing: std.atomic.Value(bool) = .init(false),
+        close_returned: std.atomic.Value(bool) = .init(false),
+        close_returned_during_render: std.atomic.Value(bool) = .init(false),
+        renders: std.atomic.Value(u32) = .init(0),
+
+        fn render(userdata: ?*anyopaque, samples: [*]f32, frames: u32, channels: u32) callconv(.c) void {
+            const probe: *@This() = @ptrCast(@alignCast(userdata.?));
+            _ = probe.renders.fetchAdd(1, .monotonic);
+            probe.entered.store(true, .release);
+            while (!probe.closing.load(.acquire)) std.Thread.yield() catch {};
+            var yields: usize = 0;
+            while (yields < 1_000) : (yields += 1) std.Thread.yield() catch {};
+            if (probe.close_returned.load(.acquire)) probe.close_returned_during_render.store(true, .release);
+            @memset(samples[0 .. frames * channels], 1);
+        }
+
+        fn closeWhenEntered(probe: *@This(), output: Output) void {
+            while (!probe.entered.load(.acquire)) std.Thread.yield() catch {};
+            probe.closing.store(true, .release);
+            output.close();
+            probe.close_returned.store(true, .release);
+        }
+    };
+    var probe: Probe = .{};
+    const output = try backend.factory().open(.{
+        .device_id = 0,
+        .format = .{
+            .sample_format = .float_32,
+            .channels = 1,
+            .sample_rate = 48_000,
+            .bits_per_sample = 32,
+            .bytes_per_frame = 4,
+        },
+        .policy = .robust,
+        .requested_latency_frames = 256,
+    }, Probe.render, &probe);
+    const stream = backend.liveStream().?;
+    const closer = try std.Thread.spawn(.{}, Probe.closeWhenEntered, .{ &probe, output });
+    var samples: [4]f32 = @splat(0);
+    stream.pump(&samples, 4);
+    closer.join();
+    try std.testing.expect(!probe.close_returned_during_render.load(.acquire));
+    try std.testing.expect(backend.liveStream() == null);
+
+    samples = @splat(0.5);
+    stream.pump(&samples, 4);
+    try std.testing.expectEqual(@as(u32, 1), probe.renders.load(.acquire));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0 }, &samples);
 }

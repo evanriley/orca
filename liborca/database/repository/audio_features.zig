@@ -94,6 +94,75 @@ pub const AudioFeatureRepository = struct {
         if (total == 0) return null;
         return std.math.clamp((below + equal / 2) / total, 0, 1);
     }
+
+    /// What `trackFeatures` reads for each of `track_ids`, in their order,
+    /// into `out`, which is as long. Energy ranks against the Library as one
+    /// read of each measurement's index, not one query per Track.
+    pub fn tracksFeatures(
+        self: *const AudioFeatureRepository,
+        allocator: std.mem.Allocator,
+        track_ids: []const i64,
+        out: []?AudioFeatures,
+    ) !void {
+        std.debug.assert(out.len == track_ids.len);
+        @memset(out, null);
+        if (track_ids.len == 0) return;
+
+        var ids: std.ArrayList(u8) = .empty;
+        defer ids.deinit(allocator);
+        try ids.append(allocator, '[');
+        for (track_ids, 0..) |id, index| try ids.print(allocator, "{s}{d}", .{ if (index == 0) "" else ",", id });
+        try ids.append(allocator, ']');
+
+        var index_of: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+        defer index_of.deinit(allocator);
+        try index_of.ensureTotalCapacity(allocator, @intCast(track_ids.len));
+        for (track_ids, 0..) |id, index| index_of.putAssumeCapacity(id, index);
+
+        var lufs = try sortedColumn(self.db, allocator, sorted_lufs_sql);
+        defer lufs.deinit(allocator);
+        var onset_rates = try sortedColumn(self.db, allocator, sorted_onset_rate_sql);
+        defer onset_rates.deinit(allocator);
+        var centroids = try sortedColumn(self.db, allocator, sorted_centroid_sql);
+        defer centroids.deinit(allocator);
+
+        var statement = try self.db.prepare(tracks_features_sql);
+        defer statement.deinit();
+        try statement.bindText(1, ids.items);
+        while (try statement.step() == .row) {
+            const index = index_of.get(statement.columnInt64(0)) orelse continue;
+            const tempo: ?AudioFeatures.Tempo = if (statement.columnIsNull(1)) null else .{
+                .bpm = statement.columnDouble(1),
+                .confidence = statement.columnDouble(2),
+            };
+            const key: ?AudioFeatures.Key = if (statement.columnIsNull(3)) null else .{
+                .pitch = std.math.cast(u8, statement.columnInt64(3)) orelse return error.InvalidStoredFeatures,
+                .mode = std.enums.fromInt(AudioFeatures.Mode, statement.columnInt64(4)) orelse
+                    return error.InvalidStoredFeatures,
+                .confidence = statement.columnDouble(5),
+            };
+            const onset_rate = optionalDouble(statement, 6);
+            const centroid_hz = optionalDouble(statement, 7);
+            const integrated_lufs = optionalDouble(statement, 8);
+            var sum: f64 = 0;
+            var ranked: usize = 0;
+            for ([_]struct { ?f64, []const f64 }{
+                .{ integrated_lufs, lufs.items },
+                .{ onset_rate, onset_rates.items },
+                .{ centroid_hz, centroids.items },
+            }) |pair| if (pair[0]) |value| if (sortedRank(pair[1], value)) |r| {
+                sum += r;
+                ranked += 1;
+            };
+            out[index] = .{
+                .tempo = tempo,
+                .key = key,
+                .onset_rate = onset_rate,
+                .centroid_hz = centroid_hz,
+                .energy = if (ranked == 0) null else sum / @as(f64, @floatFromInt(ranked)),
+            };
+        }
+    }
 };
 
 const track_features_sql =
@@ -118,6 +187,45 @@ fn rankSql(comptime table: []const u8, comptime column: []const u8) [:0]const u8
 pub const rank_lufs_sql = rankSql("file_loudness", "integrated_lufs");
 pub const rank_onset_rate_sql = rankSql("file_audio_features", "onset_rate");
 pub const rank_centroid_sql = rankSql("file_audio_features", "centroid_hz");
+
+const tracks_features_sql =
+    "SELECT tracks.id, features.tempo_bpm, features.tempo_confidence, features.key_pitch, features.key_mode,\n" ++
+    "       features.key_confidence, features.onset_rate, features.centroid_hz,\n" ++
+    "       (SELECT file_loudness.integrated_lufs FROM file_loudness\n" ++
+    "        WHERE file_loudness.file_id = play_file.id\n" ++
+    "          AND file_loudness.source_identity = play_file.content_hash)\n" ++
+    "FROM tracks\n" ++
+    "JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n" ++
+    "JOIN file_audio_features AS features ON features.file_id = play_file.id\n" ++
+    "    AND features.source_identity = play_file.content_hash\n" ++
+    "WHERE tracks.id IN (SELECT value FROM json_each(?1)) AND play_file.content_hash_algorithm = 1\n" ++
+    "  AND " ++ measurableChannels("play_file") ++ ";";
+
+const sorted_lufs_sql = "SELECT integrated_lufs FROM file_loudness WHERE integrated_lufs IS NOT NULL ORDER BY integrated_lufs;";
+const sorted_onset_rate_sql = "SELECT onset_rate FROM file_audio_features WHERE onset_rate IS NOT NULL ORDER BY onset_rate;";
+const sorted_centroid_sql = "SELECT centroid_hz FROM file_audio_features WHERE centroid_hz IS NOT NULL ORDER BY centroid_hz;";
+
+fn sortedColumn(db: sqlite.Database, allocator: std.mem.Allocator, comptime sql: [:0]const u8) !std.ArrayList(f64) {
+    var values: std.ArrayList(f64) = .empty;
+    errdefer values.deinit(allocator);
+    var statement = try db.prepare(sql);
+    defer statement.deinit();
+    while (try statement.step() == .row) try values.append(allocator, statement.columnDouble(0));
+    return values;
+}
+
+fn sortedRank(values: []const f64, value: f64) ?f64 {
+    if (values.len == 0) return null;
+    const below = std.sort.lowerBound(f64, values, value, orderF64);
+    const through = std.sort.upperBound(f64, values, value, orderF64);
+    const total: f64 = @floatFromInt(values.len);
+    const equal: f64 = @floatFromInt(through - below);
+    return std.math.clamp((@as(f64, @floatFromInt(below)) + equal / 2) / total, 0, 1);
+}
+
+fn orderF64(context: f64, item: f64) std.math.Order {
+    return std.math.order(context, item);
+}
 
 fn optionalDouble(statement: sqlite.Statement, column: c_int) ?f64 {
     return if (statement.columnIsNull(column)) null else statement.columnDouble(column);
@@ -176,6 +284,11 @@ test "a Track reads the features of the bytes its file holds now, and energy ran
     try std.testing.expectApproxEqAbs(0.5 / 3.0, fourth.energy.?, 1e-12);
     try std.testing.expectEqual(@as(?AudioFeatures, null), try library.audio_features.trackFeatures(5));
     try std.testing.expectEqual(@as(?AudioFeatures, null), try library.audio_features.trackFeatures(99));
+
+    const ids = [_]i64{ 4, 99, 1, 3, 2, 5 };
+    var batch: [ids.len]?AudioFeatures = undefined;
+    try library.audio_features.tracksFeatures(std.testing.allocator, &ids, &batch);
+    for (ids, batch) |id, features| try std.testing.expectEqual(try library.audio_features.trackFeatures(id), features);
 
     try library.database.exec("UPDATE file_audio_features SET onset_rate = NULL, centroid_hz = NULL; DELETE FROM file_loudness;");
     try std.testing.expectEqual(@as(?f64, null), (try library.audio_features.trackFeatures(1)).?.energy);

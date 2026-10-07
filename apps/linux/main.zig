@@ -22,6 +22,7 @@ const transport = @import("transport.zig");
 const details = @import("details.zig");
 const lyrics = @import("lyrics.zig");
 const queue = @import("queue.zig");
+const radio = @import("radio.zig");
 const window = @import("window.zig");
 const palette = @import("palette.zig");
 const albums = @import("albums.zig");
@@ -94,6 +95,7 @@ fn tick(self: *App) void {
         if (library_changed) jobs.reloadLibraryViews(self);
         art.tick(self);
         transport.tick(self);
+        radio.tick(self);
         queue.tick(self);
         jobs.tick(self);
         first_run.tick(self);
@@ -253,6 +255,10 @@ fn activateBack(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
 
 fn activateContextPlay(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     menu.play(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextStartRadio(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    radio.startFromContext(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateContextPlayNext(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -658,6 +664,7 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-write-tags", activateContextWriteTags, null, &self);
     addAction(application, "ctx-play", activateContextPlay, null, &self);
     addAction(application, "ctx-play-next", activateContextPlayNext, null, &self);
+    addAction(application, "ctx-start-radio", activateContextStartRadio, null, &self);
     addAction(application, "ctx-enqueue", activateContextEnqueue, null, &self);
     addAction(application, "ctx-remove", activateContextRemove, null, &self);
     addAction(application, "ctx-love", activateContextLove, null, &self);

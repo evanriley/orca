@@ -11,6 +11,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const analysis_pass = @import("library/analysis_pass.zig");
+const discovery = @import("library/discovery.zig");
 const folder_estimate = @import("library/folder_estimate.zig");
 const audio = @import("audio/root.zig");
 const control = @import("core/control.zig");
@@ -461,6 +462,17 @@ pub const TrackSummaryView = extern struct {
 
 pub const TrackSummaryCallback = *const fn (?*anyopaque, *const TrackSummaryView) callconv(.c) void;
 
+pub const RecordingSummaryView = extern struct {
+    id: i64,
+    title: StringView,
+    artist: StringView,
+    artist_id: i64,
+    has_artist_id: u8,
+    reserved: [7]u8 = @splat(0),
+};
+
+pub const RecordingSummaryCallback = *const fn (?*anyopaque, *const RecordingSummaryView) callconv(.c) void;
+
 pub const IdSource = enum(u8) {
     none = 0,
     tag = 1,
@@ -814,6 +826,122 @@ pub const AudioFeaturesView = extern struct {
     has_centroid: u8,
     has_energy: u8,
     _reserved: [1]u8 = @splat(0),
+};
+
+pub const RadioSeedView = extern struct {
+    id: i64,
+    kind: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const RadioFocusView = extern struct {
+    id: i64,
+    kind: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const RadioOptionsView = extern struct {
+    focus: [discovery.max_focus]RadioFocusView,
+    focus_count: u8,
+    explore: u8,
+    has_include_unplayed: u8,
+    include_unplayed: u8,
+    has_avoid_recent: u8,
+    avoid_recent: u8,
+    include_live: u8,
+    _reserved: [1]u8 = @splat(0),
+};
+
+pub const RadioPreviewSessionView = extern struct {
+    now_s: i64,
+    seed: u64,
+    has_now: u8,
+    has_seed: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const RadioComponentsView = extern struct {
+    artist: f64,
+    genre: f64,
+    audio: f64,
+    co_listening: f64,
+    era: f64,
+    taste: f64,
+    jitter: f64,
+};
+
+pub const ReasonPartView = extern struct {
+    a: i64,
+    b: i64,
+    kind: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const RadioPickView = extern struct {
+    track_id: i64,
+    recording_id: i64,
+    artist_id: i64,
+    release_id: i64,
+    score: f64,
+    components: RadioComponentsView,
+    reasons: [2]ReasonPartView,
+    reason_count: u8,
+    has_artist_id: u8,
+    has_release_id: u8,
+    never_played: u8,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const RadioPreviewView = extern struct {
+    picks: [*]const RadioPickView,
+    count: usize,
+    weights: RadioComponentsView,
+    relaxed_recent: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const RadioPreviewCallback = *const fn (?*anyopaque, *const RadioPreviewView) callconv(.c) void;
+
+pub const RadioStatusView = extern struct {
+    library: Handle,
+    seed: RadioSeedView,
+    options: RadioOptionsView,
+    title: StringView,
+    picks_added: u32,
+    user_queued: u32,
+    less_like_this: u32,
+    skips: u32,
+    pending: u32,
+    state: u8,
+    continued: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const RadioStatusCallback = *const fn (?*anyopaque, *const RadioStatusView) callconv(.c) void;
+
+pub const RadioQueuePickView = extern struct {
+    entry_id: u64,
+    track_id: i64,
+    recording_id: i64,
+    reasons: [2]ReasonPartView,
+    position: u32,
+    reason_count: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
+pub const RadioQueuePicksView = extern struct {
+    picks: [*]const RadioQueuePickView,
+    count: usize,
+};
+
+pub const RadioQueuePicksCallback = *const fn (?*anyopaque, *const RadioQueuePicksView) callconv(.c) void;
+
+pub const DiscoverySettingsView = extern struct {
+    radio_continue: u8,
+    include_unplayed: u8,
+    avoid_days: u8,
+    mix_count: u8,
+    _reserved: [4]u8 = @splat(0),
 };
 
 pub const HealthIssueView = extern struct {
@@ -3066,6 +3194,30 @@ pub export fn orca_library_track_get(
     return .ok;
 }
 
+pub export fn orca_library_recording_get(
+    runtime: ?*Runtime,
+    library: Handle,
+    recording_id: i64,
+    context: ?*anyopaque,
+    callback: ?RecordingSummaryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryRecordingSummary(importLibrary(library), recording_id) catch |err|
+        return box.fail(@src(), err);
+    const item = found orelse return box.reject(@src(), .not_found, "no such recording");
+    defer item.deinit(box.runtime.allocator);
+    const view: RecordingSummaryView = .{
+        .id = item.id,
+        .title = stringView(item.title),
+        .artist = stringView(item.artist),
+        .artist_id = item.artist_id orelse 0,
+        .has_artist_id = @intFromBool(item.artist_id != null),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
 pub export fn orca_library_track_details(
     runtime: ?*Runtime,
     library: Handle,
@@ -3185,6 +3337,303 @@ pub export fn orca_library_track_audio_features(
         .has_centroid = @intFromBool(features.centroid_hz != null),
         .has_energy = @intFromBool(features.energy != null),
     };
+    return .ok;
+}
+
+pub fn importRadioSeedKind(value: u8) ?std.meta.Tag(discovery.Seed) {
+    return std.enums.fromInt(std.meta.Tag(discovery.Seed), value);
+}
+
+pub fn importRadioFocusKind(value: u8) ?std.meta.Tag(discovery.Focus) {
+    return std.enums.fromInt(std.meta.Tag(discovery.Focus), value);
+}
+
+fn importRadioSeed(seed: *const RadioSeedView) ?discovery.Seed {
+    return switch (importRadioSeedKind(seed.kind) orelse return null) {
+        .track => .{ .track = seed.id },
+        .release => .{ .release = seed.id },
+        .artist => .{ .artist = seed.id },
+        .genre => .{ .genre = seed.id },
+        .decade => .{ .decade = seed.id },
+        .loved => .loved,
+        .recent => .recent,
+    };
+}
+
+fn importOptionalFlag(has: u8, value: u8) error{Invalid}!?bool {
+    if (has > 1 or value > 1) return error.Invalid;
+    return if (has == 1) value == 1 else null;
+}
+
+fn importRadioOptions(options: *const RadioOptionsView) ?discovery.RadioOptions {
+    if (options.focus_count > discovery.max_focus or options.include_live > 1) return null;
+    var result: discovery.RadioOptions = .{
+        .explore = options.explore,
+        .include_unplayed = importOptionalFlag(options.has_include_unplayed, options.include_unplayed) catch return null,
+        .avoid_recent = importOptionalFlag(options.has_avoid_recent, options.avoid_recent) catch return null,
+        .include_live = options.include_live == 1,
+    };
+    for (options.focus[0..options.focus_count], result.focus[0..options.focus_count]) |view, *focus| {
+        focus.* = switch (importRadioFocusKind(view.kind) orelse return null) {
+            .genre => .{ .genre = view.id },
+            .decade => .{ .decade = view.id },
+            .low_energy => .low_energy,
+            .high_energy => .high_energy,
+        };
+    }
+    return result;
+}
+
+fn exportRadioComponents(components: discovery.Components) RadioComponentsView {
+    return .{
+        .artist = components.artist,
+        .genre = components.genre,
+        .audio = components.audio,
+        .co_listening = components.co_listening,
+        .era = components.era,
+        .taste = components.taste,
+        .jitter = components.jitter,
+    };
+}
+
+fn exportReasonPart(part: ?discovery.ReasonPart) ReasonPartView {
+    const found = part orelse return .{ .a = 0, .b = 0, .kind = 0 };
+    return .{ .a = found.a, .b = found.b, .kind = @backingInt(found.kind) };
+}
+
+pub export fn orca_library_radio_preview(
+    runtime: ?*Runtime,
+    library: Handle,
+    seed: ?*const RadioSeedView,
+    options: ?*const RadioOptionsView,
+    session: ?*const RadioPreviewSessionView,
+    limit: u32,
+    context: ?*anyopaque,
+    callback: ?RadioPreviewCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const seed_view = seed orelse return box.reject(@src(), .invalid_argument, "seed is null");
+    const radio_seed = importRadioSeed(seed_view) orelse
+        return box.reject(@src(), .invalid_argument, "seed kind must be a known orca_radio_seed_kind");
+    var radio_options: discovery.RadioOptions = .{};
+    if (options) |view| radio_options = importRadioOptions(view) orelse
+        return box.reject(@src(), .invalid_argument, "options need at most 4 focus entries of known kinds and flags 0 or 1");
+    var preview_session: core.runtime.RadioPreviewSession = .{};
+    if (session) |view| {
+        if (view.has_now > 1 or view.has_seed > 1)
+            return box.reject(@src(), .invalid_argument, "session flags must be 0 or 1");
+        if (view.has_now == 1) preview_session.now_s = view.now_s;
+        if (view.has_seed == 1) preview_session.seed = view.seed;
+    }
+    if (limit > discovery.max_picks) return box.reject(@src(), .invalid_argument, "limit must be at most 512");
+    var picks = box.runtime.libraryRadioPreview(importLibrary(library), box.runtime.allocator, radio_seed, radio_options, limit, preview_session) catch |err|
+        return box.fail(@src(), err);
+    defer picks.deinit();
+    const views = box.runtime.allocator.alloc(RadioPickView, picks.items.len) catch |err|
+        return box.fail(@src(), err);
+    defer box.runtime.allocator.free(views);
+    for (views, picks.items) |*view, pick| view.* = .{
+        .track_id = pick.track_id,
+        .recording_id = pick.recording_id,
+        .artist_id = pick.artist_id orelse 0,
+        .release_id = pick.release_id orelse 0,
+        .score = pick.score,
+        .components = exportRadioComponents(pick.components),
+        .reasons = .{ exportReasonPart(pick.reason.first), exportReasonPart(pick.reason.second) },
+        .reason_count = @as(u8, @intFromBool(pick.reason.first != null)) + @intFromBool(pick.reason.second != null),
+        .has_artist_id = @intFromBool(pick.artist_id != null),
+        .has_release_id = @intFromBool(pick.release_id != null),
+        .never_played = @intFromBool(pick.never_played),
+    };
+    const preview: RadioPreviewView = .{
+        .picks = views.ptr,
+        .count = views.len,
+        .weights = exportRadioComponents(picks.weights),
+        .relaxed_recent = @intFromBool(picks.relaxed_recent),
+    };
+    visit(context, &preview);
+    return .ok;
+}
+
+pub export fn orca_library_discovery_settings(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*DiscoverySettingsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const settings = box.runtime.libraryDiscoverySettings(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .radio_continue = @intFromBool(settings.radio_continue),
+        .include_unplayed = @intFromBool(settings.include_unplayed),
+        .avoid_days = @backingInt(settings.avoid_days),
+        .mix_count = @backingInt(settings.mix_count),
+    };
+    return .ok;
+}
+
+pub export fn orca_library_set_discovery_settings(
+    runtime: ?*Runtime,
+    library: Handle,
+    settings: ?*const DiscoverySettingsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const view = settings orelse return box.reject(@src(), .invalid_argument, "settings is null");
+    const invalid = "radio_continue and include_unplayed must be 0 or 1, avoid_days 0, 1, 3 or 7, and mix_count 0, 4 or 6";
+    if (view.radio_continue > 1 or view.include_unplayed > 1) return box.reject(@src(), .invalid_argument, invalid);
+    const avoid_days = std.enums.fromInt(discovery.AvoidDays, view.avoid_days) orelse
+        return box.reject(@src(), .invalid_argument, invalid);
+    const mix_count = std.enums.fromInt(discovery.MixCount, view.mix_count) orelse
+        return box.reject(@src(), .invalid_argument, invalid);
+    box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{
+        .radio_continue = view.radio_continue == 1,
+        .include_unplayed = view.include_unplayed == 1,
+        .avoid_days = avoid_days,
+        .mix_count = mix_count,
+    }) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+fn exportRadioSeed(seed: discovery.Seed) RadioSeedView {
+    const id: i64 = switch (seed) {
+        .track, .release, .artist, .genre, .decade => |value| value,
+        .loved, .recent => 0,
+    };
+    return .{ .id = id, .kind = @backingInt(std.meta.activeTag(seed)) };
+}
+
+fn exportRadioOptions(options: discovery.RadioOptions) RadioOptionsView {
+    var view: RadioOptionsView = .{
+        .focus = @splat(.{ .id = 0, .kind = 0 }),
+        .focus_count = 0,
+        .explore = options.explore,
+        .has_include_unplayed = @intFromBool(options.include_unplayed != null),
+        .include_unplayed = @intFromBool(options.include_unplayed orelse false),
+        .has_avoid_recent = @intFromBool(options.avoid_recent != null),
+        .avoid_recent = @intFromBool(options.avoid_recent orelse false),
+        .include_live = @intFromBool(options.include_live),
+    };
+    for (options.focus) |entry| {
+        const focus = entry orelse continue;
+        const id: i64 = switch (focus) {
+            .genre, .decade => |value| value,
+            .low_energy, .high_energy => 0,
+        };
+        view.focus[view.focus_count] = .{ .id = id, .kind = @backingInt(std.meta.activeTag(focus)) };
+        view.focus_count += 1;
+    }
+    return view;
+}
+
+pub export fn orca_player_start_radio(
+    runtime: ?*Runtime,
+    player: Handle,
+    seed: ?*const RadioSeedView,
+    options: ?*const RadioOptionsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const seed_view = seed orelse return box.reject(@src(), .invalid_argument, "seed is null");
+    const radio_seed = importRadioSeed(seed_view) orelse
+        return box.reject(@src(), .invalid_argument, "seed kind must be a known orca_radio_seed_kind");
+    var radio_options: discovery.RadioOptions = .{};
+    if (options) |view| radio_options = importRadioOptions(view) orelse
+        return box.reject(@src(), .invalid_argument, "options need at most 4 focus entries of known kinds and flags 0 or 1");
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    box.runtime.playerStartRadio(player_handle, library, radio_seed, radio_options) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_stop_radio(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerStopRadio(importPlayer(player)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_set_radio_options(
+    runtime: ?*Runtime,
+    player: Handle,
+    options: ?*const RadioOptionsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    var radio_options: discovery.RadioOptions = .{};
+    if (options) |view| radio_options = importRadioOptions(view) orelse
+        return box.reject(@src(), .invalid_argument, "options need at most 4 focus entries of known kinds and flags 0 or 1");
+    box.runtime.playerSetRadioOptions(importPlayer(player), radio_options) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_radio_less_like_this(
+    runtime: ?*Runtime,
+    player: Handle,
+    entry_id: u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerRadioLessLikeThis(importPlayer(player), entry_id) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_radio_undo_feedback(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerRadioUndoFeedback(importPlayer(player)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_radio_status(
+    runtime: ?*Runtime,
+    player: Handle,
+    context: ?*anyopaque,
+    callback: ?RadioStatusCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const status = (box.runtime.playerRadio(importPlayer(player)) catch |err|
+        return box.fail(@src(), err)) orelse return .ok;
+    const view: RadioStatusView = .{
+        .library = exportLibraryHandle(status.library),
+        .seed = exportRadioSeed(status.seed),
+        .options = exportRadioOptions(status.options),
+        .title = stringView(status.title()),
+        .picks_added = status.counts.picks_added,
+        .user_queued = status.counts.user_queued,
+        .less_like_this = status.counts.less_like_this,
+        .skips = status.counts.skips,
+        .pending = status.pending,
+        .state = @backingInt(status.state),
+        .continued = @intFromBool(status.continued),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_player_radio_picks(
+    runtime: ?*Runtime,
+    player: Handle,
+    context: ?*anyopaque,
+    callback: ?RadioQueuePicksCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var picks: [core.runtime.max_radio_reported_picks]core.runtime.RadioQueuePick = undefined;
+    const count = box.runtime.playerRadioPicks(importPlayer(player), &picks) catch |err|
+        return box.fail(@src(), err);
+    var views: [core.runtime.max_radio_reported_picks]RadioQueuePickView = undefined;
+    for (views[0..count], picks[0..count]) |*view, pick| view.* = .{
+        .entry_id = pick.entry_id,
+        .track_id = pick.track_id,
+        .recording_id = pick.recording_id,
+        .reasons = .{ exportReasonPart(pick.reason.first), exportReasonPart(pick.reason.second) },
+        .position = pick.position,
+        .reason_count = @as(u8, @intFromBool(pick.reason.first != null)) + @intFromBool(pick.reason.second != null),
+    };
+    const result: RadioQueuePicksView = .{ .picks = &views, .count = count };
+    visit(context, &result);
     return .ok;
 }
 
@@ -8761,7 +9210,9 @@ fn mapError(err: anyerror) Status {
         error.UnknownTagWriteGroup => .not_found,
         error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
         error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
-        error.UnknownDuplicateGroup, error.NoReleaseCandidate => .not_found,
+        error.UnknownDuplicateGroup, error.NoReleaseCandidate, error.UnknownRadioSeed => .not_found,
+        error.NotARadioPick => .not_found,
+        error.RadioNotActive => .invalid_state,
         error.TrackNotOnRelease, error.UnknownReleaseTrack => .not_found,
         error.NoReleaseTracklist, error.ReleaseTrackAlreadyPaired, error.ReleaseNotPlaced => .invalid_state,
         error.ReleaseTooLarge => .unsupported,
@@ -8829,6 +9280,10 @@ fn mapError(err: anyerror) Status {
         error.InvalidRulePlaylist,
         error.NotDuplicates,
         error.SameDuplicateTrack,
+        error.InvalidExplore,
+        error.InvalidDecade,
+        error.RadioLimitTooLarge,
+        error.RadioSessionTooLarge,
         => .invalid_argument,
         else => .internal,
     };
@@ -12114,4 +12569,57 @@ test "maintenance refuses an enabled flag other than 0 or 1, null outputs and st
 
     try std.testing.expectEqual(Status.ok, orca_library_set_maintenance(runtime, library, &.{ .interval_ms = 0, .enabled = 0 }));
     try std.testing.expectEqual(exportMaintenanceState(.off), (try maintenanceStatus(runtime, library)).state);
+}
+
+fn countRadioPicks(context: ?*anyopaque, preview: *const RadioPreviewView) callconv(.c) void {
+    const visited: *usize = @ptrCast(@alignCast(context.?));
+    visited.* += 1 + preview.count;
+}
+
+test "the discovery settings round-trip and refuse values outside their sets, and a Radio preview checks its seed" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-radio?mode=memory&cache=shared", &library));
+    var settings: DiscoverySettingsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(DiscoverySettingsView{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6 }, settings);
+    const changed: DiscoverySettingsView = .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4 };
+    try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &changed));
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(changed, settings);
+    for ([_]DiscoverySettingsView{
+        .{ .radio_continue = 2, .include_unplayed = 0, .avoid_days = 3, .mix_count = 6 },
+        .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 2, .mix_count = 6 },
+        .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 5 },
+    }) |invalid| try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, &invalid));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(changed, settings);
+
+    var visited: usize = 0;
+    const loved: RadioSeedView = .{ .id = 0, .kind = @backingInt(std.meta.Tag(discovery.Seed).loved) };
+    try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, null, null, 10, &visited, countRadioPicks));
+    try std.testing.expectEqual(@as(usize, 1), visited);
+    const unknown_track: RadioSeedView = .{ .id = 5, .kind = @backingInt(std.meta.Tag(discovery.Seed).track) };
+    try std.testing.expectEqual(Status.not_found, orca_library_radio_preview(runtime, library, &unknown_track, null, null, 10, &visited, countRadioPicks));
+    const unknown_kind: RadioSeedView = .{ .id = 0, .kind = 7 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &unknown_kind, null, null, 10, &visited, countRadioPicks));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, null, null, 513, &visited, countRadioPicks));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, null, null, 10, &visited, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, null, null, null, 10, &visited, countRadioPicks));
+    var options = std.mem.zeroes(RadioOptionsView);
+    options.explore = 101;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, &options, null, 10, &visited, countRadioPicks));
+    options.explore = 35;
+    options.focus_count = 5;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, &options, null, 10, &visited, countRadioPicks));
+    options.focus_count = 1;
+    options.focus[0] = .{ .id = 0, .kind = 4 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, &options, null, 10, &visited, countRadioPicks));
+    options.focus[0] = .{ .id = 0, .kind = @backingInt(std.meta.Tag(discovery.Focus).high_energy) };
+    const session: RadioPreviewSessionView = .{ .now_s = 2_000_000_000, .seed = 1, .has_now = 1, .has_seed = 1 };
+    try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, &options, &session, 10, &visited, countRadioPicks));
+    try std.testing.expectEqual(@as(usize, 2), visited);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }

@@ -112,6 +112,15 @@ fn playlistMenu(self: *App) *gtk.GMenu {
     return choices;
 }
 
+fn startsRadio(context: *const Context) bool {
+    return switch (context.kind) {
+        .tracks, .playlist => context.tracks.items.len == 1,
+        .album => context.release_id != null,
+        .artist => context.artist_id != null,
+        .queue => false,
+    };
+}
+
 fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
     const tracks = context.tracks.items.len != 0;
     const playback = gtk.g_menu_new();
@@ -133,6 +142,7 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
             gtk.g_menu_append(playback, "Add to Queue", "app.ctx-enqueue");
         },
     }
+    if (startsRadio(context)) gtk.g_menu_append(playback, "Start Radio", "app.ctx-start-radio");
     const navigation = gtk.g_menu_new();
     if (context.kind != .album) if (context.release_id) |release_id| {
         if (!window.shows(self, .{ .album = release_id }))
@@ -274,6 +284,7 @@ pub fn popupRowActions(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
     defer gtk.g_object_unref(queueing);
     gtk.g_menu_append(queueing, "Play Next", "app.ctx-play-next");
     gtk.g_menu_append(queueing, "Play Later", "app.ctx-enqueue");
+    if (context.tracks.items.len == 1) gtk.g_menu_append(queueing, "Start Radio", "app.ctx-start-radio");
     const navigation = gtk.g_menu_new();
     defer gtk.g_object_unref(navigation);
     if (context.release_id != null) gtk.g_menu_append(navigation, "Go to Album", "app.ctx-show-album");

@@ -348,6 +348,7 @@ const commands = [_]Command{
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
+    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--limit N] [--explain]", .min_arguments = 2, .max_arguments = 8, .run = previewRadio },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{
         .name = "artwork",
@@ -5163,6 +5164,173 @@ fn showAudioFeatures(context: Context) !void {
     try printOptionalDetail(stdout, "onset rate", "{d:.2} /s", features.onset_rate);
     try printOptionalDetail(stdout, "centroid", "{d:.0} Hz", features.centroid_hz);
     try printOptionalDetail(stdout, "energy", "{d:.2}", features.energy);
+}
+
+fn previewRadio(context: Context) !void {
+    const stdout = context.stdout;
+    var seed: ?liborca.RadioSeed = null;
+    var options: liborca.RadioOptions = .{};
+    var limit: usize = 25;
+    var explain = false;
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.eql(u8, argument, "--loved")) {
+            if (seed != null) return error.InvalidArguments;
+            seed = .loved;
+        } else if (std.mem.eql(u8, argument, "--explain")) {
+            explain = true;
+        } else {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            const value = context.arguments[index];
+            if (std.mem.eql(u8, argument, "--explore")) {
+                options.explore = try std.fmt.parseInt(u8, value, 10);
+            } else if (std.mem.eql(u8, argument, "--limit")) {
+                limit = try std.fmt.parseInt(usize, value, 10);
+            } else {
+                if (seed != null) return error.InvalidArguments;
+                const id = try std.fmt.parseInt(i64, value, 10);
+                seed = if (std.mem.eql(u8, argument, "--track"))
+                    .{ .track = id }
+                else if (std.mem.eql(u8, argument, "--release"))
+                    .{ .release = id }
+                else if (std.mem.eql(u8, argument, "--artist"))
+                    .{ .artist = id }
+                else if (std.mem.eql(u8, argument, "--genre"))
+                    .{ .genre = id }
+                else if (std.mem.eql(u8, argument, "--decade"))
+                    .{ .decade = id }
+                else
+                    return error.UnknownOption;
+            }
+        }
+    }
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var picks = try runtime.libraryRadioPreview(library, context.allocator, seed orelse return error.InvalidArguments, options, limit, .{});
+    defer picks.deinit();
+
+    var summaries: std.ArrayList(liborca.TrackSummary) = .empty;
+    defer {
+        for (summaries.items) |summary| summary.deinit(runtime.allocator);
+        summaries.deinit(context.allocator);
+    }
+    for (picks.items) |pick| {
+        const summary = (try runtime.libraryTrackSummary(library, pick.track_id)) orelse continue;
+        try summaries.append(context.allocator, summary);
+    }
+
+    if (explain) {
+        const w = picks.weights;
+        try stdout.print("weights artist={d:.3} genre={d:.3} audio={d:.3} co_listening={d:.3} era={d:.3} taste={d:.3} jitter={d:.3}\n", .{
+            w.artist, w.genre, w.audio, w.co_listening, w.era, w.taste, w.jitter,
+        });
+    }
+    if (picks.relaxed_recent) try stdout.writeAll("recent plays let back in: nothing else qualified\n");
+    for (picks.items, 0..) |pick, rank| {
+        const summary: ?liborca.TrackSummary = for (summaries.items) |summary| {
+            if (summary.id == pick.track_id) break summary;
+        } else null;
+        try stdout.print("{d}\t{d}\t{s} - {s}\t", .{
+            rank + 1,
+            pick.track_id,
+            if (summary) |found| found.artist else "",
+            if (summary) |found| found.title else "",
+        });
+        var written = false;
+        for ([_]?liborca.ReasonPart{ pick.reason.first, pick.reason.second }) |maybe| {
+            const part = maybe orelse continue;
+            if (written) try stdout.writeAll("; ");
+            written = true;
+            try writeRadioReason(stdout, &runtime, library, part);
+        }
+        try stdout.writeAll("\n");
+        if (explain) {
+            const c = pick.components;
+            try stdout.print("\tscore={d:.3} artist={d:.2} genre={d:.2} audio={d:.2} co_listening={d:.2} era={d:.2} taste={d:.2} jitter={d:.2}\n", .{
+                pick.score, c.artist, c.genre, c.audio, c.co_listening, c.era, c.taste, c.jitter,
+            });
+        }
+    }
+}
+
+fn writeRadioReason(
+    stdout: *std.Io.Writer,
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    part: liborca.ReasonPart,
+) !void {
+    switch (part.kind) {
+        .played => {
+            try stdout.print("Played {d} times, last ", .{part.a});
+            try writeIsoUtc(stdout, part.b);
+        },
+        .loved => try stdout.writeAll("Loved"),
+        .same_artist => try writeArtistReason(stdout, runtime, library, "By ", part.a),
+        .related_artist => {
+            try writeArtistReason(stdout, runtime, library, "Related to ", part.a);
+            try stdout.writeAll(" (ListenBrainz)");
+        },
+        .shared_genre => {
+            const genre = try runtime.libraryGenre(library, part.a);
+            defer if (genre) |found| found.deinit(runtime.allocator);
+            try stdout.print("Also tagged {s}", .{if (genre) |found| found.name else "a shared genre"});
+        },
+        .often_after => if (part.b == 1)
+            try writeArtistReason(stdout, runtime, library, "Often played after ", part.a)
+        else
+            try writeRecordingReason(stdout, runtime, library, "Often played after ", part.a),
+        .similar_sound => {
+            try stdout.writeAll("Similar");
+            const sounds = [_]struct { i64, []const u8 }{
+                .{ liborca.radio_sound_tempo, "tempo" },
+                .{ liborca.radio_sound_key, "key" },
+                .{ liborca.radio_sound_energy, "energy" },
+            };
+            const total = @popCount(part.a & 7);
+            var count: usize = 0;
+            for (sounds) |sound| {
+                if (part.a & sound[0] == 0) continue;
+                count += 1;
+                const separator = if (count == 1) " " else if (count == total) " and " else ", ";
+                try stdout.print("{s}{s}", .{ separator, sound[1] });
+            }
+        },
+        .never_played => try stdout.writeAll("Never played"),
+        .rarely_played => try stdout.print("Rarely played ({d} {s})", .{ part.a, if (part.a == 1) "play" else "plays" }),
+        .added => {
+            try stdout.writeAll("Added ");
+            try writeIsoUtc(stdout, part.a);
+        },
+    }
+}
+
+fn writeRecordingReason(
+    stdout: *std.Io.Writer,
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    comptime prefix: []const u8,
+    recording_id: i64,
+) !void {
+    const recording = try runtime.libraryRecordingSummary(library, recording_id);
+    defer if (recording) |found| found.deinit(runtime.allocator);
+    const found = recording orelse return stdout.writeAll(prefix ++ "a Recording");
+    if (found.artist.len == 0) return stdout.print(prefix ++ "{s}", .{found.title});
+    try stdout.print(prefix ++ "{s} - {s}", .{ found.artist, found.title });
+}
+
+fn writeArtistReason(
+    stdout: *std.Io.Writer,
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    comptime prefix: []const u8,
+    artist_id: i64,
+) !void {
+    const artist = try runtime.libraryArtist(library, artist_id);
+    defer if (artist) |found| found.deinit(runtime.allocator);
+    try stdout.print(prefix ++ "{s}", .{if (artist) |found| found.name else "an Artist"});
 }
 
 fn submitAcoustId(context: Context) !void {

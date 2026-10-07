@@ -40,9 +40,22 @@ const struct_pairs = .{
     .{ c_api.SearchHitView, c.orca_search_hit_view },
     .{ c_api.GenreCountView, c.orca_genre_count_view },
     .{ c_api.TrackSummaryView, c.orca_track_summary_view },
+    .{ c_api.RecordingSummaryView, c.orca_recording_summary_view },
     .{ c_api.TrackDetailsView, c.orca_track_details_view },
     .{ c_api.PlayStatsView, c.orca_play_stats },
     .{ c_api.AudioFeaturesView, c.orca_audio_features },
+    .{ c_api.RadioSeedView, c.orca_radio_seed },
+    .{ c_api.RadioFocusView, c.orca_radio_focus },
+    .{ c_api.RadioOptionsView, c.orca_radio_options },
+    .{ c_api.RadioPreviewSessionView, c.orca_radio_preview_session },
+    .{ c_api.RadioComponentsView, c.orca_radio_components },
+    .{ c_api.ReasonPartView, c.orca_reason_part },
+    .{ c_api.RadioPickView, c.orca_radio_pick_view },
+    .{ c_api.RadioPreviewView, c.orca_radio_preview_view },
+    .{ c_api.RadioStatusView, c.orca_radio_status_view },
+    .{ c_api.RadioQueuePickView, c.orca_radio_queue_pick_view },
+    .{ c_api.RadioQueuePicksView, c.orca_radio_queue_picks_view },
+    .{ c_api.DiscoverySettingsView, c.orca_discovery_settings },
     .{ c_api.ArtistTotalsView, c.orca_artist_totals },
     .{ c_api.ChangeCount, c.orca_change_count },
     .{ c_api.PlaylistView, c.orca_playlist_view },
@@ -210,6 +223,20 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_ARTIST_INFO_OUTCOME_";
         pub const Tag = core.runtime.ArtistInfoOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RADIO_STATE_";
+        pub const Tag = core.runtime.RadioState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_REASON_";
+        pub const Tag = core.runtime.ReasonKind;
         pub fn produce(tag: Tag) ?i64 {
             return @backingInt(tag);
         }
@@ -641,6 +668,20 @@ const export_mappings = .{
 
 const import_mappings = .{
     struct {
+        pub const prefix = "ORCA_RADIO_SEED_";
+        pub const Tag = std.meta.Tag(core.runtime.RadioSeed);
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importRadioSeedKind(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RADIO_FOCUS_";
+        pub const Tag = std.meta.Tag(core.runtime.RadioFocus);
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importRadioFocusKind(value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_EQUALIZER_PRESET_";
         pub const Tag = audio.dsp.Preset;
         pub fn consume(value: u8) ?Tag {
@@ -812,6 +853,9 @@ const import_mappings = .{
 };
 
 const non_enum_constants = [_][]const u8{
+    "ORCA_SOUND_TEMPO",
+    "ORCA_SOUND_KEY",
+    "ORCA_SOUND_ENERGY",
     "ORCA_ABI_VERSION",
     "ORCA_PUMP_NO_TIMEOUT",
     "ORCA_EQUALIZER_BANDS",
@@ -1109,6 +1153,14 @@ test "the parametric equalizer limits orca.h declares are liborca's" {
     try std.testing.expectEqual(audio.dsp.max_shelf_q, @as(f32, c.ORCA_PARAMETRIC_MAX_SHELF_Q));
     try std.testing.expectEqual(audio.dsp.min_parametric_preamp_db, @as(f32, c.ORCA_PARAMETRIC_MIN_PREAMP_DB));
     try std.testing.expectEqual(audio.dsp.max_parametric_preamp_db, @as(f32, c.ORCA_PARAMETRIC_MAX_PREAMP_DB));
+}
+
+test "the similar-sound flags orca.h declares are liborca's" {
+    const discovery = liborca.internal.library.discovery;
+    try std.testing.expectEqual(discovery.sound_tempo, c.ORCA_SOUND_TEMPO);
+    try std.testing.expectEqual(discovery.sound_key, c.ORCA_SOUND_KEY);
+    try std.testing.expectEqual(discovery.sound_energy, c.ORCA_SOUND_ENERGY);
+    try std.testing.expectEqual(discovery.max_focus, @typeInfo(@FieldType(c_api.RadioOptionsView, "focus")).array.len);
 }
 
 test "the tag-write digest orca.h declares is as long as liborca's" {

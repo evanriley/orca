@@ -1488,6 +1488,290 @@ popover.queue-menu separator {
   background-color: @orca_border_popover;
 }
 
+/* Radio */
+
+.radio-status {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.radio-status-icon,
+.radio-heading-icon {
+  color: @orca_accent;
+  -gtk-icon-size: 15px;
+}
+
+.radio-heading-icon {
+  -gtk-icon-size: 13px;
+}
+
+.radio-row {
+  padding: 8px 10px;
+}
+
+.radio-row-cover {
+  border-radius: 4px;
+}
+
+.radio-reason {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+button.radio-row-action {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+  -gtk-icon-size: 16px;
+  opacity: 0;
+}
+
+button.radio-row-action:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+.queue-list > row:hover button.radio-row-action,
+.queue-list > row:focus-within button.radio-row-action,
+button.radio-row-action:focus-visible {
+  opacity: 1;
+}
+
+.radio-panel-frame {
+  background-color: @orca_bg_sidebar;
+  box-shadow: inset 1px 0 @orca_border;
+}
+
+.radio-panel {
+  padding: 22px 20px;
+}
+
+.radio-panel-title {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: @orca_text_2;
+}
+
+.radio-panel-label,
+.radio-panel-note,
+.radio-switch-note {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.radio-panel-divided {
+  padding-top: 14px;
+  box-shadow: inset 0 1px @orca_border;
+}
+
+.radio-panel switch {
+  min-width: 32px;
+  min-height: 16px;
+  padding: 2px;
+  border: none;
+  border-radius: 999px;
+  background-color: @orca_border_popover;
+  box-shadow: none;
+}
+
+.radio-panel switch:checked {
+  background-color: @orca_accent;
+}
+
+.radio-panel switch > slider {
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  background-color: @orca_text_2;
+  box-shadow: none;
+}
+
+.radio-panel switch:checked > slider {
+  background-color: @orca_text;
+}
+
+.radio-seed {
+  padding: 10px;
+  border-radius: 10px;
+  background-color: @orca_bg_popover;
+}
+
+.radio-seed-cover {
+  border-radius: 5px;
+}
+
+.radio-seed-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.radio-seed-kind {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+menubutton.radio-link > button,
+button.radio-undo {
+  min-height: 0;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text_2;
+  background: none;
+  box-shadow: none;
+}
+
+menubutton.radio-link > button:hover,
+button.radio-undo:hover {
+  color: @orca_text;
+}
+
+button.radio-undo label {
+  text-decoration: underline;
+}
+
+scale.radio-explore {
+  padding: 0;
+}
+
+scale.radio-explore trough {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @orca_track;
+}
+
+scale.radio-explore highlight {
+  border-radius: 2px;
+  background-color: @orca_accent;
+}
+
+scale.radio-explore slider {
+  min-width: 14px;
+  min-height: 14px;
+  margin: -5px;
+  border-radius: 9999px;
+  background-color: @orca_text;
+  box-shadow: none;
+}
+
+.radio-chip {
+  min-height: 28px;
+  padding: 0 6px 0 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: @orca_text;
+  background-color: @orca_bg_selected;
+}
+
+button.radio-chip-remove {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  color: @orca_text_3;
+  background: none;
+  -gtk-icon-size: 12px;
+}
+
+button.radio-chip-remove:hover {
+  color: @orca_text;
+}
+
+menubutton.radio-add-focus > button {
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text_2;
+  background: none;
+  box-shadow: none;
+}
+
+menubutton.radio-add-focus > button:hover {
+  color: @orca_text;
+  background-color: @orca_bg_hover;
+}
+
+.radio-switch-title {
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.radio-session {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.radio-info {
+  padding: 12px;
+  border-radius: 9px;
+  color: @orca_text_3;
+  background-color: @orca_bg_inset;
+  -gtk-icon-size: 16px;
+}
+
+.radio-info-text {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+popover.radio-picker-popover > contents {
+  min-width: 280px;
+  padding: 10px;
+}
+
+.radio-picker-tabs > button.radio-picker-tab {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text_3;
+  background: none;
+}
+
+.radio-picker-tabs > button.radio-picker-tab:hover {
+  color: @orca_text;
+}
+
+.radio-picker-tabs > button.radio-picker-tab:checked {
+  color: @orca_text;
+  background-color: @orca_bg_selected;
+}
+
+.radio-picker-list {
+  background-color: transparent;
+}
+
+.radio-picker-list > row {
+  border-radius: 7px;
+}
+
+.radio-picker-list > row:hover,
+.radio-picker-list > row:selected {
+  background-color: @orca_bg_hover;
+}
+
+.radio-picker-row {
+  padding: 7px 10px;
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.radio-picker-empty {
+  padding: 12px 10px;
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
 /* Devices */
 
 popover.device-picker > contents {

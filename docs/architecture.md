@@ -201,6 +201,7 @@ output, watcher or app.
 | Storage and scanning | [storage.md](storage.md) |
 | Metadata and file mutation | [metadata.md](metadata.md) |
 | Analysis and duplicates | [analysis.md](analysis.md) |
+| Radio and discovery scoring | [discovery.md](discovery.md) |
 | Playlists and ratings | [cli.md](cli.md#playlists-and-ratings) |
 | Providers, listens and scrobbling | [providers.md](providers.md) |
 | Public Zig API | [api.md](api.md) |

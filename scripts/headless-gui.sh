@@ -35,7 +35,8 @@
 # MusicBrainz, AcoustID and the Cover Art Archive point at
 # ORCA_HEADLESS_MUSICBRAINZ_URL, ORCA_HEADLESS_ACOUSTID_URL and
 # ORCA_HEADLESS_COVERARTARCHIVE_URL when they are set, such as at a local
-# mock. Nothing reaches the user's desktop:
+# mock. The output is 1440x900 unless ORCA_HEADLESS_SIZE names another
+# WIDTHxHEIGHT. Nothing reaches the user's desktop:
 # sway, D-Bus, the pointer and orca-gtk run with a private
 # XDG_RUNTIME_DIR, and on exit the script stops only the processes it
 # started.
@@ -61,8 +62,10 @@ steps=("$@")
 repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 orca_cli="$repository/zig-out/bin/orca-cli"
 orca_gtk="$repository/zig-out/bin/orca-gtk"
-width=1440
-height=900
+size=${ORCA_HEADLESS_SIZE:-1440x900}
+[[ "$size" =~ ^([1-9][0-9]{2,3})x([1-9][0-9]{2,3})$ ]] || fail "ORCA_HEADLESS_SIZE must be WIDTHxHEIGHT in pixels, such as 900x700; got '$size'"
+width=${BASH_REMATCH[1]}
+height=${BASH_REMATCH[2]}
 application_id=org.orca_music.Orca
 
 case "$page" in

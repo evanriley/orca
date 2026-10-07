@@ -76,6 +76,8 @@ test {
     _ = @import("runtime_playlists.zig");
     _ = @import("runtime_provider_tests.zig");
     _ = @import("runtime_queue.zig");
+    _ = @import("runtime_radio.zig");
+    _ = @import("runtime_radio_tests.zig");
     _ = @import("runtime_resume.zig");
     _ = @import("runtime_resume_tests.zig");
     _ = @import("runtime_roots.zig");

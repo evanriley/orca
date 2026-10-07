@@ -38,6 +38,7 @@ pub fn sections(entry: Entry) [section_count]Section {
     if (entry.in_library) {
         queueing.add(.{ .label = "Play Next", .action = "queue.play-next", .accel = "<Shift>Return" });
         queueing.add(.{ .label = "Play Later", .action = "queue.play-later" });
+        queueing.add(.{ .label = "Start Radio", .action = "app.ctx-start-radio" });
         if (entry.loved)
             track.add(.{ .label = "Remove Love", .action = "app.ctx-remove-love", .accel = "l" })
         else
@@ -60,7 +61,7 @@ fn expectLabels(expected: []const []const []const u8, actual: [section_count]Sec
 
 test "an entry in the Library offers moving, loving, navigating and removing it" {
     try expectLabels(&.{
-        &.{ "Play Next", "Play Later" },
+        &.{ "Play Next", "Play Later", "Start Radio" },
         &.{ "Love", "Go to Album", "Go to Artist" },
         &.{ "Remove from Queue", "Save Queue as Playlist…" },
     }, sections(.{ .in_library = true, .has_release = true, .has_artist = true }));
@@ -69,7 +70,7 @@ test "an entry in the Library offers moving, loving, navigating and removing it"
 test "a loved entry offers removing its love" {
     const offered = sections(.{ .in_library = true, .loved = true });
     try expectLabels(&.{
-        &.{ "Play Next", "Play Later" },
+        &.{ "Play Next", "Play Later", "Start Radio" },
         &.{"Remove Love"},
         &.{ "Remove from Queue", "Save Queue as Playlist…" },
     }, offered);
