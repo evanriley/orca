@@ -58,7 +58,9 @@ the audible entry all resolve from the published serial (identity through the
 queue's serial records, duration through a serial-keyed ring of per-entry
 timeline shapes, position through the entry anchor) and never from
 `SourceQueue.current`. The serial is adopted only once the position published
-with it belongs to the current epoch.
+with it belongs to the current epoch. Under a new epoch the callback publishes
+serial 0 until it renders that epoch's first block, so it never pairs the
+retired entry's serial with the new epoch.
 
 ### Rendered position
 
@@ -470,7 +472,8 @@ the entry still being decoded re-opens nothing.
 
 A user skip is a hard switch: the epoch bump makes the callback discard
 prepared audio. A hard load also makes its entry the audible one at once,
-because the callback republishes a serial only when the audible entry changes.
+because the callback publishes no serial under the new epoch until that
+entry's first block renders.
 `previous` restarts the current entry past three seconds and otherwise moves
 the cursor back. Shuffle generates a permutation and keeps the playing entry at
 the cursor, so toggling it does not restart the song; toggling it moves each

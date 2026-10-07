@@ -107,6 +107,17 @@ const Rig = struct {
         return (self.runtime.players.get(self.player) catch return null).radio;
     }
 
+    /// Samples without pumping until `radio.continue` wants a session.
+    fn sampleUntilContinueWanted(self: *Rig) !void {
+        var deadline: runtime_tests.TestDeadline = .init(5_000);
+        while (deadline.tick()) {
+            self.clock.advance(1_000);
+            runtime_listens.sampleListens(&self.runtime);
+            if ((try self.runtime.players.get(self.player)).radio_continue_wanted) return;
+        }
+        return error.ContinueNeverWanted;
+    }
+
     /// One host-loop turn a sampling interval later.
     fn turn(self: *Rig) void {
         self.clock.advance(1_000);
@@ -487,6 +498,24 @@ test "radio.continue starts a recent-listening session when the last entry start
 
     try rig.runtime.playerStopRadio(rig.player);
     for (0..5) |_| rig.turn();
+    try std.testing.expectEqual(@as(?runtime_module.RadioStatus, null), try rig.runtime.playerRadio(rig.player));
+}
+
+test "a continue the sampling pass wanted is dropped when play replaces or stops the queue before the pump" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-continue-dropped?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerPlayTracksBound(rig.player, rig.library, &.{ 10, 11 }, 1);
+    try rig.sampleUntilContinueWanted();
+    try rig.runtime.playerPlayTracksBound(rig.player, rig.library, &.{ 12, 13, 14 }, 0);
+    rig.runtime.pump();
+    try std.testing.expectEqual(@as(?runtime_module.RadioStatus, null), try rig.runtime.playerRadio(rig.player));
+
+    try rig.runtime.playerPlayTracksBound(rig.player, rig.library, &.{ 15, 16 }, 1);
+    try rig.sampleUntilContinueWanted();
+    try rig.runtime.stopPlayer(rig.player);
+    rig.runtime.pump();
     try std.testing.expectEqual(@as(?runtime_module.RadioStatus, null), try rig.runtime.playerRadio(rig.player));
 }
 

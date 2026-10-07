@@ -260,7 +260,12 @@ pub fn RenderContext(comptime capacity: usize) type {
             // lane stamped alongside the epoch supplies the offset inside that
             // entry.
             const base: u64 = if (same_epoch) positionFrames(self.published_position) else 0;
-            if (!same_epoch) self.entry_start_frames = 0;
+            if (!same_epoch) {
+                self.entry_start_frames = 0;
+                // The retired entry's serial must not be published under the
+                // new epoch: the engine would adopt it over the hard load's.
+                self.pipe.published_entry_serial = 0;
+            }
 
             const rendered = self.pipe.render(self.pool, self.channels, epoch, output);
             if (self.pipe.entry_started)

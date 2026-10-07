@@ -2681,6 +2681,40 @@ test "now playing reports the audible entry, not the decoded one" {
     try std.testing.expectEqual(epoch_before, harness.player.snapshot().epoch);
 }
 
+test "a callback under a hard load's epoch before its first block never restores the retired entry" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 64 * frames_per_block },
+        .{ .track_id = 11, .frames = 64 * frames_per_block },
+        .{ .track_id = 12, .frames = 64 * frames_per_block },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+    harness.run(8, 64);
+    harness.step(0);
+    const retired = harness.player.audible_entry_serial.load(.acquire);
+    try std.testing.expect(retired != 0);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+
+    harness.engine.quiesce();
+    const session = try harness.test_opener.opener().open(harness.queue.refAt(2).?);
+    loadQueueEntry(&harness.player, &harness.queue, session, 2);
+    harness.engine.release();
+    const loaded = harness.player.audible_entry_serial.load(.acquire);
+    try std.testing.expect(loaded != retired);
+
+    harness.step(64);
+    harness.engine.pass();
+    try std.testing.expectEqual(loaded, harness.player.audible_entry_serial.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.cursorPosition());
+
+    harness.run(4, 64);
+    try std.testing.expectEqual(loaded, harness.player.audible_entry_serial.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.cursorPosition());
+    try std.testing.expect(harness.player.snapshot().position_frames > 0);
+}
+
 test "reported duration follows the audible entry, not the one being decoded" {
     const allocator = std.testing.allocator;
     // Deliberately different lengths: reporting the decoded entry's duration is
