@@ -495,8 +495,11 @@ setting in `[listening]`.
 Settings › General › Default page can choose another start page. Home reads the
 Home queries and `libraryDailyMixes` when it is shown and when the Library
 reloads. It shows the Daily Mixes row with See all (a grid of every mix), the
-Start Radio card, This week, Jump back in, Rediscover, Never played, Deep cuts
-and Your library. Under 14 days of history (`libraryHistoryAge`) it hides This
+Start Radio card, This week, Jump back in, one row of Albums you haven't played
+(`libraryUnplayedReleases`), Rediscover, Deep cuts and Your library, whose This
+week in music panel lists up to four release anniversaries
+(`libraryReleaseAnniversaries`) and, with listen recording on, the Release most
+played a year ago. Under 14 days of history (`libraryHistoryAge`) it hides This
 week, Rediscover and Deep cuts. With listen recording off it shows only the
 library sections and a note linking to Settings › Listening. With Show
 listening stats on Home off it hides This week and Top artists. `orca-gtk`

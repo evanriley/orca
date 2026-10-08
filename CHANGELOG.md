@@ -24,6 +24,12 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
   stays last. `DailyMixKind` and the C ABI's `orca_daily_mix_kind` gain
   `decade`, `new_to_you`, `deep_cuts`, `upbeat` and `wind_down`, and a mix
   carries its `decade`.
+- **`orca-gtk`'s Home shows unplayed albums, release anniversaries and theme
+  mixes.** Albums you haven't played is one row of covers under Jump back in.
+  This week in music lists up to four Releases released this week in an
+  earlier year, with how many years ago and the weekday, and the Release most
+  played a year ago. Daily Mix tiles and pages describe decade, New to you,
+  Deep cuts, Upbeat and Wind down mixes.
 - **Orca says when an update adds an analysis measurement.**
   `libraryAnalysisCoverage` (C ABI `orca_library_analysis_coverage`) splits
   the files analysis would measure into never analyzed and outdated, names
@@ -53,6 +59,9 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
   in one transaction, rebuilding the Daily Mix tables (their mixes are made
   again on the next run) and keeping every other row. An upgraded Library
   cannot be opened by 0.3.0.
+- **`orca-gtk`'s Home drops the Never played list and the On this day
+  facts.** Albums you haven't played replaces the list, and This week in
+  music replaces the Added this week, Added this year and Never played facts.
 - **`orca-gtk` says what analysis measures.** The task is named Analyze music
   in Settings › Maintenance, Library Health, Activity, the command palette,
   Audio Problems and First Run, and describes all four things it does:
