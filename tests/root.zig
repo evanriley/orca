@@ -136,7 +136,7 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     while (waited < 200_000) : (waited += 1) {
         const snapshot = try runtime.playerQueueSnapshot(player);
         if (snapshot.decode_position == 1 and snapshot.cursor == 0) break;
-        if (backend.liveStream()) |stream| stream.pump(samples[0..128], 128);
+        if (backend.liveStream()) |stream| stream.pump(samples[0..256], 128);
         std.Thread.yield() catch {};
     }
     const in_window = try runtime.playerQueueSnapshot(player);
@@ -153,7 +153,7 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     while (waited < 2_000) : (waited += 1) {
         if (player_state.entrySerial() != player_state.audible_entry_serial.load(.acquire))
             break;
-        if (backend.liveStream()) |stream| stream.pump(samples[0..128], 128);
+        if (backend.liveStream()) |stream| stream.pump(samples[0..256], 128);
         sleepMilliseconds(1);
     }
     try std.testing.expect(
