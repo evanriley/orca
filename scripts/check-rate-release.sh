@@ -42,7 +42,7 @@ mkdir -p "$scratch"
 python3 - "$scratch" "$orca_rate" "$other_rate" <<'EOF'
 import sys, wave
 scratch, orca_rate, other_rate = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-for rate, seconds in ((orca_rate, 30), (other_rate, 4)):
+for rate, seconds in ((orca_rate, 60), (other_rate, 12)):
     with wave.open(f"{scratch}/silence-{rate}.wav", "wb") as out:
         out.setnchannels(2)
         out.setsampwidth(2)
@@ -50,17 +50,21 @@ for rate, seconds in ((orca_rate, 30), (other_rate, 4)):
         out.writeframes(bytes(4 * rate * seconds))
 EOF
 
-sink_rate() {
+node_state() {
     pw-dump 2>/dev/null | python3 -c '
 import json, sys
 for node in json.load(sys.stdin):
     info = node.get("info") or {}
     props = info.get("props") or {}
     if node.get("type") == "PipeWire:Interface:Node" and props.get("node.name") == sys.argv[1]:
-        formats = (info.get("params") or {}).get("Format") or []
-        print(formats[0].get("rate", "-") if formats else "-")
+        print(info.get("state"))
         break
-' "$sink"
+' "$1"
+}
+
+graph_rate() {
+    timeout 10 pw-top -b -n 2 2>/dev/null |
+        awk -v sink="$sink" '$NF == sink { rate = $4 } END { print (rate == "" ? "-" : rate) }'
 }
 
 await_line() {
@@ -81,10 +85,10 @@ pw-cli create-node adapter "{
     audio.position=[FL,FR]
 }" >/dev/null
 for _ in $(seq 50); do
-    [[ -n "$(sink_rate)" ]] && break
+    [[ -n "$(node_state "$sink")" ]] && break
     sleep 0.1
 done
-[[ -n "$(sink_rate)" ]] || fail "sink $sink never appeared"
+[[ -n "$(node_state "$sink")" ]] || fail "sink $sink never appeared"
 pw-metadata -n settings 0 clock.allowed-rates "[ $orca_rate $other_rate ]" >/dev/null
 
 run_scenario() {
@@ -96,17 +100,21 @@ run_scenario() {
     driver_pid=$!
     exec 3>"$control"
     await_line "$out" playing
-    rate=$(sink_rate)
-    [[ "$rate" == "$orca_rate" ]] || fail "$name: sink ran at $rate while Orca played, expected $orca_rate"
+    rate=$(graph_rate)
+    [[ "$rate" == "$orca_rate" ]] || fail "$name: graph ran at $rate while Orca played, expected $orca_rate"
     if [[ "$pause" == yes ]]; then
         echo pause >&3
         await_line "$out" paused
+        for _ in $(seq 50); do
+            [[ "$(node_state Orca)" == idle ]] && break
+            sleep 0.1
+        done
+        [[ "$(node_state Orca)" == idle ]] || fail "$name: Orca's stream stayed $(node_state Orca) after pause"
     fi
-    timeout 10 pw-play --target "$sink" --rate "$other_rate" "$scratch/silence-$other_rate.wav" >"$scratch/$name.pw-play" 2>&1 &
+    timeout 20 pw-play --target "$sink" --rate "$other_rate" "$scratch/silence-$other_rate.wav" >"$scratch/$name.pw-play" 2>&1 &
     local play_pid=$!
-    for _ in $(seq 20); do
-        sleep 0.1
-        seen="$seen $(sink_rate)"
+    for _ in $(seq 3); do
+        seen="$seen $(graph_rate)"
     done
     wait "$play_pid" || fail "$name: pw-play failed: $(cat "$scratch/$name.pw-play")"
     exec 3>&-
