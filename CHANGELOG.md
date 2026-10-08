@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`orca-gtk`'s right-hand panels share one width.** The Radio options
+  panel, Now Playing (every tab) and the Daily Mix "How this mix was made"
+  aside are 388 px wide like the inspector, so the page beside them no longer
+  shifts between panels or tabs.
 ## 0.3.0 - 2026-10-08
 
 Ships Library schema version 2; opening a 0.2.0 Library upgrades it in

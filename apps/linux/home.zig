@@ -38,7 +38,6 @@ const on_this_day_pixels = 56;
 const chart_bar_pixels = 80;
 const chart_bar_min_width = 12;
 const top_name_width = 120;
-const aside_width = 340;
 const card_link_uri = "settings";
 
 const Tiling = struct {
@@ -1633,7 +1632,7 @@ fn asideSection(title: [*:0]const u8, body: *gtk.Widget) *gtk.Widget {
 fn buildAside(self: *App) *gtk.Widget {
     const home = &self.home;
     const aside = box(gtk.ORIENTATION_VERTICAL, 16, "daily-mix-aside");
-    gtk.gtk_widget_set_size_request(aside, aside_width, -1);
+    gtk.gtk_widget_set_size_request(aside, page_ui.side_panel_width, -1);
     gtk.gtk_widget_set_hexpand(aside, gtk.false_);
     gtk.gtk_widget_set_valign(aside, gtk.ALIGN_START);
     const title = label("How this mix was made", "daily-mix-aside-title");

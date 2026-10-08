@@ -16,7 +16,6 @@ const main_window = @import("window.zig");
 
 const App = app.App;
 
-pub const panel_width: c_int = 340;
 const seed_cover_pixels: c_int = 48;
 const picker_rows = 12;
 const explore_settle_ms: c_uint = 300;
@@ -962,8 +961,8 @@ pub fn wrap(self: *App, view: *gtk.Widget) *gtk.Widget {
     const split_view = gtk.cast(adw.OverlaySplitView, split);
     adw.adw_overlay_split_view_set_sidebar_position(split_view, gtk.PACK_END);
     adw.adw_overlay_split_view_set_enable_show_gesture(split_view, gtk.false_);
-    adw.adw_overlay_split_view_set_min_sidebar_width(split_view, @floatFromInt(panel_width));
-    adw.adw_overlay_split_view_set_max_sidebar_width(split_view, @floatFromInt(panel_width));
+    adw.adw_overlay_split_view_set_min_sidebar_width(split_view, @floatFromInt(page_ui.side_panel_width));
+    adw.adw_overlay_split_view_set_max_sidebar_width(split_view, @floatFromInt(page_ui.side_panel_width));
     adw.adw_overlay_split_view_set_show_sidebar(split_view, gtk.false_);
     adw.adw_overlay_split_view_set_content(split_view, view);
     adw.adw_overlay_split_view_set_sidebar(split_view, buildPanel(self));

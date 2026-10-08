@@ -19,6 +19,8 @@ const write_tags = @import("write_tags.zig");
 
 const App = app.App;
 
+pub const side_panel_width: c_int = 388;
+
 pub const Bar = struct {
     widget: ?*gtk.Widget = null,
     view: ?*adw.ToolbarView = null,
@@ -274,7 +276,7 @@ pub fn fitToPage(self: *App) void {
         gtk.gtk_widget_set_margin_top(page_root, if (over) 0 else adw.adw_toolbar_view_get_top_bar_height(view));
     const view_widget = gtk.cast(gtk.Widget, view);
     radio.fitUnderBar(self, if (radio_docked) adw.adw_toolbar_view_get_top_bar_height(view) else 0);
-    const panel_width = if (playing) nowplaying.panelWidth(self) else if (radio_docked) radio.panel_width else 0;
+    const panel_width = if (playing) nowplaying.panelWidth(self) else if (radio_docked) side_panel_width else 0;
     gtk.gtk_widget_set_margin_end(barRow(bar, view_widget), panel_width);
     for ([_]?*gtk.Widget{ self.top_bar.back, self.top_bar.forward }) |button|
         if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!playing));
