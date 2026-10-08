@@ -255,7 +255,7 @@ pub const ZoneRuntime = struct {
     }
 
     pub fn hasRoom(self: *ZoneRuntime) bool {
-        return self.pipe.ready.len() < self.blockBudget();
+        return self.pipe.ready.len() < self.blockBudget() and self.pool.free_len > 0;
     }
 
     /// True once every block handed to the callback has come back. Producer-side

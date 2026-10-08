@@ -86,6 +86,11 @@
   names no Track.
 - `radio.continue` no longer starts Radio after the queue it followed was
   replaced, stopped or moved off its last entry before the runtime pumped.
+- A Zone whose render-ahead fills its whole block pool (a custom target above
+  7936 frames, or a device quantum above 3968 frames) no longer skips audio.
+  While the output held a partly played block, the engine decoded up to 8192
+  frames it had no free block for and dropped them, cutting entries short and
+  skipping short ones entirely.
 
 ## 0.2.0 - 2026-10-06
 

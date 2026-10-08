@@ -1421,6 +1421,40 @@ test "an output that consumes less often than the engine passes is never exclude
     try std.testing.expectEqual(@as(usize, 1), harness.backend.opens);
 }
 
+test "a render-ahead as deep as the pool never decodes a block it has nowhere to put" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    const total = 4 * block_count * frames_per_block;
+    var decoder: RampDecoder = .{ .total = total };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    runtime_zone.zone.policy = .{ .custom = .{ .target_frames = block_count * frames_per_block } };
+    try std.testing.expectEqual(block_count, runtime_zone.blockBudget());
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    harness.engine.pass();
+
+    var samples: [frames_per_block / 2]f32 = undefined;
+    var expected: f32 = 0;
+    var rendered: u64 = 0;
+    for (0..4 * total / samples.len) |_| {
+        liveStreamFor(&harness.backend, runtime_zone).?.pump(&samples, samples.len);
+        harness.engine.pass();
+        const now = render.positionFrames(runtime_zone.position.load(.acquire));
+        for (samples[0..@intCast(now - rendered)]) |value| {
+            try std.testing.expectEqual(expected, value);
+            expected = @mod(expected + 1, 100);
+        }
+        rendered = now;
+        if (rendered == total) break;
+    }
+    try std.testing.expectEqual(@as(u64, total), rendered);
+}
+
 test "an output that stalls for less than the timeout and resumes is never lost" {
     const allocator = std.testing.allocator;
     var harness = try Harness.init(allocator);
