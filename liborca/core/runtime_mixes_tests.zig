@@ -197,7 +197,7 @@ fn expectNames(snapshot: *const DailyMixes, names: []const []const u8) !void {
     }
 }
 
-test "daily mixes are genre clusters most played first then rarely played, skipping a lone artist with few candidates" {
+test "daily mixes are genre clusters most played first, a theme mix, then rarely played, skipping a lone artist with few candidates" {
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-clusters?mode=memory&cache=shared");
     defer rig.deinit();
@@ -208,7 +208,7 @@ test "daily mixes are genre clusters most played first then rarely played, skipp
     try testing.expectEqual(runtime_module.DailyMixesState.ready, snapshot.state);
     try testing.expectEqual(@as(?i64, now_s), snapshot.generated_at);
     try testing.expectEqual(@as(?i64, @divFloor(now_s - 4 * 3600, day_s)), snapshot.local_day);
-    try expectNames(&snapshot, &.{ "Big", "Hip Hop", "Jazz", "Rock", "Folk", "Rarely played" });
+    try expectNames(&snapshot, &.{ "Big", "Hip Hop", "Jazz", "Rock", "Deep cuts", "Rarely played" });
     const big = &snapshot.items()[0];
     try testing.expectEqual(runtime_module.DailyMixKind.genre, big.kind);
     try testing.expectEqual(@as(?i64, 8), big.genre_id);
@@ -217,6 +217,16 @@ test "daily mixes are genre clusters most played first then rarely played, skipp
     const hip_hop = &snapshot.items()[1];
     try testing.expect(hip_hop.artist_count >= 2 and hip_hop.artist_count <= 4);
     try testing.expect(hip_hop.cover_count >= 1 and hip_hop.cover_count <= 4);
+    const deep_cuts = &snapshot.items()[4];
+    try testing.expectEqual(runtime_module.DailyMixKind.deep_cuts, deep_cuts.kind);
+    try testing.expectEqual(@as(?i64, null), deep_cuts.genre_id);
+    try testing.expectEqual(@as(?i64, null), deep_cuts.decade);
+    try testing.expect(deep_cuts.entry_count > 0);
+    var buffer: [runtime_module.max_daily_mix_entries]DailyMixEntry = undefined;
+    for (try rig.entries(deep_cuts.id, &buffer)) |entry| {
+        const plays = (try rig.query("SELECT play_count FROM recording_play_stats WHERE recording_id = ?1;", entry.recording_id)) orelse 0;
+        try testing.expect(plays <= 1);
+    }
     const rarely = &snapshot.items()[5];
     try testing.expectEqual(runtime_module.DailyMixKind.rarely_played, rarely.kind);
     try testing.expectEqual(@as(?i64, null), rarely.genre_id);
@@ -230,7 +240,8 @@ test "a genre mix holds 25 tracks within 60 to 90 minutes, 15 favorites, 6 rarel
     try rig.generateNow();
 
     const snapshot = try rig.mixes();
-    for (snapshot.items()[0 .. snapshot.count - 1]) |*mix| {
+    for (snapshot.items()) |*mix| {
+        if (mix.kind != .genre) continue;
         try testing.expectEqual(@as(u32, 25), mix.entry_count);
         try testing.expect(mix.duration_ms >= 60 * 60_000 and mix.duration_ms <= 90 * 60_000);
     }
@@ -252,7 +263,8 @@ test "a class with no candidates is filled from the classes furthest below their
     try rig.generateNow();
 
     const snapshot = try rig.mixes();
-    for (snapshot.items()[0 .. snapshot.count - 1]) |*mix| {
+    for (snapshot.items()) |*mix| {
+        if (mix.kind != .genre) continue;
         try testing.expectEqual(@as(u32, 0), mix.makeup.never_played);
         try testing.expectEqual(@as(u32, 25), mix.makeup.favorite + mix.makeup.rarely_played);
         try testing.expect(mix.makeup.favorite >= 15 and mix.makeup.rarely_played >= 6);
@@ -352,7 +364,7 @@ test "every reason a mix entry gives is true of it" {
                     .shared_genre => {
                         const genre = try rig.query("SELECT genre_id FROM track_genres JOIN tracks ON tracks.id = track_genres.track_id WHERE tracks.recording_id = ?1;", entry.recording_id);
                         try testing.expectEqual(@as(?i64, part.a), genre);
-                        try testing.expectEqual(mix.genre_id, genre);
+                        if (mix.kind == .genre) try testing.expectEqual(mix.genre_id, genre);
                     },
                     .added, .related_artist, .often_after, .similar_sound => {},
                 }
@@ -481,7 +493,7 @@ test "mixes.count makes six or four mixes, and off clears them" {
     try rig.setMixCount(.four);
     try rig.generateNow();
     const four = try rig.mixes();
-    try expectNames(&four, &.{ "Big", "Hip Hop", "Jazz", "Rarely played" });
+    try expectNames(&four, &.{ "Big", "Hip Hop", "Deep cuts", "Rarely played" });
 
     try rig.setMixCount(.off);
     try rig.generateNow();
@@ -503,7 +515,7 @@ test "a lone artist's cluster qualifies only with 40 candidates" {
 
     try rig.generateNow();
 
-    try expectNames(&(try rig.mixes()), &.{ "Hip Hop", "Jazz", "Rock", "Folk", "Ambient", "Rarely played" });
+    try expectNames(&(try rig.mixes()), &.{ "Hip Hop", "Jazz", "Rock", "Folk", "Deep cuts", "Rarely played" });
 }
 
 test "not for me hides an entry at once and undo puts it back in place, and reset forgets every mark" {

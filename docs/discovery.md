@@ -326,9 +326,8 @@ The 50 Artists with the most listens in the 30 days before `now_s` (a listen
 counts for the Artist of its Recording's lowest-id Track) are grouped by each
 Artist's most frequent first genre. Clusters are ordered by their listens,
 then genre id. A cluster qualifies with at least 2 Artists, or with at least
-40 candidates by its Artists. The first `mixes.count` − 1 qualifying clusters
-become genre mixes, named after the genre; "Rarely played" comes last when it
-has candidates. Fewer qualifying clusters make fewer genre mixes.
+40 candidates by its Artists. Qualifying clusters become genre mixes, named
+after the genre, in cluster order.
 
 A genre mix ranks candidates with the shared scoring core against a cluster
 profile: the cluster's Artists at 1.0 and their related Artists, the genre
@@ -336,6 +335,52 @@ pinned at 1, and the years, audio features and co-listening of the Artists'
 Tracks. Never-played Recordings are candidates whatever
 `radio.include_unplayed` says. "Rarely played" ranks Recordings with plays
 but none in the last 365 days by play count times 1 + jitter / 2.
+
+### Theme mixes
+
+A theme mix draws from one pool of the Library:
+
+| Kind | Name | Pool |
+|---|---|---|
+| `decade` | the decade, as "1990s" | Tracks on Releases from the favorite decade |
+| `new_to_you` | New to you | Tracks on Releases none of whose Tracks were played, by Artists with a listen in the last 90 days |
+| `deep_cuts` | Deep cuts | Tracks played at most once by the 10 Artists most played in the last 90 days, as Home's deep cuts |
+| `upbeat` | Upbeat | Tracks with an energy of 2/3 or more |
+| `wind_down` | Wind down | Tracks with an energy below 1/3 |
+
+The favorite decade is the decade with the most listens in the last 30 days
+by the Release year of each listen's Recording; without such a listen it is
+the decade with the most Tracks, and with no dated Release there is no decade
+mix. Energy and its thirds are those of Radio's focus filters
+([Candidates](#candidates)); a Track without audio features is never in
+Upbeat or Wind down.
+
+A theme qualifies when its pool holds at least 40 candidates after the
+exclusions of [Filling a mix](#filling-a-mix) other than earlier mixes. Its
+candidates, at most 2,000 in a seeded order, are ranked with the shared
+scoring core against one profile of the day's 50 most-played Artists. Their
+Tracks seed it, with their related Artists, and without an Artist pin.
+Never-played Recordings are candidates whatever `radio.include_unplayed` says.
+
+### Slots
+
+With N = `mixes.count`:
+
+1. "Rarely played" takes the last slot when it has candidates and N is more
+   than 1.
+2. When at least two other slots remain and any theme qualifies, one is kept
+   for a theme mix.
+3. Genre mixes fill the other slots.
+4. Slots still empty take further qualifying themes.
+
+Themes are taken in the order `decade`, `new_to_you`, `deep_cuts`, `upbeat`,
+`wind_down`, starting at kind (mix day mod 5) and wrapping, skipping themes that
+do not qualify; so the kept slot rotates daily. Mixes are stored genre mixes
+first, then theme mixes, then "Rarely played". A Library with three genre
+clusters and no rarely-played Recordings gets three genre mixes and three
+theme mixes; one with many clusters and rarely-played Recordings gets four
+genre mixes, one theme mix and "Rarely played". Cancellation is checked
+before each mix.
 
 The jitter seed is a hash of the mix day and the mix's position, so one mix
 day always produces the same mixes from the same Library.
@@ -350,7 +395,9 @@ A genre mix aims for 15 favorites (loved, rated 80 or more, or 3 or more
 plays with one in the last 180 days), 6 rarely played (1 or 2 plays, or none
 in 180 days) and 4 never played. Each pick comes from the class furthest
 below its target; a class with nothing left is filled from the next class
-furthest below its target. "Rarely played" takes its candidates in order.
+furthest below its target. Decade, Upbeat and Wind down mixes aim for the
+same makeup. "Rarely played", "New to you" and "Deep cuts", whose candidates
+are mostly of one class, take their candidates in order.
 
 Left out of every mix:
 
@@ -363,15 +410,18 @@ Left out of every mix:
   Artist, no more than 2 from one Release in any 10. Mixes never relax them.
 
 Each mix stores the counts left out by reason: `recent`, `not_for_me`,
-`hated` and `live` over the Recordings of its Artists (for "Rarely played",
-of its candidates), each Recording under the first that applies;
+`hated` and `live` over the Recordings of its Artists (for "Rarely played"
+and theme mixes, of their pools; for Upbeat and Wind down, of the first 2,000
+Recordings with audio features left out for any reason), each Recording under the first that applies;
 `other_mix` and `diversity` over its ranked candidates.
 
 ### Stored data
 
-Per mix: its position, kind (0 genre, 1 Rarely played), genre id, name, mix
-day, generation time, up to 4 top Artists (by 30-day listens for a genre mix,
-by play count for "Rarely played"), the left-out counts, the makeup counts by
+Per mix: its position, kind (0 genre, 1 Rarely played, 2 decade, 3 New to
+you, 4 Deep cuts, 5 Upbeat, 6 Wind down), genre id, decade (the first year,
+such as 1990, for a decade mix), name, mix day, generation time, up to 4 top
+Artists (by 30-day listens for a genre mix, by play count for the others),
+the left-out counts, the makeup counts by
 class, and `signals`: bit n is set when reason kind n names at least one of
 its entries. Per entry: its position, Recording and `PickReason`, with the
 kinds and numbering of [Reasons](#reasons); each reason is true of the

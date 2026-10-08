@@ -289,7 +289,10 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_daily_mixes_request`; a Job of kind `ORCA_JOB_KIND_DAILY_MIXES`;
   `ORCA_STATUS_INVALID_ARGUMENT` for `force` above 1),
   `orca_library_daily_mixes` (one callback-scoped `orca_daily_mixes_view`
-  with an `orca_daily_mixes_state` and up to 6 `orca_daily_mix_view`s),
+  with an `orca_daily_mixes_state` and up to 6 `orca_daily_mix_view`s; a
+  view's `kind` is an `orca_daily_mix_kind`, `ORCA_DAILY_MIX_KIND_GENRE` to
+  `ORCA_DAILY_MIX_KIND_WIND_DOWN`, and `decade` is the first year of a decade
+  mix's decade, 0 for other kinds),
   `orca_library_daily_mix_entries` (up to 25 entries with reasons in one
   callback-scoped `orca_daily_mix_entries_view`), `orca_library_not_for_me`,
   `orca_library_clear_not_for_me`, `orca_library_reset_recommendations` and

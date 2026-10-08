@@ -980,7 +980,8 @@ pub const DailyMixView = extern struct {
     has_genre_id: u8,
     artist_count: u8,
     cover_count: u8,
-    _reserved: [3]u8 = @splat(0),
+    _reserved: [1]u8 = @splat(0),
+    decade: u16,
 };
 
 pub const DailyMixesView = extern struct {
@@ -3731,6 +3732,7 @@ pub export fn orca_library_daily_mixes(
             .has_genre_id = @intFromBool(mix.genre_id != null),
             .artist_count = mix.artist_count,
             .cover_count = mix.cover_count,
+            .decade = std.math.cast(u16, mix.decade orelse 0) orelse 0,
         };
         for (view.artists[0..mix.artist_count], mix.mixArtists()) |*artist_view, *artist|
             artist_view.* = .{ .id = artist.id, .name = stringView(artist.name()) };
@@ -13206,6 +13208,9 @@ const CapturedDailyMixes = struct {
     first: DailyMixView = undefined,
     first_name: [32]u8 = undefined,
     first_name_length: usize = 0,
+    last: DailyMixView = undefined,
+    last_name: [32]u8 = undefined,
+    last_name_length: usize = 0,
 };
 
 fn captureDailyMixes(context: ?*anyopaque, view: *const DailyMixesView) callconv(.c) void {
@@ -13217,6 +13222,10 @@ fn captureDailyMixes(context: ?*anyopaque, view: *const DailyMixesView) callconv
     captured.first = view.mixes[0];
     captured.first_name_length = @min(view.mixes[0].name.length, captured.first_name.len);
     @memcpy(captured.first_name[0..captured.first_name_length], view.mixes[0].name.pointer[0..captured.first_name_length]);
+    const last = view.mixes[view.count - 1];
+    captured.last = last;
+    captured.last_name_length = @min(last.name.length, captured.last_name.len);
+    @memcpy(captured.last_name[0..captured.last_name_length], last.name.pointer[0..captured.last_name_length]);
 }
 
 const CapturedDailyMixEntries = struct {
@@ -13296,6 +13305,7 @@ test "Daily Mixes are made, listed, read, marked Not for me, reset and saved thr
     try std.testing.expectEqual(@as(u32, 25), mixes.first.entry_count);
     try std.testing.expectEqual(@as(u64, 25 * 180_000), mixes.first.duration_ms);
     try std.testing.expect(mixes.first.cover_count > 0);
+    try std.testing.expectEqual(@as(u16, 0), mixes.first.decade);
     const mix_id = mixes.first.id;
 
     var entries: CapturedDailyMixEntries = .{};
@@ -13341,5 +13351,17 @@ test "Daily Mixes are made, listed, read, marked Not for me, reset and saved thr
     try std.testing.expectEqual(Status.not_found, orca_library_save_daily_mix(runtime, library, mix_id + 100, name, name.len, &playlist_id));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_save_daily_mix(runtime, library, mix_id, null, 3, &playlist_id));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_save_daily_mix(runtime, library, mix_id, name, name.len, null));
+
+    try library_database.database.exec("UPDATE releases SET release_date = '1994-05-01';");
+    try std.testing.expectEqual(Status.ok, orca_library_start_daily_mixes(runtime, library, &.{ .now_s = now_s, .utc_offset_s = 0, .force = 1 }, &mix_job));
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJob(&box.runtime, importJob(mix_job)));
+    try std.testing.expectEqual(Status.ok, orca_library_daily_mixes(runtime, library, now_s, 0, &mixes, captureDailyMixes));
+    try std.testing.expectEqual(@as(usize, 2), mixes.count);
+    try std.testing.expectEqualStrings("Jazz", mixes.first_name[0..mixes.first_name_length]);
+    try std.testing.expectEqualStrings("1990s", mixes.last_name[0..mixes.last_name_length]);
+    try std.testing.expectEqual(@backingInt(daily_mixes.Kind.decade), mixes.last.kind);
+    try std.testing.expectEqual(@as(u16, 1990), mixes.last.decade);
+    try std.testing.expectEqual(@as(u8, 0), mixes.last.has_genre_id);
+    try std.testing.expect(mixes.last.entry_count > 0);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }

@@ -15,9 +15,9 @@ pub const week_days = 7;
 const day_s = 86_400;
 const rediscover_min_plays = 10;
 const rediscover_quiet_days = 180;
-const deep_cut_artist_days = 90;
+pub const deep_cut_artist_days = 90;
 const deep_cut_artists = 10;
-const deep_cut_max_plays = 1;
+pub const deep_cut_max_plays = 1;
 
 /// When the page is read: Unix seconds, and the local offset east of UTC.
 /// Local days are `now_s + utc_offset_s` counted in days from the epoch.
@@ -305,16 +305,20 @@ pub fn neverPlayed(library: *const LibraryDatabase, output: []HomeTrack) !usize 
     return readTracks(statement, output[0..limit]);
 }
 
+/// `favorites(artist_id, plays)`: the 10 Artists most played between ?1 and
+/// ?2, the Artists whose deep cuts Home and the Deep cuts mix show.
+pub const deep_cut_favorites =
+    "WITH favorites AS (SELECT tracks.artist_id AS artist_id, count(*) AS plays\n" ++ heard_in_window ++
+    "    AND tracks.artist_id IS NOT NULL\n" ++
+    "GROUP BY tracks.artist_id ORDER BY plays DESC, tracks.artist_id LIMIT " ++
+    std.fmt.comptimePrint("{d}", .{deep_cut_artists}) ++ ")\n";
+
 /// Tracks played at most once by the 10 Artists most played in the last 90
 /// days: unplayed first, then the most played Artist's.
 pub fn deepCuts(library: *const LibraryDatabase, time: LocalTime, output: []HomeTrack) !usize {
     const limit = @min(output.len, max_items);
     var statement = try library.database.prepare(
-        "WITH favorites AS (SELECT tracks.artist_id AS artist_id, count(*) AS plays\n" ++ heard_in_window ++
-            "    AND tracks.artist_id IS NOT NULL\n" ++
-            "GROUP BY tracks.artist_id ORDER BY plays DESC, tracks.artist_id LIMIT " ++
-            std.fmt.comptimePrint("{d}", .{deep_cut_artists}) ++ ")\n" ++
-            track_columns ++ "    COALESCE(stats.play_count, 0), tracks.created_at\n" ++
+        deep_cut_favorites ++ track_columns ++ "    COALESCE(stats.play_count, 0), tracks.created_at\n" ++
             "FROM favorites JOIN tracks ON tracks.artist_id = favorites.artist_id\n" ++
             "LEFT JOIN recording_play_stats AS stats ON stats.recording_id = tracks.recording_id\n" ++
             "WHERE COALESCE(stats.play_count, 0) <= " ++ std.fmt.comptimePrint("{d}", .{deep_cut_max_plays}) ++ "\n" ++

@@ -559,7 +559,9 @@ section lists the entry points, errors and limits.
   `DailyMixesState` (`ready`, `not_enough_history`, `off`, `not_generated`),
   `generated_at`, `local_day` and `items()`, up to `max_daily_mixes` (6)
   `DailyMix`es. Each has its id, `ordinal`, `DailyMixKind` (`genre`,
-  `rarely_played`), `name()`, `genre_id`, `mixArtists()` (up to 4
+  `rarely_played`, `decade`, `new_to_you`, `deep_cuts`, `upbeat`,
+  `wind_down`), `name()`, `genre_id`, `decade` (the first year of a decade
+  mix's decade), `mixArtists()` (up to 4
   `DailyMixArtist`s), `entry_count`, `duration_ms`, `signals`,
   `DailyMixLeftOut`, `DailyMixMakeup` and `coverReleases()` (up to 4 Release
   ids).

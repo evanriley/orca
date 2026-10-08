@@ -1117,6 +1117,17 @@ typedef enum orca_daily_mix_kind {
     ORCA_DAILY_MIX_KIND_GENRE = 0,
     /* Recordings played before but not in the last 365 days. */
     ORCA_DAILY_MIX_KIND_RARELY_PLAYED = 1,
+    /* Recordings on Releases from one decade, named after it ("2010s"). */
+    ORCA_DAILY_MIX_KIND_DECADE = 2,
+    /* Unplayed Releases by Artists heard in the last 90 days. */
+    ORCA_DAILY_MIX_KIND_NEW_TO_YOU = 3,
+    /* Recordings played at most once by the 10 Artists most played in the
+     * last 90 days. */
+    ORCA_DAILY_MIX_KIND_DEEP_CUTS = 4,
+    /* Recordings in the top third of the Library's energy. */
+    ORCA_DAILY_MIX_KIND_UPBEAT = 5,
+    /* Recordings in the bottom third of the Library's energy. */
+    ORCA_DAILY_MIX_KIND_WIND_DOWN = 6,
 } orca_daily_mix_kind;
 
 typedef struct orca_daily_mix_artist {
@@ -1132,7 +1143,9 @@ typedef struct orca_daily_mix_artist {
  * The left_out_ counts are the Recordings left out when it was made, by
  * reason; the _count fields are its entries by class when it was made:
  * favorites (loved, rated 80 or more, or played 3 or more times recently),
- * rarely played, and never played. */
+ * rarely played, and never played. `decade` is the first year of a
+ * ORCA_DAILY_MIX_KIND_DECADE mix's decade, such as 2010, and 0 for other
+ * kinds. */
 typedef struct orca_daily_mix_view {
     int64_t id;
     int64_t genre_id;
@@ -1156,7 +1169,8 @@ typedef struct orca_daily_mix_view {
     uint8_t has_genre_id;
     uint8_t artist_count;
     uint8_t cover_count;
-    uint8_t reserved[3];
+    uint8_t reserved[1];
+    uint16_t decade;
 } orca_daily_mix_view;
 
 /* `mixes` holds `count` (at most 6) mixes in order, valid only for the

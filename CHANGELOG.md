@@ -2,8 +2,21 @@
 
 ## Unreleased
 
+Ships Library schema version 3; opening a 0.3.0 Library upgrades it in
+place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
+
 ### Added
 
+- **Daily Mixes have themes.** Besides genre mixes and Rarely played, Daily
+  Mixes include a decade mix (the decade most listened to in 30 days, else
+  the one with the most Tracks), New to you (Releases never played by Artists
+  heard in 90 days), Deep cuts (Home's deep cuts), Upbeat and Wind down (the
+  top and bottom thirds of energy). A theme qualifies with at least 40
+  candidates. One slot is kept for a theme, which rotates daily; genre mixes
+  fill the others, further themes fill slots left empty, and Rarely played
+  stays last. `DailyMixKind` and the C ABI's `orca_daily_mix_kind` gain
+  `decade`, `new_to_you`, `deep_cuts`, `upbeat` and `wind_down`, and a mix
+  carries its `decade`.
 - **Orca says when an update adds an analysis measurement.**
   `libraryAnalysisCoverage` (C ABI `orca_library_analysis_coverage`) splits
   the files analysis would measure into never analyzed and outdated, names
@@ -29,6 +42,10 @@
 
 ### Changed
 
+- Library schema version 3. Opening a version 2 Library upgrades it in place
+  in one transaction, rebuilding the Daily Mix tables (their mixes are made
+  again on the next run) and keeping every other row. An upgraded Library
+  cannot be opened by 0.3.0.
 - **`orca-gtk` says what analysis measures.** The task is named Analyze music
   in Settings › Maintenance, Library Health, Activity, the command palette,
   Audio Problems and First Run, and describes all four things it does:
