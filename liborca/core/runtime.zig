@@ -441,6 +441,29 @@ pub const ZoneStats = struct {
     rendered_entry_serial: u32,
 };
 
+/// How the files a library-wide analysis would measure split, for telling a
+/// user that an update added or changed a measurement.
+pub const AnalysisCoverage = struct {
+    /// Files with no measurement stored for their current bytes, including
+    /// those whose bytes changed since they were measured.
+    never_analyzed: u64,
+    /// Files measured for their current bytes that lack a current measurement.
+    outdated: u64,
+    /// The current measurements some outdated file lacks.
+    missing: MissingMeasurements,
+    /// Changes whenever a measurement is added or its algorithm, version or
+    /// parameters change.
+    measurement_set: u64,
+};
+
+pub const MissingMeasurements = struct {
+    /// Loudness, peaks, clipping and the other audio checks.
+    loudness_and_checks: bool = false,
+    fingerprint: bool = false,
+    /// Tempo, key and energy.
+    features: bool = false,
+};
+
 pub const ScanRequest = job_worker.ScanRequest;
 pub const ReconcileRequest = job_worker.ReconcileRequest;
 pub const ReconcileScope = job_worker.ReconcileScope;
@@ -891,6 +914,22 @@ pub const OrcaRuntime = struct {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
             analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins()),
         );
+    }
+
+    /// Splits `libraryUnanalyzedCount` into never-analyzed and outdated files.
+    pub fn libraryAnalysisCoverage(self: *OrcaRuntime, library: LibraryHandle) !AnalysisCoverage {
+        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins());
+        const counts = try (try libraryDatabase(self, library)).files.analysisCoverage(selectors);
+        return .{
+            .never_analyzed = counts.never_analyzed,
+            .outdated = counts.outdated,
+            .missing = .{
+                .loudness_and_checks = counts.missing[0],
+                .fingerprint = counts.missing[1],
+                .features = counts.missing[2],
+            },
+            .measurement_set = analysis_service.measurementSetId(&selectors),
+        };
     }
 
     /// Measures one file on the caller's thread and records the result in the

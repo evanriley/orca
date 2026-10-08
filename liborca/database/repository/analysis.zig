@@ -80,32 +80,10 @@ pub const AnalysisSelectors = struct {
 /// audio a file no longer contains is a wrong answer, while re-selecting a
 /// file for measurement is only wasted work.
 pub const unanalyzed_predicate =
-    \\(NOT EXISTS (SELECT 1 FROM analysis_results
-    \\    WHERE analysis_results.file_id = files.id
-    \\      AND analysis_results.kind = ?3
-    \\      AND analysis_results.algorithm_id = ?4
-    \\      AND analysis_results.algorithm_version = ?5
-    \\      AND analysis_results.parameter_hash = ?6
-    \\      AND analysis_results.source_identity = files.content_hash
-    \\      AND files.content_hash_algorithm = 1)
-    \\OR NOT EXISTS (SELECT 1 FROM analysis_results
-    \\    WHERE analysis_results.file_id = files.id
-    \\      AND analysis_results.kind = ?7
-    \\      AND analysis_results.algorithm_id = ?8
-    \\      AND analysis_results.algorithm_version = ?9
-    \\      AND analysis_results.parameter_hash = ?10
-    \\      AND analysis_results.source_identity = files.content_hash
-    \\      AND files.content_hash_algorithm = 1)
-    \\OR NOT EXISTS (SELECT 1 FROM analysis_results
-    \\    WHERE analysis_results.file_id = files.id
-    \\      AND analysis_results.kind = ?11
-    \\      AND analysis_results.algorithm_id = ?12
-    \\      AND analysis_results.algorithm_version = ?13
-    \\      AND analysis_results.parameter_hash = ?14
-    \\      AND analysis_results.source_identity = files.content_hash
-    \\      AND files.content_hash_algorithm = 1)
+    "(" ++ lacksMeasurementAt(3) ++ "\nOR " ++ lacksMeasurementAt(7) ++ "\nOR " ++ lacksMeasurementAt(11) ++
+    \\
     \\OR ((files.channels IS NULL OR files.channels >
-++ max_supported_channels_sql ++
+    ++ max_supported_channels_sql ++
     \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id)))
     \\AND NOT EXISTS (SELECT 1 FROM analysis_results
     \\    WHERE analysis_results.file_id = files.id
@@ -115,7 +93,55 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.parameter_hash = ?18
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
-;
+    ;
+
+fn lacksMeasurementAt(comptime first: comptime_int) []const u8 {
+    return std.fmt.comptimePrint(
+        \\NOT EXISTS (SELECT 1 FROM analysis_results
+        \\    WHERE analysis_results.file_id = files.id
+        \\      AND analysis_results.kind = ?{d}
+        \\      AND analysis_results.algorithm_id = ?{d}
+        \\      AND analysis_results.algorithm_version = ?{d}
+        \\      AND analysis_results.parameter_hash = ?{d}
+        \\      AND analysis_results.source_identity = files.content_hash
+        \\      AND files.content_hash_algorithm = 1)
+    , .{ first, first + 1, first + 2, first + 3 });
+}
+
+/// How the files `unanalyzed_predicate` selects split, with the same
+/// parameters bound. A selected file is `outdated` when it is recorded with a
+/// measurable channel count and holds at least one of the three measurements'
+/// kinds, any version, for its recorded content hash; every other selected
+/// file is `never_analyzed`, including one whose bytes changed since it was
+/// measured. Column 2 to 4 are 1 when some outdated file lacks the first,
+/// second or third measurement.
+pub const analysis_coverage_sql =
+    \\SELECT coalesce(sum(1 - measured), 0), coalesce(sum(measured), 0),
+    \\    coalesce(max(measured * lacks_first), 0),
+    \\    coalesce(max(measured * lacks_second), 0),
+    \\    coalesce(max(measured * lacks_third), 0)
+    \\FROM (SELECT
+    \\    CASE WHEN
+++ " " ++ measurableChannels("files") ++
+    \\ AND files.content_hash_algorithm = 1
+    \\        AND EXISTS (SELECT 1 FROM analysis_results
+    \\            WHERE analysis_results.file_id = files.id
+    \\              AND analysis_results.kind IN (?3, ?7, ?11)
+    \\              AND analysis_results.source_identity = files.content_hash)
+    \\    THEN 1 ELSE 0 END AS measured,
+    \\
+++ "    " ++ lacksMeasurementAt(3) ++ " AS lacks_first,\n    " ++
+    lacksMeasurementAt(7) ++ " AS lacks_second,\n    " ++
+    lacksMeasurementAt(11) ++ " AS lacks_third\n" ++
+    \\FROM files WHERE
+++ " " ++ unanalyzed_predicate ++ ");";
+
+/// `missing` is aligned with `AnalysisSelectors.measurements`.
+pub const AnalysisCoverageCounts = struct {
+    never_analyzed: u64,
+    outdated: u64,
+    missing: [3]bool,
+};
 
 /// One file that still owes an analysis, where to read it, and what the
 /// Library believes its bytes are.

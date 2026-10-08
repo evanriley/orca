@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Orca says when an update adds an analysis measurement.**
+  `libraryAnalysisCoverage` (C ABI `orca_library_analysis_coverage`) splits
+  the files analysis would measure into never analyzed and outdated, names
+  the measurements the outdated files lack, and identifies the current
+  measurement set; `orca-cli stats` prints it. When analyzed files lack a
+  measurement, `orca-gtk` shows a banner naming it with Analyze and a close
+  control; a dismissed banner returns only when the measurement set changes.
+
+### Fixed
+
+- **`orca-gtk`'s right-hand panels share one width.** The Radio options
+  panel, Now Playing (every tab) and the Daily Mix "How this mix was made"
+  aside are 388 px wide like the inspector, so the page beside them no longer
+  shifts between panels or tabs.
+- **`orca-gtk` says when Radio has nothing left.** When Radio runs out of
+  picks under its options, the Radio panel says so; with an Energy focus on a
+  Library that has files without tempo, key and energy it says Energy needs
+  analyzed music and offers Analyze music, or says the music is being analyzed
+  while that runs.
+
+### Changed
+
+- **`orca-gtk` says what analysis measures.** The task is named Analyze music
+  in Settings › Maintenance, Library Health, Activity, the command palette,
+  Audio Problems and First Run, and describes all four things it does:
+  loudness for ReplayGain, clipping and damage checks, fingerprints for
+  duplicates, and tempo, key and energy for Radio and Daily Mixes. Library
+  Health calls the row Not analyzed.
+
 ## 0.3.0 - 2026-10-08
 
 Ships Library schema version 2; opening a 0.2.0 Library upgrades it in

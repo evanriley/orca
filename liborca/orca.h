@@ -3342,6 +3342,32 @@ orca_status orca_library_unanalyzed_count(
     uint64_t *output
 );
 
+#define ORCA_MEASUREMENT_LOUDNESS_AND_CHECKS 1
+#define ORCA_MEASUREMENT_FINGERPRINT 2
+#define ORCA_MEASUREMENT_FEATURES 4
+
+/* How the files orca_library_unanalyzed_count counts split; `never_analyzed`
+ * + `outdated` equals it. `never_analyzed` counts files with no measurement
+ * for their current bytes, including those whose bytes changed since;
+ * `outdated` counts files measured for their current bytes that lack a
+ * current measurement, and `missing` holds the ORCA_MEASUREMENT_* flags of
+ * the measurements some outdated file lacks. `measurement_set` changes
+ * whenever a measurement is added or its algorithm, version or parameters
+ * change, so a host can remember that the user dismissed a notice for it. */
+typedef struct orca_analysis_coverage {
+    uint64_t never_analyzed;
+    uint64_t outdated;
+    uint64_t measurement_set;
+    uint32_t missing;
+    uint8_t reserved[4];
+} orca_analysis_coverage;
+
+orca_status orca_library_analysis_coverage(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_analysis_coverage *output
+);
+
 /* ------------------------------------------------------------ playlists */
 
 /* A playlist is a name and an ordered list of entries, kept in the Library.

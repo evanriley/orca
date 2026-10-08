@@ -12,11 +12,12 @@ const art = @import("art.zig");
 const transport = @import("transport.zig");
 const page_ui = @import("page.zig");
 const details = @import("details.zig");
+const jobs = @import("jobs.zig");
+const analysis_notice = @import("analysis_notice.zig");
 const main_window = @import("window.zig");
 
 const App = app.App;
 
-pub const panel_width: c_int = 340;
 const seed_cover_pixels: c_int = 48;
 const picker_rows = 12;
 const explore_settle_ms: c_uint = 300;
@@ -75,6 +76,9 @@ pub const State = struct {
     avoid_switch: ?*gtk.Widget = null,
     avoid_note: ?*gtk.Label = null,
     live_switch: ?*gtk.Widget = null,
+    notice: ?*gtk.Widget = null,
+    notice_text: ?*gtk.Label = null,
+    notice_analyze: ?*gtk.Widget = null,
     session: ?*gtk.Label = null,
     undo: ?*gtk.Widget = null,
     subject: [subject_capacity]u8 = undefined,
@@ -588,6 +592,43 @@ fn paintSession(self: *App, counts: liborca.RadioCounts) void {
     if (radio.undo) |undo| gtk.gtk_widget_set_sensitive(undo, boolean(counts.less_like_this != 0 or counts.skips != 0));
 }
 
+fn hasEnergyFocus(options: liborca.RadioOptions) bool {
+    for (options.focus) |maybe_focus| {
+        const focus = maybe_focus orelse continue;
+        switch (focus) {
+            .low_energy, .high_energy => return true,
+            .genre, .decade => {},
+        }
+    }
+    return false;
+}
+
+fn needsAnalysis(self: *const App) bool {
+    return analysis_notice.lacksFeatures(self) orelse false;
+}
+
+fn paintNotice(self: *App, status: *const liborca.RadioStatus) void {
+    const radio = &self.radio;
+    const notice = radio.notice orelse return;
+    const text = radio.notice_text orelse return;
+    const exhausted = status.state == .exhausted;
+    const analysis = exhausted and hasEnergyFocus(status.options) and needsAnalysis(self);
+    const analyzing = analysis and jobs.active(self, .analysis);
+    gtk.gtk_widget_set_visible(notice, boolean(exhausted));
+    if (radio.notice_analyze) |button| gtk.gtk_widget_set_visible(button, boolean(analysis and !analyzing));
+    if (!exhausted) return;
+    gtk.gtk_label_set_text(text, if (analyzing)
+        "Energy needs analyzed music. Analyzing your music…"
+    else if (analysis)
+        "Energy needs analyzed music. Analyze your music to find the energy of each track."
+    else
+        "Nothing in your library matches these options.");
+}
+
+fn analyzeClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    jobs.startAnalysis(state(data));
+}
+
 fn repaint(self: *App, seed_changed: bool, focus_changed: bool) void {
     const status = currentStatus(self) orelse return;
     const radio = &self.radio;
@@ -611,6 +652,7 @@ fn repaint(self: *App, seed_changed: bool, focus_changed: bool) void {
         const text = strings.format(&buffer, "Skips anything from the last {d} {s}", .{ days, if (days == 1) "day" else "days" });
         gtk.gtk_label_set_text(note, text.ptr);
     }
+    paintNotice(self, &status);
     paintSession(self, status.counts);
 }
 
@@ -924,6 +966,24 @@ fn buildSession(self: *App) *gtk.Widget {
     return group;
 }
 
+fn buildNotice(self: *App) *gtk.Widget {
+    const radio = &self.radio;
+    const box = vertical(8, "radio-info");
+    gtk.gtk_widget_add_css_class(box, "radio-notice");
+    const text = wrapped(null, "radio-info-text");
+    const analyze = gtk.gtk_button_new_with_label("Analyze music");
+    gtk.gtk_widget_add_css_class(analyze, "radio-undo");
+    gtk.gtk_widget_set_halign(analyze, gtk.ALIGN_START);
+    _ = gtk.signalConnect(analyze, "clicked", gtk.callback(analyzeClicked), self);
+    append(box, &.{ text, analyze });
+    gtk.gtk_widget_set_visible(box, gtk.false_);
+    gtk.gtk_widget_set_visible(analyze, gtk.false_);
+    radio.notice = box;
+    radio.notice_text = gtk.cast(gtk.Label, text);
+    radio.notice_analyze = analyze;
+    return box;
+}
+
 fn buildInfo() *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_add_css_class(box, "radio-info");
@@ -947,7 +1007,7 @@ fn buildPanel(self: *App) *gtk.Widget {
     append(header, &.{ title, on_switch });
 
     const column = vertical(20, "radio-panel");
-    append(column, &.{ header, buildSeed(self), buildExplore(self), buildFocus(self), buildSwitches(self), buildSession(self), buildInfo() });
+    append(column, &.{ header, buildNotice(self), buildSeed(self), buildExplore(self), buildFocus(self), buildSwitches(self), buildSession(self), buildInfo() });
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_add_css_class(scroller, "radio-panel-frame");
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
@@ -962,8 +1022,8 @@ pub fn wrap(self: *App, view: *gtk.Widget) *gtk.Widget {
     const split_view = gtk.cast(adw.OverlaySplitView, split);
     adw.adw_overlay_split_view_set_sidebar_position(split_view, gtk.PACK_END);
     adw.adw_overlay_split_view_set_enable_show_gesture(split_view, gtk.false_);
-    adw.adw_overlay_split_view_set_min_sidebar_width(split_view, @floatFromInt(panel_width));
-    adw.adw_overlay_split_view_set_max_sidebar_width(split_view, @floatFromInt(panel_width));
+    adw.adw_overlay_split_view_set_min_sidebar_width(split_view, @floatFromInt(page_ui.side_panel_width));
+    adw.adw_overlay_split_view_set_max_sidebar_width(split_view, @floatFromInt(page_ui.side_panel_width));
     adw.adw_overlay_split_view_set_show_sidebar(split_view, gtk.false_);
     adw.adw_overlay_split_view_set_content(split_view, view);
     adw.adw_overlay_split_view_set_sidebar(split_view, buildPanel(self));

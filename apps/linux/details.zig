@@ -23,6 +23,7 @@ const lyrics = @import("lyrics.zig");
 const mpris = @import("mpris.zig");
 const transport = @import("transport.zig");
 const window = @import("window.zig");
+const page_ui = @import("page.zig");
 const nowplaying = @import("nowplaying.zig");
 const radio = @import("radio.zig");
 const albums = @import("albums.zig");
@@ -33,7 +34,6 @@ const playlists = @import("playlists.zig");
 
 const App = app.App;
 
-const inspector_width: f64 = 388;
 const key_width = 104;
 const separator = " · ";
 const minus = "−";
@@ -2304,8 +2304,8 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(body), "details");
 
     adw.adw_overlay_split_view_set_sidebar(split, root);
-    adw.adw_overlay_split_view_set_min_sidebar_width(split, inspector_width);
-    adw.adw_overlay_split_view_set_max_sidebar_width(split, inspector_width);
+    adw.adw_overlay_split_view_set_min_sidebar_width(split, @floatFromInt(page_ui.side_panel_width));
+    adw.adw_overlay_split_view_set_max_sidebar_width(split, @floatFromInt(page_ui.side_panel_width));
 
     panel.* = .{
         .self = self,

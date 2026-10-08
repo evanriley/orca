@@ -26,8 +26,6 @@ const App = app.App;
 
 const cover_pixels: c_int = 340;
 const up_next_rows = 10;
-const panel_width: c_int = 340;
-const tabbed_panel_width: c_int = 380;
 const info_key_width: c_int = 96;
 const quote_width: c_int = 520;
 const star_pixels: c_int = 17;
@@ -423,7 +421,7 @@ pub fn panelWidth(self: *App) c_int {
     if (gtk.gtk_widget_get_visible(panel) == 0) return 0;
     const shown = gtk.gtk_stack_get_visible_child_name(content) orelse return 0;
     if (!std.mem.eql(u8, std.mem.span(shown), "playing")) return 0;
-    return if (page.tab == .up_next) panel_width else tabbed_panel_width;
+    return page_ui.side_panel_width;
 }
 
 fn showTab(self: *App, tab: Tab) void {
@@ -432,7 +430,7 @@ fn showTab(self: *App, tab: Tab) void {
     const tabbed = tab != .up_next;
     if (page.tab_buttons.get(tab)) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.true_);
     if (page.tabs) |tabs| gtk.gtk_widget_set_visible(tabs, boolean(tabbed));
-    if (page.panel) |panel| gtk.gtk_widget_set_size_request(panel, if (tabbed) tabbed_panel_width else panel_width, -1);
+    if (page.panel) |panel| gtk.gtk_widget_set_size_request(panel, page_ui.side_panel_width, -1);
     if (page.panel_pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, if (tab == .lyrics) "lyrics" else "facts");
     if (page.queue_section) |section| gtk.gtk_widget_set_visible(section, boolean(tab == .up_next));
     placeShowAll(self);

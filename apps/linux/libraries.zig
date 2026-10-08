@@ -36,6 +36,7 @@ const matches = @import("matches.zig");
 const match_review = @import("match_review.zig");
 const changes = @import("changes.zig");
 const offline = @import("offline.zig");
+const analysis_notice = @import("analysis_notice.zig");
 const folders = @import("folders.zig");
 const lyrics = @import("lyrics.zig");
 const palette = @import("palette.zig");
@@ -347,6 +348,7 @@ fn closeCurrent(self: *App) void {
     match_review.forgetLibrary(self);
     changes.forgetLibrary(self);
     offline.forgetLibrary(self);
+    analysis_notice.forgetLibrary(self);
     albums.forgetLibrary(self);
     artist_page.forgetLibrary(self);
     lyrics.forgetLibrary(self);

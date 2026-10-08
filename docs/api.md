@@ -158,6 +158,17 @@ sleep: 0 to pump now, null to wait for the waker alone. See
   `libraryKeepBoth`, `libraryIgnoreDuplicateGroup`,
   `libraryMergeDuplicateMetadata` and `libraryDuplicateCopyPlaylists` write no
   file; see [analysis.md](analysis.md#groups).
+- `libraryUnanalyzedCount` counts the files a `startLibraryAnalysis` Job would
+  measure. `libraryAnalysisCoverage` splits them into an `AnalysisCoverage`:
+  `never_analyzed` files hold no measurement of their current bytes, and
+  `outdated` files hold at least one but lack another, as after an update adds
+  a measurement or changes one's version or parameters. A file whose bytes
+  changed since it was measured counts as never analyzed. The two sum to
+  `libraryUnanalyzedCount`. `missing` (`MissingMeasurements`) flags what the
+  outdated files lack: `loudness_and_checks`, `fingerprint` or `features`.
+  `measurement_set` identifies the current set of measurements and changes
+  only when a measurement is added or its version or parameters change, so a
+  host can remember that the user dismissed a prompt to analyze again.
 - `libraryBackfillPending` takes a `LibraryAvailability` and returns the `files`
   and `covers` that `startLibraryPropertyBackfill` can repair; a host starts the
   Job when either is non-zero, outside a scan.

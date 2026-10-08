@@ -1624,6 +1624,18 @@ pub const BackfillPendingView = extern struct {
     covers: u64,
 };
 
+pub const measurement_loudness_and_checks: u32 = 1;
+pub const measurement_fingerprint: u32 = 2;
+pub const measurement_features: u32 = 4;
+
+pub const AnalysisCoverageView = extern struct {
+    never_analyzed: u64,
+    outdated: u64,
+    measurement_set: u64,
+    missing: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
 pub const EventKind = enum(u8) {
     none = 0,
     command_completed = 1,
@@ -4339,6 +4351,26 @@ pub export fn orca_library_unanalyzed_count(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryUnanalyzedCount(importLibrary(library)) catch |err|
         return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_analysis_coverage(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*AnalysisCoverageView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const coverage = box.runtime.libraryAnalysisCoverage(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .never_analyzed = coverage.never_analyzed,
+        .outdated = coverage.outdated,
+        .measurement_set = coverage.measurement_set,
+        .missing = (if (coverage.missing.loudness_and_checks) measurement_loudness_and_checks else 0) |
+            (if (coverage.missing.fingerprint) measurement_fingerprint else 0) |
+            (if (coverage.missing.features) measurement_features else 0),
+    };
     return .ok;
 }
 
@@ -10196,6 +10228,7 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_play_stats(runtime, library, 1, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_listens_recorded(runtime, library, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_unanalyzed_count(runtime, library, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_analysis_coverage(runtime, library, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_backfill_pending(runtime, library, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_get(runtime, library, 1, null, null));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_details(runtime, library, 1, null, null));

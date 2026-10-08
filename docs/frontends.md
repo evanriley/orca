@@ -260,7 +260,9 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_library_track_play_stats`, `orca_library_track_audio_features`
   (`ORCA_STATUS_NOT_FOUND` for an unknown or unmeasured Track; `has_*` flags
   mark the known values), `orca_library_listens_recorded`,
-  `orca_library_unanalyzed_count`, `orca_library_backfill_pending`.
+  `orca_library_unanalyzed_count`, `orca_library_analysis_coverage` (an
+  `orca_analysis_coverage` whose `missing` holds `ORCA_MEASUREMENT_*` bits),
+  `orca_library_backfill_pending`.
 - Radio and discovery: `orca_library_radio_preview` (up to 512 ranked picks
   for an `orca_radio_seed` in one callback-scoped `orca_radio_preview_view`;
   NULL `options` or `session` take the defaults; `ORCA_STATUS_NOT_FOUND` for

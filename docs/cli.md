@@ -60,7 +60,7 @@ zig build run -- health DATABASE --kind=artwork_problem --albums [OFFSET]   # on
 zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file, and `metadata_issues N`, open consistency issues
 zig build run -- formats   # each format Orca reads, `NAME<TAB>planned` for one recognized but not yet decoded
 zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
-zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=
+zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=, never_analyzed=, outdated=, missing= (loudness_and_checks, fingerprint, features, comma-separated, or -), measurement_set=
 zig build run -- cache DATABASE [--clear]   # artwork_bytes= photo_bytes= lyrics_bytes= info_bytes= of fetched provider data; --clear deletes it and prints what it held; embedded and folder art and local lyrics stay
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
 zig build run -- health-restore DATABASE FILE_ID KIND

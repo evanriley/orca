@@ -1558,6 +1558,88 @@ test "a library analysed before audio features is selected once and decoded only
     try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
 }
 
+test "coverage splits the files an analysis owes into never analyzed and outdated, naming what the outdated lack" {
+    var fixture = try Fixture.init("file:orca-analysis-coverage?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("generated-reference.flac", "outdated.flac");
+    try fixture.copyFixture("generated-reference.qoa", "complete.qoa");
+    try fixture.copyFixture("fingerprint-reference.mp3", "changed.mp3");
+    const outdated_id = try fixture.record("outdated.flac");
+    _ = try fixture.record("complete.qoa");
+    const changed_id = try fixture.record("changed.mp3");
+
+    var pass = fixture.pass();
+    try testing.expectEqual(@as(u64, 0), (try pass.run()).errors);
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = .{ false, false, false } },
+        try fixture.library.files.analysisCoverage(pass.selectors()),
+    );
+
+    try fixture.copyFixture("generated-reference.qoa", "never.qoa");
+    _ = try fixture.record("never.qoa");
+    var delete_features = try fixture.library.database.prepare(
+        "DELETE FROM analysis_results WHERE file_id = ?1 AND kind = ?2;",
+    );
+    defer delete_features.deinit();
+    try delete_features.bindInt64(1, outdated_id);
+    try delete_features.bindInt64(2, analysis.audio_features.cache_kind);
+    try testing.expectEqual(database.sqlite.Step.done, try delete_features.step());
+    try fixture.copyFixture("generated-reference.flac", "changed.mp3");
+    try fixture.observe(changed_id, "changed.mp3");
+
+    const coverage = try fixture.library.files.analysisCoverage(pass.selectors());
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 2, .outdated = 1, .missing = .{ false, false, true } },
+        coverage,
+    );
+    try testing.expectEqual(
+        try fixture.library.files.unanalyzedCount(pass.selectors()),
+        coverage.never_analyzed + coverage.outdated,
+    );
+}
+
+test "coverage names a changed measurement parameter as missing loudness and checks only" {
+    var fixture = try Fixture.init("file:orca-analysis-coverage-parameters?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("generated-reference.flac", "one.flac");
+    _ = try fixture.record("one.flac");
+
+    var pass = fixture.pass();
+    _ = try pass.run();
+    pass.parameters.replay_gain_target_lufs = -14;
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 1, .missing = .{ true, false, false } },
+        try fixture.library.files.analysisCoverage(pass.selectors()),
+    );
+}
+
+test "coverage counts an empty Library as owing nothing" {
+    var fixture = try Fixture.init("file:orca-analysis-coverage-empty?mode=memory&cache=shared");
+    defer fixture.deinit();
+    var pass = fixture.pass();
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = .{ false, false, false } },
+        try fixture.library.files.analysisCoverage(pass.selectors()),
+    );
+}
+
+test "coverage probes the analysis cache by key and never scans it" {
+    var fixture = try Fixture.init("file:orca-analysis-coverage-plan?mode=memory&cache=shared");
+    defer fixture.deinit();
+    var statement = try fixture.library.database.prepare(
+        "EXPLAIN QUERY PLAN " ++ database.repository.analysis_coverage_sql,
+    );
+    defer statement.deinit();
+    var plan: std.ArrayList(u8) = .empty;
+    defer plan.deinit(testing.allocator);
+    while (try statement.step() == .row) {
+        try plan.appendSlice(testing.allocator, statement.columnText(3));
+        try plan.append(testing.allocator, '\n');
+    }
+    try testing.expect(std.mem.indexOf(u8, plan.items, "analysis_results") != null);
+    try testing.expect(std.mem.indexOf(u8, plan.items, "SCAN analysis_results") == null);
+}
+
 fn columnTextOwned(fixture: *Fixture, sql: [:0]const u8) ![]u8 {
     var statement = try fixture.library.database.prepare(sql);
     defer statement.deinit();

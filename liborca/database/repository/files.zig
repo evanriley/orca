@@ -11,6 +11,8 @@ const AnalysisCandidatePage = @import("analysis.zig").AnalysisCandidatePage;
 const AnalysisSelectors = @import("analysis.zig").AnalysisSelectors;
 const bindAnalysisSelectors = @import("analysis.zig").bindAnalysisSelectors;
 const unanalyzed_predicate = @import("analysis.zig").unanalyzed_predicate;
+const analysis_coverage_sql = @import("analysis.zig").analysis_coverage_sql;
+const AnalysisCoverageCounts = @import("analysis.zig").AnalysisCoverageCounts;
 const DuplicateCandidate = @import("duplicates.zig").DuplicateCandidate;
 const DuplicateCandidatePage = @import("duplicates.zig").DuplicateCandidatePage;
 const DuplicatePeer = @import("duplicates.zig").DuplicatePeer;
@@ -561,6 +563,27 @@ pub const FileRepository = struct {
         try bindAnalysisSelectors(statement, &selectors);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    /// How the files `unanalyzedCount` counts split into never analyzed and
+    /// outdated, and which measurements the outdated ones lack.
+    pub fn analysisCoverage(
+        self: *const FileRepository,
+        selectors: AnalysisSelectors,
+    ) !AnalysisCoverageCounts {
+        var statement = try self.db.prepare(analysis_coverage_sql);
+        defer statement.deinit();
+        try bindAnalysisSelectors(statement, &selectors);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{
+            .never_analyzed = @intCast(statement.columnInt64(0)),
+            .outdated = @intCast(statement.columnInt64(1)),
+            .missing = .{
+                statement.columnInt64(2) != 0,
+                statement.columnInt64(3) != 0,
+                statement.columnInt64(4) != 0,
+            },
+        };
     }
 
     /// One bounded page of files for a duplicate scan, past `after_id`.

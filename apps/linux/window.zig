@@ -46,6 +46,7 @@ const preferences = @import("preferences.zig");
 const palette = @import("palette.zig");
 const lyrics = @import("lyrics.zig");
 const offline = @import("offline.zig");
+const analysis_notice = @import("analysis_notice.zig");
 
 const App = app.App;
 const Column = track_model.Column;
@@ -991,6 +992,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .metadata_issues) metadata_issues.shown(self);
     if (page == .match_review) match_review.shown(self);
     offline.showBanner(self);
+    analysis_notice.show(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
     if (self.queue_visible) {
@@ -1487,6 +1489,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const framed = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), offline.build(self));
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), analysis_notice.build(self));
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), libraries.wrapPages(self, pages));
     self.top_bar.view = gtk.cast(adw.ToolbarView, framed);
     page_ui.coverContent(self, self.top_bar.view.?);

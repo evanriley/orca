@@ -5601,6 +5601,11 @@ int main(int argc, char **argv) {
     if (orca_library_unanalyzed_count(runtime, library, &unanalyzed) != ORCA_STATUS_OK ||
         unanalyzed == 0 || unanalyzed != stats.files_seen - stats.unsupported - stats.errors)
         return 97;
+    orca_analysis_coverage coverage;
+    if (orca_library_analysis_coverage(runtime, library, &coverage) != ORCA_STATUS_OK) return 648;
+    if (coverage.never_analyzed != unanalyzed || coverage.outdated != 0 || coverage.missing != 0)
+        return 649;
+    uint64_t measurement_set = coverage.measurement_set;
     if (orca_library_start_analysis(runtime, library, &analysis_options, &analysis_job) !=
         ORCA_STATUS_OK)
         return 150;
@@ -5634,6 +5639,10 @@ int main(int argc, char **argv) {
     if (orca_library_unanalyzed_count(runtime, library, &unanalyzed) != ORCA_STATUS_OK ||
         unanalyzed != 0)
         return 99;
+    if (orca_library_analysis_coverage(runtime, library, &coverage) != ORCA_STATUS_OK) return 650;
+    if (coverage.never_analyzed != 0 || coverage.outdated != 0 || coverage.missing != 0 ||
+        coverage.measurement_set != measurement_set)
+        return 651;
 
     /* The fixtures were just measured, so this can actually compare them. Its
      * denominator is every file in the Library, because it examines every row

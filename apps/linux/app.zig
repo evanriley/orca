@@ -28,6 +28,7 @@ const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const offline = @import("offline.zig");
+const analysis_notice = @import("analysis_notice.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
 const changes = @import("changes.zig");
@@ -183,7 +184,6 @@ pub const SettingsPage = struct {
     subtitle: ?*gtk.Label = null,
     about_header: ?*gtk.Widget = null,
     folder_slot: ?*gtk.Box = null,
-    measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,
     duplicates_row: ?*gtk.Widget = null,
     buffer_value: ?*gtk.Label = null,
@@ -491,6 +491,7 @@ pub const App = struct {
     genres: genres.State = .{},
     folders: folders.State = .{},
     offline: offline.State = .{},
+    analysis_notice: analysis_notice.State = .{},
     folders_count: ?*gtk.Label = null,
     palette: palette.State = .{},
 
@@ -524,7 +525,7 @@ pub const App = struct {
     general: General = .{},
     playback: Playback = .{},
 
-    /// Files Measure Loudness decodes at once; null takes liborca's default.
+    /// Files Analyze music decodes at once; null takes liborca's default.
     analysis_threads: ?u16 = null,
     watch_folders: bool = true,
     watch_row: ?*gtk.Widget = null,

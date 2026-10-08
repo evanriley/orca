@@ -145,6 +145,7 @@ const struct_pairs = .{
     .{ c_api.DuplicateScanOptions, c.orca_duplicate_scan_options },
     .{ c_api.BackfillOptions, c.orca_backfill_options },
     .{ c_api.BackfillPendingView, c.orca_backfill_pending },
+    .{ c_api.AnalysisCoverageView, c.orca_analysis_coverage },
     .{ c_api.CommandCompletedEvent, c.orca_command_completed_event },
     .{ c_api.JobProgressEvent, c.orca_job_progress_event },
     .{ c_api.JobFinishedEvent, c.orca_job_finished_event },
@@ -907,6 +908,9 @@ const non_enum_constants = [_][]const u8{
     "ORCA_DEVICE_BIT_DEPTH_32",
     "ORCA_DEVICE_SAMPLE_FORMAT_UNKNOWN",
     "ORCA_MAX_WAITING_JOBS",
+    "ORCA_MEASUREMENT_LOUDNESS_AND_CHECKS",
+    "ORCA_MEASUREMENT_FINGERPRINT",
+    "ORCA_MEASUREMENT_FEATURES",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -1202,6 +1206,12 @@ test "the Daily Mix arrays orca.h declares are as long as liborca's" {
 test "the tag-write digest orca.h declares is as long as liborca's" {
     try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @sizeOf(metadata.mutation.Digest));
     try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @typeInfo(@FieldType(c_api.TagWriteDigest, "bytes")).array.len);
+}
+
+test "the missing-measurement flags orca.h declares are liborca's" {
+    try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_LOUDNESS_AND_CHECKS), c_api.measurement_loudness_and_checks);
+    try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_FINGERPRINT), c_api.measurement_fingerprint);
+    try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_FEATURES), c_api.measurement_features);
 }
 
 test "the lyrics fetch flag orca.h declares is liborca's" {

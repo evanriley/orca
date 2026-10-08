@@ -87,6 +87,23 @@ pub fn analysisSelectors(
     };
 }
 
+/// Names the measurements in `selectors`, not the undecodable verdict: it
+/// changes when a measurement is added, removed or reordered, or its
+/// algorithm, version or parameters change.
+pub fn measurementSetId(selectors: *const database.repository.AnalysisSelectors) u64 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    for (selectors.measurements) |selector| {
+        hasher.update(&.{selector.kind});
+        hasher.update(std.mem.asBytes(&std.mem.nativeToLittle(u64, selector.algorithm_id.len)));
+        hasher.update(selector.algorithm_id);
+        hasher.update(std.mem.asBytes(&std.mem.nativeToLittle(u32, selector.algorithm_version)));
+        hasher.update(&selector.parameter_hash);
+    }
+    var digest: [8]u8 = undefined;
+    hasher.final(&digest);
+    return std.mem.readInt(u64, &digest, .little);
+}
+
 /// The audio features measurement under the default
 /// `audio_features.Parameters`, the only parameters the Library's
 /// `file_audio_features` triggers recognise.
@@ -620,6 +637,19 @@ fn sameIdentity(first: storage.StorageIdentity, second: storage.StorageIdentity)
     return first.inode == second.inode and
         first.size == second.size and
         first.modified_ns == second.modified_ns;
+}
+
+test "the measurement set changes with a measurement's version and ignores the decoder set" {
+    const codecs = codec.CodecRegistry.builtins();
+    var selectors = analysisSelectors(.{}, &codecs);
+    const current = measurementSetId(&selectors);
+    try std.testing.expectEqual(current, measurementSetId(&analysisSelectors(.{}, &codecs)));
+
+    selectors.undecodable.algorithm_version += 1;
+    try std.testing.expectEqual(current, measurementSetId(&selectors));
+
+    selectors.measurements[2].algorithm_version += 1;
+    try std.testing.expect(measurementSetId(&selectors) != current);
 }
 
 test "service streams codecs into cache and cancellation publishes nothing" {
