@@ -350,6 +350,7 @@ const commands = [_]Command{
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
     .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--limit N] [--explain]", .min_arguments = 2, .max_arguments = 8, .run = previewRadio },
+    .{ .name = "home", .usage = "home DATABASE", .min_arguments = 1, .max_arguments = 1, .run = showHome },
     .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N]", .min_arguments = 1, .max_arguments = 4, .run = showDailyMixes },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{
@@ -5255,6 +5256,82 @@ fn previewRadio(context: Context) !void {
                 pick.score, c.artist, c.genre, c.audio, c.co_listening, c.era, c.taste, c.jitter,
             });
         }
+    }
+}
+
+/// `orca-cli home DATABASE`: prints every Home page section for the current
+/// time in UTC, reading the database alone.
+fn showHome(context: Context) !void {
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const time: liborca.HomeLocalTime = .{ .now_s = std.Io.Clock.real.now(context.io).toSeconds(), .utc_offset_s = 0 };
+
+    const week = try runtime.libraryListeningWeek(library, time);
+    try stdout.print("listening week: {d} min, {d} plays, {d} artists, {d} releases; previous week {d} min, {d} plays\n", .{
+        week.listened_ms / 60_000, week.plays, week.artists, week.releases, week.previous_listened_ms / 60_000, week.previous_plays,
+    });
+    try stdout.writeAll("\tper day (oldest first, min):");
+    for (week.day_listened_ms) |ms| try stdout.print(" {d}", .{ms / 60_000});
+    try stdout.writeAll("\n");
+    if (week.top_artist) |*artist| {
+        try stdout.print("\ttop artist: {s} ({d} plays)\n", .{ artist.name.slice(), artist.plays });
+    }
+
+    var releases: [liborca.home_max_items]liborca.HomePlayedRelease = undefined;
+    var tracks: [liborca.home_max_items]liborca.HomeTrack = undefined;
+    var artists: [liborca.home_max_items]liborca.HomeTopArtist = undefined;
+
+    const recent = try runtime.libraryRecentReleases(library, time, &releases);
+    try writeHomeReleases(stdout, "recently played releases", releases[0..recent]);
+    const rediscover = try runtime.libraryRediscover(library, time, &releases);
+    try writeHomeReleases(stdout, "rediscover", releases[0..rediscover]);
+    const never = try runtime.libraryNeverPlayed(library, &tracks);
+    try writeHomeTracks(stdout, "never played", tracks[0..never]);
+    const deep = try runtime.libraryDeepCuts(library, time, &tracks);
+    try writeHomeTracks(stdout, "deep cuts", tracks[0..deep]);
+    const top = try runtime.libraryTopArtists(library, time, 30, &artists);
+    try stdout.print("top artists, 30 days ({d})\n", .{top});
+    for (artists[0..top], 1..) |*artist, rank| try stdout.print("\t{d}\t{s}\t{d} plays\n", .{ rank, artist.name.slice(), artist.plays });
+
+    const formats = try runtime.libraryFormats(library);
+    try stdout.print("formats: {d} releases, {d} tracks, {d} min; flac={d} alac={d} mp3={d} other={d}\n", .{
+        formats.releases, formats.tracks, formats.duration_ms / 60_000, formats.flac, formats.alac, formats.mp3, formats.other,
+    });
+
+    const day = try runtime.libraryOnThisDay(library, time);
+    try stdout.print("on this day: added this week={d} this year={d}, never played {d}% of {d} tracks\n", .{
+        day.added_this_week, day.added_this_year, day.never_played_percent, day.tracks,
+    });
+    if (day.top_release) |*release| {
+        try stdout.print("\ta year ago: {s} - {s} ({d} plays)\n", .{ release.artist.slice(), release.title.slice(), release.plays });
+    }
+
+    const age = try runtime.libraryHistoryAge(library, time);
+    try stdout.print("history: {d} listening days, recording {s}", .{ age.listen_days, if (age.recording_enabled) "on" else "off" });
+    if (age.first_listen_at) |first| {
+        try stdout.writeAll(", first listen ");
+        try writeIsoUtc(stdout, first);
+    }
+    try stdout.writeAll("\n");
+}
+
+fn writeHomeReleases(stdout: *std.Io.Writer, title: []const u8, releases: []const liborca.HomePlayedRelease) !void {
+    try stdout.print("{s} ({d})\n", .{ title, releases.len });
+    for (releases, 1..) |*release, rank| {
+        try stdout.print("\t{d}\t{s} - {s}\t{d} plays, last ", .{ rank, release.artist.slice(), release.title.slice(), release.plays });
+        try writeIsoUtc(stdout, release.last_played_at);
+        try stdout.writeAll("\n");
+    }
+}
+
+fn writeHomeTracks(stdout: *std.Io.Writer, title: []const u8, tracks: []const liborca.HomeTrack) !void {
+    try stdout.print("{s} ({d})\n", .{ title, tracks.len });
+    for (tracks, 1..) |*track, rank| {
+        try stdout.print("\t{d}\t{d}\t{s} - {s}\t{s}\t{d} plays\n", .{
+            rank, track.track_id, track.artist.slice(), track.title.slice(), track.release.slice(), track.plays,
+        });
     }
 }
 

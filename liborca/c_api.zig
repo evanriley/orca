@@ -1013,6 +1013,104 @@ pub const DailyMixEntriesView = extern struct {
 
 pub const DailyMixEntriesCallback = *const fn (?*anyopaque, *const DailyMixEntriesView) callconv(.c) void;
 
+pub const HomeTopArtistView = extern struct {
+    artist_id: i64,
+    name: StringView,
+    plays: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const ListeningWeekView = extern struct {
+    first_local_day: i64,
+    day_listened_ms: [core.runtime.home_week_days]u64,
+    listened_ms: u64,
+    previous_listened_ms: u64,
+    top_artist: HomeTopArtistView,
+    plays: u32,
+    artists: u32,
+    releases: u32,
+    previous_plays: u32,
+    has_top_artist: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const ListeningWeekCallback = *const fn (?*anyopaque, *const ListeningWeekView) callconv(.c) void;
+
+pub const HomeTopArtistsView = extern struct {
+    artists: [*]const HomeTopArtistView,
+    count: usize,
+};
+
+pub const HomeTopArtistsCallback = *const fn (?*anyopaque, *const HomeTopArtistsView) callconv(.c) void;
+
+pub const HomePlayedReleaseView = extern struct {
+    release_id: i64,
+    title: StringView,
+    artist: StringView,
+    last_played_at: i64,
+    plays: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const HomePlayedReleasesView = extern struct {
+    releases: [*]const HomePlayedReleaseView,
+    count: usize,
+};
+
+pub const HomePlayedReleasesCallback = *const fn (?*anyopaque, *const HomePlayedReleasesView) callconv(.c) void;
+
+pub const HomeTrackView = extern struct {
+    track_id: i64,
+    artist_id: i64,
+    release_id: i64,
+    title: StringView,
+    artist: StringView,
+    release: StringView,
+    added_at: i64,
+    plays: u32,
+    has_artist_id: u8,
+    has_release_id: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const HomeTracksView = extern struct {
+    tracks: [*]const HomeTrackView,
+    count: usize,
+};
+
+pub const HomeTracksCallback = *const fn (?*anyopaque, *const HomeTracksView) callconv(.c) void;
+
+pub const HomeFormatsView = extern struct {
+    releases: u64,
+    tracks: u64,
+    duration_ms: u64,
+    flac: u64,
+    alac: u64,
+    mp3: u64,
+    other: u64,
+};
+
+pub const OnThisDayView = extern struct {
+    top_release: HomePlayedReleaseView,
+    added_this_week: u32,
+    added_this_year: u32,
+    tracks: u32,
+    never_played_tracks: u32,
+    never_played_percent: u8,
+    has_top_release: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const OnThisDayCallback = *const fn (?*anyopaque, *const OnThisDayView) callconv(.c) void;
+
+pub const HistoryAgeView = extern struct {
+    first_listen_at: i64,
+    listen_days: u32,
+    has_first_listen_at: u8,
+    recording_enabled: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
 pub const HealthIssueView = extern struct {
     kind: u8,
     severity: u8,
@@ -3662,6 +3760,245 @@ pub export fn orca_library_daily_mix_entries(
     };
     const result: DailyMixEntriesView = .{ .entries = &views, .count = count };
     visit(context, &result);
+    return .ok;
+}
+
+fn exportHomeTopArtist(artist: *const core.runtime.HomeTopArtist) HomeTopArtistView {
+    return .{ .artist_id = artist.artist_id, .name = stringView(artist.name.slice()), .plays = artist.plays };
+}
+
+fn exportHomePlayedRelease(release: *const core.runtime.HomePlayedRelease) HomePlayedReleaseView {
+    return .{
+        .release_id = release.release_id,
+        .title = stringView(release.title.slice()),
+        .artist = stringView(release.artist.slice()),
+        .last_played_at = release.last_played_at,
+        .plays = release.plays,
+    };
+}
+
+fn exportHomeTrack(track: *const core.runtime.HomeTrack) HomeTrackView {
+    return .{
+        .track_id = track.track_id,
+        .artist_id = track.artist_id orelse 0,
+        .release_id = track.release_id orelse 0,
+        .title = stringView(track.title.slice()),
+        .artist = stringView(track.artist.slice()),
+        .release = stringView(track.release.slice()),
+        .added_at = track.added_at,
+        .plays = track.plays,
+        .has_artist_id = @intFromBool(track.artist_id != null),
+        .has_release_id = @intFromBool(track.release_id != null),
+    };
+}
+
+pub export fn orca_library_listening_week(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?ListeningWeekCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const week = box.runtime.libraryListeningWeek(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }) catch |err|
+        return box.fail(@src(), err);
+    const view: ListeningWeekView = .{
+        .first_local_day = week.first_local_day,
+        .day_listened_ms = week.day_listened_ms,
+        .listened_ms = week.listened_ms,
+        .previous_listened_ms = week.previous_listened_ms,
+        .top_artist = if (week.top_artist) |*artist| exportHomeTopArtist(artist) else .{ .artist_id = 0, .name = stringView(""), .plays = 0 },
+        .plays = week.plays,
+        .artists = week.artists,
+        .releases = week.releases,
+        .previous_plays = week.previous_plays,
+        .has_top_artist = @intFromBool(week.top_artist != null),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+fn visitPlayedReleases(
+    box: *RuntimeBox,
+    found: anyerror!usize,
+    releases: []const core.runtime.HomePlayedRelease,
+    context: ?*anyopaque,
+    visit: HomePlayedReleasesCallback,
+    comptime src: std.builtin.SourceLocation,
+) Status {
+    const count = found catch |err| return box.fail(src, err);
+    var views: [core.runtime.home_max_items]HomePlayedReleaseView = undefined;
+    for (views[0..count], releases[0..count]) |*view, *release| view.* = exportHomePlayedRelease(release);
+    const result: HomePlayedReleasesView = .{ .releases = &views, .count = count };
+    visit(context, &result);
+    return .ok;
+}
+
+pub export fn orca_library_recent_releases(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?HomePlayedReleasesCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var releases: [core.runtime.home_max_items]core.runtime.HomePlayedRelease = undefined;
+    const found = box.runtime.libraryRecentReleases(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &releases);
+    return visitPlayedReleases(box, found, &releases, context, visit, @src());
+}
+
+pub export fn orca_library_rediscover(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?HomePlayedReleasesCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var releases: [core.runtime.home_max_items]core.runtime.HomePlayedRelease = undefined;
+    const found = box.runtime.libraryRediscover(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &releases);
+    return visitPlayedReleases(box, found, &releases, context, visit, @src());
+}
+
+fn visitHomeTracks(
+    box: *RuntimeBox,
+    found: anyerror!usize,
+    tracks: []const core.runtime.HomeTrack,
+    context: ?*anyopaque,
+    visit: HomeTracksCallback,
+    comptime src: std.builtin.SourceLocation,
+) Status {
+    const count = found catch |err| return box.fail(src, err);
+    var views: [core.runtime.home_max_items]HomeTrackView = undefined;
+    for (views[0..count], tracks[0..count]) |*view, *track| view.* = exportHomeTrack(track);
+    const result: HomeTracksView = .{ .tracks = &views, .count = count };
+    visit(context, &result);
+    return .ok;
+}
+
+pub export fn orca_library_never_played(
+    runtime: ?*Runtime,
+    library: Handle,
+    context: ?*anyopaque,
+    callback: ?HomeTracksCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var tracks: [core.runtime.home_max_items]core.runtime.HomeTrack = undefined;
+    const found = box.runtime.libraryNeverPlayed(importLibrary(library), &tracks);
+    return visitHomeTracks(box, found, &tracks, context, visit, @src());
+}
+
+pub export fn orca_library_deep_cuts(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?HomeTracksCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var tracks: [core.runtime.home_max_items]core.runtime.HomeTrack = undefined;
+    const found = box.runtime.libraryDeepCuts(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &tracks);
+    return visitHomeTracks(box, found, &tracks, context, visit, @src());
+}
+
+pub export fn orca_library_top_artists(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    days: u32,
+    context: ?*anyopaque,
+    callback: ?HomeTopArtistsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var artists: [core.runtime.home_max_items]core.runtime.HomeTopArtist = undefined;
+    const count = box.runtime.libraryTopArtists(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, days, &artists) catch |err|
+        return box.fail(@src(), err);
+    var views: [core.runtime.home_max_items]HomeTopArtistView = undefined;
+    for (views[0..count], artists[0..count]) |*view, *artist| view.* = exportHomeTopArtist(artist);
+    const result: HomeTopArtistsView = .{ .artists = &views, .count = count };
+    visit(context, &result);
+    return .ok;
+}
+
+pub export fn orca_library_formats(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*HomeFormatsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const formats = box.runtime.libraryFormats(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    destination.* = .{
+        .releases = formats.releases,
+        .tracks = formats.tracks,
+        .duration_ms = formats.duration_ms,
+        .flac = formats.flac,
+        .alac = formats.alac,
+        .mp3 = formats.mp3,
+        .other = formats.other,
+    };
+    return .ok;
+}
+
+pub export fn orca_library_on_this_day(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?OnThisDayCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const day = box.runtime.libraryOnThisDay(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }) catch |err|
+        return box.fail(@src(), err);
+    const view: OnThisDayView = .{
+        .top_release = if (day.top_release) |*release| exportHomePlayedRelease(release) else .{
+            .release_id = 0,
+            .title = stringView(""),
+            .artist = stringView(""),
+            .last_played_at = 0,
+            .plays = 0,
+        },
+        .added_this_week = day.added_this_week,
+        .added_this_year = day.added_this_year,
+        .tracks = day.tracks,
+        .never_played_tracks = day.never_played_tracks,
+        .never_played_percent = day.never_played_percent,
+        .has_top_release = @intFromBool(day.top_release != null),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_history_age(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    output: ?*HistoryAgeView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const age = box.runtime.libraryHistoryAge(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .first_listen_at = age.first_listen_at orelse 0,
+        .listen_days = age.listen_days,
+        .has_first_listen_at = @intFromBool(age.first_listen_at != null),
+        .recording_enabled = @intFromBool(age.recording_enabled),
+    };
     return .ok;
 }
 

@@ -28,6 +28,7 @@ const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_radio = @import("runtime_radio.zig");
+const runtime_home = @import("runtime_home.zig");
 const runtime_mixes = @import("runtime_mixes.zig");
 const runtime_resume = @import("runtime_resume.zig");
 const runtime_zones = @import("runtime_zones.zig");
@@ -122,6 +123,17 @@ pub const DailyMixesState = library_pass.daily_mixes.State;
 pub const DailyMixLeftOut = library_pass.daily_mixes.LeftOutCounts;
 pub const DailyMixMakeup = library_pass.daily_mixes.Makeup;
 pub const DailyMixEntry = library_pass.daily_mixes.Entry;
+pub const HomeLocalTime = library_pass.home.LocalTime;
+pub const HomeListeningWeek = library_pass.home.ListeningWeek;
+pub const HomeTopArtist = library_pass.home.TopArtist;
+pub const HomePlayedRelease = library_pass.home.PlayedRelease;
+pub const HomeTrack = library_pass.home.HomeTrack;
+pub const HomeFormats = library_pass.home.Formats;
+pub const HomeOnThisDay = library_pass.home.OnThisDay;
+pub const HomeHistoryAge = library_pass.home.HistoryAge;
+pub const home_max_items = library_pass.home.max_items;
+pub const home_week_days = library_pass.home.week_days;
+pub const home_max_text_bytes = library_pass.home.max_text_bytes;
 pub const max_daily_mixes = library_pass.daily_mixes.max_mixes;
 pub const max_daily_mix_entries = library_pass.daily_mixes.max_entries;
 pub const daily_mix_not_for_me_days = library_pass.daily_mixes.not_for_me_days;
@@ -2269,6 +2281,60 @@ pub const OrcaRuntime = struct {
     /// analysed.
     pub fn libraryStats(self: *OrcaRuntime, library: LibraryHandle) !database.LibraryStats {
         return (try libraryDatabase(self, library)).stats.stats();
+    }
+
+    /// Listening per local day over the last 7 days (today last), the week's
+    /// totals, its most played Artist and the 7 days before, for Home.
+    pub fn libraryListeningWeek(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime) !HomeListeningWeek {
+        return runtime_home.libraryListeningWeek(self, library, time);
+    }
+
+    /// Writes the Releases most recently played, latest first, into
+    /// `output`; at most `home_max_items`.
+    pub fn libraryRecentReleases(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, output: []HomePlayedRelease) !usize {
+        return runtime_home.libraryRecentReleases(self, library, time, output);
+    }
+
+    /// Writes the Releases played 10 or more times and not in the last 180
+    /// days into `output`; at most `home_max_items`.
+    pub fn libraryRediscover(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, output: []HomePlayedRelease) !usize {
+        return runtime_home.libraryRediscover(self, library, time, output);
+    }
+
+    /// Writes the Tracks never played, newest added first, into `output`; at
+    /// most `home_max_items`.
+    pub fn libraryNeverPlayed(self: *OrcaRuntime, library: LibraryHandle, output: []HomeTrack) !usize {
+        return runtime_home.libraryNeverPlayed(self, library, output);
+    }
+
+    /// Writes the Tracks played at most once by the 10 Artists most played in
+    /// the last 90 days into `output`; at most `home_max_items`.
+    pub fn libraryDeepCuts(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, output: []HomeTrack) !usize {
+        return runtime_home.libraryDeepCuts(self, library, time, output);
+    }
+
+    /// Writes the Artists most played in the last `days` days into `output`;
+    /// at most `home_max_items`.
+    pub fn libraryTopArtists(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, days: u32, output: []HomeTopArtist) !usize {
+        return runtime_home.libraryTopArtists(self, library, time, days, output);
+    }
+
+    /// Track counts by codec of the preferred file, with the Release and
+    /// Track counts and the total duration.
+    pub fn libraryFormats(self: *OrcaRuntime, library: LibraryHandle) !HomeFormats {
+        return runtime_home.libraryFormats(self, library);
+    }
+
+    /// What was played on this date a year ago, Tracks added this local week
+    /// and year, and the share of Tracks never played.
+    pub fn libraryOnThisDay(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime) !HomeOnThisDay {
+        return runtime_home.libraryOnThisDay(self, library, time);
+    }
+
+    /// The first listen, the local days with listens and whether listens are
+    /// recorded, for Home's low-history states.
+    pub fn libraryHistoryAge(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime) !HomeHistoryAge {
+        return runtime_home.libraryHistoryAge(self, library, time);
     }
 
     /// The services Orca takes data from, in `ProviderSourceId` order.

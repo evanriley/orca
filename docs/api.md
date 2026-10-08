@@ -565,6 +565,30 @@ section lists the entry points, errors and limits.
   as a manual playlist and returns its id.
   See [discovery.md](discovery.md#daily-mixes).
 
+#### Home
+
+Each query takes the Library and a `HomeLocalTime{ now_s, utc_offset_s }`,
+reads the database alone, and is bounded: lists fill a caller-supplied slice
+of at most `home_max_items` (24) entries and return the count, strings are
+`HomeText` values cut at `home_max_text_bytes` (256). An empty Library or an
+empty history gives empty lists and zero numbers. See
+[discovery.md](discovery.md#home).
+
+- `libraryListeningWeek(library, time)`: `HomeListeningWeek` with the time
+  listened on each of the last `home_week_days` (7) local days (today last),
+  the week's total, plays, distinct Artists and Releases, the most played
+  Artist, and the previous 7 days' total and plays.
+- `libraryRecentReleases`, `libraryRediscover(library, time, out)`:
+  `HomePlayedRelease` lists.
+- `libraryNeverPlayed(library, out)`, `libraryDeepCuts(library, time, out)`:
+  `HomeTrack` lists.
+- `libraryTopArtists(library, time, days, out)`: `HomeTopArtist` list.
+- `libraryFormats(library)`: `HomeFormats` with the Release, Track and
+  duration totals and Tracks by FLAC, ALAC, MP3 and other, summing to the
+  Track count.
+- `libraryOnThisDay(library, time)`: `HomeOnThisDay`.
+- `libraryHistoryAge(library, time)`: `HomeHistoryAge`.
+
 ### Playlists
 
 `libraryPlaylists`, `libraryCreatePlaylist`, `libraryRenamePlaylist`,

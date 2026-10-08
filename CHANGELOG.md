@@ -4,6 +4,12 @@
 
 ### Added
 
+- Home queries: `libraryListeningWeek`, `libraryRecentReleases`,
+  `libraryRediscover`, `libraryNeverPlayed`, `libraryDeepCuts`,
+  `libraryTopArtists`, `libraryFormats`, `libraryOnThisDay`,
+  `libraryHistoryAge`, their `orca_library_*` C ABI counterparts and
+  `orca-cli home` give every number and list of the Home page as bounded,
+  read-only queries taking the time and UTC offset.
 - Daily Mixes: `startDailyMixes` (Job kind `daily_mixes`),
   `libraryDailyMixes`, `libraryDailyMixEntries`, `libraryNotForMe`,
   `libraryClearNotForMe`, `libraryResetRecommendations`,

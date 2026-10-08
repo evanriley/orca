@@ -294,6 +294,18 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_library_save_daily_mix` (writes the new playlist id).
   `ORCA_STATUS_NOT_FOUND` for an unknown mix or Track. See
   [discovery.md](discovery.md#daily-mixes).
+- Home page queries, each taking `now_s` and `utc_offset_s` where the answer
+  depends on the date: `orca_library_listening_week`
+  (`orca_listening_week_view`), `orca_library_recent_releases` and
+  `orca_library_rediscover` (`orca_home_played_releases_view`),
+  `orca_library_never_played` and `orca_library_deep_cuts`
+  (`orca_home_tracks_view`), `orca_library_top_artists`
+  (`orca_home_top_artists_view`), `orca_library_formats`
+  (`orca_home_formats`), `orca_library_on_this_day`
+  (`orca_on_this_day_view`) and `orca_library_history_age`
+  (`orca_history_age`). Lists hold at most 24 entries and are valid only in
+  their callback; a NULL callback or output is `ORCA_STATUS_INVALID_ARGUMENT`.
+  See [discovery.md](discovery.md#home).
 - Listen settings: `orca_library_set_listen_policy`,
   `orca_library_set_listen_recording`, `orca_library_clear_listens` (keeps
   ratings and loves).

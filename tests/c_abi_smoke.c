@@ -229,6 +229,48 @@ static void capture_daily_mixes(void *context, const orca_daily_mixes_view *mixe
     capture->state = mixes->state;
 }
 
+typedef struct home_capture {
+    size_t calls;
+    size_t count;
+    uint64_t listened_ms;
+    uint32_t plays;
+    uint8_t flag;
+} home_capture;
+
+static void capture_listening_week(void *context, const orca_listening_week_view *week) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->listened_ms = week->listened_ms + week->day_listened_ms[6];
+    capture->plays = week->plays;
+    capture->flag = week->has_top_artist;
+}
+
+static void capture_home_releases(void *context, const orca_home_played_releases_view *releases) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = releases->count;
+}
+
+static void capture_home_tracks(void *context, const orca_home_tracks_view *tracks) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = tracks->count;
+}
+
+static void capture_home_artists(void *context, const orca_home_top_artists_view *artists) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = artists->count;
+}
+
+static void capture_on_this_day(void *context, const orca_on_this_day_view *day) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = day->tracks;
+    capture->plays = day->never_played_percent;
+    capture->flag = day->has_top_release;
+}
+
 static void capture_daily_mix_entries(void *context, const orca_daily_mix_entries_view *entries) {
     size_t *calls = context;
     *calls += 1 + entries->count;
@@ -6027,6 +6069,59 @@ int main(int argc, char **argv) {
             ORCA_STATUS_NOT_FOUND ||
         mix_playlist != 0)
         return 637;
+
+    home_capture home = {0};
+    if (orca_library_listening_week(runtime, library, 2000000000, 3600, &home,
+                                    capture_listening_week) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.listened_ms != 0 || home.plays != 0 || home.flag != 0)
+        return 638;
+    memset(&home, 0, sizeof home);
+    if (orca_library_recent_releases(runtime, library, 2000000000, 3600, &home,
+                                     capture_home_releases) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count != 0)
+        return 639;
+    memset(&home, 0, sizeof home);
+    if (orca_library_rediscover(runtime, library, 2000000000, 3600, &home,
+                                capture_home_releases) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count != 0)
+        return 640;
+    memset(&home, 0, sizeof home);
+    if (orca_library_never_played(runtime, library, &home, capture_home_tracks) !=
+            ORCA_STATUS_OK ||
+        home.calls != 1 || home.count == 0 || home.count > 24)
+        return 641;
+    memset(&home, 0, sizeof home);
+    if (orca_library_deep_cuts(runtime, library, 2000000000, 3600, &home,
+                               capture_home_tracks) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count != 0)
+        return 642;
+    memset(&home, 0, sizeof home);
+    if (orca_library_top_artists(runtime, library, 2000000000, 3600, 30, &home,
+                                 capture_home_artists) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count != 0)
+        return 643;
+    orca_home_formats formats;
+    memset(&formats, 0, sizeof formats);
+    if (orca_library_formats(runtime, library, &formats) != ORCA_STATUS_OK ||
+        formats.tracks == 0 ||
+        formats.flac + formats.alac + formats.mp3 + formats.other != formats.tracks)
+        return 644;
+    memset(&home, 0, sizeof home);
+    if (orca_library_on_this_day(runtime, library, 2000000000, 3600, &home,
+                                 capture_on_this_day) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count == 0 || home.plays != 100 || home.flag != 0)
+        return 645;
+    orca_history_age age;
+    memset(&age, 0xff, sizeof age);
+    if (orca_library_history_age(runtime, library, 2000000000, 3600, &age) != ORCA_STATUS_OK ||
+        age.has_first_listen_at != 0 || age.listen_days != 0 || age.recording_enabled != 1)
+        return 646;
+    if (orca_library_listening_week(runtime, library, 2000000000, 3600, NULL, NULL) !=
+            ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_formats(runtime, library, NULL) != ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_history_age(runtime, library, 2000000000, 3600, NULL) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 647;
 
     uint64_t listens = 1;
     if (orca_library_listens_recorded(runtime, library, &listens) != ORCA_STATUS_OK ||

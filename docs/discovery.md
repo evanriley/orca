@@ -405,3 +405,37 @@ with an unexpired Not for me mark and Recordings with no present file.
 
 The C ABI counterparts are in [frontends.md](frontends.md#surface), and
 `orca-cli mixes` lists and prints mixes ([cli.md](cli.md)).
+
+## Home
+
+The Home page numbers and lists come from bounded, read-only queries on the
+Library's database, with no network. Each takes `now_s` and `utc_offset_s`.
+A local day is `floor((t + utc_offset_s) / 86400)`; a week is the 7 local days
+ending today, and the previous week the 7 before. A listen counts when it
+started at or before `now_s`. Lists hold at most 24 items.
+
+- Listening week: time listened is the sum of `listened_ms` per local day;
+  plays, distinct Artists and Releases are counted over listens of the week,
+  each listen resolved to the first Track of its Recording. The most played
+  Artist and the previous week's time and plays accompany it.
+- Recently played: Releases ordered by their latest play.
+- Rediscover: Releases played at least 10 times and not in the last 180 days,
+  most played first.
+- Never played: Tracks whose Recording has no listen, newest added first.
+- Deep cuts: Tracks played at most once by the 10 Artists most played in the
+  last 90 days, unplayed first.
+- Top Artists: the most played Artists over the last N days.
+- Formats: Tracks by the codec of their preferred file as FLAC, ALAC, MP3 or
+  other; a Track with no preferred file is other, so the four sum to the Track
+  count. Release and Track counts and the total duration come with it.
+- On this day: the most played Release on this date a year ago (29 February
+  maps to 28 February), Tracks added this local week (from Monday 00:00) and
+  this local year, and the share of Tracks never played, rounded to a whole
+  percent.
+- History age: the first listen, the distinct local days with listens, and
+  whether listen recording is on.
+
+All-time counts come from the stored play statistics and windowed counts from
+the listens, as Radio and Daily Mixes read them. The C ABI counterparts are in
+[frontends.md](frontends.md#surface) and `orca-cli home` prints every section
+([cli.md](cli.md)).

@@ -1202,6 +1202,143 @@ typedef void (*orca_daily_mix_entries_callback)(
     const orca_daily_mix_entries_view *entries
 );
 
+/* An Artist and how often it was heard in a window. */
+typedef struct orca_home_top_artist {
+    int64_t artist_id;
+    orca_string_view name;
+    uint32_t plays;
+    uint8_t reserved[4];
+} orca_home_top_artist;
+
+/* Listening over the 7 local days ending today, and the 7 before. Days are
+ * local to the UTC offset passed with the query. `first_local_day` (days since
+ * the Unix epoch) is the first of the 7; `day_listened_ms` holds the time
+ * listened per day with today last. `top_artist` is meaningful only when
+ * `has_top_artist` is 1. */
+typedef struct orca_listening_week_view {
+    int64_t first_local_day;
+    uint64_t day_listened_ms[7];
+    uint64_t listened_ms;
+    uint64_t previous_listened_ms;
+    orca_home_top_artist top_artist;
+    uint32_t plays;
+    uint32_t artists;
+    uint32_t releases;
+    uint32_t previous_plays;
+    uint8_t has_top_artist;
+    uint8_t reserved[7];
+} orca_listening_week_view;
+
+typedef void (*orca_listening_week_callback)(
+    void *context,
+    const orca_listening_week_view *week
+);
+
+/* `artists` holds `count` (at most 24) Artists, most played first, valid only
+ * for the duration of the callback. */
+typedef struct orca_home_top_artists_view {
+    const orca_home_top_artist *artists;
+    size_t count;
+} orca_home_top_artists_view;
+
+typedef void (*orca_home_top_artists_callback)(
+    void *context,
+    const orca_home_top_artists_view *artists
+);
+
+/* A Release with how often it was heard and when last (Unix s, 0 when
+ * never). */
+typedef struct orca_home_played_release {
+    int64_t release_id;
+    orca_string_view title;
+    orca_string_view artist;
+    int64_t last_played_at;
+    uint32_t plays;
+    uint8_t reserved[4];
+} orca_home_played_release;
+
+/* `releases` holds `count` (at most 24) Releases in order, valid only for the
+ * duration of the callback. */
+typedef struct orca_home_played_releases_view {
+    const orca_home_played_release *releases;
+    size_t count;
+} orca_home_played_releases_view;
+
+typedef void (*orca_home_played_releases_callback)(
+    void *context,
+    const orca_home_played_releases_view *releases
+);
+
+/* A Track on the Home page. `artist_id` and `release_id` are meaningful only
+ * when `has_artist_id` and `has_release_id` are 1. `added_at` is Unix s. */
+typedef struct orca_home_track {
+    int64_t track_id;
+    int64_t artist_id;
+    int64_t release_id;
+    orca_string_view title;
+    orca_string_view artist;
+    orca_string_view release;
+    int64_t added_at;
+    uint32_t plays;
+    uint8_t has_artist_id;
+    uint8_t has_release_id;
+    uint8_t reserved[2];
+} orca_home_track;
+
+/* `tracks` holds `count` (at most 24) Tracks in order, valid only for the
+ * duration of the callback. */
+typedef struct orca_home_tracks_view {
+    const orca_home_track *tracks;
+    size_t count;
+} orca_home_tracks_view;
+
+typedef void (*orca_home_tracks_callback)(
+    void *context,
+    const orca_home_tracks_view *tracks
+);
+
+/* The Library by format of each Track's preferred file. flac + alac + mp3 +
+ * other equals `tracks`; a Track with no preferred file counts as other. */
+typedef struct orca_home_formats {
+    uint64_t releases;
+    uint64_t tracks;
+    uint64_t duration_ms;
+    uint64_t flac;
+    uint64_t alac;
+    uint64_t mp3;
+    uint64_t other;
+} orca_home_formats;
+
+/* `top_release` is the Release most played on this date a year ago, and is
+ * meaningful only when `has_top_release` is 1. `added_this_week` counts Tracks
+ * added since Monday 00:00 local, `added_this_year` since 1 January local.
+ * `never_played_percent` is rounded to a whole percent. */
+typedef struct orca_on_this_day_view {
+    orca_home_played_release top_release;
+    uint32_t added_this_week;
+    uint32_t added_this_year;
+    uint32_t tracks;
+    uint32_t never_played_tracks;
+    uint8_t never_played_percent;
+    uint8_t has_top_release;
+    uint8_t reserved[6];
+} orca_on_this_day_view;
+
+typedef void (*orca_on_this_day_callback)(
+    void *context,
+    const orca_on_this_day_view *day
+);
+
+/* `first_listen_at` (Unix s) is meaningful only when `has_first_listen_at` is
+ * 1. `listen_days` counts distinct local days with a listen. */
+typedef struct orca_history_age {
+    int64_t first_listen_at;
+    uint32_t listen_days;
+    uint8_t has_first_listen_at;
+    uint8_t recording_enabled;
+    uint8_t reserved[2];
+} orca_history_age;
+
 typedef struct orca_artist_totals {
     /* Summed over the Tracks `track_count` counts; a Track with no known
      * duration adds 0. */
@@ -2964,6 +3101,89 @@ orca_status orca_library_daily_mix_entries(
     int64_t mix_id,
     void *context,
     orca_daily_mix_entries_callback callback
+);
+/* The Home page queries below read the database alone, with no network, and
+ * take the clock and the UTC offset in seconds from the caller. Every list
+ * holds at most 24 items. An empty Library or an empty history gives empty
+ * lists and zero numbers. A NULL callback is INVALID_ARGUMENT. */
+
+/* Invokes the callback once with the listening week. */
+orca_status orca_library_listening_week(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_listening_week_callback callback
+);
+/* Releases most recently played, latest first. */
+orca_status orca_library_recent_releases(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_home_played_releases_callback callback
+);
+/* Releases played 10 times or more and not at all in the last 180 days. */
+orca_status orca_library_rediscover(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_home_played_releases_callback callback
+);
+/* Tracks never played, newest added first. */
+orca_status orca_library_never_played(
+    orca_runtime *runtime,
+    orca_handle library,
+    void *context,
+    orca_home_tracks_callback callback
+);
+/* Tracks played at most once by the 10 Artists most played in the last 90
+ * days. */
+orca_status orca_library_deep_cuts(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_home_tracks_callback callback
+);
+/* The Artists most played in the last `days` days. */
+orca_status orca_library_top_artists(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    uint32_t days,
+    void *context,
+    orca_home_top_artists_callback callback
+);
+/* Writes the Library's format counts. */
+orca_status orca_library_formats(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_home_formats *output
+);
+/* Invokes the callback once with what happened on this date a year ago and
+ * the counts of Tracks added this week and year. */
+orca_status orca_library_on_this_day(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_on_this_day_callback callback
+);
+/* Writes how long the listening history is and whether listens are recorded. */
+orca_status orca_library_history_age(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    orca_history_age *output
 );
 /* Leaves the Track's Recording out of Daily Mixes, at once, and out of Radio
  * for 90 days from `now_s`; marking it again restarts the 90 days. NOT_FOUND

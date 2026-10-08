@@ -15,6 +15,7 @@ pub const property_backfill = @import("property_backfill.zig");
 pub const consistency_pass = @import("consistency_pass.zig");
 pub const daily_mixes = @import("daily_mixes.zig");
 pub const discovery = @import("discovery.zig");
+pub const home = @import("home.zig");
 pub const scanner = @import("scanner.zig");
 pub const smart_playlist = @import("smart_playlist.zig");
 pub const tag_reader = @import("tag_reader.zig");
@@ -58,6 +59,7 @@ test {
     _ = @import("consistency_pass.zig");
     _ = @import("daily_mixes.zig");
     _ = @import("discovery.zig");
+    _ = @import("home.zig");
     _ = @import("scanner.zig");
     _ = @import("smart_playlist.zig");
     _ = @import("tag_reader.zig");

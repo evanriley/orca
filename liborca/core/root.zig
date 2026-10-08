@@ -17,6 +17,7 @@ pub const runtime = @import("runtime.zig");
 pub const runtime_jobs = @import("runtime_jobs.zig");
 pub const runtime_listens = @import("runtime_listens.zig");
 pub const runtime_maintenance = @import("runtime_maintenance.zig");
+pub const runtime_home = @import("runtime_home.zig");
 pub const runtime_mixes = @import("runtime_mixes.zig");
 pub const runtime_mixes_tests = @import("runtime_mixes_tests.zig");
 pub const runtime_artist_info = @import("runtime_artist_info.zig");
@@ -69,6 +70,7 @@ test {
     _ = @import("runtime_jobs.zig");
     _ = @import("runtime_listens.zig");
     _ = @import("runtime_maintenance.zig");
+    _ = @import("runtime_home.zig");
     _ = @import("runtime_mixes.zig");
     _ = @import("runtime_mixes_tests.zig");
     _ = @import("runtime_artist_info.zig");
