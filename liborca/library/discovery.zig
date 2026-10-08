@@ -6,6 +6,7 @@ const sqlite = database.sqlite;
 const AudioFeatures = database.AudioFeatures;
 const track_play_file = @import("../database/repository/tracks.zig").track_play_file;
 const optionalInt64 = @import("../database/columns.zig").optionalInt64;
+const home = @import("home.zig");
 
 pub const max_pool = 2000;
 pub const max_picks = 512;
@@ -506,9 +507,8 @@ pub const Ranking = struct {
 /// sound and co-listening of the Artists' Tracks. Never-played Recordings are
 /// candidates whatever `radio.include_unplayed` says.
 pub fn rankCluster(arena: std.mem.Allocator, library: *const Source, cluster: Cluster, mix: MixFilter) !Ranking {
-    var profile = try buildClusterProfile(arena, library, cluster, mix.now_s);
-    var weights = Components.weightsAt((RadioOptions{}).explore);
-    if (profile.sound.isEmpty()) weights = weights.withoutAudio();
+    const profile = try buildArtistsProfile(arena, library, cluster.artists, .{ .genre = cluster.genre_id }, true, mix.now_s);
+    const weights = mixWeights(&profile);
 
     var filter = mix.filter();
     var relaxed_recent = false;
@@ -518,8 +518,17 @@ pub fn rankCluster(arena: std.mem.Allocator, library: *const Source, cluster: Cl
         relaxed_recent = true;
         candidates = try loadCandidates(arena, library, &profile, &filter, .{});
     }
+    return .{ .items = try rankScored(arena, candidates, &profile, weights, mix), .relaxed_recent = relaxed_recent };
+}
+
+fn mixWeights(profile: *const Profile) Components {
+    const weights = Components.weightsAt((RadioOptions{}).explore);
+    return if (profile.sound.isEmpty()) weights.withoutAudio() else weights;
+}
+
+fn rankScored(arena: std.mem.Allocator, candidates: []Candidate, profile: *const Profile, weights: Components, mix: MixFilter) ![]const Ranked {
     const session: Session = .{ .now_s = mix.now_s, .seed = mix.seed };
-    for (candidates) |*candidate| score(candidate, &profile, weights, session);
+    for (candidates) |*candidate| score(candidate, profile, weights, session);
     const order = try arena.alloc(u32, candidates.len);
     for (order, 0..) |*slot, index| slot.* = @intCast(index);
     std.mem.sort(u32, order, candidates, byScore);
@@ -527,9 +536,91 @@ pub fn rankCluster(arena: std.mem.Allocator, library: *const Source, cluster: Cl
     const items = try arena.alloc(Ranked, candidates.len);
     for (items, order) |*item, index| {
         const candidate = &candidates[index];
-        item.* = rankedFrom(candidate, candidate.score, reasonFor(candidate, &profile, weights, mix.now_s));
+        item.* = rankedFrom(candidate, candidate.score, reasonFor(candidate, profile, weights, mix.now_s));
     }
-    return .{ .items = items, .relaxed_recent = relaxed_recent };
+    return items;
+}
+
+/// What a theme mix draws from.
+pub const Theme = union(enum) {
+    /// Tracks on Releases from the decade starting this year.
+    decade: i64,
+    /// Tracks on Releases none of whose Tracks were played, by Artists heard
+    /// since this time.
+    new_to_you: i64,
+    /// Tracks played at most `home.deep_cut_max_plays` times by these Artists.
+    deep_cuts: []const i64,
+    /// Tracks in the top third of the Library's energy.
+    upbeat,
+    /// Tracks in the bottom third of the Library's energy.
+    wind_down,
+};
+
+/// The listener's profile theme mixes are ranked against.
+pub const Taste = struct {
+    profile: Profile,
+    weights: Components,
+};
+
+/// A profile of the Tracks of `artists`, weighted by how many of their
+/// Tracks are most played, for ranking theme mixes.
+pub fn tasteOf(arena: std.mem.Allocator, library: *const Source, artists: []const i64, now_s: i64) !Taste {
+    const profile = try buildArtistsProfile(arena, library, artists, .recent, false, now_s);
+    return .{ .profile = profile, .weights = mixWeights(&profile) };
+}
+
+/// Eligible Recordings of `theme`, at most `max_pool` in a seeded order,
+/// ranked against `taste`. Never-played Recordings are candidates whatever
+/// `radio.include_unplayed` says; Upbeat and Wind down hold only Recordings
+/// whose Track has an energy.
+pub fn rankTheme(arena: std.mem.Allocator, library: *const Source, taste: *const Taste, theme: Theme, mix: MixFilter) !Ranking {
+    var filter = mix.filter();
+    var relaxed_recent = false;
+    var candidates = try themeCandidates(arena, library, &filter, theme);
+    if (candidates.len == 0 and filter.avoid_after != null) {
+        filter.avoid_after = null;
+        relaxed_recent = true;
+        candidates = try themeCandidates(arena, library, &filter, theme);
+    }
+    return .{ .items = try rankScored(arena, candidates, &taste.profile, taste.weights, mix), .relaxed_recent = relaxed_recent };
+}
+
+const decade_condition = "tracks.release_id IN (SELECT id FROM releases WHERE " ++ bare_release_year ++ " BETWEEN ?8 AND ?8 + 9)";
+const new_to_you_condition =
+    "tracks.release_id IS NOT NULL\n" ++
+    "  AND NOT EXISTS (SELECT 1 FROM tracks AS sibling JOIN recording_play_stats AS sibling_stats\n" ++
+    "      ON sibling_stats.recording_id = sibling.recording_id\n" ++
+    "      WHERE sibling.release_id = tracks.release_id AND sibling_stats.play_count > 0)\n" ++
+    "  AND tracks.artist_id IN (SELECT heard_track.artist_id FROM listens JOIN tracks AS heard_track\n" ++
+    "      ON heard_track.id = (SELECT min(first.id) FROM tracks AS first WHERE first.recording_id = listens.recording_id)\n" ++
+    "      WHERE listens.started_at >= ?8 AND listens.started_at <= ?1 AND heard_track.artist_id IS NOT NULL)";
+const deep_cuts_condition =
+    "tracks.artist_id IN (SELECT value FROM json_each(?8))\n" ++
+    "  AND COALESCE((SELECT deep.play_count FROM recording_play_stats AS deep WHERE deep.recording_id = tracks.recording_id), 0) <= " ++
+    std.fmt.comptimePrint("{d}", .{home.deep_cut_max_plays});
+const featured_condition =
+    "?8 IS NULL AND EXISTS (SELECT 1 FROM files AS play_file JOIN file_audio_features AS features\n" ++
+    "      ON features.file_id = play_file.id AND features.source_identity = play_file.content_hash\n" ++
+    "      WHERE play_file.id = " ++ track_play_file ++ " AND play_file.content_hash_algorithm = 1)";
+
+fn themeCandidates(arena: std.mem.Allocator, library: *const Source, filter: *const Filter, theme: Theme) ![]Candidate {
+    const db = library.database;
+    var pool: Pool = .{};
+    switch (theme) {
+        .decade => |year| try pool.add(arena, db, bucketSql(decade_condition), filter, year, max_pool),
+        .new_to_you => |since| try pool.add(arena, db, bucketSql(new_to_you_condition), filter, since, max_pool),
+        .deep_cuts => |artists| try pool.add(arena, db, bucketSql(deep_cuts_condition), filter, try jsonIds(arena, artists), max_pool),
+        .upbeat, .wind_down => try pool.add(arena, db, bucketSql(featured_condition), filter, null, max_pool),
+    }
+    return candidateDetails(arena, library, filter, pool.ids.items, themeEnergy(theme));
+}
+
+fn themeEnergy(theme: Theme) EnergyFocus {
+    return switch (theme) {
+        .upbeat => .{ .high = true },
+        .wind_down => .{ .low = true },
+        .decade, .new_to_you, .deep_cuts => .{},
+    };
 }
 
 /// Eligible Recordings played at least once but not since `unplayed_since`,
@@ -584,11 +675,11 @@ fn rankedFrom(candidate: *const Candidate, value: f64, reason: PickReason) Ranke
     };
 }
 
-fn buildClusterProfile(arena: std.mem.Allocator, library: *const Source, cluster: Cluster, now_s: i64) !Profile {
+fn buildArtistsProfile(arena: std.mem.Allocator, library: *const Source, artists: []const i64, seed: Seed, own_artists: bool, now_s: i64) !Profile {
     const db = library.database;
     var statement = try db.prepare(seedTracksSql("tracks.artist_id IN (SELECT value FROM json_each(?1))"));
     defer statement.deinit();
-    try statement.bindText(1, try jsonIds(arena, cluster.artists));
+    try statement.bindText(1, try jsonIds(arena, artists));
     var tracks: std.ArrayList(SeedTrack) = .empty;
     while (try statement.step() == .row) try tracks.append(arena, .{
         .track_id = statement.columnInt64(0),
@@ -597,9 +688,9 @@ fn buildClusterProfile(arena: std.mem.Allocator, library: *const Source, cluster
         .year = optionalInt64(statement, 3),
     });
 
-    var profile: Profile = .{ .seed = .{ .genre = cluster.genre_id }, .seed_tracks = tracks.items, .own_artists = true };
+    var profile: Profile = .{ .seed = seed, .seed_tracks = tracks.items, .own_artists = own_artists };
     try profileArtists(arena, library, &profile);
-    for (cluster.artists) |artist| try profile.artists.put(arena, artist, 1);
+    if (own_artists) for (artists) |artist| try profile.artists.put(arena, artist, 1);
     try profileGenres(arena, db, &profile);
     profileYears(arena, &profile);
     try profileSound(arena, library, &profile);
@@ -623,22 +714,37 @@ pub const LeftOutScope = union(enum) {
     artists: []const i64,
     /// Recordings played at least once but not since this time.
     unplayed_since: i64,
+    /// Recordings of a theme mix.
+    theme: Theme,
 };
 
 /// Counts the Recordings in `scope` the mix exclusions left out. Recently
 /// played ones count only under `avoid_after`, null when the avoid window
 /// was off or relaxed.
 pub fn leftOut(arena: std.mem.Allocator, library: *const Source, scope: LeftOutScope, now_s: i64, avoid_after: ?i64) !LeftOut {
+    if (scope == .theme and scope.theme == .upbeat) return leftOutByEnergy(arena, library, .{ .high = true }, now_s, avoid_after);
+    if (scope == .theme and scope.theme == .wind_down) return leftOutByEnergy(arena, library, .{ .low = true }, now_s, avoid_after);
     var statement = try library.database.prepare(switch (scope) {
-        .artists => leftOutSql("tracks.artist_id IN (SELECT value FROM json_each(?2))"),
+        .artists => leftOutSql("tracks.artist_id IN (SELECT value FROM json_each(?8))"),
         .unplayed_since => leftOutSql("tracks.recording_id IN (SELECT recording_id FROM recording_play_stats\n" ++
-            "    WHERE play_count > 0 AND last_played_at <= ?2)"),
+            "    WHERE play_count > 0 AND last_played_at <= ?8)"),
+        .theme => |theme| switch (theme) {
+            .decade => leftOutSql(decade_condition),
+            .new_to_you => leftOutSql(new_to_you_condition),
+            .deep_cuts => leftOutSql(deep_cuts_condition),
+            .upbeat, .wind_down => unreachable,
+        },
     });
     defer statement.deinit();
     try statement.bindInt64(1, now_s);
     switch (scope) {
-        .artists => |ids| try statement.bindText(2, try jsonIds(arena, ids)),
-        .unplayed_since => |since| try statement.bindInt64(2, since),
+        .artists => |ids| try statement.bindText(8, try jsonIds(arena, ids)),
+        .unplayed_since => |since| try statement.bindInt64(8, since),
+        .theme => |theme| switch (theme) {
+            .decade, .new_to_you => |value| try statement.bindInt64(8, value),
+            .deep_cuts => |ids| try statement.bindText(8, try jsonIds(arena, ids)),
+            .upbeat, .wind_down => unreachable,
+        },
     }
     try statement.bindOptionalInt64(3, avoid_after);
     if (try statement.step() != .row) return .{};
@@ -650,11 +756,53 @@ pub fn leftOut(arena: std.mem.Allocator, library: *const Source, scope: LeftOutS
     };
 }
 
+/// Counts like `leftOut` over the Recordings with audio features whose
+/// energy `focus` admits, reading at most `max_pool` left-out Recordings.
+fn leftOutByEnergy(arena: std.mem.Allocator, library: *const Source, focus: EnergyFocus, now_s: i64, avoid_after: ?i64) !LeftOut {
+    var statement = try library.database.prepare(
+        "SELECT track_id, hated, not_for_me, live, recent\n" ++ comptime leftOutRows(featured_condition) ++
+            "\nWHERE hated OR not_for_me OR live OR recent ORDER BY recording_id LIMIT " ++
+            std.fmt.comptimePrint("{d}", .{max_pool}) ++ ";",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, now_s);
+    try statement.bindOptionalInt64(3, avoid_after);
+    const Row = struct { hated: bool, not_for_me: bool, live: bool, recent: bool };
+    var ids: std.ArrayList(i64) = .empty;
+    var rows: std.ArrayList(Row) = .empty;
+    while (try statement.step() == .row) {
+        try ids.append(arena, statement.columnInt64(0));
+        try rows.append(arena, .{
+            .hated = statement.columnInt64(1) != 0,
+            .not_for_me = statement.columnInt64(2) != 0,
+            .live = statement.columnInt64(3) != 0,
+            .recent = statement.columnInt64(4) != 0,
+        });
+    }
+    const features = try arena.alloc(?AudioFeatures, ids.items.len);
+    try library.audio_features.tracksFeatures(arena, ids.items, features);
+    var result: LeftOut = .{};
+    for (rows.items, features) |row, f| {
+        if (!energyMatches(focus, f)) continue;
+        if (row.hated) {
+            result.hated += 1;
+        } else if (row.not_for_me) {
+            result.not_for_me += 1;
+        } else if (row.live) {
+            result.live += 1;
+        } else if (row.recent) result.recent += 1;
+    }
+    return result;
+}
+
 fn leftOutSql(comptime scope: []const u8) [:0]const u8 {
     return "SELECT COALESCE(sum(hated), 0), COALESCE(sum(NOT hated AND not_for_me), 0),\n" ++
         "    COALESCE(sum(NOT hated AND NOT not_for_me AND live), 0),\n" ++
-        "    COALESCE(sum(NOT hated AND NOT not_for_me AND NOT live AND recent), 0)\n" ++
-        "FROM (SELECT tracks.recording_id,\n" ++
+        "    COALESCE(sum(NOT hated AND NOT not_for_me AND NOT live AND recent), 0)\n" ++ comptime leftOutRows(scope) ++ ";";
+}
+
+fn leftOutRows(comptime scope: []const u8) []const u8 {
+    return "FROM (SELECT tracks.recording_id, min(tracks.id) AS track_id,\n" ++
         "    EXISTS (SELECT 1 FROM feedback WHERE feedback.recording_id = tracks.recording_id AND feedback.score = -1) AS hated,\n" ++
         "    EXISTS (SELECT 1 FROM recommendation_feedback AS not_for_me\n" ++
         "        WHERE not_for_me.recording_id = tracks.recording_id AND not_for_me.expires_at > ?1) AS not_for_me,\n" ++
@@ -664,7 +812,7 @@ fn leftOutSql(comptime scope: []const u8) [:0]const u8 {
         "        WHERE recent.recording_id = tracks.recording_id AND recent.last_played_at > ?3) AS recent\n" ++
         "  FROM tracks WHERE tracks.recording_id IS NOT NULL AND (" ++ scope ++ ")\n" ++
         "    AND EXISTS (SELECT 1 FROM locations WHERE locations.file_id = " ++ track_play_file ++ " AND locations.state = 'present')\n" ++
-        "  GROUP BY tracks.recording_id);";
+        "  GROUP BY tracks.recording_id)";
 }
 
 pub fn validateRadio(seed: Seed, options: RadioOptions) !void {
@@ -757,7 +905,7 @@ const Profile = struct {
     colisten: CoListening = .{},
 };
 
-const year_of_track_release =
+pub const year_of_track_release =
     "CASE WHEN substr(track_release.release_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]' " ++
     "THEN CAST(substr(track_release.release_date, 1, 4) AS INTEGER) END";
 
@@ -1135,6 +1283,7 @@ const Pool = struct {
         switch (@TypeOf(argument)) {
             []const u8 => try statement.bindText(8, argument),
             f64 => try statement.bindDouble(8, argument),
+            i64 => try statement.bindInt64(8, argument),
             @TypeOf(null) => try statement.bindOptionalInt64(8, null),
             else => @compileError("unsupported bucket argument"),
         }

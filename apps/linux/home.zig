@@ -35,6 +35,7 @@ const mix_hero_pixels = 220;
 const list_art_pixels = 44;
 const playing_art_pixels = 52;
 const on_this_day_pixels = 56;
+const anniversary_limit = 4;
 const chart_bar_pixels = 80;
 const chart_bar_min_width = 12;
 const top_name_width = 120;
@@ -67,7 +68,8 @@ const Layout = struct {
     pixels: c_int = 140,
 };
 
-const ListKind = enum { rediscover, never_played, deep_cuts };
+const ListKind = enum { rediscover, deep_cuts };
+const list_kinds = std.enums.values(ListKind).len;
 
 pub const State = struct {
     navigation: ?*adw.NavigationView = null,
@@ -105,12 +107,17 @@ pub const State = struct {
     recent_ids: [recent_limit]i64 = @splat(0),
     recent_count: usize = 0,
 
+    unplayed_section: ?*gtk.Widget = null,
+    unplayed_flow: ?*gtk.FlowBox = null,
+    unplayed_ids: [recent_limit]i64 = @splat(0),
+    unplayed_count: usize = 0,
+
     list_row: ?*gtk.Widget = null,
-    list_sections: [3]?*gtk.Widget = @splat(null),
-    list_boxes: [3]?*gtk.ListBox = @splat(null),
-    list_ids: [3][list_limit]i64 = @splat(@splat(0)),
-    list_counts: [3]usize = @splat(0),
-    list_fillers: [2]?*gtk.Widget = @splat(null),
+    list_sections: [list_kinds]?*gtk.Widget = @splat(null),
+    list_boxes: [list_kinds]?*gtk.ListBox = @splat(null),
+    list_ids: [list_kinds][list_limit]i64 = @splat(@splat(0)),
+    list_counts: [list_kinds]usize = @splat(0),
+    list_fillers: [list_kinds - 1]?*gtk.Widget = @splat(null),
 
     top_panel: ?*gtk.Widget = null,
     top_list: ?*gtk.ListBox = null,
@@ -119,17 +126,19 @@ pub const State = struct {
     collection_albums: ?*gtk.Label = null,
     collection_tracks: ?*gtk.Label = null,
     collection_hours: ?*gtk.Label = null,
+    format_rows: [4]?*gtk.Widget = @splat(null),
     format_bars: [4]?*gtk.Widget = @splat(null),
     format_counts: [4]?*gtk.Label = @splat(null),
+    day_panel: ?*gtk.Widget = null,
+    anniversary_box: ?*gtk.Widget = null,
+    anniversary_ids: [anniversary_limit]i64 = @splat(0),
+    year_ago: ?*gtk.Widget = null,
     day_release: ?*gtk.Widget = null,
     day_cover: ?*gtk.Widget = null,
     day_when: ?*gtk.Label = null,
     day_title: ?*gtk.Label = null,
     day_artist: ?*gtk.Label = null,
     day_release_id: ?i64 = null,
-    day_week: ?*gtk.Label = null,
-    day_year: ?*gtk.Label = null,
-    day_never: ?*gtk.Label = null,
 
     grid_scroller: ?*gtk.Widget = null,
     grid_flow: ?*gtk.FlowBox = null,
@@ -290,6 +299,7 @@ fn refresh(self: *App) void {
     if (home.week_card) |card| gtk.gtk_widget_set_visible(card, boolean(week_shown));
     if (week_shown) showWeek(self, library, time);
     showRecent(self, library, time, recording);
+    showUnplayed(self, library, time);
     showLists(self, library, time, recording and enough_history);
     const top_shown = recording and stats;
     if (home.top_panel) |top_panel| gtk.gtk_widget_set_visible(top_panel, boolean(top_shown));
@@ -302,7 +312,7 @@ fn refresh(self: *App) void {
 
 fn hideAll(self: *App) void {
     const home = &self.home;
-    for ([_]?*gtk.Widget{ home.mixes_section, home.week_card, home.recent_section, home.list_row, home.top_panel, home.recording_note }) |maybe|
+    for ([_]?*gtk.Widget{ home.mixes_section, home.week_card, home.recent_section, home.unplayed_section, home.list_row, home.top_panel, home.recording_note }) |maybe|
         if (maybe) |widget| gtk.gtk_widget_set_visible(widget, gtk.false_);
 }
 
@@ -475,10 +485,25 @@ fn writeArtists(writer: *std.Io.Writer, mix: *const liborca.DailyMix) !void {
     if (artists.len > 3) try writer.writeAll(" and more");
 }
 
+fn writeKindSummary(writer: *std.Io.Writer, mix: *const liborca.DailyMix) !void {
+    switch (mix.kind) {
+        .genre => {},
+        .rarely_played => try writer.writeAll("Tracks from your library you haven't heard in a year"),
+        .decade => if (mix.decade) |decade|
+            try writer.print("Tracks released in the {d}s", .{decade})
+        else
+            try writer.print("Tracks released in the {s}", .{mix.name()}),
+        .new_to_you => try writer.writeAll("Albums you haven't played by artists you listen to"),
+        .deep_cuts => try writer.writeAll("Rarely played tracks by artists you play most"),
+        .upbeat => try writer.writeAll("The most energetic third of your analyzed music"),
+        .wind_down => try writer.writeAll("The calmest third of your analyzed music"),
+    }
+}
+
 fn artistsText(buffer: []u8, mix: *const liborca.DailyMix) [:0]const u8 {
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    if (mix.kind == .rarely_played)
-        writer.writeAll("Tracks from your library you haven't heard in a year") catch {}
+    if (mix.kind == .rarely_played or mix.mixArtists().len == 0)
+        writeKindSummary(&writer, mix) catch {}
     else
         writeArtists(&writer, mix) catch {};
     buffer[writer.end] = 0;
@@ -931,7 +956,7 @@ fn whenText(buffer: []u8, played_at: i64, time: liborca.HomeLocalTime) []const u
     return strings.terminated(buffer, std.mem.span(date));
 }
 
-fn newRecentTile(self: *App, release: *const liborca.HomePlayedRelease, pixels: c_int, time: liborca.HomeLocalTime) *gtk.Widget {
+fn newReleaseTile(self: *App, release_id: i64, title_text: []const u8, detail_text: [:0]const u8, pixels: c_int) *gtk.Widget {
     const tile = box(gtk.ORIENTATION_VERTICAL, 0, "home-recent-tile");
     const frame = gtk.gtk_overlay_new();
     gtk.gtk_widget_add_css_class(frame, "home-recent-art");
@@ -942,18 +967,23 @@ fn newRecentTile(self: *App, release: *const liborca.HomePlayedRelease, pixels: 
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), sizer);
     gtk.g_object_set_data(frame, "orca-art-sizer", sizer);
     const cover = playlists.fillingCover(self, 40);
-    art.show(self, cover, art.Key.release(release.release_id, .medium));
+    art.show(self, cover, art.Key.release(release_id, .medium));
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), cover);
     gtk.g_object_set_data(tile, "orca-art", frame);
     var title_buffer: [300]u8 = undefined;
-    const title = ellipsized(strings.terminated(&title_buffer, if (release.title.slice().len != 0) release.title.slice() else "Untitled").ptr, "home-tile-title");
+    const title = ellipsized(strings.terminated(&title_buffer, if (title_text.len != 0) title_text else "Untitled").ptr, "home-tile-title");
     gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, title), 1);
-    var when_buffer: [64]u8 = undefined;
-    var detail_buffer: [400]u8 = undefined;
-    const detail = ellipsized(strings.format(&detail_buffer, "{s} · {s}", .{ release.artist.slice(), whenText(&when_buffer, release.last_played_at, time) }).ptr, "home-tile-detail");
+    const detail = ellipsized(detail_text.ptr, "home-tile-detail");
     gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, detail), 1);
     append(tile, &.{ frame, title, detail });
     return tile;
+}
+
+fn appendReleaseTile(flow: *gtk.FlowBox, tile: *gtk.Widget, index: usize, columns: c_uint, accessible: [:0]const u8) void {
+    gtk.gtk_flow_box_append(flow, tile);
+    const cell = gtk.gtk_widget_get_parent(tile) orelse return;
+    gtk.gtk_widget_set_visible(cell, boolean(index < columns));
+    setAccessibleLabel(cell, accessible.ptr);
 }
 
 fn showRecent(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLocalTime, recording: bool) void {
@@ -965,16 +995,49 @@ fn showRecent(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLoca
     const count = if (recording) self.runtime.libraryRecentReleases(library, time, &releases) catch 0 else 0;
     for (releases[0..count], 0..) |*release, index| {
         home.recent_ids[index] = release.release_id;
-        const tile = newRecentTile(self, release, home.recent_layout.pixels, time);
-        gtk.gtk_flow_box_append(flow, tile);
-        if (gtk.gtk_widget_get_parent(tile)) |cell| {
-            gtk.gtk_widget_set_visible(cell, boolean(index < home.recent_layout.columns));
-            var accessible: [700]u8 = undefined;
-            setAccessibleLabel(cell, strings.format(&accessible, "{s} by {s}", .{ release.title.slice(), release.artist.slice() }).ptr);
-        }
+        var when_buffer: [64]u8 = undefined;
+        var detail: [400]u8 = undefined;
+        const tile = newReleaseTile(self, release.release_id, release.title.slice(), strings.format(&detail, "{s} · {s}", .{
+            release.artist.slice(), whenText(&when_buffer, release.last_played_at, time),
+        }), home.recent_layout.pixels);
+        var accessible: [700]u8 = undefined;
+        appendReleaseTile(flow, tile, index, home.recent_layout.columns, strings.format(&accessible, "{s} by {s}", .{ release.title.slice(), release.artist.slice() }));
     }
     home.recent_count = count;
     if (home.recent_section) |section| gtk.gtk_widget_set_visible(section, boolean(count != 0));
+}
+
+fn showUnplayed(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLocalTime) void {
+    const home = &self.home;
+    const flow = home.unplayed_flow orelse return;
+    gtk.gtk_flow_box_remove_all(flow);
+    home.unplayed_count = 0;
+    var releases: [recent_limit]liborca.HomeRelease = undefined;
+    const count = self.runtime.libraryUnplayedReleases(library, time, &releases) catch 0;
+    for (releases[0..count], 0..) |*release, index| {
+        home.unplayed_ids[index] = release.release_id;
+        var detail: [400]u8 = undefined;
+        var accessible: [700]u8 = undefined;
+        const detail_text = if (release.year) |year|
+            strings.format(&detail, "{s} · {d}", .{ release.artist.slice(), year })
+        else
+            strings.terminated(&detail, release.artist.slice());
+        const tile = newReleaseTile(self, release.release_id, release.title.slice(), detail_text, home.recent_layout.pixels);
+        const spoken = if (release.year) |year|
+            strings.format(&accessible, "{s} by {s}, {d}", .{ release.title.slice(), release.artist.slice(), year })
+        else
+            strings.format(&accessible, "{s} by {s}", .{ release.title.slice(), release.artist.slice() });
+        appendReleaseTile(flow, tile, index, home.recent_layout.columns, spoken);
+    }
+    home.unplayed_count = count;
+    if (home.unplayed_section) |section| gtk.gtk_widget_set_visible(section, boolean(count != 0));
+}
+
+fn unplayedActivated(_: ?*anyopaque, child: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const index = gtk.gtk_flow_box_child_get_index(gtk.cast(gtk.FlowBoxChild, child));
+    if (index < 0 or @as(usize, @intCast(index)) >= self.home.unplayed_count) return;
+    window.showAlbum(self, self.home.unplayed_ids[@intCast(index)]);
 }
 
 fn recentActivated(_: ?*anyopaque, child: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1090,18 +1153,6 @@ fn showLists(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLocal
     fillList(self, .rediscover, rediscovered);
 
     var tracks: [list_limit]liborca.HomeTrack = undefined;
-    const never = self.runtime.libraryNeverPlayed(library, &tracks) catch 0;
-    if (home.list_boxes[@backingInt(ListKind.never_played)]) |list| for (tracks[0..never], 0..) |*track, index| {
-        home.list_ids[@backingInt(ListKind.never_played)][index] = track.release_id orelse 0;
-        var line: [600]u8 = undefined;
-        var reason: [128]u8 = undefined;
-        var writer = std.Io.Writer.fixed(reason[0 .. reason.len - 1]);
-        radio_reason.writePart(&writer, .{ .kind = .added, .a = track.added_at }, "", clock) catch {};
-        reason[writer.end] = 0;
-        gtk.gtk_list_box_append(list, listRow(self, track.release_id, strings.format(&line, "{s} · {s}", .{ track.title.slice(), track.artist.slice() }), reason[0..writer.end :0]));
-    };
-    fillList(self, .never_played, never);
-
     const deep = if (with_history) self.runtime.libraryDeepCuts(library, time, &tracks) catch 0 else 0;
     if (home.list_boxes[@backingInt(ListKind.deep_cuts)]) |list| for (tracks[0..deep], 0..) |*track, index| {
         home.list_ids[@backingInt(ListKind.deep_cuts)][index] = track.release_id orelse 0;
@@ -1116,7 +1167,7 @@ fn showLists(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLocal
         gtk.gtk_list_box_append(list, listRow(self, track.release_id, strings.format(&line, "{s} · {s}", .{ track.title.slice(), track.artist.slice() }), reason[0..writer.end :0]));
     };
     fillList(self, .deep_cuts, deep);
-    if (home.list_row) |row| gtk.gtk_widget_set_visible(row, boolean(rediscovered + never + deep != 0));
+    if (home.list_row) |row| gtk.gtk_widget_set_visible(row, boolean(rediscovered + deep != 0));
 }
 
 fn panel(title: [*:0]const u8) *gtk.Widget {
@@ -1221,6 +1272,7 @@ fn buildCollectionPanel(self: *App) *gtk.Widget {
         gtk.gtk_widget_add_css_class(count, "numeric");
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, count), 1);
         gtk.gtk_widget_set_size_request(count, 58, -1);
+        home.format_rows[index] = row;
         home.format_bars[index] = bar;
         home.format_counts[index] = gtk.cast(gtk.Label, count);
         append(row, &.{ caption, bar, count });
@@ -1239,26 +1291,18 @@ fn showCollection(self: *App, library: liborca.LibraryHandle) void {
     setText(home.collection_hours, strings.format(&buffer, "{f} h", .{strings.grouped((formats.duration_ms + 1_800_000) / 3_600_000)}));
     const counts = [_]u64{ formats.flac, formats.alac, formats.mp3, formats.other };
     const total: f64 = @floatFromInt(@max(formats.tracks, 1));
-    for (counts, home.format_bars, home.format_counts) |count, bar, count_label| {
+    for (counts, home.format_rows, home.format_bars, home.format_counts) |count, row, bar, count_label| {
+        if (row) |widget| gtk.gtk_widget_set_visible(widget, boolean(count != 0));
         if (bar) |widget| gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, widget), @as(f64, @floatFromInt(count)) / total);
         setText(count_label, strings.format(&buffer, "{f}", .{strings.grouped(count)}));
     }
 }
 
-fn factRow(caption: [*:0]const u8, value: *?*gtk.Label) *gtk.Widget {
-    const row = box(gtk.ORIENTATION_HORIZONTAL, 12, "home-fact");
-    const name = label(caption, "home-fact-name");
-    gtk.gtk_widget_set_hexpand(name, gtk.true_);
-    const amount = label(null, "home-fact-value");
-    gtk.gtk_widget_add_css_class(amount, "numeric");
-    value.* = gtk.cast(gtk.Label, amount);
-    append(row, &.{ name, amount });
-    return row;
-}
-
 fn buildDayPanel(self: *App) *gtk.Widget {
     const home = &self.home;
-    const widget = panel("On this day");
+    const widget = panel("This week in music");
+    const anniversaries = box(gtk.ORIENTATION_VERTICAL, 2, "home-anniversaries");
+    home.anniversary_box = anniversaries;
     const release = gtk.gtk_button_new();
     gtk.gtk_widget_add_css_class(release, "flat");
     gtk.gtk_widget_add_css_class(release, "home-day-release");
@@ -1281,13 +1325,11 @@ fn buildDayPanel(self: *App) *gtk.Widget {
     home.day_when = gtk.cast(gtk.Label, when);
     home.day_title = gtk.cast(gtk.Label, title);
     home.day_artist = gtk.cast(gtk.Label, artist);
-    const facts = box(gtk.ORIENTATION_VERTICAL, 4, "home-facts");
-    append(facts, &.{
-        factRow("Added this week", &home.day_week),
-        factRow("Added this year", &home.day_year),
-        factRow("Never played", &home.day_never),
-    });
-    append(widget, &.{ release, facts });
+    const year_ago = box(gtk.ORIENTATION_VERTICAL, 6, "home-year-ago");
+    append(year_ago, &.{ label("A year ago you were playing", "home-year-ago-heading"), release });
+    home.year_ago = year_ago;
+    append(widget, &.{ anniversaries, year_ago });
+    home.day_panel = widget;
     return widget;
 }
 
@@ -1296,24 +1338,65 @@ fn dayReleaseClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     window.showAlbum(self, self.home.day_release_id orelse return);
 }
 
-fn tracksText(buffer: []u8, count: u32) [:0]const u8 {
-    return strings.format(buffer, "{f} {s}", .{ strings.grouped(count), if (count == 1) "track" else "tracks" });
+fn anniversaryClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const position = @intFromPtr(gtk.g_object_get_data(button.?, "orca-anniversary") orelse return);
+    if (position == 0 or position > self.home.anniversary_ids.len) return;
+    window.showAlbum(self, self.home.anniversary_ids[position - 1]);
+}
+
+fn anniversaryButton(self: *App, index: usize, anniversary: *const liborca.HomeAnniversary, today: i64) *gtk.Widget {
+    const day = weekday(today + anniversary.day_offset);
+    const years: []const u8 = if (anniversary.years_ago == 1) "year" else "years";
+    var line: [600]u8 = undefined;
+    var reason: [64]u8 = undefined;
+    const row = listRow(self, anniversary.release_id, strings.format(&line, "{s} · {s}", .{ anniversary.title.slice(), anniversary.artist.slice() }), strings.format(&reason, "{d} {s} ago · {s}", .{
+        anniversary.years_ago, years, if (anniversary.day_offset == 0) "Today" else weekday_short[day],
+    }));
+    const button = gtk.gtk_button_new();
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "home-anniversary");
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), row);
+    var accessible: [700]u8 = undefined;
+    setAccessibleLabel(button, strings.format(&accessible, "{s} by {s}, released {d} {s} ago {s}", .{
+        anniversary.title.slice(), anniversary.artist.slice(), anniversary.years_ago, years, if (anniversary.day_offset == 0) "today" else weekday_long[day],
+    }).ptr);
+    gtk.g_object_set_data(button, "orca-anniversary", @ptrFromInt(index + 1));
+    _ = gtk.signalConnect(button, "clicked", gtk.callback(anniversaryClicked), self);
+    return button;
+}
+
+fn showAnniversaries(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLocalTime) usize {
+    const home = &self.home;
+    const parent = home.anniversary_box orelse return 0;
+    clearBox(parent);
+    var anniversaries: [anniversary_limit]liborca.HomeAnniversary = undefined;
+    const count = self.runtime.libraryReleaseAnniversaries(library, time, &anniversaries) catch 0;
+    const today = @divFloor(time.now_s + time.utc_offset_s, day_s);
+    for (anniversaries[0..count], 0..) |*anniversary, index| {
+        home.anniversary_ids[index] = anniversary.release_id;
+        append(parent, &.{anniversaryButton(self, index, anniversary, today)});
+    }
+    gtk.gtk_widget_set_visible(parent, boolean(count != 0));
+    return count;
 }
 
 fn showOnThisDay(self: *App, library: liborca.LibraryHandle, time: liborca.HomeLocalTime, recording: bool) void {
     const home = &self.home;
-    const day = self.runtime.libraryOnThisDay(library, time) catch return;
-    var buffer: [64]u8 = undefined;
-    setText(home.day_week, tracksText(&buffer, day.added_this_week));
-    setText(home.day_year, tracksText(&buffer, day.added_this_year));
-    setText(home.day_never, strings.format(&buffer, "{d}% of tracks", .{day.never_played_percent}));
-    const release_widget = home.day_release orelse return;
+    const anniversaries = showAnniversaries(self, library, time);
+    const day = self.runtime.libraryOnThisDay(library, time) catch liborca.HomeOnThisDay{};
     const release = if (recording) day.top_release else null;
-    gtk.gtk_widget_set_visible(release_widget, boolean(release != null));
+    if (home.day_panel) |widget| gtk.gtk_widget_set_visible(widget, boolean(anniversaries != 0 or release != null));
+    if (home.year_ago) |widget| {
+        gtk.gtk_widget_set_visible(widget, boolean(release != null));
+        if (anniversaries != 0) gtk.gtk_widget_add_css_class(widget, "after-rows") else gtk.gtk_widget_remove_css_class(widget, "after-rows");
+    }
     home.day_release_id = null;
     const played = release orelse return;
+    const release_widget = home.day_release orelse return;
     home.day_release_id = played.release_id;
     if (home.day_cover) |cover| art.show(self, cover, art.Key.release(played.release_id, .thumb));
+    var buffer: [64]u8 = undefined;
     var when: [128]u8 = undefined;
     const year_ago = gtk.g_date_time_new_from_unix_local(time.now_s) orelse return;
     defer gtk.g_date_time_unref(year_ago);
@@ -1332,7 +1415,7 @@ fn showOnThisDay(self: *App, library: liborca.LibraryHandle, time: liborca.HomeL
     setText(home.day_title, strings.terminated(&title, played.title.slice()));
     setText(home.day_artist, strings.terminated(&artist, played.artist.slice()));
     var accessible: [700]u8 = undefined;
-    setAccessibleLabel(release_widget, strings.format(&accessible, "On this day last year: {s} by {s}", .{ played.title.slice(), played.artist.slice() }).ptr);
+    setAccessibleLabel(release_widget, strings.format(&accessible, "A year ago you were playing {s} by {s}", .{ played.title.slice(), played.artist.slice() }).ptr);
 }
 
 fn contentWidth(self: *App, scroller: *gtk.Widget) f64 {
@@ -1373,12 +1456,12 @@ fn applyLayout(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const self = state(data);
     const home = &self.home;
     home.layout_idle = 0;
-    for ([_]?*gtk.FlowBox{ home.mixes_flow, home.recent_flow, home.grid_flow }, [_]Layout{ home.mixes_layout, home.recent_layout, home.grid_layout }) |maybe, layout| {
+    for ([_]?*gtk.FlowBox{ home.mixes_flow, home.recent_flow, home.unplayed_flow, home.grid_flow }, [_]Layout{ home.mixes_layout, home.recent_layout, home.recent_layout, home.grid_layout }) |maybe, layout| {
         const flow = maybe orelse continue;
         gtk.gtk_flow_box_set_max_children_per_line(flow, layout.columns);
         sizeTiles(flow, layout.pixels);
     }
-    if (home.recent_flow) |flow| showFirstCells(flow, home.recent_layout.columns);
+    for ([_]?*gtk.FlowBox{ home.recent_flow, home.unplayed_flow }) |maybe| if (maybe) |flow| showFirstCells(flow, home.recent_layout.columns);
     return gtk.SOURCE_REMOVE;
 }
 
@@ -1450,6 +1533,20 @@ fn buildRecentSection(self: *App) *gtk.Widget {
     return section;
 }
 
+fn buildUnplayedSection(self: *App) *gtk.Widget {
+    const home = &self.home;
+    const section = box(gtk.ORIENTATION_VERTICAL, 14, "home-section");
+    append(section, &.{sectionTitle("Albums you haven\u{2019}t played")});
+    const flow = newFlow("home-unplayed");
+    setAccessibleLabel(gtk.cast(gtk.Widget, flow), "Albums you haven\u{2019}t played");
+    _ = gtk.signalConnect(flow, "child-activated", gtk.callback(unplayedActivated), self);
+    home.unplayed_flow = flow;
+    append(section, &.{gtk.cast(gtk.Widget, flow)});
+    gtk.gtk_widget_set_visible(section, gtk.false_);
+    home.unplayed_section = section;
+    return section;
+}
+
 fn buildHomePage(self: *App) *gtk.Widget {
     const home = &self.home;
     const content = box(gtk.ORIENTATION_VERTICAL, 40, "home-page");
@@ -1477,7 +1574,6 @@ fn buildHomePage(self: *App) *gtk.Widget {
     gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, lists), gtk.true_);
     append(lists, &.{
         listSection(self, .rediscover, "Rediscover", "Albums you played a lot, then stopped"),
-        listSection(self, .never_played, "Never played", "In your library, waiting"),
         listSection(self, .deep_cuts, "Deep cuts", "Rarely played tracks by artists you play most"),
     });
     for (&home.list_fillers) |*filler| {
@@ -1496,7 +1592,7 @@ fn buildHomePage(self: *App) *gtk.Widget {
     append(panels, &.{ buildTopPanel(self), buildCollectionPanel(self), buildDayPanel(self) });
     append(library_section, &.{ sectionTitle("Your library"), panels });
 
-    append(content, &.{ header, note, buildMixesSection(self), cards, buildRecentSection(self), lists, library_section });
+    append(content, &.{ header, note, buildMixesSection(self), cards, buildRecentSection(self), buildUnplayedSection(self), lists, library_section });
     const scroller = scrollerFor(content);
     home.scroller = scroller;
     watchWidth(self, scroller);
@@ -1839,11 +1935,29 @@ fn showSignals(self: *App, mix: *const liborca.DailyMix) void {
     }
 }
 
+const highlight_open = "<span foreground=\"#F2F2F0\">";
+const highlight_close = "</span>";
+const decade_choice = ". Orca picks the decade you played most in the last 30 days, or the one with the most music in your library.";
+
 fn builtAroundMarkup(buffer: []u8, mix: *const liborca.DailyMix) [:0]const u8 {
-    if (mix.kind == .rarely_played) return strings.terminated(buffer, "Tracks you\u{2019}ve played before but not in the last year.");
-    const escaped = gtk.g_markup_escape_text(mix.name().ptr, @intCast(mix.name().len));
-    defer gtk.g_free(escaped);
-    return strings.format(buffer, "The artists you played most in the last 30 days that share the <span foreground=\"#F2F2F0\">{s}</span> tag.", .{std.mem.span(escaped)});
+    switch (mix.kind) {
+        .rarely_played => return strings.terminated(buffer, "Tracks you\u{2019}ve played before but not in the last year."),
+        .new_to_you => return strings.terminated(buffer, "Albums you haven\u{2019}t played yet by artists you listened to in the last 90 days."),
+        .deep_cuts => return strings.terminated(buffer, "Tracks you\u{2019}ve played once or never by the 10 artists you played most in the last 90 days."),
+        .upbeat => return strings.terminated(buffer, "The most energetic third of your analyzed music."),
+        .wind_down => return strings.terminated(buffer, "The calmest third of your analyzed music."),
+        .decade => {
+            if (mix.decade) |decade| return strings.format(buffer, "Tracks released in the " ++ highlight_open ++ "{d}s" ++ highlight_close ++ decade_choice, .{decade});
+            const escaped = gtk.g_markup_escape_text(mix.name().ptr, @intCast(mix.name().len));
+            defer gtk.g_free(escaped);
+            return strings.format(buffer, "Tracks released in the " ++ highlight_open ++ "{s}" ++ highlight_close ++ decade_choice, .{std.mem.span(escaped)});
+        },
+        .genre => {
+            const escaped = gtk.g_markup_escape_text(mix.name().ptr, @intCast(mix.name().len));
+            defer gtk.g_free(escaped);
+            return strings.format(buffer, "The artists you played most in the last 30 days that share the " ++ highlight_open ++ "{s}" ++ highlight_close ++ " tag.", .{std.mem.span(escaped)});
+        },
+    }
 }
 
 fn leftOutText(buffer: []u8, mix: *const liborca.DailyMix, avoid_days: u8) [:0]const u8 {
@@ -1851,7 +1965,7 @@ fn leftOutText(buffer: []u8, mix: *const liborca.DailyMix, avoid_days: u8) [:0]c
     var texts: [6][]const u8 = undefined;
     var count: usize = 0;
     const left = mix.left_out;
-    if (avoid_days != 0 and mix.kind == .genre) {
+    if (avoid_days != 0 and mix.kind != .rarely_played) {
         texts[count] = std.fmt.bufPrint(&parts[count], "anything played in the last {d} {s}", .{ avoid_days, if (avoid_days == 1) "day" else "days" }) catch "";
         count += 1;
     }

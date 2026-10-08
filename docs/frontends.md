@@ -289,7 +289,10 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `orca_daily_mixes_request`; a Job of kind `ORCA_JOB_KIND_DAILY_MIXES`;
   `ORCA_STATUS_INVALID_ARGUMENT` for `force` above 1),
   `orca_library_daily_mixes` (one callback-scoped `orca_daily_mixes_view`
-  with an `orca_daily_mixes_state` and up to 6 `orca_daily_mix_view`s),
+  with an `orca_daily_mixes_state` and up to 6 `orca_daily_mix_view`s; a
+  view's `kind` is an `orca_daily_mix_kind`, `ORCA_DAILY_MIX_KIND_GENRE` to
+  `ORCA_DAILY_MIX_KIND_WIND_DOWN`, and `decade` is the first year of a decade
+  mix's decade, 0 for other kinds),
   `orca_library_daily_mix_entries` (up to 25 entries with reasons in one
   callback-scoped `orca_daily_mix_entries_view`), `orca_library_not_for_me`,
   `orca_library_clear_not_for_me`, `orca_library_reset_recommendations` and
@@ -301,7 +304,10 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   (`orca_listening_week_view`), `orca_library_recent_releases` and
   `orca_library_rediscover` (`orca_home_played_releases_view`),
   `orca_library_never_played` and `orca_library_deep_cuts`
-  (`orca_home_tracks_view`), `orca_library_top_artists`
+  (`orca_home_tracks_view`), `orca_library_unplayed_releases`
+  (`orca_home_releases_view`, with `orca_home_release_class` values in
+  `release_class`), `orca_library_release_anniversaries`
+  (`orca_release_anniversaries_view`), `orca_library_top_artists`
   (`orca_home_top_artists_view`), `orca_library_formats`
   (`orca_home_formats`), `orca_library_on_this_day`
   (`orca_on_this_day_view`) and `orca_library_history_age`
@@ -489,8 +495,11 @@ setting in `[listening]`.
 Settings › General › Default page can choose another start page. Home reads the
 Home queries and `libraryDailyMixes` when it is shown and when the Library
 reloads. It shows the Daily Mixes row with See all (a grid of every mix), the
-Start Radio card, This week, Jump back in, Rediscover, Never played, Deep cuts
-and Your library. Under 14 days of history (`libraryHistoryAge`) it hides This
+Start Radio card, This week, Jump back in, one row of Albums you haven't played
+(`libraryUnplayedReleases`), Rediscover, Deep cuts and Your library, whose This
+week in music panel lists up to four release anniversaries
+(`libraryReleaseAnniversaries`) and, with listen recording on, the Release most
+played a year ago. Under 14 days of history (`libraryHistoryAge`) it hides This
 week, Rediscover and Deep cuts. With listen recording off it shows only the
 library sections and a note linking to Settings › Listening. With Show
 listening stats on Home off it hides This week and Top artists. `orca-gtk`

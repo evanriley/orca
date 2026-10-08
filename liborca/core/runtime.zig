@@ -128,6 +128,9 @@ pub const HomeListeningWeek = library_pass.home.ListeningWeek;
 pub const HomeTopArtist = library_pass.home.TopArtist;
 pub const HomePlayedRelease = library_pass.home.PlayedRelease;
 pub const HomeTrack = library_pass.home.HomeTrack;
+pub const HomeRelease = library_pass.home.HomeRelease;
+pub const HomeReleaseClass = library_pass.home.ReleaseClass;
+pub const HomeAnniversary = library_pass.home.Anniversary;
 pub const HomeFormats = library_pass.home.Formats;
 pub const HomeOnThisDay = library_pass.home.OnThisDay;
 pub const HomeHistoryAge = library_pass.home.HistoryAge;
@@ -2350,6 +2353,19 @@ pub const OrcaRuntime = struct {
     /// the last 90 days into `output`; at most `home_max_items`.
     pub fn libraryDeepCuts(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, output: []HomeTrack) !usize {
         return runtime_home.libraryDeepCuts(self, library, time, output);
+    }
+
+    /// Writes the Releases none of whose Tracks was played into `output`, at
+    /// most one per album Artist, albums first; at most `home_max_items`.
+    pub fn libraryUnplayedReleases(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, output: []HomeRelease) !usize {
+        return runtime_home.libraryUnplayedReleases(self, library, time, output);
+    }
+
+    /// Writes the Releases whose full release date falls within 3 days of
+    /// today's month and day into `output`, round anniversaries first; at most
+    /// `home_max_items`.
+    pub fn libraryReleaseAnniversaries(self: *OrcaRuntime, library: LibraryHandle, time: HomeLocalTime, output: []HomeAnniversary) !usize {
+        return runtime_home.libraryReleaseAnniversaries(self, library, time, output);
     }
 
     /// Writes the Artists most played in the last `days` days into `output`;

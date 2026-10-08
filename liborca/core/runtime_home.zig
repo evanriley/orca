@@ -25,6 +25,14 @@ pub fn libraryDeepCuts(self: *OrcaRuntime, library: LibraryHandle, time: home.Lo
     return home.deepCuts(try runtime.libraryDatabase(self, library), time, output);
 }
 
+pub fn libraryUnplayedReleases(self: *OrcaRuntime, library: LibraryHandle, time: home.LocalTime, output: []home.HomeRelease) !usize {
+    return home.unplayedReleases(try runtime.libraryDatabase(self, library), time, output);
+}
+
+pub fn libraryReleaseAnniversaries(self: *OrcaRuntime, library: LibraryHandle, time: home.LocalTime, output: []home.Anniversary) !usize {
+    return home.releaseAnniversaries(try runtime.libraryDatabase(self, library), time, output);
+}
+
 pub fn libraryTopArtists(self: *OrcaRuntime, library: LibraryHandle, time: home.LocalTime, days: u32, output: []home.TopArtist) !usize {
     return home.topArtists(try runtime.libraryDatabase(self, library), time, days, output);
 }

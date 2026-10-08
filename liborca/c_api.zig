@@ -980,7 +980,8 @@ pub const DailyMixView = extern struct {
     has_genre_id: u8,
     artist_count: u8,
     cover_count: u8,
-    _reserved: [3]u8 = @splat(0),
+    _reserved: [1]u8 = @splat(0),
+    decade: u16,
 };
 
 pub const DailyMixesView = extern struct {
@@ -1079,6 +1080,41 @@ pub const HomeTracksView = extern struct {
 };
 
 pub const HomeTracksCallback = *const fn (?*anyopaque, *const HomeTracksView) callconv(.c) void;
+
+pub const HomeReleaseView = extern struct {
+    release_id: i64,
+    title: StringView,
+    artist: StringView,
+    year: i32,
+    release_class: u8,
+    has_year: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const HomeReleasesView = extern struct {
+    releases: [*]const HomeReleaseView,
+    count: usize,
+};
+
+pub const HomeReleasesCallback = *const fn (?*anyopaque, *const HomeReleasesView) callconv(.c) void;
+
+pub const AnniversaryView = extern struct {
+    release_id: i64,
+    title: StringView,
+    artist: StringView,
+    year: i32,
+    years_ago: u32,
+    day_offset: i8,
+    round: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const AnniversariesView = extern struct {
+    anniversaries: [*]const AnniversaryView,
+    count: usize,
+};
+
+pub const AnniversariesCallback = *const fn (?*anyopaque, *const AnniversariesView) callconv(.c) void;
 
 pub const HomeFormatsView = extern struct {
     releases: u64,
@@ -3731,6 +3767,7 @@ pub export fn orca_library_daily_mixes(
             .has_genre_id = @intFromBool(mix.genre_id != null),
             .artist_count = mix.artist_count,
             .cover_count = mix.cover_count,
+            .decade = std.math.cast(u16, mix.decade orelse 0) orelse 0,
         };
         for (view.artists[0..mix.artist_count], mix.mixArtists()) |*artist_view, *artist|
             artist_view.* = .{ .id = artist.id, .name = stringView(artist.name()) };
@@ -3801,6 +3838,29 @@ fn exportHomeTrack(track: *const core.runtime.HomeTrack) HomeTrackView {
         .plays = track.plays,
         .has_artist_id = @intFromBool(track.artist_id != null),
         .has_release_id = @intFromBool(track.release_id != null),
+    };
+}
+
+fn exportHomeRelease(release: *const core.runtime.HomeRelease) HomeReleaseView {
+    return .{
+        .release_id = release.release_id,
+        .title = stringView(release.title.slice()),
+        .artist = stringView(release.artist.slice()),
+        .year = release.year orelse 0,
+        .release_class = @backingInt(release.release_class),
+        .has_year = @intFromBool(release.year != null),
+    };
+}
+
+fn exportAnniversary(anniversary: *const core.runtime.HomeAnniversary) AnniversaryView {
+    return .{
+        .release_id = anniversary.release_id,
+        .title = stringView(anniversary.title.slice()),
+        .artist = stringView(anniversary.artist.slice()),
+        .year = anniversary.year,
+        .years_ago = anniversary.years_ago,
+        .day_offset = anniversary.day_offset,
+        .round = @intFromBool(anniversary.round),
     };
 }
 
@@ -3920,6 +3980,46 @@ pub export fn orca_library_deep_cuts(
     var tracks: [core.runtime.home_max_items]core.runtime.HomeTrack = undefined;
     const found = box.runtime.libraryDeepCuts(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &tracks);
     return visitHomeTracks(box, found, &tracks, context, visit, @src());
+}
+
+pub export fn orca_library_unplayed_releases(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?HomeReleasesCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var releases: [core.runtime.home_max_items]core.runtime.HomeRelease = undefined;
+    const count = box.runtime.libraryUnplayedReleases(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &releases) catch |err|
+        return box.fail(@src(), err);
+    var views: [core.runtime.home_max_items]HomeReleaseView = undefined;
+    for (views[0..count], releases[0..count]) |*view, *release| view.* = exportHomeRelease(release);
+    const result: HomeReleasesView = .{ .releases = &views, .count = count };
+    visit(context, &result);
+    return .ok;
+}
+
+pub export fn orca_library_release_anniversaries(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?AnniversariesCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var anniversaries: [core.runtime.home_max_items]core.runtime.HomeAnniversary = undefined;
+    const count = box.runtime.libraryReleaseAnniversaries(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &anniversaries) catch |err|
+        return box.fail(@src(), err);
+    var views: [core.runtime.home_max_items]AnniversaryView = undefined;
+    for (views[0..count], anniversaries[0..count]) |*view, *anniversary| view.* = exportAnniversary(anniversary);
+    const result: AnniversariesView = .{ .anniversaries = &views, .count = count };
+    visit(context, &result);
+    return .ok;
 }
 
 pub export fn orca_library_top_artists(
@@ -13206,6 +13306,9 @@ const CapturedDailyMixes = struct {
     first: DailyMixView = undefined,
     first_name: [32]u8 = undefined,
     first_name_length: usize = 0,
+    last: DailyMixView = undefined,
+    last_name: [32]u8 = undefined,
+    last_name_length: usize = 0,
 };
 
 fn captureDailyMixes(context: ?*anyopaque, view: *const DailyMixesView) callconv(.c) void {
@@ -13217,6 +13320,10 @@ fn captureDailyMixes(context: ?*anyopaque, view: *const DailyMixesView) callconv
     captured.first = view.mixes[0];
     captured.first_name_length = @min(view.mixes[0].name.length, captured.first_name.len);
     @memcpy(captured.first_name[0..captured.first_name_length], view.mixes[0].name.pointer[0..captured.first_name_length]);
+    const last = view.mixes[view.count - 1];
+    captured.last = last;
+    captured.last_name_length = @min(last.name.length, captured.last_name.len);
+    @memcpy(captured.last_name[0..captured.last_name_length], last.name.pointer[0..captured.last_name_length]);
 }
 
 const CapturedDailyMixEntries = struct {
@@ -13296,6 +13403,7 @@ test "Daily Mixes are made, listed, read, marked Not for me, reset and saved thr
     try std.testing.expectEqual(@as(u32, 25), mixes.first.entry_count);
     try std.testing.expectEqual(@as(u64, 25 * 180_000), mixes.first.duration_ms);
     try std.testing.expect(mixes.first.cover_count > 0);
+    try std.testing.expectEqual(@as(u16, 0), mixes.first.decade);
     const mix_id = mixes.first.id;
 
     var entries: CapturedDailyMixEntries = .{};
@@ -13341,5 +13449,17 @@ test "Daily Mixes are made, listed, read, marked Not for me, reset and saved thr
     try std.testing.expectEqual(Status.not_found, orca_library_save_daily_mix(runtime, library, mix_id + 100, name, name.len, &playlist_id));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_save_daily_mix(runtime, library, mix_id, null, 3, &playlist_id));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_save_daily_mix(runtime, library, mix_id, name, name.len, null));
+
+    try library_database.database.exec("UPDATE releases SET release_date = '1994-05-01';");
+    try std.testing.expectEqual(Status.ok, orca_library_start_daily_mixes(runtime, library, &.{ .now_s = now_s, .utc_offset_s = 0, .force = 1 }, &mix_job));
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJob(&box.runtime, importJob(mix_job)));
+    try std.testing.expectEqual(Status.ok, orca_library_daily_mixes(runtime, library, now_s, 0, &mixes, captureDailyMixes));
+    try std.testing.expectEqual(@as(usize, 2), mixes.count);
+    try std.testing.expectEqualStrings("Jazz", mixes.first_name[0..mixes.first_name_length]);
+    try std.testing.expectEqualStrings("1990s", mixes.last_name[0..mixes.last_name_length]);
+    try std.testing.expectEqual(@backingInt(daily_mixes.Kind.decade), mixes.last.kind);
+    try std.testing.expectEqual(@as(u16, 1990), mixes.last.decade);
+    try std.testing.expectEqual(@as(u8, 0), mixes.last.has_genre_id);
+    try std.testing.expect(mixes.last.entry_count > 0);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }

@@ -559,7 +559,9 @@ section lists the entry points, errors and limits.
   `DailyMixesState` (`ready`, `not_enough_history`, `off`, `not_generated`),
   `generated_at`, `local_day` and `items()`, up to `max_daily_mixes` (6)
   `DailyMix`es. Each has its id, `ordinal`, `DailyMixKind` (`genre`,
-  `rarely_played`), `name()`, `genre_id`, `mixArtists()` (up to 4
+  `rarely_played`, `decade`, `new_to_you`, `deep_cuts`, `upbeat`,
+  `wind_down`), `name()`, `genre_id`, `decade` (the first year of a decade
+  mix's decade), `mixArtists()` (up to 4
   `DailyMixArtist`s), `entry_count`, `duration_ms`, `signals`,
   `DailyMixLeftOut`, `DailyMixMakeup` and `coverReleases()` (up to 4 Release
   ids).
@@ -593,6 +595,12 @@ empty history gives empty lists and zero numbers. See
   `HomePlayedRelease` lists.
 - `libraryNeverPlayed(library, out)`, `libraryDeepCuts(library, time, out)`:
   `HomeTrack` lists.
+- `libraryUnplayedReleases(library, time, out)`: `HomeRelease` list of Releases
+  with no listen, one per album Artist, ordered by `HomeReleaseClass` (album,
+  unknown, EP or single) and then a shuffle that holds for one local day.
+- `libraryReleaseAnniversaries(library, time, out)`: `HomeAnniversary` list of
+  Releases whose full release date falls within 3 days of today's month and
+  day, with `years_ago`, `day_offset` (-3 to 3) and `round`.
 - `libraryTopArtists(library, time, days, out)`: `HomeTopArtist` list.
 - `libraryFormats(library)`: `HomeFormats` with the Release, Track and
   duration totals and Tracks by FLAC, ALAC, MP3 and other, summing to the

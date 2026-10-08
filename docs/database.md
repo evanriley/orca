@@ -22,15 +22,16 @@ state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
 [metadata.md](metadata.md#tag-write-files)). A Library with no file (in-memory)
 has none of them.
 
-`PRAGMA user_version` selects the schema. The current version is 2. Each
-version has one step in `migrations.steps`: `baseline` creates version 1 and
-`v2` adds to it without rebuilding any table. `migrations.apply` runs every step
-after the database's version, and sets the new version, in one transaction, so
-a failed step leaves the database at its old version. A database at version 0
-gets the whole schema, version 1 is upgraded in place, version 2 opens
-unchanged, and any other `user_version`, negative or newer, is refused with
-`error.SchemaVersionTooNew` and left untouched. A Library at version 2 cannot be
-opened by Orca 0.2.0 or earlier.
+`PRAGMA user_version` selects the schema. The current version is 3. Each
+version has one step in `migrations.steps`: `baseline` creates version 1, `v2`
+adds to it without rebuilding any table, and `v3` drops and recreates the Daily
+Mix tables, whose rows are made again on the next run. `migrations.apply` runs
+every step after the database's version, and sets the new version, in one
+transaction, so a failed step leaves the database at its old version. A
+database at version 0 gets the whole schema, versions 1 and 2 are upgraded in
+place, version 3 opens unchanged, and any other `user_version`, negative or
+newer, is refused with `error.SchemaVersionTooNew` and left untouched. A
+Library at version 3 cannot be opened by Orca 0.3.0 or earlier.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
 
@@ -445,7 +446,9 @@ are stored by number, so new states are appended and never reordered
   pruning of expired rows.
 - `daily_mixes`: one row per mix of the current day, `ordinal` unique and from
   0. `kind` is 0 for a genre mix built around `genre_id` (NULL once that Genre
-  is gone) and 1 for the rarely-played mix. `local_day` is the local day the mix
+  is gone), 1 for the rarely-played mix, 2 for a decade mix of the decade
+  starting at `decade` (a multiple of 10, NULL for other kinds), 3 for New to
+  you, 4 for Deep cuts, 5 for Upbeat and 6 for Wind down. `local_day` is the local day the mix
   was made for and `generated_at` the Unix time it was made. The explanation is
   `signals` (a bit set of the scoring signals used) and the `left_out_*` counts
   of candidates left out by reason (`recent`, `not_for_me`, `hated`, `live`,

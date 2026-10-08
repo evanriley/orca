@@ -220,13 +220,40 @@ typedef struct daily_mixes_capture {
     size_t calls;
     size_t count;
     uint8_t state;
+    size_t unknown_kinds;
 } daily_mixes_capture;
+
+_Static_assert(ORCA_DAILY_MIX_KIND_DECADE == 2 && ORCA_DAILY_MIX_KIND_NEW_TO_YOU == 3 &&
+                   ORCA_DAILY_MIX_KIND_DEEP_CUTS == 4 && ORCA_DAILY_MIX_KIND_UPBEAT == 5 &&
+                   ORCA_DAILY_MIX_KIND_WIND_DOWN == 6,
+               "theme mix kinds");
+_Static_assert(sizeof(((orca_daily_mix_view *)0)->decade) == 2, "decade is a uint16_t");
 
 static void capture_daily_mixes(void *context, const orca_daily_mixes_view *mixes) {
     daily_mixes_capture *capture = context;
     capture->calls += 1;
     capture->count = mixes->count;
     capture->state = mixes->state;
+    for (size_t i = 0; i < mixes->count; i += 1) {
+        const orca_daily_mix_view *mix = &mixes->mixes[i];
+        switch ((orca_daily_mix_kind)mix->kind) {
+        case ORCA_DAILY_MIX_KIND_DECADE:
+            if (mix->decade % 10 != 0 || mix->has_genre_id)
+                capture->unknown_kinds += 1;
+            break;
+        case ORCA_DAILY_MIX_KIND_GENRE:
+        case ORCA_DAILY_MIX_KIND_RARELY_PLAYED:
+        case ORCA_DAILY_MIX_KIND_NEW_TO_YOU:
+        case ORCA_DAILY_MIX_KIND_DEEP_CUTS:
+        case ORCA_DAILY_MIX_KIND_UPBEAT:
+        case ORCA_DAILY_MIX_KIND_WIND_DOWN:
+            if (mix->decade != 0)
+                capture->unknown_kinds += 1;
+            break;
+        default:
+            capture->unknown_kinds += 1;
+        }
+    }
 }
 
 typedef struct home_capture {
@@ -255,6 +282,26 @@ static void capture_home_tracks(void *context, const orca_home_tracks_view *trac
     home_capture *capture = context;
     capture->calls += 1;
     capture->count = tracks->count;
+}
+
+static void capture_home_unplayed(void *context, const orca_home_releases_view *releases) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = releases->count;
+    for (size_t index = 0; index < releases->count; index += 1) {
+        const orca_home_release *release = &releases->releases[index];
+        if (release->release_id == 0 ||
+            release->release_class > ORCA_HOME_RELEASE_CLASS_EP_OR_SINGLE ||
+            (index > 0 && release->release_class < releases->releases[index - 1].release_class))
+            capture->flag = 1;
+    }
+}
+
+static void capture_release_anniversaries(void *context,
+                                          const orca_release_anniversaries_view *anniversaries) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = anniversaries->count;
 }
 
 static void capture_home_artists(void *context, const orca_home_top_artists_view *artists) {
@@ -6051,10 +6098,10 @@ int main(int argc, char **argv) {
     if (orca_library_start_daily_mixes(runtime, library, &mix_request, &mix_job) !=
         ORCA_STATUS_INVALID_ARGUMENT)
         return 632;
-    daily_mixes_capture daily = {0, 1, 255};
+    daily_mixes_capture daily = {0, 1, 255, 0};
     if (orca_library_daily_mixes(runtime, library, 2000000000, 3600, &daily,
                                  capture_daily_mixes) != ORCA_STATUS_OK ||
-        daily.calls != 1 || daily.count != 0 ||
+        daily.calls != 1 || daily.count != 0 || daily.unknown_kinds != 0 ||
         daily.state != ORCA_DAILY_MIXES_STATE_NOT_ENOUGH_HISTORY)
         return 633;
     size_t mix_entry_calls = 0;
@@ -6104,6 +6151,21 @@ int main(int argc, char **argv) {
                                capture_home_tracks) != ORCA_STATUS_OK ||
         home.calls != 1 || home.count != 0)
         return 642;
+    memset(&home, 0, sizeof home);
+    if (orca_library_unplayed_releases(runtime, library, 2000000000, 3600, &home,
+                                       capture_home_unplayed) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count == 0 || home.count > 24 || home.flag != 0)
+        return 652;
+    memset(&home, 0, sizeof home);
+    if (orca_library_release_anniversaries(runtime, library, 2000000000, 3600, &home,
+                                           capture_release_anniversaries) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count > 24)
+        return 653;
+    if (orca_library_unplayed_releases(runtime, library, 2000000000, 3600, NULL, NULL) !=
+            ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_release_anniversaries(runtime, library, 2000000000, 3600, NULL, NULL) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 654;
     memset(&home, 0, sizeof home);
     if (orca_library_top_artists(runtime, library, 2000000000, 3600, 30, &home,
                                  capture_home_artists) != ORCA_STATUS_OK ||

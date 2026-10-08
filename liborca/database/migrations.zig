@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 
-pub const current_version = 2;
+pub const current_version = 3;
 
 const baseline =
     \\CREATE TABLE volumes (
@@ -1271,7 +1271,57 @@ const v2 =
     \\CREATE INDEX daily_mix_entries_by_recording ON daily_mix_entries(recording_id);
 ;
 
-const steps = [_][:0]const u8{ baseline, v2 };
+const v3 =
+    \\DROP TABLE daily_mix_entries;
+    \\DROP TABLE daily_mix_artists;
+    \\DROP TABLE daily_mixes;
+    \\
+    \\CREATE TABLE daily_mixes (
+    \\    id INTEGER PRIMARY KEY,
+    \\    ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 0),
+    \\    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 6),
+    \\    genre_id INTEGER REFERENCES genres(id) ON DELETE SET NULL,
+    \\    decade INTEGER CHECK (decade IS NULL OR (decade BETWEEN 0 AND 9990 AND decade % 10 = 0)),
+    \\    name TEXT NOT NULL,
+    \\    local_day INTEGER NOT NULL,
+    \\    generated_at INTEGER NOT NULL,
+    \\    signals INTEGER NOT NULL DEFAULT 0 CHECK (signals >= 0),
+    \\    left_out_recent INTEGER NOT NULL DEFAULT 0 CHECK (left_out_recent >= 0),
+    \\    left_out_not_for_me INTEGER NOT NULL DEFAULT 0 CHECK (left_out_not_for_me >= 0),
+    \\    left_out_hated INTEGER NOT NULL DEFAULT 0 CHECK (left_out_hated >= 0),
+    \\    left_out_live INTEGER NOT NULL DEFAULT 0 CHECK (left_out_live >= 0),
+    \\    left_out_other_mix INTEGER NOT NULL DEFAULT 0 CHECK (left_out_other_mix >= 0),
+    \\    left_out_diversity INTEGER NOT NULL DEFAULT 0 CHECK (left_out_diversity >= 0),
+    \\    favorite_count INTEGER NOT NULL DEFAULT 0 CHECK (favorite_count >= 0),
+    \\    rarely_played_count INTEGER NOT NULL DEFAULT 0 CHECK (rarely_played_count >= 0),
+    \\    never_played_count INTEGER NOT NULL DEFAULT 0 CHECK (never_played_count >= 0)
+    \\);
+    \\
+    \\CREATE TABLE daily_mix_artists (
+    \\    mix_id INTEGER NOT NULL REFERENCES daily_mixes(id) ON DELETE CASCADE,
+    \\    position INTEGER NOT NULL CHECK (position >= 0),
+    \\    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    \\    PRIMARY KEY(mix_id, position)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX daily_mix_artists_by_artist ON daily_mix_artists(artist_id);
+    \\
+    \\CREATE TABLE daily_mix_entries (
+    \\    mix_id INTEGER NOT NULL REFERENCES daily_mixes(id) ON DELETE CASCADE,
+    \\    position INTEGER NOT NULL CHECK (position >= 0),
+    \\    recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    reason1_kind INTEGER CHECK (reason1_kind IS NULL OR reason1_kind BETWEEN 0 AND 9),
+    \\    reason1_a INTEGER NOT NULL DEFAULT 0,
+    \\    reason1_b INTEGER NOT NULL DEFAULT 0,
+    \\    reason2_kind INTEGER CHECK (reason2_kind IS NULL OR reason2_kind BETWEEN 0 AND 9),
+    \\    reason2_a INTEGER NOT NULL DEFAULT 0,
+    \\    reason2_b INTEGER NOT NULL DEFAULT 0,
+    \\    CHECK (reason2_kind IS NULL OR reason1_kind IS NOT NULL),
+    \\    PRIMARY KEY(mix_id, position)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX daily_mix_entries_by_recording ON daily_mix_entries(recording_id);
+;
+
+const steps = [_][:0]const u8{ baseline, v2, v3 };
 
 comptime {
     std.debug.assert(steps.len == current_version);
@@ -2030,13 +2080,13 @@ const v2_objects_count_sql =
     \\    'daily_mix_entries_by_recording');
 ;
 
-test "a version 1 library upgrades to version 2 keeping its rows and gaining the recommendation tables" {
+test "a version 1 library upgrades to the current version keeping its rows and gaining the recommendation tables" {
     const db = try atBaseline();
     defer db.close();
 
     try apply(db);
 
-    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try expectBaselineRowsKept(db);
     try std.testing.expectEqual(@as(i64, 15), try scalar(db, v2_objects_count_sql));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
@@ -2053,6 +2103,56 @@ test "a failing version 2 step rolls back and leaves the library at version 1" {
     try expectBaselineRowsKept(db);
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, v2_objects_count_sql));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM sqlite_master WHERE name = 'listens_by_time';"));
+}
+
+fn atVersion2() !sqlite.Database {
+    const db = try atBaseline();
+    errdefer db.close();
+    try db.exec(v2);
+    try db.exec(
+        \\PRAGMA user_version=2;
+        \\INSERT INTO artists(id, name) VALUES (1, 'A');
+        \\INSERT INTO recommendation_feedback VALUES (1, 10, 100), (2, 20, 200);
+        \\INSERT INTO daily_mixes(id, ordinal, kind, name, local_day, generated_at) VALUES (1, 0, 1, 'Rarely played', 20000, 0);
+        \\INSERT INTO daily_mix_artists VALUES (1, 0, 1);
+        \\INSERT INTO daily_mix_entries(mix_id, position, recording_id) VALUES (1, 0, 1);
+    );
+    return db;
+}
+
+test "a version 2 library upgrades to version 3 keeping Not for me and its other rows, with the fresh schema" {
+    const db = try atVersion2();
+    defer db.close();
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM recommendation_feedback WHERE created_at * 10 = expires_at;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM daily_mixes;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM daily_mix_artists;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM daily_mix_entries;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
+    const upgraded = try schemaObjects(std.testing.allocator, db);
+    defer std.testing.allocator.free(upgraded);
+    const created = try fresh();
+    defer created.close();
+    const fresh_schema = try schemaObjects(std.testing.allocator, created);
+    defer std.testing.allocator.free(fresh_schema);
+    try std.testing.expectEqualStrings(fresh_schema, upgraded);
+}
+
+test "a failing version 3 step rolls back and leaves the library at version 2 with its mixes" {
+    const db = try atVersion2();
+    defer db.close();
+    try db.exec("CREATE TABLE fail_v3 (id INTEGER); DROP INDEX daily_mix_artists_by_artist; CREATE INDEX daily_mix_artists_by_artist ON fail_v3(id);");
+
+    try std.testing.expectError(error.SqlFailed, apply(db));
+
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mixes;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mix_entries;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM recommendation_feedback;"));
 }
 
 test "audio features need a known key and follow their file" {
@@ -2144,12 +2244,14 @@ test "a daily mix keeps one row per ordinal, its artists and entries go with it,
     );
 
     try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mixes(ordinal, kind, name, local_day, generated_at) VALUES (0, 1, 'Rarely played', 20000, 0);"));
-    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mixes(ordinal, kind, name, local_day, generated_at) VALUES (1, 2, 'Other', 20000, 0);"));
+    try db.exec("INSERT INTO daily_mixes(ordinal, kind, decade, name, local_day, generated_at) VALUES (1, 6, NULL, 'Wind down', 20000, 0), (2, 2, 1990, '1990s', 20000, 0);");
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mixes(ordinal, kind, name, local_day, generated_at) VALUES (3, 7, 'Other', 20000, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mixes(ordinal, kind, decade, name, local_day, generated_at) VALUES (3, 2, 1995, '1990s', 20000, 0);"));
     try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mix_entries(mix_id, position, recording_id, reason1_kind) VALUES (1, 2, 1, 10);"));
     try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO daily_mix_entries(mix_id, position, recording_id, reason2_kind) VALUES (1, 2, 1, 0);"));
 
     try db.exec("DELETE FROM genres WHERE id = 1;");
-    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mixes WHERE genre_id IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mixes WHERE id = 1 AND genre_id IS NULL;"));
     try db.exec("DELETE FROM recordings WHERE id = 2;");
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mix_entries;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM recommendation_feedback;"));

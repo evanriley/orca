@@ -2,8 +2,34 @@
 
 ## Unreleased
 
+Ships Library schema version 3; opening a 0.3.0 Library upgrades it in
+place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
+
 ### Added
 
+- **Home can list unplayed albums and release anniversaries.**
+  `libraryUnplayedReleases` (C ABI `orca_library_unplayed_releases`) returns
+  Releases with no listen, one per album Artist, albums before Releases of
+  unknown type before EPs and singles, shuffled once per local day.
+  `libraryReleaseAnniversaries` (`orca_library_release_anniversaries`) returns
+  Releases whose full release date falls within 3 days of today's month and
+  day, round anniversaries first, each with its day offset.
+- **Daily Mixes have themes.** Besides genre mixes and Rarely played, Daily
+  Mixes include a decade mix (the decade most listened to in 30 days, else
+  the one with the most Tracks), New to you (Releases never played by Artists
+  heard in 90 days), Deep cuts (Home's deep cuts), Upbeat and Wind down (the
+  top and bottom thirds of energy). A theme qualifies with at least 40
+  candidates. One slot is kept for a theme, which rotates daily; genre mixes
+  fill the others, further themes fill slots left empty, and Rarely played
+  stays last. `DailyMixKind` and the C ABI's `orca_daily_mix_kind` gain
+  `decade`, `new_to_you`, `deep_cuts`, `upbeat` and `wind_down`, and a mix
+  carries its `decade`.
+- **`orca-gtk`'s Home shows unplayed albums, release anniversaries and theme
+  mixes.** Albums you haven't played is one row of covers under Jump back in.
+  This week in music lists up to four Releases released this week in an
+  earlier year, with how many years ago and the weekday, and the Release most
+  played a year ago. Daily Mix tiles and pages describe decade, New to you,
+  Deep cuts, Upbeat and Wind down mixes.
 - **Orca says when an update adds an analysis measurement.**
   `libraryAnalysisCoverage` (C ABI `orca_library_analysis_coverage`) splits
   the files analysis would measure into never analyzed and outdated, names
@@ -23,9 +49,19 @@
   Library that has files without tempo, key and energy it says Energy needs
   analyzed music and offers Analyze music, or says the music is being analyzed
   while that runs.
+- **Home's never-played share rounds down.** `onThisDay`'s
+  `never_played_percent` reads 100 only when no Track has been played, and
+  `orca-gtk`'s Collection panel hides formats with no Tracks.
 
 ### Changed
 
+- Library schema version 3. Opening a version 2 Library upgrades it in place
+  in one transaction, rebuilding the Daily Mix tables (their mixes are made
+  again on the next run) and keeping every other row. An upgraded Library
+  cannot be opened by 0.3.0.
+- **`orca-gtk`'s Home drops the Never played list and the On this day
+  facts.** Albums you haven't played replaces the list, and This week in
+  music replaces the Added this week, Added this year and Never played facts.
 - **`orca-gtk` says what analysis measures.** The task is named Analyze music
   in Settings › Maintenance, Library Health, Activity, the command palette,
   Audio Problems and First Run, and describes all four things it does:
