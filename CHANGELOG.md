@@ -40,6 +40,9 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **`orca-gtk` shows what's playing on Daily Mixes.** A Daily Mix page marks
+  the playing Track's row, and the mix's tile on Home and in the mixes grid
+  shows the playing badge.
 - **`orca-gtk`'s right-hand panels share one width.** The Radio options
   panel, Now Playing (every tab) and the Daily Mix "How this mix was made"
   aside are 388 px wide like the inspector, so the page beside them no longer

@@ -30,6 +30,7 @@ const feedback = @import("feedback.zig");
 const preferences = @import("preferences.zig");
 const parametric = @import("parametric.zig");
 const radio = @import("radio.zig");
+const home = @import("home.zig");
 
 const App = app.App;
 
@@ -1280,6 +1281,7 @@ pub fn tick(self: *App) void {
         genres.markPlaying(self, status.track_id);
         folders.markPlaying(self, status.track_id);
         palette.markPlaying(self, status.track_id);
+        home.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
         details.trackChanged(self);
         lyrics.trackChanged(self);

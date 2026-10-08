@@ -161,6 +161,8 @@ pub const State = struct {
     entries: [liborca.max_daily_mix_entries]liborca.DailyMixEntry = undefined,
     entry_count: usize = 0,
     entry_ids: [liborca.max_daily_mix_entries]i64 = @splat(0),
+    mix_tracks: [liborca.max_daily_mixes][liborca.max_daily_mix_entries]i64 = undefined,
+    mix_track_counts: [liborca.max_daily_mixes]usize = @splat(0),
 
     mixes: liborca.DailyMixes = .{ .state = .not_generated },
     mix_job: ?liborca.JobHandle = null,
@@ -191,6 +193,7 @@ pub fn forgetLibrary(self: *App) void {
     home.mixes = .{ .state = .not_generated };
     home.open_mix = null;
     home.entry_count = 0;
+    home.mix_track_counts = @splat(0);
     home.loaded = false;
     home.stale = true;
     home.playing_shown = false;
@@ -268,6 +271,78 @@ fn readMixes(self: *App) void {
     };
     const clock = queue.localClock();
     self.home.mixes = self.runtime.libraryDailyMixes(library, clock.now_s, clock.utc_offset_s) catch .{ .state = .not_generated };
+    readMixTracks(self, library);
+}
+
+fn readMixTracks(self: *App, library: liborca.LibraryHandle) void {
+    const home = &self.home;
+    home.mix_track_counts = @splat(0);
+    var entries: [liborca.max_daily_mix_entries]liborca.DailyMixEntry = undefined;
+    for (home.mixes.items(), 0..) |mix, index| {
+        if (index >= home.mix_tracks.len) break;
+        const count = self.runtime.libraryDailyMixEntries(library, mix.id, &entries) catch 0;
+        for (entries[0..count], 0..) |entry, position| home.mix_tracks[index][position] = entry.track_id;
+        home.mix_track_counts[index] = count;
+    }
+}
+
+fn mixHasTrack(self: *const App, index: usize, track_id: ?i64) bool {
+    const id = track_id orelse return false;
+    if (index >= self.home.mix_tracks.len) return false;
+    return std.mem.indexOfScalar(i64, self.home.mix_tracks[index][0..self.home.mix_track_counts[index]], id) != null;
+}
+
+pub fn markPlaying(self: *App, track_id: ?i64) void {
+    markMixRows(self, track_id);
+    for ([_]?*gtk.FlowBox{ self.home.mixes_flow, self.home.grid_flow }) |maybe| {
+        const flow = maybe orelse continue;
+        markMixTiles(self, flow, track_id);
+    }
+}
+
+fn markMixTiles(self: *App, flow: *gtk.FlowBox, track_id: ?i64) void {
+    var index: usize = 0;
+    var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, flow));
+    while (child) |cell| : ({
+        child = gtk.gtk_widget_get_next_sibling(cell);
+        index += 1;
+    }) {
+        const tile = gtk.gtk_flow_box_child_get_child(gtk.cast(gtk.FlowBoxChild, cell)) orelse continue;
+        const mix = if (index < self.home.mixes.count) &self.home.mixes.items()[index] else continue;
+        const playing = mixHasTrack(self, index, track_id);
+        albums.showPlaying(tile, playing);
+        labelMix(mix, cell, playing);
+    }
+}
+
+fn markMixRows(self: *App, track_id: ?i64) void {
+    const rows = self.home.mix_rows orelse return;
+    for (self.home.entry_ids[0..self.home.entry_count], 0..) |id, index| {
+        const row = gtk.gtk_list_box_get_row_at_index(rows, @intCast(index)) orelse continue;
+        const playing = track_id == id;
+        const widget = gtk.cast(gtk.Widget, row);
+        if (playing)
+            gtk.gtk_widget_add_css_class(widget, "now-playing")
+        else
+            gtk.gtk_widget_remove_css_class(widget, "now-playing");
+        if (gtk.g_object_get_data(widget, "orca-number")) |number|
+            gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, number), if (playing) "playing" else "number");
+        labelMixRow(widget, index, playing);
+    }
+}
+
+fn labelMixRow(row: *gtk.Widget, index: usize, playing: bool) void {
+    const title = gtk.g_object_get_data(row, "orca-title") orelse return;
+    const artist = gtk.g_object_get_data(row, "orca-artist") orelse return;
+    const reason = gtk.g_object_get_data(row, "orca-reason") orelse return;
+    var text: [800]u8 = undefined;
+    setAccessibleLabel(row, strings.format(&text, "{d}. {s} by {s}, {s}{s}", .{
+        index + 1,
+        std.mem.span(gtk.gtk_label_get_text(gtk.cast(gtk.Label, title))),
+        std.mem.span(gtk.gtk_label_get_text(gtk.cast(gtk.Label, artist))),
+        std.mem.span(gtk.gtk_label_get_text(gtk.cast(gtk.Label, reason))),
+        if (playing) ", now playing" else "",
+    }).ptr);
 }
 
 fn localTime() liborca.HomeLocalTime {
@@ -514,6 +589,9 @@ fn newMixTile(self: *App, mix: *const liborca.DailyMix, pixels: c_int) *gtk.Widg
     const tile = box(gtk.ORIENTATION_VERTICAL, 0, "home-mix-tile");
     const frame = newMixArt(self, mix, pixels);
     gtk.g_object_set_data(tile, "orca-art", frame);
+    const badge = albums.playingBadge();
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), badge);
+    gtk.g_object_set_data(tile, "orca-playing", badge);
     var name_buffer: [300]u8 = undefined;
     const name = strings.terminated(&name_buffer, mix.name());
     const title = ellipsized(name.ptr, "home-tile-title");
@@ -549,20 +627,22 @@ fn showFirstCells(flow: *gtk.FlowBox, count: c_uint) void {
 
 fn fillMixes(self: *App, flow: *gtk.FlowBox, layout: Layout) void {
     gtk.gtk_flow_box_remove_all(flow);
-    for (self.home.mixes.items()) |*mix| {
+    for (self.home.mixes.items(), 0..) |*mix, index| {
         const tile = newMixTile(self, mix, layout.pixels);
         gtk.gtk_flow_box_append(flow, tile);
-        if (gtk.gtk_widget_get_parent(tile)) |cell| labelMix(mix, cell);
+        const playing = mixHasTrack(self, index, self.shown_track_id);
+        albums.showPlaying(tile, playing);
+        if (gtk.gtk_widget_get_parent(tile)) |cell| labelMix(mix, cell, playing);
     }
 }
 
-fn labelMix(mix: *const liborca.DailyMix, widget: *gtk.Widget) void {
+fn labelMix(mix: *const liborca.DailyMix, widget: *gtk.Widget, playing: bool) void {
     var name_buffer: [300]u8 = undefined;
     const name = strings.terminated(&name_buffer, mix.name());
     var artists_buffer: [1200]u8 = undefined;
     const artists = artistsText(&artists_buffer, mix);
     var accessible: [1600]u8 = undefined;
-    setAccessibleLabel(widget, strings.format(&accessible, "Mix {d}, {s}: {s}", .{ mixNumber(mix), name, artists }).ptr);
+    setAccessibleLabel(widget, strings.format(&accessible, "Mix {d}, {s}: {s}{s}", .{ mixNumber(mix), name, artists, if (playing) ", playing" else "" }).ptr);
 }
 
 fn updatedText(buffer: []u8, mixes: *const liborca.DailyMixes, clock: radio_reason.Clock, capital: bool) [:0]const u8 {
@@ -1847,7 +1927,13 @@ fn mixRow(self: *App, index: usize, entry: *const liborca.DailyMixEntry, clock: 
     var number_buffer: [8]u8 = undefined;
     const number = label(strings.format(&number_buffer, "{d}", .{index + 1}).ptr, "daily-mix-number");
     gtk.gtk_widget_add_css_class(number, "numeric");
-    gtk.gtk_widget_set_size_request(number, 24, -1);
+    const playing_glyph = gtk.gtk_image_new_from_icon_name("orca-play-symbolic");
+    gtk.gtk_widget_set_halign(playing_glyph, gtk.ALIGN_START);
+    gtk.gtk_widget_add_css_class(playing_glyph, "album-track-playing");
+    const number_column = gtk.gtk_stack_new();
+    gtk.gtk_widget_set_size_request(number_column, 24, -1);
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, number_column), number, "number");
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, number_column), playing_glyph, "playing");
     const middle = box(gtk.ORIENTATION_HORIZONTAL, 16, null);
     gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, middle), gtk.true_);
     gtk.gtk_widget_set_hexpand(middle, gtk.true_);
@@ -1883,11 +1969,14 @@ fn mixRow(self: *App, index: usize, entry: *const liborca.DailyMixEntry, clock: 
     setAccessibleLabel(remove, strings.format(&accessible, "Not for me: remove {s} from mixes", .{title_text}).ptr);
     gtk.g_object_set_data(remove, "orca-entry", @ptrFromInt(index + 1));
     _ = gtk.signalConnect(remove, "clicked", gtk.callback(notForMeClicked), self);
-    append(row, &.{ number, middle, time, remove });
-    var row_label: [700]u8 = undefined;
+    append(row, &.{ number_column, middle, time, remove });
     const list_row = gtk.gtk_list_box_row_new();
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, list_row), row);
-    setAccessibleLabel(list_row, strings.format(&row_label, "{d}. {s} by {s}, {s}", .{ index + 1, title_text, artist_text, std.mem.sliceTo(&reason_buffer, 0) }).ptr);
+    gtk.g_object_set_data(list_row, "orca-number", number_column);
+    gtk.g_object_set_data(list_row, "orca-title", title);
+    gtk.g_object_set_data(list_row, "orca-artist", artist);
+    gtk.g_object_set_data(list_row, "orca-reason", reason);
+    labelMixRow(list_row, index, false);
     return list_row;
 }
 
@@ -2046,6 +2135,7 @@ fn loadMix(self: *App) void {
     gtk.gtk_list_box_remove_all(rows);
     const clock = queue.localClock();
     for (home.entries[0..home.entry_count], 0..) |*entry, index| gtk.gtk_list_box_append(rows, mixRow(self, index, entry, clock));
+    markMixRows(self, self.shown_track_id);
 }
 
 fn rowActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
