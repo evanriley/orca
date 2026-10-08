@@ -13,6 +13,7 @@ const app = @import("app.zig");
 const settings = @import("settings.zig");
 const preferences = @import("preferences.zig");
 const window = @import("window.zig");
+const home = @import("home.zig");
 const page_ui = @import("page.zig");
 const transport = @import("transport.zig");
 const jobs = @import("jobs.zig");
@@ -337,6 +338,7 @@ fn rememberTracks(self: *App) void {
 /// which hold the library's handle, are joined before it.
 fn closeCurrent(self: *App) void {
     window.forgetLibrary(self);
+    home.forgetLibrary(self);
     artwork_review.forgetLibrary(self);
     audio_problems.forgetLibrary(self);
     metadata_issues.forgetLibrary(self);
@@ -412,6 +414,7 @@ fn rebuild(self: *App) void {
     details.forgetLibrary(self);
     browse.clearSearch(self);
     jobs.reloadLibraryViews(self);
+    home.startMixes(self, false);
     audio_problems.invalidate(self);
     metadata_issues.invalidate(self);
     artwork_review.invalidate(self);

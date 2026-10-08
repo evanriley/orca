@@ -539,6 +539,55 @@ section lists the entry points, errors and limits.
   session; it is never saved. With `radio_continue` on, a Player that starts
   the last entry of a queue that does not repeat starts a `recent` session.
   See [discovery.md](discovery.md#library-radio).
+- `startDailyMixes(library, DailyMixesRequest{ now_s, utc_offset_s, force })`
+  starts a `daily_mixes` Job that makes the mix day's Daily Mixes unless they
+  exist and `force` is false. It takes no Library slot, is not pausable and
+  keeps no history; its progress counts the mixes made, and it succeeds when
+  mixes are off or history is too short.
+- `libraryDailyMixes(library, now_s, utc_offset_s)` returns `DailyMixes`: a
+  `DailyMixesState` (`ready`, `not_enough_history`, `off`, `not_generated`),
+  `generated_at`, `local_day` and `items()`, up to `max_daily_mixes` (6)
+  `DailyMix`es. Each has its id, `ordinal`, `DailyMixKind` (`genre`,
+  `rarely_played`), `name()`, `genre_id`, `mixArtists()` (up to 4
+  `DailyMixArtist`s), `entry_count`, `duration_ms`, `signals`,
+  `DailyMixLeftOut`, `DailyMixMakeup` and `coverReleases()` (up to 4 Release
+  ids).
+- `libraryDailyMixEntries(library, mix_id, output)` fills up to
+  `max_daily_mix_entries` (25) `DailyMixEntry`s (Track, Recording, duration,
+  reason) in order and returns how many; `error.UnknownDailyMix` for an
+  unknown mix.
+- `libraryNotForMe(library, track_id, now_s)` hides the Track's Recording from
+  Radio and Daily Mixes for `daily_mix_not_for_me_days` (90) days
+  (`error.TrackNotFound` for an unknown or Recording-less Track);
+  `libraryClearNotForMe(library, track_id)` undoes it and
+  `libraryResetRecommendations(library)` clears every mark.
+- `librarySaveDailyMix(library, mix_id, name)` saves the mix's shown entries
+  as a manual playlist and returns its id.
+  See [discovery.md](discovery.md#daily-mixes).
+
+#### Home
+
+Each query takes the Library and a `HomeLocalTime{ now_s, utc_offset_s }`,
+reads the database alone, and is bounded: lists fill a caller-supplied slice
+of at most `home_max_items` (24) entries and return the count, strings are
+`HomeText` values cut at `home_max_text_bytes` (256). An empty Library or an
+empty history gives empty lists and zero numbers. See
+[discovery.md](discovery.md#home).
+
+- `libraryListeningWeek(library, time)`: `HomeListeningWeek` with the time
+  listened on each of the last `home_week_days` (7) local days (today last),
+  the week's total, plays, distinct Artists and Releases, the most played
+  Artist, and the previous 7 days' total and plays.
+- `libraryRecentReleases`, `libraryRediscover(library, time, out)`:
+  `HomePlayedRelease` lists.
+- `libraryNeverPlayed(library, out)`, `libraryDeepCuts(library, time, out)`:
+  `HomeTrack` lists.
+- `libraryTopArtists(library, time, days, out)`: `HomeTopArtist` list.
+- `libraryFormats(library)`: `HomeFormats` with the Release, Track and
+  duration totals and Tracks by FLAC, ALAC, MP3 and other, summing to the
+  Track count.
+- `libraryOnThisDay(library, time)`: `HomeOnThisDay`.
+- `libraryHistoryAge(library, time)`: `HomeHistoryAge`.
 
 ### Playlists
 

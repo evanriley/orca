@@ -24,6 +24,7 @@ const details = @import("details.zig");
 const tags = @import("tags.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const home = @import("home.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const changes = @import("changes.zig");
@@ -115,6 +116,7 @@ pub fn reloadLibraryViews(self: *App) void {
     playlists.refresh(self);
     playlists.reloadPage(self, true);
     loved.reload(self);
+    home.reload(self);
     genres.invalidate(self);
     folders.invalidate(self);
     changes.invalidate(self);

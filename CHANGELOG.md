@@ -4,6 +4,28 @@
 
 ### Added
 
+- `orca-gtk` opens on Home: Daily Mixes with a grid of every mix, Start
+  Radio from what is playing, an Artist, a genre, a decade or loved tracks,
+  This week's listening chart, Jump back in, Rediscover, Never played, Deep
+  cuts, Top artists, the Collection's formats and On this day. A Daily Mix
+  page plays, shuffles or saves the mix, says why each Track is in it and
+  removes a Track with Not for me, undone from its toast. Settings ›
+  Listening adds Reset recommendations.
+- Home queries: `libraryListeningWeek`, `libraryRecentReleases`,
+  `libraryRediscover`, `libraryNeverPlayed`, `libraryDeepCuts`,
+  `libraryTopArtists`, `libraryFormats`, `libraryOnThisDay`,
+  `libraryHistoryAge`, their `orca_library_*` C ABI counterparts and
+  `orca-cli home` give every number and list of the Home page as bounded,
+  read-only queries taking the time and UTC offset.
+- Daily Mixes: `startDailyMixes` (Job kind `daily_mixes`),
+  `libraryDailyMixes`, `libraryDailyMixEntries`, `libraryNotForMe`,
+  `libraryClearNotForMe`, `libraryResetRecommendations`,
+  `librarySaveDailyMix`, their `orca_library_*` C ABI counterparts and
+  `orca-cli mixes` make up to five genre mixes from the Artists played in the
+  last 30 days and a Rarely played mix once a mix day (from 04:00 local),
+  each 25 tracks within 90 minutes with true reasons, no repeats across mixes
+  and counts of what was left out. Not for me hides a Recording for 90 days
+  and can be undone in place; a mix saves as a playlist.
 - Audio features: analysis estimates each file's tempo, key, onset rate and
   spectral centroid, and `libraryTrackAudioFeatures`,
   `orca_library_track_audio_features` and `orca-cli features` read them for a
@@ -51,6 +73,10 @@
 
 ### Fixed
 
+- A Job or query reading the Library no longer fails with an aborted
+  statement when another Job runs the first missing-location sweep, cache
+  clear or root removal: the scratch tables those use now exist from open
+  instead of being created on the shared connection mid-read.
 - The test output backend's `close` waits for a render callback in progress,
   as real backends do, so a test can no longer release an audio block twice
   when its output reopens for a new format.

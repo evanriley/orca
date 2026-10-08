@@ -452,6 +452,221 @@ pub fn pickRadio(
     };
 }
 
+/// Artists a Daily Mix is made for, under the genre they share.
+pub const Cluster = struct {
+    genre_id: i64,
+    artists: []const i64,
+};
+
+/// What Daily Mix ranking reads besides the Library.
+pub const MixFilter = struct {
+    now_s: i64,
+    seed: u64,
+    /// Played Recordings within this many days are left out; 0 for none.
+    avoid_days: i64,
+
+    fn filter(self: MixFilter) Filter {
+        return .{
+            .now_s = self.now_s,
+            .include_live = false,
+            .focus_genres = "[]",
+            .focus_decades = "[]",
+            .avoid_after = if (self.avoid_days > 0) self.now_s - self.avoid_days * 86_400 else null,
+            .require_played = false,
+            .excluded = "[]",
+            .jitter_seed = @intCast(self.seed % 4_294_967_291),
+        };
+    }
+};
+
+/// A Daily Mix candidate with its true reasons.
+pub const Ranked = struct {
+    track_id: i64,
+    recording_id: i64,
+    artist_id: ?i64,
+    release_id: ?i64,
+    score: f64,
+    reason: PickReason,
+    loved: bool,
+    rating: ?i64,
+    play_count: i64,
+    last_played_at: ?i64,
+};
+
+/// At most `max_pool` candidates, best first.
+pub const Ranking = struct {
+    items: []const Ranked,
+    /// Whether Recordings played within the avoid window were let back in
+    /// because nothing else qualified.
+    relaxed_recent: bool,
+};
+
+/// Eligible Recordings ranked against the cluster's profile: its Artists at
+/// 1.0 and their related Artists, its genre pinned at 1, and the years,
+/// sound and co-listening of the Artists' Tracks. Never-played Recordings are
+/// candidates whatever `radio.include_unplayed` says.
+pub fn rankCluster(arena: std.mem.Allocator, library: *const Source, cluster: Cluster, mix: MixFilter) !Ranking {
+    var profile = try buildClusterProfile(arena, library, cluster, mix.now_s);
+    var weights = Components.weightsAt((RadioOptions{}).explore);
+    if (profile.sound.isEmpty()) weights = weights.withoutAudio();
+
+    var filter = mix.filter();
+    var relaxed_recent = false;
+    var candidates = try loadCandidates(arena, library, &profile, &filter, .{});
+    if (candidates.len == 0 and filter.avoid_after != null) {
+        filter.avoid_after = null;
+        relaxed_recent = true;
+        candidates = try loadCandidates(arena, library, &profile, &filter, .{});
+    }
+    const session: Session = .{ .now_s = mix.now_s, .seed = mix.seed };
+    for (candidates) |*candidate| score(candidate, &profile, weights, session);
+    const order = try arena.alloc(u32, candidates.len);
+    for (order, 0..) |*slot, index| slot.* = @intCast(index);
+    std.mem.sort(u32, order, candidates, byScore);
+
+    const items = try arena.alloc(Ranked, candidates.len);
+    for (items, order) |*item, index| {
+        const candidate = &candidates[index];
+        item.* = rankedFrom(candidate, candidate.score, reasonFor(candidate, &profile, weights, mix.now_s));
+    }
+    return .{ .items = items, .relaxed_recent = relaxed_recent };
+}
+
+/// Eligible Recordings played at least once but not since `unplayed_since`,
+/// at most `max_pool` of the most played, ordered by play count times
+/// 1 + jitter / 2. Their reasons are loved and their play history.
+pub fn rankRarelyPlayed(arena: std.mem.Allocator, library: *const Source, mix: MixFilter, unplayed_since: i64) !Ranking {
+    var filter = mix.filter();
+    filter.avoid_after = null;
+    var statement = try library.database.prepare(rarely_played_sql);
+    defer statement.deinit();
+    try filter.bind(statement);
+    try statement.bindInt64(8, unplayed_since);
+    var ids: std.ArrayList(i64) = .empty;
+    while (try statement.step() == .row) try ids.append(arena, statement.columnInt64(0));
+
+    const candidates = try candidateDetails(arena, library, &filter, ids.items, .{});
+    const profile: Profile = .{ .seed = .recent, .seed_tracks = &.{}, .own_artists = false };
+    const weights = Components.weightsAt(0);
+    const items = try arena.alloc(Ranked, candidates.len);
+    for (items, candidates) |*item, *candidate| {
+        candidate.components.taste = tasteScore(candidate.loved, candidate.rating, candidate.release_or_artist_loved);
+        const count: f64 = @floatFromInt(candidate.play_count);
+        item.* = rankedFrom(candidate, count * (1 + jitter(candidate.recording_id, mix.seed) / 2), reasonFor(candidate, &profile, weights, mix.now_s));
+    }
+    std.mem.sort(Ranked, items, {}, struct {
+        fn lessThan(_: void, a: Ranked, b: Ranked) bool {
+            if (a.score != b.score) return a.score > b.score;
+            return a.recording_id < b.recording_id;
+        }
+    }.lessThan);
+    return .{ .items = items, .relaxed_recent = false };
+}
+
+const rarely_played_sql =
+    "SELECT tracks.recording_id FROM tracks JOIN recording_play_stats AS rarely ON rarely.recording_id = tracks.recording_id\n" ++
+    "WHERE rarely.play_count > 0 AND rarely.last_played_at <= ?8 AND " ++ eligible ++ "\n" ++
+    "GROUP BY tracks.recording_id ORDER BY max(rarely.play_count) DESC, tracks.recording_id LIMIT " ++
+    std.fmt.comptimePrint("{d}", .{max_pool}) ++ ";";
+
+fn rankedFrom(candidate: *const Candidate, value: f64, reason: PickReason) Ranked {
+    return .{
+        .track_id = candidate.track_id,
+        .recording_id = candidate.recording_id,
+        .artist_id = candidate.artist_id,
+        .release_id = candidate.release_id,
+        .score = value,
+        .reason = reason,
+        .loved = candidate.loved,
+        .rating = candidate.rating,
+        .play_count = candidate.play_count,
+        .last_played_at = candidate.last_played_at,
+    };
+}
+
+fn buildClusterProfile(arena: std.mem.Allocator, library: *const Source, cluster: Cluster, now_s: i64) !Profile {
+    const db = library.database;
+    var statement = try db.prepare(seedTracksSql("tracks.artist_id IN (SELECT value FROM json_each(?1))"));
+    defer statement.deinit();
+    try statement.bindText(1, try jsonIds(arena, cluster.artists));
+    var tracks: std.ArrayList(SeedTrack) = .empty;
+    while (try statement.step() == .row) try tracks.append(arena, .{
+        .track_id = statement.columnInt64(0),
+        .recording_id = statement.columnInt64(1),
+        .artist_id = optionalInt64(statement, 2),
+        .year = optionalInt64(statement, 3),
+    });
+
+    var profile: Profile = .{ .seed = .{ .genre = cluster.genre_id }, .seed_tracks = tracks.items, .own_artists = true };
+    try profileArtists(arena, library, &profile);
+    for (cluster.artists) |artist| try profile.artists.put(arena, artist, 1);
+    try profileGenres(arena, db, &profile);
+    profileYears(arena, &profile);
+    try profileSound(arena, library, &profile);
+    profile.colisten = try loadCoListening(arena, db, tracks.items, now_s);
+    return profile;
+}
+
+/// Recordings with a present file that a Daily Mix left out, each counted
+/// under the first of hated, Not for me, live and recently played that
+/// applies.
+pub const LeftOut = struct {
+    hated: u32 = 0,
+    not_for_me: u32 = 0,
+    live: u32 = 0,
+    recent: u32 = 0,
+};
+
+/// Which Recordings `leftOut` counts.
+pub const LeftOutScope = union(enum) {
+    /// Recordings by these Artists.
+    artists: []const i64,
+    /// Recordings played at least once but not since this time.
+    unplayed_since: i64,
+};
+
+/// Counts the Recordings in `scope` the mix exclusions left out. Recently
+/// played ones count only under `avoid_after`, null when the avoid window
+/// was off or relaxed.
+pub fn leftOut(arena: std.mem.Allocator, library: *const Source, scope: LeftOutScope, now_s: i64, avoid_after: ?i64) !LeftOut {
+    var statement = try library.database.prepare(switch (scope) {
+        .artists => leftOutSql("tracks.artist_id IN (SELECT value FROM json_each(?2))"),
+        .unplayed_since => leftOutSql("tracks.recording_id IN (SELECT recording_id FROM recording_play_stats\n" ++
+            "    WHERE play_count > 0 AND last_played_at <= ?2)"),
+    });
+    defer statement.deinit();
+    try statement.bindInt64(1, now_s);
+    switch (scope) {
+        .artists => |ids| try statement.bindText(2, try jsonIds(arena, ids)),
+        .unplayed_since => |since| try statement.bindInt64(2, since),
+    }
+    try statement.bindOptionalInt64(3, avoid_after);
+    if (try statement.step() != .row) return .{};
+    return .{
+        .hated = @intCast(statement.columnInt64(0)),
+        .not_for_me = @intCast(statement.columnInt64(1)),
+        .live = @intCast(statement.columnInt64(2)),
+        .recent = @intCast(statement.columnInt64(3)),
+    };
+}
+
+fn leftOutSql(comptime scope: []const u8) [:0]const u8 {
+    return "SELECT COALESCE(sum(hated), 0), COALESCE(sum(NOT hated AND not_for_me), 0),\n" ++
+        "    COALESCE(sum(NOT hated AND NOT not_for_me AND live), 0),\n" ++
+        "    COALESCE(sum(NOT hated AND NOT not_for_me AND NOT live AND recent), 0)\n" ++
+        "FROM (SELECT tracks.recording_id,\n" ++
+        "    EXISTS (SELECT 1 FROM feedback WHERE feedback.recording_id = tracks.recording_id AND feedback.score = -1) AS hated,\n" ++
+        "    EXISTS (SELECT 1 FROM recommendation_feedback AS not_for_me\n" ++
+        "        WHERE not_for_me.recording_id = tracks.recording_id AND not_for_me.expires_at > ?1) AS not_for_me,\n" ++
+        "    min(tracks.release_id IS NOT NULL AND EXISTS (SELECT 1 FROM releases AS live\n" ++
+        "        WHERE live.id = tracks.release_id AND (" ++ live_release ++ "))) AS live,\n" ++
+        "    ?3 IS NOT NULL AND EXISTS (SELECT 1 FROM recording_play_stats AS recent\n" ++
+        "        WHERE recent.recording_id = tracks.recording_id AND recent.last_played_at > ?3) AS recent\n" ++
+        "  FROM tracks WHERE tracks.recording_id IS NOT NULL AND (" ++ scope ++ ")\n" ++
+        "    AND EXISTS (SELECT 1 FROM locations WHERE locations.file_id = " ++ track_play_file ++ " AND locations.state = 'present')\n" ++
+        "  GROUP BY tracks.recording_id);";
+}
+
 pub fn validateRadio(seed: Seed, options: RadioOptions) !void {
     if (options.explore > 100) return error.InvalidExplore;
     switch (seed) {
@@ -1011,13 +1226,23 @@ fn loadCandidates(
         try pool.add(arena, db, bucket_era, filter, @as([]const u8, range), 200);
     }
     try pool.add(arena, db, bucket_any, filter, null, max_pool - @min(pool.ids.items.len, max_pool));
+    return candidateDetails(arena, library, filter, pool.ids.items, energy_focus);
+}
 
+fn candidateDetails(
+    arena: std.mem.Allocator,
+    library: *const Source,
+    filter: *const Filter,
+    recording_ids: []const i64,
+    energy_focus: EnergyFocus,
+) ![]Candidate {
+    const db = library.database;
     var candidates: std.ArrayList(Candidate) = .empty;
-    if (pool.ids.items.len == 0) return candidates.items;
+    if (recording_ids.len == 0) return candidates.items;
     var details = try db.prepare(details_sql);
     defer details.deinit();
     try filter.bind(details);
-    try details.bindText(8, try jsonIds(arena, pool.ids.items));
+    try details.bindText(8, try jsonIds(arena, recording_ids));
     while (try details.step() == .row) try candidates.append(arena, .{
         .recording_id = details.columnInt64(0),
         .track_id = details.columnInt64(1),
@@ -1158,11 +1383,22 @@ fn allowed(candidate: Candidate, history: []const RecentPick, relaxation: usize,
         const window = history[history.len -| (unplayed_window - 1)..];
         for (window) |recent| if (recent.never_played) return false;
     }
-    if (relaxation < 2) if (candidate.artist_id) |artist| {
+    return diverseAt(history, candidate.artist_id, candidate.release_id, relaxation);
+}
+
+/// Whether a pick by `artist_id` from `release_id` after `history` keeps to
+/// at most 2 consecutive picks by one Artist and 2 from one Release in any
+/// 10.
+pub fn diverse(history: []const RecentPick, artist_id: ?i64, release_id: ?i64) bool {
+    return diverseAt(history, artist_id, release_id, 0);
+}
+
+fn diverseAt(history: []const RecentPick, artist_id: ?i64, release_id: ?i64, relaxation: usize) bool {
+    if (relaxation < 2) if (artist_id) |artist| {
         if (history.len >= 2 and history[history.len - 1].artist_id == artist and history[history.len - 2].artist_id == artist)
             return false;
     };
-    if (relaxation < 1) if (candidate.release_id) |release| {
+    if (relaxation < 1) if (release_id) |release| {
         var same: usize = 0;
         for (history[history.len -| (diversity_window - 1)..]) |recent| {
             if (recent.release_id == release) same += 1;

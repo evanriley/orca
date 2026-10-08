@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/headless-gui.sh PAGE OUT.png [STEP...]
 #
-# PAGE is albums, artists, tracks, genres, folders, loved, playlists,
+# PAGE is home, albums, artists, tracks, genres, folders, loved, playlists,
 # now-playing, queue, health, matches or settings. Each STEP runs in order
 # after PAGE is shown:
 #   key:SPEC     one key, with modifiers: key:Return, key:ctrl+k, key:alt+Left
@@ -69,8 +69,8 @@ height=${BASH_REMATCH[2]}
 application_id=org.orca_music.Orca
 
 case "$page" in
-    albums | artists | tracks | genres | folders | loved | playlists | now-playing | queue | health | matches | settings) ;;
-    *) fail "unknown page '$page'; expected albums, artists, tracks, genres, folders, loved, playlists, now-playing, queue, health, matches or settings" ;;
+    home | albums | artists | tracks | genres | folders | loved | playlists | now-playing | queue | health | matches | settings) ;;
+    *) fail "unknown page '$page'; expected home, albums, artists, tracks, genres, folders, loved, playlists, now-playing, queue, health, matches or settings" ;;
 esac
 library_mode=${ORCA_HEADLESS_LIBRARY:-copy}
 case "$library_mode" in
@@ -494,13 +494,13 @@ run_step() {
     sleep 0.6
 }
 
-# Every page but Albums and Settings is reached through the command palette's
+# Every page but Home and Settings is reached through the command palette's
 # "Show <page>" commands, typed after ">" (the palette's alias for "›"), so a
 # change to the palette's command prefix or names must be mirrored here.
 show_page() {
     local title
     case "$1" in
-        albums) return 0 ;;
+        home) return 0 ;;
         settings)
             run_step key:ctrl+comma
             return 0

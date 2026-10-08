@@ -39,6 +39,10 @@ lock; when another process holds it, recovery is deferred to the next holder.
 - The primary connection uses WAL and `synchronous=NORMAL`. Every connection
   sets `foreign_keys=ON`, a five-second busy timeout and SQLite's full-mutex
   mode.
+- The primary connection creates the scratch TEMP tables of sweeps, cache
+  clears and root removal when it opens, and those paths only empty and fill
+  them. A TEMP schema change on a connection expires every statement prepared
+  on it, which aborts a read in progress on another thread.
 - One write lane (`std.Io.Mutex`, futex-backed, not a spinlock) serializes
   complete write transactions. A scan holds it across one bounded 256-row
   transaction while UI threads read.
@@ -473,8 +477,11 @@ are stored by number, so new states are appended and never reordered
 ### Settings and history
 
 - `library_settings` (`WITHOUT ROWID`): the Library's own settings, never
-  credentials: `listens.policy`, `listens.record`, and `genre_fill.musicbrainz`
-  (`0` disables; absent is on).
+  credentials: `listens.policy`, `listens.record`, `genre_fill.musicbrainz`
+  (`0` disables; absent is on), the discovery settings
+  ([discovery.md](discovery.md#settings)) and `mixes.generated_day`, the mix
+  day the stored Daily Mixes were made for
+  ([discovery.md](discovery.md#mix-day)).
 - `job_history`: one row per finished host Job
   ([control-plane.md](control-plane.md#history)).
 

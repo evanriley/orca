@@ -54,7 +54,6 @@ const cache_size_sql =
 /// that holds it, with everything fetched taken out and `fetched_at` zero so
 /// the next look fetches again.
 const clear_sql =
-    "CREATE TEMP TABLE IF NOT EXISTS cleared_cover_releases(id INTEGER PRIMARY KEY);\n" ++
     "DELETE FROM temp.cleared_cover_releases;\n" ++
     "INSERT INTO temp.cleared_cover_releases(id)\n" ++
     "    SELECT release_id FROM release_artwork WHERE kind = 0 AND " ++ fetched_artwork ++ ";\n" ++

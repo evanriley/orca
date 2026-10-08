@@ -221,6 +221,7 @@ const commands = [_]Command{
     .{ .title = "Submit to AcoustID", .subtitle = "Library tools", .icon = "auth-fingerprint-symbolic", .run = jobs.startSubmission, .needs_library = true },
     .{ .title = "Add music folder…", .subtitle = "Library tools", .shortcut = "Ctrl O", .icon = "list-add-symbolic", .run = jobs.chooseFolder, .needs_library = true },
     .{ .title = "Search library", .subtitle = "Go to", .keywords = "find", .icon = "orca-search-symbolic", .run = summonSearch, .needs_library = true },
+    .{ .title = "Show Home", .subtitle = "Go to", .keywords = "daily mixes start radio this week", .icon = "orca-home-symbolic", .run = goTo(.home) },
     .{ .title = "Show Albums", .subtitle = "Go to", .icon = "orca-albums-symbolic", .run = goTo(.albums) },
     .{ .title = "Show Artists", .subtitle = "Go to", .icon = "orca-artists-symbolic", .run = goTo(.artists) },
     .{ .title = "Show Tracks", .subtitle = "Go to", .icon = "orca-tracks-symbolic", .run = goTo(.tracks) },

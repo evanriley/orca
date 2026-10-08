@@ -56,6 +56,22 @@ const struct_pairs = .{
     .{ c_api.RadioQueuePickView, c.orca_radio_queue_pick_view },
     .{ c_api.RadioQueuePicksView, c.orca_radio_queue_picks_view },
     .{ c_api.DiscoverySettingsView, c.orca_discovery_settings },
+    .{ c_api.DailyMixesRequestView, c.orca_daily_mixes_request },
+    .{ c_api.DailyMixArtistView, c.orca_daily_mix_artist },
+    .{ c_api.DailyMixView, c.orca_daily_mix_view },
+    .{ c_api.DailyMixesView, c.orca_daily_mixes_view },
+    .{ c_api.DailyMixEntryView, c.orca_daily_mix_entry_view },
+    .{ c_api.DailyMixEntriesView, c.orca_daily_mix_entries_view },
+    .{ c_api.HomeTopArtistView, c.orca_home_top_artist },
+    .{ c_api.ListeningWeekView, c.orca_listening_week_view },
+    .{ c_api.HomeTopArtistsView, c.orca_home_top_artists_view },
+    .{ c_api.HomePlayedReleaseView, c.orca_home_played_release },
+    .{ c_api.HomePlayedReleasesView, c.orca_home_played_releases_view },
+    .{ c_api.HomeTrackView, c.orca_home_track },
+    .{ c_api.HomeTracksView, c.orca_home_tracks_view },
+    .{ c_api.HomeFormatsView, c.orca_home_formats },
+    .{ c_api.OnThisDayView, c.orca_on_this_day_view },
+    .{ c_api.HistoryAgeView, c.orca_history_age },
     .{ c_api.ArtistTotalsView, c.orca_artist_totals },
     .{ c_api.ChangeCount, c.orca_change_count },
     .{ c_api.PlaylistView, c.orca_playlist_view },
@@ -230,6 +246,20 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_RADIO_STATE_";
         pub const Tag = core.runtime.RadioState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_DAILY_MIXES_STATE_";
+        pub const Tag = core.runtime.DailyMixesState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_DAILY_MIX_KIND_";
+        pub const Tag = core.runtime.DailyMixKind;
         pub fn produce(tag: Tag) ?i64 {
             return @backingInt(tag);
         }
@@ -1161,6 +1191,12 @@ test "the similar-sound flags orca.h declares are liborca's" {
     try std.testing.expectEqual(discovery.sound_key, c.ORCA_SOUND_KEY);
     try std.testing.expectEqual(discovery.sound_energy, c.ORCA_SOUND_ENERGY);
     try std.testing.expectEqual(discovery.max_focus, @typeInfo(@FieldType(c_api.RadioOptionsView, "focus")).array.len);
+}
+
+test "the Daily Mix arrays orca.h declares are as long as liborca's" {
+    try std.testing.expectEqual(liborca.internal.library.daily_mixes.max_mix_artists, @typeInfo(@FieldType(c_api.DailyMixView, "artists")).array.len);
+    try std.testing.expectEqual(liborca.internal.library.daily_mixes.max_covers, @typeInfo(@FieldType(c_api.DailyMixView, "cover_release_ids")).array.len);
+    try std.testing.expectEqual(liborca.internal.library.home.week_days, @typeInfo(@FieldType(c_api.ListeningWeekView, "day_listened_ms")).array.len);
 }
 
 test "the tag-write digest orca.h declares is as long as liborca's" {

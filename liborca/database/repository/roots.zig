@@ -192,7 +192,7 @@ pub const LibraryRootRepository = struct {
             if (try exists.step() != .row) return error.UnknownRoot;
         }
 
-        try self.db.exec("CREATE TEMP TABLE forgotten_files(id INTEGER PRIMARY KEY);");
+        try self.db.exec("DELETE FROM temp.forgotten_files; DELETE FROM temp.forgotten_recordings;");
         const files_forgotten = try self.execWithRoot(
             \\INSERT INTO temp.forgotten_files(id)
             \\SELECT DISTINCT file_id FROM locations AS under
@@ -231,7 +231,6 @@ pub const LibraryRootRepository = struct {
         }
 
         try self.db.exec(
-            \\CREATE TEMP TABLE forgotten_recordings(id INTEGER PRIMARY KEY);
             \\INSERT INTO temp.forgotten_recordings(id)
             \\SELECT recording_id FROM tracks
             \\WHERE preferred_file_id IN (SELECT id FROM temp.forgotten_files) AND recording_id IS NOT NULL
@@ -268,7 +267,7 @@ pub const LibraryRootRepository = struct {
         const recordings_forgotten = self.db.changes();
         _ = try self.execWithRoot("DELETE FROM library_roots WHERE id = ?1;", root_id);
         for (releases.items) |release_id| _ = try refreshFolderCoverLocked(self.db, release_id);
-        try self.db.exec("DROP TABLE temp.forgotten_files; DROP TABLE temp.forgotten_recordings;");
+        try self.db.exec("DELETE FROM temp.forgotten_files; DELETE FROM temp.forgotten_recordings;");
         try self.db.exec("COMMIT;");
         return .{
             .allocator = allocator,

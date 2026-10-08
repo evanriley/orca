@@ -410,6 +410,7 @@ pub extern fn g_date_time_new_from_unix_local(t: i64) ?*GDateTime;
 pub extern fn g_date_time_new_local(year: c_int, month: c_int, day: c_int, hour: c_int, minute: c_int, seconds: f64) ?*GDateTime;
 pub extern fn g_date_time_to_unix(datetime: *GDateTime) i64;
 pub extern fn g_date_time_add_days(datetime: *GDateTime, days: c_int) ?*GDateTime;
+pub extern fn g_date_time_add_years(datetime: *GDateTime, years: c_int) ?*GDateTime;
 pub extern fn g_date_time_format(datetime: *GDateTime, format: [*:0]const u8) ?[*:0]u8;
 pub extern fn g_date_time_unref(datetime: *GDateTime) void;
 pub extern fn g_date_time_difference(end: *GDateTime, begin: *GDateTime) i64;
@@ -758,6 +759,7 @@ pub extern fn gtk_overlay_new() *Widget;
 pub extern fn gtk_overlay_set_child(overlay: *Overlay, child: ?*Widget) void;
 pub extern fn gtk_overlay_add_overlay(overlay: *Overlay, widget: *Widget) void;
 pub extern fn gtk_overlay_set_measure_overlay(overlay: *Overlay, widget: *Widget, measure: gboolean) void;
+pub extern fn gtk_orientable_get_orientation(orientable: *Orientable) c_int;
 pub extern fn gtk_orientable_set_orientation(orientable: *Orientable, orientation: c_int) void;
 
 pub extern fn gtk_list_box_new() *Widget;
@@ -837,6 +839,7 @@ pub extern fn g_object_set_data_full(
 pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean, data: ?*anyopaque) c_uint;
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
+pub const ACCESSIBLE_PROPERTY_DESCRIPTION: c_int = 1;
 pub const ACCESSIBLE_PROPERTY_LABEL: c_int = 4;
 pub const ACCESSIBLE_PROPERTY_VALUE_TEXT: c_int = 18;
 pub extern fn gtk_accessible_update_property(accessible: *Accessible, first_property: c_int, ...) void;

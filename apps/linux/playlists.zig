@@ -39,7 +39,7 @@ const row_icon_pixels: c_int = 20;
 const hero_pixels: c_int = 232;
 const handle_width: c_int = 26;
 const album_width: c_int = 324;
-const meta_separator = "  <span fgalpha=\"43%\">·</span>  ";
+pub const meta_separator = "  <span fgalpha=\"43%\">·</span>  ";
 const overview_tag = "playlists";
 pub const page_tag = "playlist";
 
@@ -784,7 +784,7 @@ fn writeNumber(writer: *std.Io.Writer, unit: Unit, op: []const u8, value: ?std.j
     return writeAmount(writer, unit, amount);
 }
 
-fn part(widget: *gtk.Widget, key: [*:0]const u8) ?*gtk.Widget {
+pub fn part(widget: *gtk.Widget, key: [*:0]const u8) ?*gtk.Widget {
     return gtk.cast(gtk.Widget, gtk.g_object_get_data(widget, key) orelse return null);
 }
 
@@ -817,7 +817,7 @@ fn emptyArt(pixels: c_int) *gtk.Widget {
     return box;
 }
 
-fn fillingCover(self: *App, pixels: c_int) *gtk.Widget {
+pub fn fillingCover(self: *App, pixels: c_int) *gtk.Widget {
     const cover = art.newFillingCover(self, art.iconPlaceholder(pixels));
     gtk.gtk_widget_add_css_class(cover, "playlist-art-cell");
     return cover;
@@ -898,7 +898,7 @@ fn mosaicPlaceholder(pixels: c_int) *gtk.Widget {
     return icon;
 }
 
-fn newMosaic(self: *App, pixels: c_int) *gtk.Widget {
+pub fn newMosaic(self: *App, pixels: c_int) *gtk.Widget {
     const stack = gtk.gtk_stack_new();
     gtk.gtk_widget_add_css_class(stack, "playlist-mosaic");
     gtk.gtk_widget_set_overflow(stack, gtk.OVERFLOW_HIDDEN);
@@ -931,7 +931,7 @@ fn clearCover(cover: *gtk.Widget) void {
     gtk.gtk_stack_set_visible_child_name(stack, "placeholder");
 }
 
-fn showMosaic(self: *App, mosaic: *gtk.Widget, covers: []const i64) void {
+pub fn showMosaic(self: *App, mosaic: *gtk.Widget, covers: []const i64) void {
     const single = part(mosaic, "orca-single") orelse return;
     if (covers.len == 0) {
         art.forget(self, single);
@@ -945,7 +945,7 @@ fn showMosaic(self: *App, mosaic: *gtk.Widget, covers: []const i64) void {
     gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, mosaic), if (tiled) "grid" else "single");
 }
 
-fn showMosaicBackdrop(self: *App, backdrop: *gtk.Widget, mosaic: *gtk.Widget, cover_count: usize) void {
+pub fn showMosaicBackdrop(self: *App, backdrop: *gtk.Widget, mosaic: *gtk.Widget, cover_count: usize) void {
     if (cover_count == 0) return art.showBackdrop(self, backdrop, &.{});
     if (cover_count < cell_keys.len) return art.showBackdrop(self, backdrop, &.{part(mosaic, "orca-single") orelse return});
     var cells: [cell_keys.len]*gtk.Widget = undefined;
@@ -2046,7 +2046,7 @@ fn arrangeColumns(self: *App) void {
     self.playlists.handle_column = handle;
 }
 
-fn roundButton(icon: [*:0]const u8, tooltip: [*:0]const u8, toggle: bool) *gtk.Widget {
+pub fn roundButton(icon: [*:0]const u8, tooltip: [*:0]const u8, toggle: bool) *gtk.Widget {
     const button = if (toggle) gtk.gtk_toggle_button_new() else gtk.gtk_button_new();
     gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, button), icon);
     gtk.gtk_widget_add_css_class(button, "album-more");

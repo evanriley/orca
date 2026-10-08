@@ -16,6 +16,8 @@ pub const radio_include_unplayed = "radio.include_unplayed";
 pub const discovery_avoid_days = "discovery.avoid_days";
 /// How many Daily Mixes are made each day.
 pub const mixes_count = "mixes.count";
+/// The mix day the stored Daily Mixes were made for.
+pub const mixes_generated_day = "mixes.generated_day";
 
 /// Per-Library settings kept in the Library itself, never credentials.
 pub const LibrarySettingsRepository = struct {

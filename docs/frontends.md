@@ -283,6 +283,29 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   a session return `ORCA_STATUS_INVALID_STATE` without one. Picks arrive from
   a worker that wakes the host; the next `orca_runtime_pump` adds them. See
   [discovery.md](discovery.md#library-radio).
+- Daily Mixes: `orca_library_start_daily_mixes` (an
+  `orca_daily_mixes_request`; a Job of kind `ORCA_JOB_KIND_DAILY_MIXES`;
+  `ORCA_STATUS_INVALID_ARGUMENT` for `force` above 1),
+  `orca_library_daily_mixes` (one callback-scoped `orca_daily_mixes_view`
+  with an `orca_daily_mixes_state` and up to 6 `orca_daily_mix_view`s),
+  `orca_library_daily_mix_entries` (up to 25 entries with reasons in one
+  callback-scoped `orca_daily_mix_entries_view`), `orca_library_not_for_me`,
+  `orca_library_clear_not_for_me`, `orca_library_reset_recommendations` and
+  `orca_library_save_daily_mix` (writes the new playlist id).
+  `ORCA_STATUS_NOT_FOUND` for an unknown mix or Track. See
+  [discovery.md](discovery.md#daily-mixes).
+- Home page queries, each taking `now_s` and `utc_offset_s` where the answer
+  depends on the date: `orca_library_listening_week`
+  (`orca_listening_week_view`), `orca_library_recent_releases` and
+  `orca_library_rediscover` (`orca_home_played_releases_view`),
+  `orca_library_never_played` and `orca_library_deep_cuts`
+  (`orca_home_tracks_view`), `orca_library_top_artists`
+  (`orca_home_top_artists_view`), `orca_library_formats`
+  (`orca_home_formats`), `orca_library_on_this_day`
+  (`orca_on_this_day_view`) and `orca_library_history_age`
+  (`orca_history_age`). Lists hold at most 24 entries and are valid only in
+  their callback; a NULL callback or output is `ORCA_STATUS_INVALID_ARGUMENT`.
+  See [discovery.md](discovery.md#home).
 - Listen settings: `orca_library_set_listen_policy`,
   `orca_library_set_listen_recording`, `orca_library_clear_listens` (keeps
   ratings and loves).
@@ -460,6 +483,23 @@ the pending picks. Settings › Listening holds Radio & Daily Mixes, stored with
 `setLibraryDiscoverySettings`, and Show listening stats on Home, an `orca-gtk`
 setting in `[listening]`.
 
+`orca-gtk` opens on Home, the first sidebar item in its own unlabeled group;
+Settings › General › Default page can choose another start page. Home reads the
+Home queries and `libraryDailyMixes` when it is shown and when the Library
+reloads. It shows the Daily Mixes row with See all (a grid of every mix), the
+Start Radio card, This week, Jump back in, Rediscover, Never played, Deep cuts
+and Your library. Under 14 days of history (`libraryHistoryAge`) it hides This
+week, Rediscover and Deep cuts. With listen recording off it shows only the
+library sections and a note linking to Settings › Listening. With Show
+listening stats on Home off it hides This week and Top artists. `orca-gtk`
+calls `startDailyMixes` with the local time and UTC offset after a Library
+opens and when Home is shown, and with `force` after the Daily Mixes setting
+changes; the tiles reload when that Job ends. A Daily Mix page plays,
+shuffles or saves the mix as a playlist, explains each Track with the Radio
+reason wording, and removes a Track with Not for me (`libraryNotForMe`, undone
+from its toast with `libraryClearNotForMe`). Settings › Listening › Reset
+recommendations calls `libraryResetRecommendations` after a confirmation.
+
 Run it from the tree:
 
 ```sh
@@ -555,7 +595,7 @@ scripts/headless-gui.sh albums /tmp/albums.png
 scripts/headless-gui.sh albums /tmp/palette.png key:ctrl+k type:scan wait:500
 ```
 
-The first argument is the page (`albums`, `artists`, `tracks`, `genres`,
+The first argument is the page (`home`, `albums`, `artists`, `tracks`, `genres`,
 `folders`, `loved`, `playlists`, `now-playing`, `queue`, `health`, `matches` or
 `settings`). The steps after the output path (`key:`, `type:`, `move:`,
 `click:`, `dclick:`, `rclick:`, `drag:`, `scroll:`, `wait:`, `shot:`, `tree:`,

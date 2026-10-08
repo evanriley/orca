@@ -39,6 +39,7 @@ const details = @import("details.zig");
 const logging = @import("logging.zig");
 const libraries = @import("libraries.zig");
 const radio = @import("radio.zig");
+const home_page = @import("home.zig");
 
 const App = app.App;
 
@@ -759,7 +760,7 @@ fn generalTab(self: *App) *gtk.Widget {
     startup.add(selectRow(
         "Default page",
         "Queue and resume behavior live in Playback",
-        &.{ "Albums", "Artists", "Tracks", "Now Playing", null },
+        &.{ "Home", "Albums", "Artists", "Tracks", "Now Playing", null },
         @backingInt(general.start_page),
         gtk.callback(startPagePicked),
         self,
@@ -2085,6 +2086,7 @@ fn recordingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
         self.toast("Could not change listening history");
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), @intFromBool(!enabled));
     };
+    home_page.reload(self);
 }
 
 fn policyPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -2177,14 +2179,35 @@ fn mixesPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
     if (selected >= mix_choices.len) return;
     var discovery = discoverySettings(self);
+    if (discovery.mix_count == mix_choices[selected]) return;
     discovery.mix_count = mix_choices[selected];
     saveDiscoverySettings(self, discovery);
+    home_page.startMixes(self, true);
 }
 
 fn homeStatsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.home_stats = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
     settings.save(self);
+    home_page.reload(self);
+}
+
+fn resetRecommendations(self: *App) void {
+    const library = self.library orelse return;
+    self.runtime.libraryResetRecommendations(library) catch return self.toast("Could not reset recommendations");
+    radio.invalidate(self);
+    home_page.reload(self);
+    self.toast("Recommendations reset");
+}
+
+fn resetRecommendationsClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    confirm(
+        state(data),
+        "Reset recommendations?",
+        "Radio and Daily Mixes forget every “Not for me” and “Less like this”. Listening history is kept.",
+        "Reset",
+        resetRecommendations,
+    );
 }
 
 fn radioCard(self: *App) *gtk.Widget {
@@ -2220,6 +2243,10 @@ fn radioCard(self: *App) *gtk.Widget {
         radio_card.add(row);
     }
     radio_card.add(switchRow("Show listening stats on Home", "", self.home_stats, gtk.callback(homeStatsSwitched), self));
+    const reset = actionRow("Reset recommendations", "Forgets “Not for me” and “Less like this”");
+    _ = suffixButton(reset, "Reset…", null, gtk.callback(resetRecommendationsClicked), self);
+    gtk.gtk_widget_set_sensitive(reset, has_library);
+    radio_card.add(reset);
     return radio_card.widget;
 }
 
@@ -2581,6 +2608,7 @@ fn resetSettings(self: *App) void {
         self.runtime.librarySetListenRecording(library, true) catch {};
         self.runtime.setLibraryDiscoverySettings(library, .{}) catch {};
         radio.invalidate(self);
+        home_page.startMixes(self, true);
     }
     self.scrobbling = false;
     self.announce_now_playing = false;

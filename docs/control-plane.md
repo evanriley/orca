@@ -116,7 +116,8 @@ not running.
 Jobs share one state, progress and cancellation representation across the
 scanner, the projection, the property backfill, the library-wide analysis,
 duplicate detection, consistency checks, metadata lookup, AcoustID submission,
-tag write-back, and the lyrics, artist-info and release-info fetches. The C ABI
+tag write-back, the lyrics, artist-info and release-info fetches, and making
+Daily Mixes. The C ABI
 names the kinds `ORCA_JOB_KIND_*` (`orca.h`). The serialized control lane owns
 job state; the worker publishes counters through atomics and is joined through
 `work.Registry` before its terminal state is recorded and its lossless
@@ -151,8 +152,8 @@ selects only what is left
 ### One Job per Library, and the waiting queue
 
 A Library runs one host Job at a time. Lyrics, artist-info and per-Release
-info fetches answer a page the host is showing, so they never wait and take no
-slot; every other host Job holds its Library's slot from start until the pump
+info fetches answer a page the host is showing, and Daily Mixes are made when
+Home opens, so they never wait and take no slot; every other host Job holds its Library's slot from start until the pump
 reaps it. A Job started while the slot is held, while an earlier Job of the
 same Library waits, or while the Library is paused is created in state
 `waiting` and appended to the runtime's waiting queue, `max_waiting_jobs` (32)
@@ -176,8 +177,8 @@ and not cancelled); `resumeJob` lets it carry on. The Job keeps its thread and
 its slot, so nothing else can start in its Library. It pauses between provider
 requests, and a request holds its service's lease only while it runs.
 
-A projection, a tag write, a lyrics fetch and an artist-info fetch never poll,
-so they are not pausable (`error.JobNotPausable`). A release-info fetch is
+A projection, a tag write, a lyrics fetch, an artist-info fetch and a Daily
+Mixes Job never poll, so they are not pausable (`error.JobNotPausable`). A release-info fetch is
 pausable only when it fills missing genres. A finished Job returns
 `error.JobAlreadyFinished`.
 

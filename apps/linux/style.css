@@ -35,6 +35,9 @@
 @define-color orca_diff #E5C88A;
 @define-color orca_match_checked #1A2028;
 @define-color orca_lyric_faded #6A6E71;
+@define-color orca_chart_bar #3A4046;
+@define-color orca_makeup_never #4A5056;
+@define-color orca_row_hover #1B1F23;
 
 @define-color orca_shadow rgb(0 0 0 / 0.55);
 @define-color orca_shadow_soft rgb(0 0 0 / 0.4);
@@ -8960,4 +8963,589 @@ checkbutton.metadata-issues-check-box check:checked {
 
 .metadata-issues-note image {
   color: @orca_text_3;
+}
+
+/* Home */
+
+.nav-group-untitled {
+  padding-top: 0;
+}
+
+.home-page {
+  padding: 18px 32px 56px 32px;
+}
+
+.narrow .home-page {
+  padding: 2px 16px 40px 16px;
+}
+
+.narrow .home-page .display-page {
+  font-size: 26px;
+}
+
+.home-subline {
+  font-size: 14px;
+  color: @orca_text_2;
+}
+
+.home-section-title {
+  font-size: 24px;
+}
+
+.home-list-heading .home-section-title {
+  font-size: 22px;
+}
+
+.home-updated,
+.home-definition,
+.home-card-subtitle {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+button.home-link {
+  min-height: 0;
+  padding: 2px 6px;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text_2;
+}
+
+button.home-link:hover {
+  color: @orca_text;
+}
+
+.home-note {
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.home-recording-note {
+  padding: 12px 14px;
+  border-radius: 9px;
+  background-color: @orca_bg_inset;
+  color: @orca_text_3;
+}
+
+.home-note-text,
+.daily-mix-note-text {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.home-note-text link,
+.daily-mix-note-text link {
+  color: @orca_text_2;
+}
+
+.home-tiles > flowboxchild {
+  padding: 0;
+  border-radius: 8px;
+  outline-offset: 2px;
+}
+
+.home-tiles > flowboxchild:hover .home-mix-art,
+.home-tiles > flowboxchild:hover .home-recent-art {
+  box-shadow: 0 0 0 2px @orca_text;
+}
+
+.home-mix-art {
+  border-radius: 8px;
+  background-color: @orca_bg_raised_2;
+}
+
+.home-recent-art {
+  border-radius: 7px;
+  background-color: @orca_bg_raised_2;
+}
+
+.home-mix-art .cover,
+.home-recent-art .cover {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.home-mix-chip {
+  margin: 0 0 8px 8px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background-color: alpha(@orca_bg_window, 0.78);
+  font-size: 12px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.home-tile-title {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.home-tile-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.home-card {
+  padding: 20px 22px;
+  border-radius: 14px;
+  background-color: @orca_bg_raised;
+}
+
+.home-card-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.home-card-icon {
+  color: @orca_text_2;
+  -gtk-icon-size: 18px;
+}
+
+.home-playing {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: @orca_smart_control;
+}
+
+.home-playing-cover {
+  border-radius: 6px;
+}
+
+.home-playing-from {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.home-playing-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.home-playing-artist {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+button.home-start {
+  min-height: 34px;
+  padding: 0 14px;
+}
+
+button.home-seed {
+  min-height: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-weight: 400;
+}
+
+button.home-seed:hover,
+menubutton.home-seed > button:hover {
+  background-color: @orca_bg_hover;
+}
+
+menubutton.home-seed > button {
+  min-height: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-weight: 400;
+}
+
+menubutton.home-seed {
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.home-seed-icon {
+  color: @orca_text_2;
+  -gtk-icon-size: 18px;
+}
+
+.home-seed-title {
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.home-seed-detail {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.home-week-time {
+  font-family: var(--orca-display-font);
+  font-size: 40px;
+  color: @orca_text;
+}
+
+.home-week-counts {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.home-chart {
+  min-height: 118px;
+  padding-top: 8px;
+  border-radius: 6px;
+}
+
+.home-chart:focus-visible {
+  outline: 2px solid @orca_accent;
+  outline-offset: 2px;
+}
+
+.home-chart-value,
+.home-chart-label {
+  font-size: 11.5px;
+  color: @orca_text_3;
+}
+
+.home-chart-day.today .home-chart-value {
+  color: @orca_accent_text;
+}
+
+.home-chart-day.today .home-chart-label {
+  color: @orca_text;
+}
+
+.home-chart-bar {
+  border-radius: 4px 4px 0 0;
+  background-color: @orca_chart_bar;
+}
+
+.home-chart-day.today .home-chart-bar {
+  background-color: @orca_accent;
+}
+
+.home-week-footer {
+  padding-top: 4px;
+  border-top: 1px solid @orca_divider;
+}
+
+.home-week-footer-text {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+list.home-list {
+  background: none;
+}
+
+list.home-list > row {
+  margin: 0 -8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: none;
+}
+
+list.home-list > row:hover {
+  background-color: @orca_row_hover;
+}
+
+.home-list-heading {
+  padding-bottom: 6px;
+}
+
+.home-list-cover {
+  border-radius: 5px;
+}
+
+.home-list-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.home-list-reason {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.home-panel {
+  padding: 18px 20px;
+  border-radius: 12px;
+  background-color: @orca_bg_raised;
+}
+
+list.home-top-list > row {
+  margin: 0;
+  padding: 3px 0;
+  border-radius: 4px;
+}
+
+.home-top-rank {
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.home-top-name {
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.home-top-count,
+.home-format-count {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+progressbar.home-bar > trough {
+  min-width: 24px;
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @orca_track;
+}
+
+progressbar.home-bar > trough > progress {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @orca_text_3;
+}
+
+.home-stat-value {
+  font-size: 20px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.home-stat-caption,
+.home-formats-heading {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.home-formats-heading {
+  padding-top: 4px;
+}
+
+.home-format-name {
+  font-size: 12.5px;
+  color: @orca_text;
+}
+
+.home-format-count {
+  font-size: 12.5px;
+}
+
+button.home-day-release {
+  margin: 0 -8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-weight: 400;
+}
+
+.home-day-cover {
+  border-radius: 6px;
+}
+
+.home-day-when {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.home-day-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.home-day-artist {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.home-facts {
+  padding-top: 10px;
+  border-top: 1px solid @orca_divider;
+}
+
+.home-fact-name {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.home-fact-value {
+  font-size: 12.5px;
+  color: @orca_text_artist;
+}
+
+/* Daily Mix */
+
+.daily-mix-page {
+  padding: 72px 32px 48px 32px;
+}
+
+.narrow .daily-mix-page {
+  padding: 64px 16px 40px 16px;
+}
+
+.daily-mix-mosaic {
+  border-radius: 10px;
+  box-shadow: 0 16px 40px alpha(black, 0.4);
+}
+
+.daily-mix-page .album-kind {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: @orca_text_2;
+}
+
+.daily-mix-page .album-hero-title {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.narrow .daily-mix-page .album-hero-title {
+  font-size: 32px;
+}
+
+.daily-mix-artists {
+  font-size: 15px;
+  color: @orca_text_artist;
+}
+
+.daily-mix-page .album-meta {
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.daily-mix-page .playlist-actions {
+  margin-top: 6px;
+}
+
+.daily-mix-legend-text {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.daily-mix-swatch {
+  border-radius: 2px;
+}
+
+.daily-mix-swatch.favorite {
+  background-color: @orca_text_artist;
+}
+
+.daily-mix-swatch.rarely {
+  background-color: @orca_text_3;
+}
+
+.daily-mix-swatch.never {
+  background-color: @orca_makeup_never;
+}
+
+.daily-mix-head {
+  padding-bottom: 10px;
+}
+
+.daily-mix-head-cell {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: @orca_text_3;
+}
+
+list.daily-mix-rows > row {
+  margin: 0;
+  padding: 9px 0;
+  border-radius: 0;
+  border-top: 1px solid @orca_border;
+}
+
+list.daily-mix-rows > row:hover {
+  background-color: @orca_row_hover;
+}
+
+.daily-mix-number {
+  font-size: 13.5px;
+  color: @orca_text_3;
+}
+
+.daily-mix-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.daily-mix-artist {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.daily-mix-album,
+.daily-mix-time {
+  font-size: 13.5px;
+  color: @orca_text_2;
+}
+
+.daily-mix-reason {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+button.daily-mix-not-for-me {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+  -gtk-icon-size: 16px;
+  opacity: 0;
+}
+
+button.daily-mix-not-for-me:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+list.daily-mix-rows > row:hover button.daily-mix-not-for-me,
+list.daily-mix-rows > row:focus-within button.daily-mix-not-for-me,
+button.daily-mix-not-for-me:focus-visible {
+  opacity: 1;
+}
+
+.daily-mix-aside {
+  padding: 18px 20px;
+  border-radius: 12px;
+  background-color: alpha(@orca_bg_raised, 0.9);
+}
+
+.daily-mix-aside-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.daily-mix-aside-text {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.daily-mix-aside-section > .daily-mix-aside-text:first-child,
+.daily-mix-aside-section > label.daily-mix-aside-text {
+  color: @orca_text_2;
+}
+
+.daily-mix-bullet-dot {
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.daily-mix-note {
+  padding: 12px;
+  border-radius: 9px;
+  background-color: @orca_bg_inset;
+  color: @orca_text_3;
+}
+
+.home-grid-page {
+  padding-top: 18px;
 }

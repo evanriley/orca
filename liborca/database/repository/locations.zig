@@ -1508,7 +1508,6 @@ test "a Release's front images come from the folder holding most of its Tracks, 
 test "a Release's front images are found through the folder index, never by scanning" {
     var library = try openFolderTestLibrary("release-front-image-plan");
     defer library.close();
-    try library.database.exec("CREATE TEMP TABLE IF NOT EXISTS swept_cover_releases(id INTEGER PRIMARY KEY);");
     for ([_][:0]const u8{
         release_front_images_sql,
         track_release_front_images_sql,

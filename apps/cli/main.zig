@@ -44,6 +44,7 @@ fn describe(err: anyerror) []const u8 {
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
         error.UnknownArtist => "no artist with that id",
+        error.UnknownDailyMix => "no Daily Mix with that number; run mixes to list them",
         error.InvalidLanguage => "--lang must be a Wikipedia language code such as en or pt-br",
         error.NoArtistPhoto => "the artist has no photo; run artist-info --fetch first",
         error.NoReleaseGroupCover => "the release group has no cover; run artist-info --fetch --include-releases first",
@@ -349,6 +350,8 @@ const commands = [_]Command{
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
     .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--limit N] [--explain]", .min_arguments = 2, .max_arguments = 8, .run = previewRadio },
+    .{ .name = "home", .usage = "home DATABASE", .min_arguments = 1, .max_arguments = 1, .run = showHome },
+    .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N]", .min_arguments = 1, .max_arguments = 4, .run = showDailyMixes },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{
         .name = "artwork",
@@ -5253,6 +5256,155 @@ fn previewRadio(context: Context) !void {
                 pick.score, c.artist, c.genre, c.audio, c.co_listening, c.era, c.taste, c.jitter,
             });
         }
+    }
+}
+
+/// `orca-cli home DATABASE`: prints every Home page section for the current
+/// time in UTC, reading the database alone.
+fn showHome(context: Context) !void {
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const time: liborca.HomeLocalTime = .{ .now_s = std.Io.Clock.real.now(context.io).toSeconds(), .utc_offset_s = 0 };
+
+    const week = try runtime.libraryListeningWeek(library, time);
+    try stdout.print("listening week: {d} min, {d} plays, {d} artists, {d} releases; previous week {d} min, {d} plays\n", .{
+        week.listened_ms / 60_000, week.plays, week.artists, week.releases, week.previous_listened_ms / 60_000, week.previous_plays,
+    });
+    try stdout.writeAll("\tper day (oldest first, min):");
+    for (week.day_listened_ms) |ms| try stdout.print(" {d}", .{ms / 60_000});
+    try stdout.writeAll("\n");
+    if (week.top_artist) |*artist| {
+        try stdout.print("\ttop artist: {s} ({d} plays)\n", .{ artist.name.slice(), artist.plays });
+    }
+
+    var releases: [liborca.home_max_items]liborca.HomePlayedRelease = undefined;
+    var tracks: [liborca.home_max_items]liborca.HomeTrack = undefined;
+    var artists: [liborca.home_max_items]liborca.HomeTopArtist = undefined;
+
+    const recent = try runtime.libraryRecentReleases(library, time, &releases);
+    try writeHomeReleases(stdout, "recently played releases", releases[0..recent]);
+    const rediscover = try runtime.libraryRediscover(library, time, &releases);
+    try writeHomeReleases(stdout, "rediscover", releases[0..rediscover]);
+    const never = try runtime.libraryNeverPlayed(library, &tracks);
+    try writeHomeTracks(stdout, "never played", tracks[0..never]);
+    const deep = try runtime.libraryDeepCuts(library, time, &tracks);
+    try writeHomeTracks(stdout, "deep cuts", tracks[0..deep]);
+    const top = try runtime.libraryTopArtists(library, time, 30, &artists);
+    try stdout.print("top artists, 30 days ({d})\n", .{top});
+    for (artists[0..top], 1..) |*artist, rank| try stdout.print("\t{d}\t{s}\t{d} plays\n", .{ rank, artist.name.slice(), artist.plays });
+
+    const formats = try runtime.libraryFormats(library);
+    try stdout.print("formats: {d} releases, {d} tracks, {d} min; flac={d} alac={d} mp3={d} other={d}\n", .{
+        formats.releases, formats.tracks, formats.duration_ms / 60_000, formats.flac, formats.alac, formats.mp3, formats.other,
+    });
+
+    const day = try runtime.libraryOnThisDay(library, time);
+    try stdout.print("on this day: added this week={d} this year={d}, never played {d}% of {d} tracks\n", .{
+        day.added_this_week, day.added_this_year, day.never_played_percent, day.tracks,
+    });
+    if (day.top_release) |*release| {
+        try stdout.print("\ta year ago: {s} - {s} ({d} plays)\n", .{ release.artist.slice(), release.title.slice(), release.plays });
+    }
+
+    const age = try runtime.libraryHistoryAge(library, time);
+    try stdout.print("history: {d} listening days, recording {s}", .{ age.listen_days, if (age.recording_enabled) "on" else "off" });
+    if (age.first_listen_at) |first| {
+        try stdout.writeAll(", first listen ");
+        try writeIsoUtc(stdout, first);
+    }
+    try stdout.writeAll("\n");
+}
+
+fn writeHomeReleases(stdout: *std.Io.Writer, title: []const u8, releases: []const liborca.HomePlayedRelease) !void {
+    try stdout.print("{s} ({d})\n", .{ title, releases.len });
+    for (releases, 1..) |*release, rank| {
+        try stdout.print("\t{d}\t{s} - {s}\t{d} plays, last ", .{ rank, release.artist.slice(), release.title.slice(), release.plays });
+        try writeIsoUtc(stdout, release.last_played_at);
+        try stdout.writeAll("\n");
+    }
+}
+
+fn writeHomeTracks(stdout: *std.Io.Writer, title: []const u8, tracks: []const liborca.HomeTrack) !void {
+    try stdout.print("{s} ({d})\n", .{ title, tracks.len });
+    for (tracks, 1..) |*track, rank| {
+        try stdout.print("\t{d}\t{d}\t{s} - {s}\t{s}\t{d} plays\n", .{
+            rank, track.track_id, track.artist.slice(), track.title.slice(), track.release.slice(), track.plays,
+        });
+    }
+}
+
+/// `orca-cli mixes DATABASE [--refresh] [--mix N]`: makes the day's Daily
+/// Mixes in UTC unless they are from this mix day, or always with
+/// `--refresh`, then lists them, or the entries of the Nth with `--mix N`.
+fn showDailyMixes(context: Context) !void {
+    const stdout = context.stdout;
+    var force = false;
+    var shown: ?usize = null;
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.eql(u8, argument, "--refresh")) {
+            force = true;
+        } else if (std.mem.eql(u8, argument, "--mix")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            shown = try std.fmt.parseInt(usize, context.arguments[index], 10);
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const now_s = std.Io.Clock.real.now(context.io).toSeconds();
+    const job_handle = try runtime.startDailyMixes(library, .{ .now_s = now_s, .force = force });
+    try awaitJob(&runtime, stdout, job_handle, null);
+    const mixes = try runtime.libraryDailyMixes(library, now_s, 0);
+
+    if (shown) |number| {
+        if (number == 0 or number > mixes.count) return error.UnknownDailyMix;
+        const mix = &mixes.items()[number - 1];
+        try stdout.print("{s}\n", .{mix.name()});
+        var entries: [liborca.max_daily_mix_entries]liborca.DailyMixEntry = undefined;
+        const count = try runtime.libraryDailyMixEntries(library, mix.id, &entries);
+        for (entries[0..count], 0..) |entry, position| {
+            const summary = try runtime.libraryTrackSummary(library, entry.track_id);
+            defer if (summary) |found| found.deinit(runtime.allocator);
+            try stdout.print("{d}\t{d}\t{s} - {s}\t", .{
+                position + 1,
+                entry.track_id,
+                if (summary) |found| found.artist else "",
+                if (summary) |found| found.title else "",
+            });
+            var written = false;
+            for ([_]?liborca.ReasonPart{ entry.reason.first, entry.reason.second }) |maybe| {
+                const part = maybe orelse continue;
+                if (written) try stdout.writeAll("; ");
+                written = true;
+                try writeRadioReason(stdout, &runtime, library, part);
+            }
+            try stdout.writeAll("\n");
+        }
+        return;
+    }
+
+    try stdout.print("state: {t}", .{mixes.state});
+    if (mixes.generated_at) |generated_at| {
+        try stdout.writeAll(", made ");
+        try writeIsoUtc(stdout, generated_at);
+    }
+    try stdout.writeAll("\n");
+    for (mixes.items(), 1..) |*mix, number| {
+        try stdout.print("{d}\t{s}\t{d} tracks\t{d} min\t", .{ number, mix.name(), mix.entry_count, mix.duration_ms / 60_000 });
+        for (mix.mixArtists(), 0..) |*artist, artist_index| {
+            if (artist_index != 0) try stdout.writeAll(", ");
+            try stdout.writeAll(artist.name());
+        }
+        try stdout.print("\n\tfavorites={d} rarely played={d} never played={d}\n", .{ mix.makeup.favorite, mix.makeup.rarely_played, mix.makeup.never_played });
+        const left_out = mix.left_out;
+        try stdout.print("\tleft out: recent={d} not for me={d} hated={d} live={d} other mix={d} spacing={d}\n", .{
+            left_out.recent, left_out.not_for_me, left_out.hated, left_out.live, left_out.other_mix, left_out.diversity,
+        });
     }
 }
 

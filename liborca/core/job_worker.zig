@@ -214,6 +214,8 @@ pub const ConsistencyRequest = struct {
     batch_size: usize = 128,
 };
 
+pub const DailyMixesRequest = library_pass.daily_mixes.Options;
+
 /// What an AcoustID submission job did.
 pub const SubmissionStats = struct {
     files_examined: u64 = 0,
@@ -446,6 +448,7 @@ pub const Request = union(enum) {
     artist_info: ArtistInfoRequest,
     release_info: ReleaseInfoRequest,
     consistency: ConsistencyRequest,
+    daily_mixes: DailyMixesRequest,
 
     pub fn kind(self: Request) job.Kind {
         return switch (self) {
@@ -462,6 +465,7 @@ pub const Request = union(enum) {
             .artist_info => .artist_info,
             .release_info => .release_info,
             .consistency => .consistency,
+            .daily_mixes => .daily_mixes,
         };
     }
 
@@ -474,7 +478,7 @@ pub const Request = union(enum) {
             .duplicate_scan => |request| request.batch_size,
             .metadata_lookup => |request| request.batch_size,
             .consistency => |request| request.batch_size,
-            .projection, .mutation, .acoustid_submission, .lyrics, .artist_info, .release_info => null,
+            .projection, .mutation, .acoustid_submission, .lyrics, .artist_info, .release_info, .daily_mixes => null,
         };
     }
 
@@ -482,7 +486,7 @@ pub const Request = union(enum) {
     /// waits behind the Job holding it.
     pub fn queues(self: Request) bool {
         return switch (self) {
-            .lyrics, .artist_info => false,
+            .lyrics, .artist_info, .daily_mixes => false,
             .release_info => |request| request.target == .missing_genres,
             else => true,
         };
@@ -494,7 +498,7 @@ pub const Request = union(enum) {
         return switch (self) {
             .scan, .reconcile, .property_backfill, .analysis, .duplicate_scan, .metadata_lookup, .acoustid_submission, .consistency => true,
             .release_info => |request| request.target == .missing_genres,
-            .projection, .mutation, .lyrics, .artist_info => false,
+            .projection, .mutation, .lyrics, .artist_info, .daily_mixes => false,
         };
     }
 };
@@ -781,7 +785,7 @@ pub const Stats = union(enum) {
 
     pub fn init(request: Request) Stats {
         return switch (request) {
-            .scan, .reconcile, .projection, .property_backfill, .analysis, .mutation, .consistency => .{ .scan = .{} },
+            .scan, .reconcile, .projection, .property_backfill, .analysis, .mutation, .consistency, .daily_mixes => .{ .scan = .{} },
             .duplicate_scan => .{ .duplicates = .{} },
             .metadata_lookup => .{ .matching = .{} },
             .acoustid_submission => .{ .submission = .{} },
@@ -971,6 +975,7 @@ pub const JobWorker = struct {
             .artist_info => |*request| self.runArtistInfo(request),
             .release_info => |*request| self.runReleaseInfo(request),
             .consistency => |request| self.runConsistency(request),
+            .daily_mixes => |request| self.runDailyMixes(request),
         }
     }
 
@@ -1300,6 +1305,16 @@ pub const JobWorker = struct {
         _ = stats.changed.fetchAdd(result.issues, .acq_rel);
         _ = stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
         if (result.cancelled) stats.cancelled.store(true, .release);
+    }
+
+    fn runDailyMixes(self: *JobWorker, request: DailyMixesRequest) void {
+        const stats = &self.stats.scan;
+        const generation = library_pass.daily_mixes.generate(self.allocator, self.database, request, &self.token) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        _ = stats.changed.fetchAdd(generation.mixes, .acq_rel);
+        if (generation.outcome == .cancelled) stats.cancelled.store(true, .release);
     }
 
     fn runMatching(self: *JobWorker, request: MatchingRequest) void {

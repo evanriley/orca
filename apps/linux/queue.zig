@@ -28,7 +28,7 @@ const origin_capacity = 256;
 const unavailable_opacity = 0.55;
 const radio_cover_pixels: c_int = 40;
 const max_radio_rows = liborca.max_radio_reported_picks;
-const reason_capacity = 192;
+pub const reason_capacity = 192;
 
 pub const State = struct {
     now_store: ?*gtk.ListStore = null,
@@ -1062,7 +1062,7 @@ fn pickAt(picks: []const liborca.RadioQueuePick, position: u32) ?*const liborca.
     return null;
 }
 
-fn localClock() radio_reason.Clock {
+pub fn localClock() radio_reason.Clock {
     const now = gtk.g_date_time_new_now_local() orelse return .{ .now_s = 0, .utc_offset_s = 0 };
     defer gtk.g_date_time_unref(now);
     return .{
@@ -1071,7 +1071,7 @@ fn localClock() radio_reason.Clock {
     };
 }
 
-fn formatReason(self: *App, buffer: *[reason_capacity]u8, reason: liborca.PickReason, clock: radio_reason.Clock) [:0]const u8 {
+pub fn formatReason(self: *App, buffer: *[reason_capacity]u8, reason: liborca.PickReason, clock: radio_reason.Clock) [:0]const u8 {
     var first: [256]u8 = undefined;
     var second: [256]u8 = undefined;
     const names: [2][]const u8 = .{ reasonName(self, &first, reason.first), reasonName(self, &second, reason.second) };
