@@ -9549,3 +9549,8 @@ button.daily-mix-not-for-me:focus-visible {
 .home-grid-page {
   padding-top: 18px;
 }
+
+.radio-notice,
+.radio-notice .radio-info-text {
+  color: @orca_text_2;
+}

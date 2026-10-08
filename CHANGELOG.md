@@ -8,6 +8,11 @@
   panel, Now Playing (every tab) and the Daily Mix "How this mix was made"
   aside are 388 px wide like the inspector, so the page beside them no longer
   shifts between panels or tabs.
+- **`orca-gtk` says when Radio has nothing left.** When Radio runs out of
+  picks under its options, the Radio panel says so; with an Energy focus on a
+  Library that still has unanalyzed files it says Energy needs analyzed music
+  and offers Analyze music.
+
 ## 0.3.0 - 2026-10-08
 
 Ships Library schema version 2; opening a 0.2.0 Library upgrades it in
