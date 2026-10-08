@@ -14,6 +14,7 @@ const details = @import("details.zig");
 const browse = @import("browse.zig");
 const queue = @import("queue.zig");
 const albums = @import("albums.zig");
+const home = @import("home.zig");
 const nowplaying = @import("nowplaying.zig");
 const artists = @import("artists.zig");
 const artist_page = @import("artist_page.zig");
@@ -386,6 +387,7 @@ const mouse_back_button: c_uint = 8;
 const mouse_forward_button: c_uint = 9;
 
 pub const Page = enum(c_uint) {
+    home,
     albums,
     artists,
     tracks,
@@ -409,6 +411,7 @@ pub const Page = enum(c_uint) {
 
     pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
+            .home => home.navigation_tag,
             .albums => "albums",
             .artists => "artists",
             .tracks => "tracks",
@@ -434,6 +437,7 @@ pub const Page = enum(c_uint) {
 
     pub fn title(self: Page) [*:0]const u8 {
         return switch (self) {
+            .home => "Home",
             .albums => "Albums",
             .artists => "Artists",
             .tracks => "Tracks",
@@ -475,6 +479,8 @@ pub const Pushed = union(enum) {
     smart_rules: ?i64,
     metadata_editor,
     write_tags,
+    daily_mix: i64,
+    mixes,
 };
 
 fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
@@ -483,8 +489,8 @@ fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
 
 pub fn markPushed(page: *adw.NavigationPage, pushed: Pushed) void {
     switch (pushed) {
-        .smart_rules, .metadata_editor, .write_tags => {},
-        inline .album, .artist, .playlist => |id, kind| {
+        .smart_rules, .metadata_editor, .write_tags, .mixes => {},
+        inline .album, .artist, .playlist, .daily_mix => |id, kind| {
             const value = std.math.cast(usize, id) orelse return;
             gtk.g_object_set_data(page, pushedKey(kind), @ptrFromInt(value));
         },
@@ -492,7 +498,7 @@ pub fn markPushed(page: *adw.NavigationPage, pushed: Pushed) void {
 }
 
 fn pushedOf(self: *App, page: *adw.NavigationPage) ?Pushed {
-    inline for (.{ .album, .artist }) |kind| {
+    inline for (.{ .album, .artist, .daily_mix }) |kind| {
         if (gtk.g_object_get_data(page, pushedKey(kind))) |value|
             return @unionInit(Pushed, @tagName(kind), @intCast(@intFromPtr(value)));
     }
@@ -502,6 +508,7 @@ fn pushedOf(self: *App, page: *adw.NavigationPage) ?Pushed {
     if (adw.adw_navigation_page_get_tag(page)) |tag| {
         if (std.mem.eql(u8, std.mem.span(tag), playlists.page_tag))
             return .{ .playlist = self.playlists.open_id orelse return null };
+        if (std.mem.eql(u8, std.mem.span(tag), home.mixes_tag)) return .mixes;
     }
     return null;
 }
@@ -567,7 +574,7 @@ pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
 /// Pops every pushed page and forgets the history: both name ids of the
 /// library being closed.
 pub fn forgetLibrary(self: *App) void {
-    for ([_]Page{ .albums, .artists, .genres, .loved, .playlists }) |page| {
+    for ([_]Page{ .home, .albums, .artists, .genres, .loved, .playlists }) |page| {
         const navigation = pageNavigation(self, page) orelse continue;
         adw.adw_navigation_view_set_animate_transitions(navigation, gtk.false_);
         popToTag(self, navigation, page.name());
@@ -581,6 +588,7 @@ pub fn forgetLibrary(self: *App) void {
 
 pub fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
     return switch (page) {
+        .home => self.home.navigation,
         .albums => self.albums_navigation,
         .artists => self.artists_navigation,
         .genres => self.genres.navigation,
@@ -625,7 +633,7 @@ fn pushedSource(self: *App, page: *adw.NavigationPage) ?details.Source {
             .selection = self.playlists.tracks.selection orelse return null,
             .playlist_id = id,
         } },
-        .smart_rules, .metadata_editor, .write_tags => null,
+        .smart_rules, .metadata_editor, .write_tags, .daily_mix, .mixes => null,
     };
 }
 
@@ -692,6 +700,8 @@ fn open(self: *App, navigation: *adw.NavigationView, pushed: Pushed) void {
         .playlist => |playlist_id| playlists.open(self, playlist_id),
         .smart_rules => |playlist_id| smart_playlist_editor.present(self, playlist_id),
         .metadata_editor, .write_tags => {},
+        .daily_mix => |mix_id| home.openMix(self, mix_id),
+        .mixes => home.openGrid(self),
     }
 }
 
@@ -700,6 +710,7 @@ fn revisit(self: *App, visit: Visit) bool {
         .playlist => |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
         .smart_rules => |editing| if (editing) |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
         .metadata_editor, .write_tags => return false,
+        .daily_mix => |mix_id| if (!home.mixExists(self, mix_id)) return false,
         else => {},
     };
     switchTo(self, visit.page);
@@ -845,7 +856,7 @@ fn sectionPopped(navigation: ?*anyopaque, page: ?*anyopaque, data: ?*anyopaque) 
 }
 
 fn watchSections(self: *App) void {
-    for ([_]Page{ .albums, .artists, .genres, .loved, .playlists }) |page| {
+    for ([_]Page{ .home, .albums, .artists, .genres, .loved, .playlists }) |page| {
         const navigation = pageNavigation(self, page) orelse continue;
         _ = gtk.signalConnect(navigation, "notify::visible-page", gtk.callback(sectionChanged), self);
         _ = gtk.signalConnect(navigation, "popped", gtk.callback(sectionPopped), self);
@@ -889,6 +900,9 @@ const NavItem = struct { page: Page, icon: [*:0]const u8 };
 const NavGroup = struct { title: [*:0]const u8, items: []const NavItem };
 
 const nav_groups = [_]NavGroup{
+    .{ .title = "", .items = &.{
+        .{ .page = .home, .icon = "orca-home-symbolic" },
+    } },
     .{ .title = "Library", .items = &.{
         .{ .page = .albums, .icon = "orca-albums-symbolic" },
         .{ .page = .artists, .icon = "orca-artists-symbolic" },
@@ -963,6 +977,7 @@ fn switchTo(self: *App, page: Page) void {
     libraries.showFailure(self);
     if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     syncSidebarSelection(self);
+    if (page == .home) home.shown(self);
     if (page == .loved) loved.reload(self);
     if (page == .matches) matches.shown(self);
     if (page == .genres) genres.shown(self);
@@ -1049,10 +1064,12 @@ fn buildSidebar(self: *App) *gtk.Widget {
     for (nav_groups) |group| {
         const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
         gtk.gtk_widget_add_css_class(box, "nav-group");
-        const title = gtk.gtk_label_new(group.title);
-        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
-        gtk.gtk_widget_add_css_class(title, "nav-group-label");
-        gtk.gtk_box_append(gtk.cast(gtk.Box, box), title);
+        if (group.title[0] != 0) {
+            const title = gtk.gtk_label_new(group.title);
+            gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
+            gtk.gtk_widget_add_css_class(title, "nav-group-label");
+            gtk.gtk_box_append(gtk.cast(gtk.Box, box), title);
+        } else gtk.gtk_widget_add_css_class(box, "nav-group-untitled");
         for (group.items) |item| gtk.gtk_box_append(gtk.cast(gtk.Box, box), navItem(self, item));
         gtk.gtk_box_append(gtk.cast(gtk.Box, groups), box);
     }
@@ -1329,6 +1346,7 @@ fn compacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
+    home.setNarrow(self);
 }
 
 fn uncompacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1340,6 +1358,7 @@ fn uncompacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
+    home.setNarrow(self);
 }
 
 fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
@@ -1372,6 +1391,7 @@ fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
+    home.setNarrow(self);
 }
 
 fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1386,6 +1406,7 @@ fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artist_page.setNarrow(self);
     playlists.setNarrow(self);
     preferences.setNarrow(self);
+    home.setNarrow(self);
     syncSidebarSelection(self);
 }
 
@@ -1434,6 +1455,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     self.pages = gtk.cast(gtk.Stack, pages);
     gtk.gtk_stack_set_transition_type(self.pages.?, gtk.STACK_TRANSITION_CROSSFADE);
     gtk.gtk_stack_set_hhomogeneous(self.pages.?, gtk.false_);
+    _ = gtk.gtk_stack_add_named(self.pages.?, home.build(self), Page.home.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());

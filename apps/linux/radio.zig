@@ -35,7 +35,7 @@ const Snapshot = struct {
     picks_hash: u64 = 0,
 };
 
-const PickerMode = enum { seed, focus };
+const PickerMode = enum { seed, focus, home_artist, home_genre, home_decade };
 const Tab = enum { artist, genre, decade, energy };
 
 const Choice = union(enum) {
@@ -82,7 +82,10 @@ pub const State = struct {
     subject_is_artist: bool = false,
     seed_picker: Picker = .{ .tab = .artist },
     focus_picker: Picker = .{ .tab = .genre },
+    home_pickers: [3]Picker = .{ .{ .tab = .artist }, .{ .tab = .genre }, .{ .tab = .decade } },
 };
+
+pub const HomeSeed = enum { artist, genre, decade };
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -203,6 +206,33 @@ fn contextSeed(context: anytype) ?liborca.RadioSeed {
 pub fn startFromContext(self: *App) void {
     const seed = contextSeed(&self.context) orelse return;
     if (start(self, seed, .{})) main_window.goTo(self, .queue);
+}
+
+pub fn startShowingQueue(self: *App, seed: liborca.RadioSeed) void {
+    if (start(self, seed, .{})) main_window.goTo(self, .queue);
+}
+
+pub fn startFromPlaying(self: *App) void {
+    startShowingQueue(self, playingSeed(self));
+}
+
+pub fn startFromLoved(self: *App) void {
+    startShowingQueue(self, .loved);
+}
+
+pub fn buildHomePicker(self: *App, seed: HomeSeed, button: *gtk.Widget) void {
+    const index: usize = @backingInt(seed);
+    const mode: PickerMode = switch (seed) {
+        .artist => .home_artist,
+        .genre => .home_genre,
+        .decade => .home_decade,
+    };
+    const tab: Tab = switch (seed) {
+        .artist => .artist,
+        .genre => .genre,
+        .decade => .decade,
+    };
+    buildPicker(self, &self.radio.home_pickers[index], mode, &.{tab}, button);
 }
 
 fn currentStatus(self: *App) ?liborca.RadioStatus {
@@ -590,9 +620,20 @@ fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.requestTick();
 }
 
-fn pickerOf(self: *App, widget: *anyopaque) *Picker {
+fn modeOf(widget: *anyopaque) PickerMode {
     const stored = @intFromPtr(gtk.g_object_get_data(widget, "orca-radio-picker"));
-    return if (stored == @as(usize, @backingInt(PickerMode.focus)) + 1) &self.radio.focus_picker else &self.radio.seed_picker;
+    if (stored == 0) return .seed;
+    return @fromBackingInt(@intCast(stored - 1));
+}
+
+fn pickerOf(self: *App, widget: *anyopaque) *Picker {
+    return switch (modeOf(widget)) {
+        .seed => &self.radio.seed_picker,
+        .focus => &self.radio.focus_picker,
+        .home_artist => &self.radio.home_pickers[0],
+        .home_genre => &self.radio.home_pickers[1],
+        .home_decade => &self.radio.home_pickers[2],
+    };
 }
 
 fn markPicker(widget: *gtk.Widget, mode: PickerMode) void {
@@ -722,7 +763,11 @@ fn rowActivated(list: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv
     if (index < 0 or @as(usize, @intCast(index)) >= picker.count) return;
     const choice = picker.choices[@intCast(index)];
     if (picker.popover) |popover| gtk.gtk_popover_popdown(gtk.cast(gtk.Popover, popover));
-    if (picker == &self.radio.focus_picker) return addFocus(self, focusOf(choice));
+    switch (modeOf(list.?)) {
+        .focus => return addFocus(self, focusOf(choice)),
+        .home_artist, .home_genre, .home_decade => return startShowingQueue(self, seedOf(choice)),
+        .seed => {},
+    }
     const options = currentOptions(self) orelse liborca.RadioOptions{};
     _ = start(self, seedOf(choice), options);
 }
@@ -744,6 +789,7 @@ fn buildPicker(self: *App, picker: *Picker, mode: PickerMode, tabs: []const Tab,
         _ = gtk.signalConnect(tab_button, "toggled", gtk.callback(tabToggled), self);
         append(tab_row, &.{tab_button});
     }
+    gtk.gtk_widget_set_visible(tab_row, boolean(tabs.len > 1));
     const entry = gtk.gtk_search_entry_new();
     gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), "Search");
     gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, entry), 150);

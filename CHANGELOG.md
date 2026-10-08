@@ -4,6 +4,13 @@
 
 ### Added
 
+- `orca-gtk` opens on Home: Daily Mixes with a grid of every mix, Start
+  Radio from what is playing, an Artist, a genre, a decade or loved tracks,
+  This week's listening chart, Jump back in, Rediscover, Never played, Deep
+  cuts, Top artists, the Collection's formats and On this day. A Daily Mix
+  page plays, shuffles or saves the mix, says why each Track is in it and
+  removes a Track with Not for me, undone from its toast. Settings ›
+  Listening adds Reset recommendations.
 - Home queries: `libraryListeningWeek`, `libraryRecentReleases`,
   `libraryRediscover`, `libraryNeverPlayed`, `libraryDeepCuts`,
   `libraryTopArtists`, `libraryFormats`, `libraryOnThisDay`,

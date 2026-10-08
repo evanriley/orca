@@ -43,6 +43,7 @@ const lyrics = @import("lyrics.zig");
 const nowplaying = @import("nowplaying.zig");
 const queue = @import("queue.zig");
 const radio = @import("radio.zig");
+const home = @import("home.zig");
 const palette = @import("palette.zig");
 const page_ui = @import("page.zig");
 const parametric = @import("parametric.zig");
@@ -233,11 +234,11 @@ pub const Appearance = struct {
     tabular_numerals: bool = true,
 };
 
-pub const StartPage = enum { albums, artists, tracks, now_playing };
+pub const StartPage = enum { home, albums, artists, tracks, now_playing };
 
 pub const General = struct {
     launch_at_login: bool = false,
-    start_page: StartPage = .albums,
+    start_page: StartPage = .home,
     notify_tracks: bool = false,
     notify_tasks: bool = true,
     name_order: liborca.NameOrder = .ignore_articles,
@@ -628,6 +629,7 @@ pub const App = struct {
 
     queue: queue.State = .{},
     radio: radio.State = .{},
+    home: home.State = .{},
     queue_count: ?*gtk.Label = null,
     queue_visible: bool = false,
 
@@ -1016,6 +1018,7 @@ pub const App = struct {
         if (self.volume_settle_timer != 0) _ = gtk.g_source_remove(self.volume_settle_timer);
         if (self.signal_path_settle_timer != 0) _ = gtk.g_source_remove(self.signal_path_settle_timer);
         if (self.radio.explore_timer != 0) _ = gtk.g_source_remove(self.radio.explore_timer);
+        home.deinit(self);
         self.tracks.deinit();
         self.track_filters_ui.deinit(self.allocator);
         self.album_filters_ui.deinit(self.allocator);

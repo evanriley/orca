@@ -26,6 +26,7 @@ const radio = @import("radio.zig");
 const window = @import("window.zig");
 const palette = @import("palette.zig");
 const albums = @import("albums.zig");
+const home = @import("home.zig");
 const artists = @import("artists.zig");
 const artist_page = @import("artist_page.zig");
 const menu = @import("menu.zig");
@@ -96,6 +97,7 @@ fn tick(self: *App) void {
         art.tick(self);
         transport.tick(self);
         radio.tick(self);
+        home.tick(self);
         queue.tick(self);
         jobs.tick(self);
         first_run.tick(self);
@@ -175,7 +177,9 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     artists.reload(self);
     health.reload(self);
     matches.invalidate(self);
+    home.startMixes(self, false);
     window.showPage(self, switch (self.general.start_page) {
+        .home => .home,
         .albums => .albums,
         .artists => .artists,
         .tracks => .tracks,

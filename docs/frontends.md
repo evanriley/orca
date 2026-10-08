@@ -483,6 +483,23 @@ the pending picks. Settings › Listening holds Radio & Daily Mixes, stored with
 `setLibraryDiscoverySettings`, and Show listening stats on Home, an `orca-gtk`
 setting in `[listening]`.
 
+`orca-gtk` opens on Home, the first sidebar item in its own unlabeled group;
+Settings › General › Default page can choose another start page. Home reads the
+Home queries and `libraryDailyMixes` when it is shown and when the Library
+reloads. It shows the Daily Mixes row with See all (a grid of every mix), the
+Start Radio card, This week, Jump back in, Rediscover, Never played, Deep cuts
+and Your library. Under 14 days of history (`libraryHistoryAge`) it hides This
+week, Rediscover and Deep cuts. With listen recording off it shows only the
+library sections and a note linking to Settings › Listening. With Show
+listening stats on Home off it hides This week and Top artists. `orca-gtk`
+calls `startDailyMixes` with the local time and UTC offset after a Library
+opens and when Home is shown, and with `force` after the Daily Mixes setting
+changes; the tiles reload when that Job ends. A Daily Mix page plays,
+shuffles or saves the mix as a playlist, explains each Track with the Radio
+reason wording, and removes a Track with Not for me (`libraryNotForMe`, undone
+from its toast with `libraryClearNotForMe`). Settings › Listening › Reset
+recommendations calls `libraryResetRecommendations` after a confirmation.
+
 Run it from the tree:
 
 ```sh
@@ -578,7 +595,7 @@ scripts/headless-gui.sh albums /tmp/albums.png
 scripts/headless-gui.sh albums /tmp/palette.png key:ctrl+k type:scan wait:500
 ```
 
-The first argument is the page (`albums`, `artists`, `tracks`, `genres`,
+The first argument is the page (`home`, `albums`, `artists`, `tracks`, `genres`,
 `folders`, `loved`, `playlists`, `now-playing`, `queue`, `health`, `matches` or
 `settings`). The steps after the output path (`key:`, `type:`, `move:`,
 `click:`, `dclick:`, `rclick:`, `drag:`, `scroll:`, `wait:`, `shot:`, `tree:`,
