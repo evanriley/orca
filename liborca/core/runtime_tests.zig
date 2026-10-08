@@ -1024,6 +1024,15 @@ test "a runtime Player and Zone form one object graph that actually renders" {
     try runtime.destroyPlayer(player);
 }
 
+fn pumpUntilInactive(stream: *audio.output.TestBackend.Stream) !void {
+    var samples: [512]f32 = undefined;
+    var deadline: TestDeadline = .init(5_000);
+    while (stream.isActive()) {
+        if (!deadline.tick()) return error.OutputNeverInactive;
+        stream.pump(&samples, 256);
+    }
+}
+
 fn awaitEngineParked(engine: *const audio.engine.PlayerEngine) !void {
     var deadline: TestDeadline = .init(5_000);
     var last = engine.pass_epoch.load(.seq_cst);
@@ -1058,6 +1067,7 @@ test "playing a paused or stopped Player wakes its parked engine" {
         stream.pump(&samples, 256);
 
     try runtime.pausePlayer(player);
+    try pumpUntilInactive(stream);
     try awaitEngineParked((try runtime.players.get(player)).engine.?);
     const paused_at = (try runtime.playerSnapshot(player)).position_frames;
     try std.testing.expect(paused_at > 0);
@@ -1069,6 +1079,7 @@ test "playing a paused or stopped Player wakes its parked engine" {
     try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > paused_at);
 
     try runtime.stopPlayer(player);
+    try pumpUntilInactive(stream);
     try awaitEngineParked((try runtime.players.get(player)).engine.?);
     try std.testing.expectEqual(@as(u64, 0), (try runtime.playerSnapshot(player)).position_frames);
     try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
@@ -1319,12 +1330,14 @@ test "a 24-bit 192 kHz FLAC plays at 192 kHz sample for sample, and a 24-bit dev
         var deadline: TestDeadline = .init(5_000);
         while (queuedFrames(&runtime_zone.pipe) < frames and deadline.tick()) {}
         opened.stream.pump(samples[0 .. frames * 2], frames);
+        const held = opened.stream.heldQuantum();
+        const rendered = held[held.len - frames * 2 ..];
         for (0..frames) |offset| {
             const expected = hiresReferenceFrame(frame + @as(u32, @intCast(offset)));
             for (expected, 0..) |value, channel| {
                 try std.testing.expectEqual(
                     @as(f32, @floatFromInt(value)) / (1 << 23),
-                    samples[offset * 2 + channel],
+                    rendered[offset * 2 + channel],
                 );
             }
         }

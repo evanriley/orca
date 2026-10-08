@@ -29,6 +29,7 @@ pub const Output = struct {
         latency: *const fn (?*anyopaque, u32, u32) anyerror!zone_model.Latency,
         timing: *const fn (?*anyopaque) anyerror!contract.TimingSnapshot,
         set_state_waker: *const fn (?*anyopaque, ?work.Waker) void,
+        set_active: *const fn (?*anyopaque, bool) void,
     };
 
     pub fn close(self: Output) void {
@@ -56,6 +57,12 @@ pub const Output = struct {
     /// returns, the previous waker is never called again.
     pub fn setStateWaker(self: Output, waker: ?work.Waker) void {
         self.vtable.set_state_waker(self.context, waker);
+    }
+
+    /// An inactive output stops rendering and releases its device rate while
+    /// staying open; `status` keeps reporting it active.
+    pub fn setActive(self: Output, active: bool) void {
+        self.vtable.set_active(self.context, active);
     }
 };
 
@@ -120,16 +127,61 @@ pub const TestBackend = struct {
         request: contract.OpenRequest,
         state: std.atomic.Value(u8) = .init(@backingInt(Status.active)),
         callback: std.atomic.Value(CallbackState) = .init(.idle),
+        active: std.atomic.Value(bool) = .init(true),
         state_waker: ?work.Waker = null,
+        held: [max_held_samples]f32 = undefined,
+        held_len: ?usize = null,
 
-        /// Drives one render callback exactly as a backend RT thread would.
+        pub const max_held_samples = 256 * 8;
+
+        /// Drives one render callback as a backend RT thread would, and
+        /// models PipeWire's one quantum of playback latency: a call returns
+        /// the samples held from earlier calls (silence before the first
+        /// render) and holds back the end of what it rendered. An inactive
+        /// stream is not rendered and keeps what it holds.
         pub fn pump(self: *Stream, samples: []f32, frames: u32) void {
+            const output = samples[0 .. frames * self.request.format.channels];
+            if (!self.active.load(.acquire)) {
+                @memset(output, 0);
+                return;
+            }
             if (self.callback.cmpxchgStrong(.idle, .rendering, .acquire, .monotonic) != null) {
-                @memset(samples[0 .. frames * self.request.format.channels], 0);
+                @memset(output, 0);
                 return;
             }
             self.render(self.userdata, samples.ptr, frames, self.request.format.channels);
             self.callback.store(.idle, .release);
+            self.exchangeHeld(output);
+        }
+
+        fn exchangeHeld(self: *Stream, output: []f32) void {
+            const held_len = self.held_len orelse primed: {
+                if (output.len > max_held_samples)
+                    std.debug.panic("TestBackend pump of {d} samples exceeds the held quantum's {d}", .{ output.len, max_held_samples });
+                @memset(self.held[0..output.len], 0);
+                self.held_len = output.len;
+                break :primed output.len;
+            };
+            const held = self.held[0..held_len];
+            if (held_len <= output.len) {
+                const kept = output.len - held_len;
+                for (held, output[kept..]) |*held_sample, *output_sample|
+                    std.mem.swap(f32, held_sample, output_sample);
+                std.mem.rotate(f32, output, kept);
+            } else {
+                for (held[0..output.len], output) |*held_sample, *output_sample|
+                    std.mem.swap(f32, held_sample, output_sample);
+                std.mem.rotate(f32, held, output.len);
+            }
+        }
+
+        /// What the latest render produced, to be returned by the next pump.
+        pub fn heldQuantum(self: *const Stream) []const f32 {
+            return self.held[0 .. self.held_len orelse 0];
+        }
+
+        pub fn isActive(self: *const Stream) bool {
+            return self.active.load(.acquire);
         }
 
         pub fn isClosed(self: *const Stream) bool {
@@ -172,6 +224,7 @@ pub const TestBackend = struct {
         .latency = streamLatency,
         .timing = streamTiming,
         .set_state_waker = setStreamStateWaker,
+        .set_active = setStreamActive,
     };
 
     fn open(
@@ -266,6 +319,11 @@ pub const TestBackend = struct {
     fn setStreamStateWaker(context: ?*anyopaque, waker: ?work.Waker) void {
         const stream: *Stream = @ptrCast(@alignCast(context.?));
         stream.state_waker = waker;
+    }
+
+    fn setStreamActive(context: ?*anyopaque, active: bool) void {
+        const stream: *Stream = @ptrCast(@alignCast(context.?));
+        stream.active.store(active, .release);
     }
 
     fn streamTiming(context: ?*anyopaque) anyerror!contract.TimingSnapshot {

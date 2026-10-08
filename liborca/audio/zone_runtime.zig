@@ -117,6 +117,8 @@ pub const ZoneRuntime = struct {
 
     // Engine-thread-only state.
     output: ?output_api.Output = null,
+    output_active: bool = true,
+    callbacks_when_unwanted: ?u64 = null,
     channels: u16 = 0,
     /// Canonical format the open stream was negotiated for. `RenderContext`
     /// channel count and the negotiated rate are fixed when a stream opens, so
@@ -295,6 +297,8 @@ pub const ZoneRuntime = struct {
                 frames_per_block,
         };
         self.output = try factory.open(request, Context.callback, self.context.userdata());
+        self.output_active = true;
+        self.callbacks_when_unwanted = null;
         self.open_format = format;
         self.open_device_id = device_id;
         self.open_device_kind = discoverDeviceKind(factory, device_id);
@@ -313,6 +317,8 @@ pub const ZoneRuntime = struct {
             active.close();
             self.output = null;
         }
+        self.output_active = true;
+        self.callbacks_when_unwanted = null;
         self.open_format = null;
         self.open_device_id = 0;
         self.open_device_kind = .unknown;

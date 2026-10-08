@@ -273,6 +273,22 @@ pub fn build(b: *std.Build) void {
         _ = check_output_fail_closed.addOutputDirectoryArg("output-fail-closed");
         check_output_fail_closed.has_side_effects = true;
         test_step.dependOn(&check_output_fail_closed.step);
+
+        const rate_release_driver = b.addExecutable(.{
+            .name = "rate-release-driver",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/platform/rate_release_driver.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+            }),
+        });
+        const check_rate_release = b.addSystemCommand(&.{"bash"});
+        check_rate_release.addFileArg(b.path("scripts/check-rate-release.sh"));
+        check_rate_release.addArtifactArg(rate_release_driver);
+        _ = check_rate_release.addOutputDirectoryArg("rate-release");
+        check_rate_release.has_side_effects = true;
+        test_step.dependOn(&check_rate_release.step);
     }
 
     const manifest = @import("build.zig.zon");

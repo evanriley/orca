@@ -47,6 +47,7 @@ extern fn orca_pw_output_timing(?*anyopaque, *NativeTiming) c_int;
 extern fn orca_pw_output_status(?*anyopaque) c_int;
 const WakeFn = *const fn (*anyopaque) callconv(.c) void;
 extern fn orca_pw_output_set_waker(?*anyopaque, ?WakeFn, ?*anyopaque) void;
+extern fn orca_pw_output_set_active(?*anyopaque, bool) c_int;
 extern fn orca_pw_fill(?RenderFn, ?*anyopaque, [*]f32, u32, u32) void;
 
 /// Process-level PipeWire client library lifetime. Server connections and
@@ -225,6 +226,11 @@ pub const OutputSession = struct {
             orca_pw_output_set_waker(self.native, null, null);
     }
 
+    /// A failure marks the stream lost, so `status` reports it.
+    pub fn setActive(self: *const OutputSession, active: bool) void {
+        _ = orca_pw_output_set_active(self.native, active);
+    }
+
     pub fn latency(
         self: *const OutputSession,
         render_ahead_frames: u32,
@@ -299,6 +305,7 @@ pub const OutputFactory = struct {
         .latency = outputLatency,
         .timing = outputTiming,
         .set_state_waker = setOutputStateWaker,
+        .set_active = setOutputActive,
     };
 
     fn open(
@@ -361,6 +368,11 @@ pub const OutputFactory = struct {
     fn setOutputStateWaker(context: ?*anyopaque, waker: ?work.Waker) void {
         const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
         owned.session.setStateWaker(waker);
+    }
+
+    fn setOutputActive(context: ?*anyopaque, active: bool) void {
+        const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
+        owned.session.setActive(active);
     }
 };
 
