@@ -556,19 +556,19 @@ fn labelledButton(label: [*:0]const u8, icon: [*:0]const u8, handler: gtk.GCallb
 
 fn showMeasure(self: *App) void {
     const page = &self.settings_page;
-    const row = page.measure_row orelse return;
+    const button = page.measure_button orelse return;
     const library = self.library orelse return;
     const unmeasured = self.runtime.libraryUnanalyzedCount(library) catch 0;
     var buffer: [256]u8 = undefined;
-    const measure_text: [:0]const u8 = if (unmeasured == 0)
-        "Every track is measured"
+    const tooltip: [:0]const u8 = if (unmeasured == 0)
+        "Every track is analyzed"
     else
-        strings.format(&buffer, "{f} {s} need analysis · decodes each file, so this can take a while", .{
+        strings.format(&buffer, "{f} {s} need analysis; this decodes each file, so it can take a while", .{
             strings.grouped(unmeasured),
             plural(unmeasured, "track", "tracks"),
         });
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), measure_text.ptr);
-    if (page.measure_button) |button| gtk.gtk_widget_set_sensitive(button, if (unmeasured != 0) gtk.true_ else gtk.false_);
+    gtk.gtk_widget_set_tooltip_text(button, tooltip.ptr);
+    gtk.gtk_widget_set_sensitive(button, if (unmeasured != 0) gtk.true_ else gtk.false_);
 }
 
 fn duplicatesSubtitle(buffer: []u8, self: *App) [:0]const u8 {
@@ -626,9 +626,8 @@ fn foldersCard(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
 
 fn maintenanceCard(self: *App) *gtk.Widget {
     const maintenance_card = flatCard("orca-pulse-symbolic", "Maintenance", "Keep your library healthy and consistent.");
-    const measure = actionRow("Measure loudness", "");
-    const measure_button = suffixButton(measure, "Measure", null, gtk.callback(measureClicked), self);
-    self.settings_page.measure_row = measure;
+    const measure = actionRow("Analyze music", jobs.analysis_summary);
+    const measure_button = suffixButton(measure, "Analyze", null, gtk.callback(measureClicked), self);
     self.settings_page.measure_button = measure_button;
     showMeasure(self);
     maintenance_card.add(measure);

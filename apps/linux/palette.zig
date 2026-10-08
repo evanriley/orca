@@ -215,7 +215,7 @@ const commands = [_]Command{
     .{ .title = "Scan library", .subtitle = "Rescan all music folders", .keywords = "rescan", .shortcut = "Ctrl ⇧ R", .icon = "view-refresh-symbolic", .run = jobs.rescan, .needs_library = true },
     .{ .title = "Scan for duplicates", .subtitle = "Library tools", .keywords = "find duplicates", .icon = "edit-copy-symbolic", .run = jobs.startDuplicates, .needs_library = true },
     .{ .title = "Show Library Health", .subtitle = "Go to", .keywords = "scan issues problems", .icon = "orca-health-symbolic", .run = goTo(.health) },
-    .{ .title = "Measure loudness", .subtitle = "Library tools", .keywords = "analyze analyse replaygain fingerprints", .icon = "orca-pulse-symbolic", .run = jobs.startAnalysis, .needs_library = true },
+    .{ .title = "Analyze music", .subtitle = "Library tools", .keywords = "analyze analyse replaygain fingerprints tempo key energy radio mixes", .icon = "orca-pulse-symbolic", .run = jobs.startAnalysis, .needs_library = true },
     .{ .title = "Find matches", .subtitle = "Library tools", .keywords = "musicbrainz acoustid identify", .icon = "orca-matches-symbolic", .run = jobs.startMatching, .needs_library = true },
     .{ .title = "Verify recording IDs", .subtitle = "Library tools", .keywords = "acoustid", .icon = "auth-fingerprint-symbolic", .run = jobs.startLibraryVerification, .needs_library = true },
     .{ .title = "Submit to AcoustID", .subtitle = "Library tools", .icon = "auth-fingerprint-symbolic", .run = jobs.startSubmission, .needs_library = true },

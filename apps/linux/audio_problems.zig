@@ -365,7 +365,7 @@ fn buildDetail(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_hexpand(note_text, gtk.true_);
     gtk.gtk_widget_set_valign(note_text, gtk.ALIGN_CENTER);
     self.audio_problems.note_text = gtk.cast(gtk.Label, note_text);
-    const analyze = button("Analyze", "audio-problems-action", "Measure loudness for ReplayGain across the library", gtk.callback(analyzeClicked), self);
+    const analyze = button("Analyze", "audio-problems-action", jobs.analysis_summary, gtk.callback(analyzeClicked), self);
     gtk.gtk_widget_set_valign(analyze, gtk.ALIGN_CENTER);
     const note = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(note, "audio-problems-note");

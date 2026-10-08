@@ -1,4 +1,4 @@
-//! Background jobs — scans, loudness analysis, duplicate finding, tag writes,
+//! Background jobs — scans, music analysis, duplicate finding, tag writes,
 //! matching, AcoustID submission and the property backfill — started from
 //! this frontend, and what each reports when it ends. A Job started while
 //! another holds the Library's slot waits its turn in liborca; the Activity
@@ -171,9 +171,9 @@ pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
     begin(self, .{ .task = .scan, .job = job });
 }
 
-/// Measures the loudness ReplayGain plays by, and the fingerprints duplicate
-/// finding compares. Hours on a large library, and stopping it keeps what is
-/// done.
+pub const analysis_summary: [:0]const u8 = "Measures loudness for ReplayGain, checks for clipping and damage, fingerprints files to find duplicates, and finds tempo, key and energy for Radio and Daily Mixes.";
+
+/// Hours on a large library, and stopping it keeps what is done.
 pub fn startAnalysis(self: *App) void {
     _ = analyzeLibrary(self);
 }
@@ -182,7 +182,7 @@ pub fn startAnalysis(self: *App) void {
 pub fn analyzeLibrary(self: *App) ?liborca.JobHandle {
     const library = self.library orelse return null;
     const job = self.runtime.startLibraryAnalysis(library, .{ .threads = self.analysis_threads }) catch |err| {
-        self.toast(queueRefusal(err, "Could not start measuring"));
+        self.toast(queueRefusal(err, "Could not start analysis"));
         return null;
     };
     begin(self, .{ .task = .analysis, .job = job });
@@ -726,7 +726,7 @@ fn finished(
     if (state_value == .cancelled) return self.toast("Stopped");
     if (state_value != .succeeded) return report(self, switch (task) {
         .scan => "The scan failed",
-        .analysis => "Measuring stopped with an error",
+        .analysis => "Analysis stopped with an error",
         .duplicates => "Looking for duplicates failed",
         .tag_write => tagWriteFailedText(tag_write_failure),
         .matching, .submission, .backfill, .consistency => unreachable,

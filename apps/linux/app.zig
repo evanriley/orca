@@ -183,7 +183,6 @@ pub const SettingsPage = struct {
     subtitle: ?*gtk.Label = null,
     about_header: ?*gtk.Widget = null,
     folder_slot: ?*gtk.Box = null,
-    measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,
     duplicates_row: ?*gtk.Widget = null,
     buffer_value: ?*gtk.Label = null,
@@ -524,7 +523,7 @@ pub const App = struct {
     general: General = .{},
     playback: Playback = .{},
 
-    /// Files Measure Loudness decodes at once; null takes liborca's default.
+    /// Files Analyze music decodes at once; null takes liborca's default.
     analysis_threads: ?u16 = null,
     watch_folders: bool = true,
     watch_row: ?*gtk.Widget = null,

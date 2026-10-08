@@ -351,7 +351,7 @@ fn buildFolders(self: *App) *gtk.Widget {
 }
 
 fn buildIdentify(self: *App) *gtk.Widget {
-    const top = heading("Measure your music", gtk.gtk_label_new("Orca can measure each file’s loudness so albums play at an even volume, and find duplicate copies. It runs in the background while you listen."));
+    const top = heading("Analyze your music", gtk.gtk_label_new("Orca can measure each file’s loudness so albums play at an even volume, find duplicate copies, and learn the tempo, key and energy Radio and Daily Mixes use. It runs in the background while you listen."));
     const analyze = toggle(true, "Analyze my music", analyzeSwitched, self);
     self.first_run.analyze_switch = gtk.cast(gtk.Switch, analyze);
     const text = label("Waiting to start", "first-run-progress-text");
@@ -361,7 +361,7 @@ fn buildIdentify(self: *App) *gtk.Widget {
     const progress = box(gtk.ORIENTATION_VERTICAL, 10, "first-run-progress");
     append(progress, &.{ text, gtk.cast(gtk.Widget, bar) });
     const card = box(gtk.ORIENTATION_VERTICAL, 14, "first-run-card");
-    const option = switchRow("Analyze my music", "Loudness for even volume, fingerprints for duplicates", analyze);
+    const option = switchRow("Analyze my music", jobs.analysis_summary, analyze);
     gtk.gtk_widget_add_css_class(option, "first");
     append(card, &.{ option, progress });
     const skip = button("Skip", "first-run-secondary", skipClicked, self);
@@ -704,7 +704,7 @@ pub fn buildScan(self: *App) *gtk.Widget {
     append(stages, &.{
         buildStage(self, 0, "Discover files", ""),
         buildStage(self, 1, "Read tags & build albums", ""),
-        buildStage(self, 2, "Loudness analysis", "Runs after the scan, in the background"),
+        buildStage(self, 2, "Music analysis", "Runs after the scan, in the background"),
         buildStage(self, 3, "Match with MusicBrainz", "Optional · uses AcoustID"),
     });
     const card = box(gtk.ORIENTATION_VERTICAL, 16, "scan-card");
@@ -937,11 +937,11 @@ fn showAnalysis(self: *App) void {
         const job = first.analysis_job orelse break :progress .{ "Waiting to start", 0 };
         const snapshot = self.runtime.jobSnapshotSynced(job) catch break :progress .{ "", 0 };
         if (snapshot.state == .queued or snapshot.state == .waiting) break :progress .{ "Starts when the scan finishes", 0 };
-        const total = snapshot.total_units orelse break :progress .{ "Measuring files", 0 };
-        if (total == 0) break :progress .{ "Every file is measured", 1 };
+        const total = snapshot.total_units orelse break :progress .{ "Analyzing files", 0 };
+        if (total == 0) break :progress .{ "Every file is analyzed", 1 };
         const done = @min(snapshot.completed_units, total);
         break :progress .{
-            strings.format(&buffer, "Measuring {f} of {f} files", .{ strings.grouped(done), strings.grouped(total) }),
+            strings.format(&buffer, "Analyzing {f} of {f} files", .{ strings.grouped(done), strings.grouped(total) }),
             @as(f64, @floatFromInt(done)) / @as(f64, @floatFromInt(total)),
         };
     };
@@ -974,7 +974,7 @@ fn showListen(self: *App) void {
     } else |_| {};
     const analyzing = first.analysis_job != null and jobs.active(self, .analysis);
     if (first.listen_note) |note| gtk.gtk_label_set_text(note, if (analyzing)
-        "Loudness analysis continues in the background."
+        "Music analysis continues in the background."
     else if (self.watch_folders)
         "Orca keeps watching your folders for changes."
     else

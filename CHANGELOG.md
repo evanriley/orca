@@ -13,6 +13,15 @@
   Library that still has unanalyzed files it says Energy needs analyzed music
   and offers Analyze music.
 
+### Changed
+
+- **`orca-gtk` says what analysis measures.** The task is named Analyze music
+  in Settings › Maintenance, Library Health, Activity, the command palette,
+  Audio Problems and First Run, and describes all four things it does:
+  loudness for ReplayGain, clipping and damage checks, fingerprints for
+  duplicates, and tempo, key and energy for Radio and Daily Mixes. Library
+  Health calls the row Not analyzed.
+
 ## 0.3.0 - 2026-10-08
 
 Ships Library schema version 2; opening a 0.2.0 Library upgrades it in

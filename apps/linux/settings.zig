@@ -9,7 +9,7 @@
 //! whether listens and the current track are submitted, how confident a match
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
 //! the music folders are watched, whether idle maintenance runs, how many
-//! files Measure Loudness decodes at once, whether lyrics are fetched from
+//! files Analyze music decodes at once, whether lyrics are fetched from
 //! LRCLIB, whether artist info is fetched, whether Home shows listening
 //! stats, whether the queue shows what it played, what the inspector shows,
 //! how albums and artists are sorted and laid out, which artists the Artists

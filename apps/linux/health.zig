@@ -83,14 +83,14 @@ fn info(row: Row) RowInfo {
             .kinds = &.{.clipping},
         },
         .loudness => .{
-            .title = "Missing loudness analysis",
-            .subtitle = "Needed before ReplayGain can apply",
-            .detail = "Enables consistent playback volume",
-            .about = "Orca has not measured these files yet, or could not because the audio is too short or silent, so they play without ReplayGain. Analyze measures loudness and checks for clipping, damage and duplicates; stopping it keeps what is done.",
+            .title = "Not analyzed",
+            .subtitle = "Needed for ReplayGain, duplicates, Radio and Daily Mixes",
+            .detail = "Runs in the background",
+            .about = "Orca has not analyzed these files yet, or could not measure their loudness because the audio is too short or silent. Analyze measures loudness for ReplayGain, checks for clipping and damage, fingerprints files to find duplicates, and finds tempo, key and energy for Radio and Daily Mixes. Files analyzed by an earlier version are analyzed again for what they lack. Stopping keeps what is done.",
             .icon = "orca-gain-symbolic",
             .tone = .neutral,
             .action = "Analyze",
-            .tooltip = "Measure loudness for ReplayGain across the library",
+            .tooltip = jobs.analysis_summary,
             .unit = "track",
             .kinds = &.{.missing_analysis},
         },
@@ -750,7 +750,7 @@ fn analyzeButton(self: *App) *gtk.Widget {
     gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
     gtk.gtk_widget_add_css_class(button, "health-analyze");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(button, "Measure loudness, then look for duplicates");
+    gtk.gtk_widget_set_tooltip_text(button, "Analyze every file again, then look for duplicates");
     _ = gtk.signalConnect(button, "clicked", gtk.callback(analyzeAgainClicked), self);
     return button;
 }
