@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-08
+
+Ships Library schema version 2; opening a 0.2.0 Library upgrades it in
+place, and 0.2.0 cannot open it afterwards. The C ABI only adds.
 
 ### Added
 
