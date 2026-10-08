@@ -119,6 +119,7 @@ pub const State = struct {
     collection_albums: ?*gtk.Label = null,
     collection_tracks: ?*gtk.Label = null,
     collection_hours: ?*gtk.Label = null,
+    format_rows: [4]?*gtk.Widget = @splat(null),
     format_bars: [4]?*gtk.Widget = @splat(null),
     format_counts: [4]?*gtk.Label = @splat(null),
     day_release: ?*gtk.Widget = null,
@@ -1221,6 +1222,7 @@ fn buildCollectionPanel(self: *App) *gtk.Widget {
         gtk.gtk_widget_add_css_class(count, "numeric");
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, count), 1);
         gtk.gtk_widget_set_size_request(count, 58, -1);
+        home.format_rows[index] = row;
         home.format_bars[index] = bar;
         home.format_counts[index] = gtk.cast(gtk.Label, count);
         append(row, &.{ caption, bar, count });
@@ -1239,7 +1241,8 @@ fn showCollection(self: *App, library: liborca.LibraryHandle) void {
     setText(home.collection_hours, strings.format(&buffer, "{f} h", .{strings.grouped((formats.duration_ms + 1_800_000) / 3_600_000)}));
     const counts = [_]u64{ formats.flac, formats.alac, formats.mp3, formats.other };
     const total: f64 = @floatFromInt(@max(formats.tracks, 1));
-    for (counts, home.format_bars, home.format_counts) |count, bar, count_label| {
+    for (counts, home.format_rows, home.format_bars, home.format_counts) |count, row, bar, count_label| {
+        if (row) |widget| gtk.gtk_widget_set_visible(widget, boolean(count != 0));
         if (bar) |widget| gtk.gtk_progress_bar_set_fraction(gtk.cast(gtk.ProgressBar, widget), @as(f64, @floatFromInt(count)) / total);
         setText(count_label, strings.format(&buffer, "{f}", .{strings.grouped(count)}));
     }

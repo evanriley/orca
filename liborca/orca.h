@@ -1312,7 +1312,8 @@ typedef struct orca_home_formats {
 /* `top_release` is the Release most played on this date a year ago, and is
  * meaningful only when `has_top_release` is 1. `added_this_week` counts Tracks
  * added since Monday 00:00 local, `added_this_year` since 1 January local.
- * `never_played_percent` is rounded to a whole percent. */
+ * `never_played_percent` is rounded down to a whole percent, so it is 100 only
+ * when no Track has been played. */
 typedef struct orca_on_this_day_view {
     orca_home_played_release top_release;
     uint32_t added_this_week;

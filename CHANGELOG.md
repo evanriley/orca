@@ -23,6 +23,9 @@
   Library that has files without tempo, key and energy it says Energy needs
   analyzed music and offers Analyze music, or says the music is being analyzed
   while that runs.
+- **Home's never-played share rounds down.** `onThisDay`'s
+  `never_played_percent` reads 100 only when no Track has been played, and
+  `orca-gtk`'s Collection panel hides formats with no Tracks.
 
 ### Changed
 

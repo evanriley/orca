@@ -122,7 +122,7 @@ pub const OnThisDay = struct {
     added_this_year: u32 = 0,
     tracks: u32 = 0,
     /// Tracks whose Recording has no listen, and their share of `tracks`
-    /// rounded to a whole percent; 0 when there are no Tracks.
+    /// rounded down to a whole percent; 0 when there are no Tracks.
     never_played_tracks: u32 = 0,
     never_played_percent: u8 = 0,
 };
@@ -434,7 +434,7 @@ pub fn onThisDay(library: *const LibraryDatabase, time: LocalTime) !OnThisDay {
     result.tracks = counted(unplayed.columnInt64(0));
     result.never_played_tracks = counted(unplayed.columnInt64(1));
     if (result.tracks > 0) {
-        const percent = (@as(u64, result.never_played_tracks) * 100 + result.tracks / 2) / result.tracks;
+        const percent = @as(u64, result.never_played_tracks) * 100 / result.tracks;
         result.never_played_percent = @intCast(percent);
     }
     return result;
@@ -785,6 +785,21 @@ test "added this week starts on Monday, added this year on 1 January, in local t
     try testing.expectEqual(@as(u32, 4), day.tracks);
     try testing.expectEqual(@as(u32, 3), day.never_played_tracks);
     try testing.expectEqual(@as(u8, 75), day.never_played_percent);
+}
+
+test "the never-played share rounds down, so one played Track keeps it under 100" {
+    var library = try openHomeLibrary("never-share");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addRelease(&library, 1, "One", "Ann");
+    var id: i64 = 1;
+    while (id <= 201) : (id += 1) try addTrack(&library, .{ .id = id, .artist = 1, .release = 1 });
+    try listen(&library, 1, noon_s, 1000);
+    try rebuildStats(&library);
+
+    const day = try onThisDay(&library, fixture_time);
+    try testing.expectEqual(@as(u32, 200), day.never_played_tracks);
+    try testing.expectEqual(@as(u8, 99), day.never_played_percent);
 }
 
 test "history age reports the first listen, distinct local days and the recording setting" {

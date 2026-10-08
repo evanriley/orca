@@ -430,8 +430,8 @@ started at or before `now_s`. Lists hold at most 24 items.
   count. Release and Track counts and the total duration come with it.
 - On this day: the most played Release on this date a year ago (29 February
   maps to 28 February), Tracks added this local week (from Monday 00:00) and
-  this local year, and the share of Tracks never played, rounded to a whole
-  percent.
+  this local year, and the share of Tracks never played, rounded down to a
+  whole percent.
 - History age: the first listen, the distinct local days with listens, and
   whether listen recording is on.
 
