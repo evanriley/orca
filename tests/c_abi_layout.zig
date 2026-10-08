@@ -69,6 +69,10 @@ const struct_pairs = .{
     .{ c_api.HomePlayedReleasesView, c.orca_home_played_releases_view },
     .{ c_api.HomeTrackView, c.orca_home_track },
     .{ c_api.HomeTracksView, c.orca_home_tracks_view },
+    .{ c_api.HomeReleaseView, c.orca_home_release },
+    .{ c_api.HomeReleasesView, c.orca_home_releases_view },
+    .{ c_api.AnniversaryView, c.orca_release_anniversary },
+    .{ c_api.AnniversariesView, c.orca_release_anniversaries_view },
     .{ c_api.HomeFormatsView, c.orca_home_formats },
     .{ c_api.OnThisDayView, c.orca_on_this_day_view },
     .{ c_api.HistoryAgeView, c.orca_history_age },
@@ -254,6 +258,13 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_DAILY_MIXES_STATE_";
         pub const Tag = core.runtime.DailyMixesState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_HOME_RELEASE_CLASS_";
+        pub const Tag = core.runtime.HomeReleaseClass;
         pub fn produce(tag: Tag) ?i64 {
             return @backingInt(tag);
         }

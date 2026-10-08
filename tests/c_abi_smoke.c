@@ -284,6 +284,26 @@ static void capture_home_tracks(void *context, const orca_home_tracks_view *trac
     capture->count = tracks->count;
 }
 
+static void capture_home_unplayed(void *context, const orca_home_releases_view *releases) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = releases->count;
+    for (size_t index = 0; index < releases->count; index += 1) {
+        const orca_home_release *release = &releases->releases[index];
+        if (release->release_id == 0 ||
+            release->release_class > ORCA_HOME_RELEASE_CLASS_EP_OR_SINGLE ||
+            (index > 0 && release->release_class < releases->releases[index - 1].release_class))
+            capture->flag = 1;
+    }
+}
+
+static void capture_release_anniversaries(void *context,
+                                          const orca_release_anniversaries_view *anniversaries) {
+    home_capture *capture = context;
+    capture->calls += 1;
+    capture->count = anniversaries->count;
+}
+
 static void capture_home_artists(void *context, const orca_home_top_artists_view *artists) {
     home_capture *capture = context;
     capture->calls += 1;
@@ -6131,6 +6151,21 @@ int main(int argc, char **argv) {
                                capture_home_tracks) != ORCA_STATUS_OK ||
         home.calls != 1 || home.count != 0)
         return 642;
+    memset(&home, 0, sizeof home);
+    if (orca_library_unplayed_releases(runtime, library, 2000000000, 3600, &home,
+                                       capture_home_unplayed) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count == 0 || home.count > 24 || home.flag != 0)
+        return 652;
+    memset(&home, 0, sizeof home);
+    if (orca_library_release_anniversaries(runtime, library, 2000000000, 3600, &home,
+                                           capture_release_anniversaries) != ORCA_STATUS_OK ||
+        home.calls != 1 || home.count > 24)
+        return 653;
+    if (orca_library_unplayed_releases(runtime, library, 2000000000, 3600, NULL, NULL) !=
+            ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_release_anniversaries(runtime, library, 2000000000, 3600, NULL, NULL) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 654;
     memset(&home, 0, sizeof home);
     if (orca_library_top_artists(runtime, library, 2000000000, 3600, 30, &home,
                                  capture_home_artists) != ORCA_STATUS_OK ||

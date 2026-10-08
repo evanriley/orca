@@ -474,6 +474,24 @@ started at or before `now_s`. Lists hold at most 24 items.
 - Never played: Tracks whose Recording has no listen, newest added first.
 - Deep cuts: Tracks played at most once by the 10 Artists most played in the
   last 90 days, unplayed first.
+- Unplayed albums: Releases with at least one Track and no listen of any
+  Track's Recording, at most one per album Artist (the Artist id when set,
+  else the album artist text, ignoring case and surrounding spaces). A type
+  naming an album sorts first, any other or no type next, and a type naming an
+  EP or single last, matching whole words of `release_type` as the live check
+  does. Within a type the order is a shuffle of the Release id and the local
+  day number, so it holds for a day and changes on the next. An Artist is
+  represented by its first Release in that order, so by an album when it has
+  one.
+- Release anniversaries: Releases with a full `YYYY-MM-DD` release date whose
+  month and day fall within 3 days of the local today, dated in an earlier
+  year than the anniversary's (a Release dated today or later never shows,
+  nor does a date of a year or a month only). `years_ago` is counted against
+  the anniversary's own year, so 1 January shows 29 to 31 December of earlier
+  years. 29 February counts as 28 February in a year without one. Each carries
+  its day offset from today, -3 to 3. Round anniversaries (a multiple of 5
+  years) come first, then Releases by Artists with a listen, then the nearest
+  to today, then the Release id.
 - Top Artists: the most played Artists over the last N days.
 - Formats: Tracks by the codec of their preferred file as FLAC, ALAC, MP3 or
   other; a Track with no preferred file is other, so the four sum to the Track

@@ -304,7 +304,10 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   (`orca_listening_week_view`), `orca_library_recent_releases` and
   `orca_library_rediscover` (`orca_home_played_releases_view`),
   `orca_library_never_played` and `orca_library_deep_cuts`
-  (`orca_home_tracks_view`), `orca_library_top_artists`
+  (`orca_home_tracks_view`), `orca_library_unplayed_releases`
+  (`orca_home_releases_view`, with `orca_home_release_class` values in
+  `release_class`), `orca_library_release_anniversaries`
+  (`orca_release_anniversaries_view`), `orca_library_top_artists`
   (`orca_home_top_artists_view`), `orca_library_formats`
   (`orca_home_formats`), `orca_library_on_this_day`
   (`orca_on_this_day_view`) and `orca_library_history_age`

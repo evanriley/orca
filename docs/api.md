@@ -595,6 +595,12 @@ empty history gives empty lists and zero numbers. See
   `HomePlayedRelease` lists.
 - `libraryNeverPlayed(library, out)`, `libraryDeepCuts(library, time, out)`:
   `HomeTrack` lists.
+- `libraryUnplayedReleases(library, time, out)`: `HomeRelease` list of Releases
+  with no listen, one per album Artist, ordered by `HomeReleaseClass` (album,
+  unknown, EP or single) and then a shuffle that holds for one local day.
+- `libraryReleaseAnniversaries(library, time, out)`: `HomeAnniversary` list of
+  Releases whose full release date falls within 3 days of today's month and
+  day, with `years_ago`, `day_offset` (-3 to 3) and `round`.
 - `libraryTopArtists(library, time, days, out)`: `HomeTopArtist` list.
 - `libraryFormats(library)`: `HomeFormats` with the Release, Track and
   duration totals and Tracks by FLAC, ALAC, MP3 and other, summing to the

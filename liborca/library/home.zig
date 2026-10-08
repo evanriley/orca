@@ -81,6 +81,35 @@ pub const HomeTrack = struct {
     added_at: i64,
 };
 
+/// How a Release's free-text type reads: `album` for a type naming an album,
+/// `ep_or_single` for one naming an EP or single, `unknown` for any other
+/// text or none. The values are the display order of `unplayedReleases`.
+pub const ReleaseClass = enum(u8) { album, unknown, ep_or_single };
+
+pub const HomeRelease = struct {
+    release_id: i64,
+    title: Text = .{},
+    /// The album Artist as written; the Artist of its first Track when empty.
+    artist: Text = .{},
+    year: ?i32,
+    release_class: ReleaseClass,
+};
+
+/// A Release whose full release date falls within 3 days of today's month and
+/// day, in a year before the anniversary's.
+pub const Anniversary = struct {
+    release_id: i64,
+    title: Text = .{},
+    /// The album Artist as written; the Artist of its first Track when empty.
+    artist: Text = .{},
+    year: i32,
+    years_ago: u32,
+    /// Days from today to the anniversary, -3 to 3.
+    day_offset: i8,
+    /// `years_ago` is a multiple of 5.
+    round: bool,
+};
+
 pub const ListeningWeek = struct {
     /// The local day number (days since the Unix epoch) of `day_listened_ms[0]`;
     /// the last element is today.
@@ -329,6 +358,144 @@ pub fn deepCuts(library: *const LibraryDatabase, time: LocalTime, output: []Home
     try statement.bindInt64(2, time.now_s);
     try statement.bindInt64(3, @intCast(limit));
     return readTracks(statement, output[0..limit]);
+}
+
+const release_artist_or_track = "COALESCE(NULLIF(releases.album_artist, ''), (SELECT artists.name FROM artists WHERE artists.id = releases.album_artist_id),\n" ++
+    "    (SELECT tracks.artist FROM tracks WHERE tracks.release_id = releases.id ORDER BY tracks.id LIMIT 1), '')";
+
+const release_year = "CASE WHEN substr(releases.release_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]' " ++
+    "THEN CAST(substr(releases.release_date, 1, 4) AS INTEGER) END";
+
+const release_type_tokens = "(' ' || replace(replace(replace(lower(COALESCE(releases.release_type, '')), '+', ' '), ',', ' '), ';', ' ') || ' ')";
+
+const release_shuffle_mask = 0x3FFF_FFFF;
+const release_shuffle_multiplier = 2_654_435_761;
+
+fn shuffleSeed(local_day: i64) i64 {
+    var state: u64 = @bitCast(local_day);
+    state +%= 0x9E37_79B9_7F4A_7C15;
+    state = (state ^ (state >> 30)) *% 0xBF58_476D_1CE4_E5B9;
+    state = (state ^ (state >> 27)) *% 0x94D0_49BB_1331_11EB;
+    state ^= state >> 31;
+    return @intCast(state & release_shuffle_mask);
+}
+
+fn readHomeReleases(statement: sqlite.Statement, output: []HomeRelease) !usize {
+    var count: usize = 0;
+    while (count < output.len and try statement.step() == .row) : (count += 1) {
+        output[count] = .{
+            .release_id = statement.columnInt64(0),
+            .year = if (optionalInt64(statement, 3)) |year| std.math.cast(i32, year) else null,
+            .release_class = std.enums.fromInt(ReleaseClass, statement.columnInt64(4)) orelse .unknown,
+        };
+        output[count].title.set(statement.columnText(1));
+        output[count].artist.set(statement.columnText(2));
+    }
+    return count;
+}
+
+/// Releases none of whose Tracks' Recordings has a listen, at most one per
+/// album Artist, albums before Releases of unknown type before EPs and
+/// singles. Within a type the order is a shuffle that holds for one local day.
+/// An Artist is represented by its first Release in that order.
+pub fn unplayedReleases(library: *const LibraryDatabase, time: LocalTime, output: []HomeRelease) !usize {
+    const limit = @min(output.len, max_items);
+    var statement = try library.database.prepare(
+        "WITH candidates AS (\n" ++
+            "    SELECT releases.id AS id, releases.title AS title, " ++ release_artist_or_track ++ " AS artist,\n" ++
+            "        " ++ release_year ++ " AS year,\n" ++
+            "        CASE WHEN " ++ release_type_tokens ++ " LIKE '% album %' THEN 0\n" ++
+            "             WHEN " ++ release_type_tokens ++ " LIKE '% ep %' OR " ++ release_type_tokens ++ " LIKE '% single %' THEN 2\n" ++
+            "             ELSE 1 END AS class,\n" ++
+            "        COALESCE('i' || releases.album_artist_id, 't' || lower(trim(NULLIF(releases.album_artist, ''))), 'r' || releases.id) AS artist_key,\n" ++
+            "        (((releases.id & " ++ std.fmt.comptimePrint("{d}", .{release_shuffle_mask}) ++ ") + ?1) * " ++
+            std.fmt.comptimePrint("{d}", .{release_shuffle_multiplier}) ++ ") & 4294967295 AS shuffle\n" ++
+            "    FROM releases\n" ++
+            "    WHERE EXISTS (SELECT 1 FROM tracks WHERE tracks.release_id = releases.id)\n" ++
+            "      AND NOT EXISTS (SELECT 1 FROM tracks JOIN recording_play_stats AS stats ON stats.recording_id = tracks.recording_id\n" ++
+            "          WHERE tracks.release_id = releases.id)\n" ++
+            "), ranked AS (\n" ++
+            "    SELECT *, row_number() OVER (PARTITION BY artist_key ORDER BY class, shuffle, id) AS artist_rank FROM candidates\n" ++
+            ")\n" ++
+            "SELECT id, title, artist, year, class FROM ranked WHERE artist_rank = 1 ORDER BY class, shuffle, id LIMIT ?2;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, shuffleSeed(time.localDay()));
+    try statement.bindInt64(2, @intCast(limit));
+    return readHomeReleases(statement, output[0..limit]);
+}
+
+const anniversary_days = 3;
+const anniversary_round_years = 5;
+
+fn isLeapYear(year: i64) bool {
+    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+}
+
+/// The month-days within 3 days of `local_day` as `[offset, year, "MM-DD",
+/// alias]`: a 28 February outside a leap year also matches a 29 February.
+fn anniversaryDays(local_day: i64, buffer: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    try writer.writeByte('[');
+    var offset: i64 = -anniversary_days;
+    while (offset <= anniversary_days) : (offset += 1) {
+        const date = civilFromDays(local_day + offset);
+        if (offset != -anniversary_days) try writer.writeByte(',');
+        try writer.print("[{d},{d},\"{d:0>2}-{d:0>2}\",", .{ offset, date.year, date.month, date.day });
+        if (date.month == 2 and date.day == 28 and !isLeapYear(date.year)) {
+            try writer.writeAll("\"02-29\"]");
+        } else {
+            try writer.writeAll("null]");
+        }
+    }
+    try writer.writeByte(']');
+    return writer.buffered();
+}
+
+/// Releases with a full release date whose month and day fall within 3 days of
+/// today's, dated in an earlier year than the anniversary's. Round
+/// anniversaries (a multiple of 5 years) come first, then Releases of Artists
+/// with a listen, then the nearest to today.
+pub fn releaseAnniversaries(library: *const LibraryDatabase, time: LocalTime, output: []Anniversary) !usize {
+    const limit = @min(output.len, max_items);
+    var days_buffer: [256]u8 = undefined;
+    const days = try anniversaryDays(time.localDay(), &days_buffer);
+    var statement = try library.database.prepare(
+        "WITH days AS (\n" ++
+            "    SELECT json_extract(value, '$[0]') AS day_offset, json_extract(value, '$[1]') AS year,\n" ++
+            "        json_extract(value, '$[2]') AS month_day, json_extract(value, '$[3]') AS alias_day FROM json_each(?1)\n" ++
+            "), due AS (\n" ++
+            "    SELECT releases.id AS id, releases.title AS title, " ++ release_artist_or_track ++ " AS artist, releases.album_artist_id AS album_artist_id,\n" ++
+            "        CAST(substr(releases.release_date, 1, 4) AS INTEGER) AS year, days.year - CAST(substr(releases.release_date, 1, 4) AS INTEGER) AS years_ago,\n" ++
+            "        days.day_offset AS day_offset\n" ++
+            "    FROM releases JOIN days ON substr(releases.release_date, 6, 5) IN (days.month_day, days.alias_day)\n" ++
+            "    WHERE releases.release_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND length(releases.release_date) = 10\n" ++
+            "      AND days.year - CAST(substr(releases.release_date, 1, 4) AS INTEGER) >= 1\n" ++
+            ")\n" ++
+            "SELECT id, title, artist, year, years_ago, day_offset FROM due\n" ++
+            "ORDER BY years_ago % " ++ std.fmt.comptimePrint("{d}", .{anniversary_round_years}) ++ " = 0 DESC,\n" ++
+            "    EXISTS (SELECT 1 FROM tracks JOIN recording_play_stats AS stats ON stats.recording_id = tracks.recording_id\n" ++
+            "        WHERE tracks.artist_id = COALESCE(due.album_artist_id,\n" ++
+            "            (SELECT first.artist_id FROM tracks AS first WHERE first.release_id = due.id ORDER BY first.id LIMIT 1))) DESC,\n" ++
+            "    abs(day_offset), id LIMIT ?2;",
+    );
+    defer statement.deinit();
+    try statement.bindText(1, days);
+    try statement.bindInt64(2, @intCast(limit));
+    var count: usize = 0;
+    while (count < limit and try statement.step() == .row) : (count += 1) {
+        const years_ago = counted(statement.columnInt64(4));
+        output[count] = .{
+            .release_id = statement.columnInt64(0),
+            .year = std.math.cast(i32, statement.columnInt64(3)) orelse 0,
+            .years_ago = years_ago,
+            .day_offset = std.math.cast(i8, statement.columnInt64(5)) orelse 0,
+            .round = years_ago % anniversary_round_years == 0,
+        };
+        output[count].title.set(statement.columnText(1));
+        output[count].artist.set(statement.columnText(2));
+    }
+    return count;
 }
 
 /// The Artists most played in the last `days` days, most played first.
@@ -822,4 +989,220 @@ test "history age reports the first listen, distinct local days and the recordin
     try testing.expectEqual(@as(?i64, midnight_s - 5 * day_s), age.first_listen_at);
     try testing.expectEqual(@as(u32, 3), age.listen_days);
     try testing.expect(!age.recording_enabled);
+}
+
+fn addTypedRelease(library: *LibraryDatabase, id: i64, artist: i64, release_type: ?[]const u8, release_date: ?[]const u8) !void {
+    var name: [16]u8 = undefined;
+    try addRelease(library, id, try std.fmt.bufPrint(&name, "Release {d}", .{id}), "");
+    try run(library, "UPDATE releases SET album_artist_id = {d} WHERE id = {d};", .{ artist, id });
+    if (release_type) |text| try run(library, "UPDATE releases SET release_type = '{s}' WHERE id = {d};", .{ text, id });
+    if (release_date) |text| try run(library, "UPDATE releases SET release_date = '{s}' WHERE id = {d};", .{ text, id });
+    try addTrack(library, .{ .id = id, .artist = artist, .release = id });
+}
+
+fn timeOnCivilDay(year: i64, month: u8, day: u8) LocalTime {
+    return .{ .now_s = daysFromCivil(.{ .year = year, .month = month, .day = day }) * day_s + 12 * 3600 - offset_s, .utc_offset_s = offset_s };
+}
+
+test "unplayed Releases leave out any Release with a played Track or no Tracks" {
+    var library = try openHomeLibrary("unplayed-played");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addArtist(&library, 2, "Bo");
+    try addArtist(&library, 3, "Cy");
+    try addTypedRelease(&library, 1, 1, "album", null);
+    try addTypedRelease(&library, 2, 2, "album", null);
+    try addTypedRelease(&library, 3, 3, "album", null);
+    try addTrack(&library, .{ .id = 20, .artist = 2, .release = 2 });
+    try run(&library, "INSERT INTO releases(id, title, release_key) VALUES (9, 'Empty', 'key9');", .{});
+    try listen(&library, 20, noon_s - 60, 1000);
+    try rebuildStats(&library);
+
+    var releases: [max_items]HomeRelease = undefined;
+    const count = try unplayedReleases(&library, fixture_time, &releases);
+    try testing.expectEqual(@as(usize, 2), count);
+    for (releases[0..count]) |release| try testing.expect(release.release_id == 1 or release.release_id == 3);
+}
+
+test "unplayed Releases order albums, then unknown types, then EPs and singles" {
+    var library = try openHomeLibrary("unplayed-order");
+    defer library.close();
+    for (1..8) |index| {
+        var name: [8]u8 = undefined;
+        try addArtist(&library, @intCast(index), try std.fmt.bufPrint(&name, "A{d}", .{index}));
+    }
+    try addTypedRelease(&library, 1, 1, "single", "2020-01-01");
+    try addTypedRelease(&library, 2, 2, null, null);
+    try addTypedRelease(&library, 3, 3, "album", "2019");
+    try addTypedRelease(&library, 4, 4, "compile", null);
+    try addTypedRelease(&library, 5, 5, "EP", null);
+    try addTypedRelease(&library, 6, 6, "Album + Live", null);
+    try addTypedRelease(&library, 7, 7, "a", null);
+
+    var releases: [max_items]HomeRelease = undefined;
+    const count = try unplayedReleases(&library, fixture_time, &releases);
+    try testing.expectEqual(@as(usize, 7), count);
+    const expected = [_]ReleaseClass{ .album, .album, .unknown, .unknown, .unknown, .ep_or_single, .ep_or_single };
+    for (releases[0..count], expected) |release, class| try testing.expectEqual(class, release.release_class);
+    for (releases[0..count]) |release| switch (release.release_id) {
+        3 => try testing.expectEqual(@as(?i32, 2019), release.year),
+        1 => try testing.expectEqual(@as(?i32, 2020), release.year),
+        2 => try testing.expectEqual(@as(?i32, null), release.year),
+        else => {},
+    };
+}
+
+test "unplayed Releases show one Release per Artist, stable within a day and changing across days" {
+    var library = try openHomeLibrary("unplayed-artist");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addArtist(&library, 2, "Bo");
+    for (1..6) |index| try addTypedRelease(&library, @intCast(index), 1, "album", null);
+    try addRelease(&library, 10, "Typed", "Bo");
+    try addRelease(&library, 11, "Typed Again", " bo ");
+    try addTrack(&library, .{ .id = 10, .artist = 2, .release = 10 });
+    try addTrack(&library, .{ .id = 11, .artist = 2, .release = 11 });
+
+    var releases: [max_items]HomeRelease = undefined;
+    const today = try unplayedReleases(&library, fixture_time, &releases);
+    try testing.expectEqual(@as(usize, 2), today);
+    var ann_today: i64 = 0;
+    var bo_count: usize = 0;
+    for (releases[0..today]) |release| {
+        if (release.release_id <= 5) ann_today = release.release_id else bo_count += 1;
+    }
+    try testing.expect(ann_today != 0);
+    try testing.expectEqual(@as(usize, 1), bo_count);
+
+    const later = try unplayedReleases(&library, .{ .now_s = fixture_time.now_s + 3600, .utc_offset_s = offset_s }, &releases);
+    try testing.expectEqual(today, later);
+    for (releases[0..later]) |release| {
+        if (release.release_id <= 5) try testing.expectEqual(ann_today, release.release_id);
+    }
+
+    var differs = false;
+    for (1..8) |ahead| {
+        const next = try unplayedReleases(&library, .{ .now_s = fixture_time.now_s + @as(i64, @intCast(ahead)) * day_s, .utc_offset_s = offset_s }, &releases);
+        try testing.expectEqual(@as(usize, 2), next);
+        for (releases[0..next]) |release| {
+            if (release.release_id <= 5 and release.release_id != ann_today) differs = true;
+        }
+    }
+    try testing.expect(differs);
+}
+
+test "unplayed Releases are bounded to 24" {
+    var library = try openHomeLibrary("unplayed-bound");
+    defer library.close();
+    for (1..31) |index| {
+        var name: [8]u8 = undefined;
+        try addArtist(&library, @intCast(index), try std.fmt.bufPrint(&name, "A{d}", .{index}));
+        try addTypedRelease(&library, @intCast(index), @intCast(index), "album", null);
+    }
+    var releases: [40]HomeRelease = undefined;
+    try testing.expectEqual(@as(usize, max_items), try unplayedReleases(&library, fixture_time, &releases));
+}
+
+test "anniversaries wrap across New Year with the years counted against the anniversary's year" {
+    var library = try openHomeLibrary("anniversary-wrap");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addTypedRelease(&library, 1, 1, null, "2015-12-30");
+    try addTypedRelease(&library, 2, 1, null, "2015-01-04");
+    try addTypedRelease(&library, 3, 1, null, "2015-01-05");
+
+    var found: [max_items]Anniversary = undefined;
+    const count = try releaseAnniversaries(&library, timeOnCivilDay(2027, 1, 1), &found);
+    try testing.expectEqual(@as(usize, 2), count);
+    try testing.expectEqual(@as(i64, 1), found[0].release_id);
+    try testing.expectEqual(@as(i8, -2), found[0].day_offset);
+    try testing.expectEqual(@as(u32, 11), found[0].years_ago);
+    try testing.expectEqual(@as(i32, 2015), found[0].year);
+    try testing.expect(!found[0].round);
+    try testing.expectEqualStrings("Release 1", found[0].title.slice());
+    try testing.expectEqual(@as(i64, 2), found[1].release_id);
+    try testing.expectEqual(@as(i8, 3), found[1].day_offset);
+    try testing.expectEqual(@as(u32, 12), found[1].years_ago);
+}
+
+test "anniversaries treat 29 February as 28 February outside leap years" {
+    var library = try openHomeLibrary("anniversary-leap");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addTypedRelease(&library, 1, 1, null, "2016-02-29");
+
+    var found: [max_items]Anniversary = undefined;
+    try testing.expectEqual(@as(usize, 1), try releaseAnniversaries(&library, timeOnCivilDay(2027, 2, 28), &found));
+    try testing.expectEqual(@as(i8, 0), found[0].day_offset);
+    try testing.expectEqual(@as(u32, 11), found[0].years_ago);
+    try testing.expectEqual(@as(usize, 1), try releaseAnniversaries(&library, timeOnCivilDay(2027, 3, 1), &found));
+    try testing.expectEqual(@as(i8, -1), found[0].day_offset);
+    try testing.expectEqual(@as(usize, 1), try releaseAnniversaries(&library, timeOnCivilDay(2028, 2, 29), &found));
+    try testing.expectEqual(@as(i8, 0), found[0].day_offset);
+    try testing.expectEqual(@as(u32, 12), found[0].years_ago);
+    try testing.expectEqual(@as(usize, 1), try releaseAnniversaries(&library, timeOnCivilDay(2028, 2, 27), &found));
+    try testing.expectEqual(@as(i8, 2), found[0].day_offset);
+    try testing.expectEqual(@as(usize, 0), try releaseAnniversaries(&library, timeOnCivilDay(2027, 3, 4), &found));
+}
+
+test "anniversaries never show a Release dated today or later, or a partial date" {
+    var library = try openHomeLibrary("anniversary-dates");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addTypedRelease(&library, 1, 1, null, "2026-10-08");
+    try addTypedRelease(&library, 2, 1, null, "2026-10-09");
+    try addTypedRelease(&library, 3, 1, null, "2027-10-08");
+    try addTypedRelease(&library, 4, 1, null, "2013");
+    try addTypedRelease(&library, 5, 1, null, "2013-10");
+    try addTypedRelease(&library, 6, 1, null, "2013-10-08T00:00:00");
+    try addTypedRelease(&library, 7, 1, null, null);
+    try addTypedRelease(&library, 8, 1, null, "2025-10-08");
+
+    var found: [max_items]Anniversary = undefined;
+    const count = try releaseAnniversaries(&library, timeOnCivilDay(2026, 10, 8), &found);
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqual(@as(i64, 8), found[0].release_id);
+    try testing.expectEqual(@as(u32, 1), found[0].years_ago);
+}
+
+test "anniversaries put round years first, then Artists with a listen, then the nearest day" {
+    var library = try openHomeLibrary("anniversary-order");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    try addArtist(&library, 2, "Bo");
+    try addTypedRelease(&library, 1, 1, null, "2013-10-08");
+    try addTypedRelease(&library, 2, 1, null, "2016-10-08");
+    try addTypedRelease(&library, 3, 2, null, "2018-10-08");
+    try addTypedRelease(&library, 4, 1, null, "2018-10-10");
+    try addTypedRelease(&library, 5, 2, null, "2018-10-09");
+    try addTypedRelease(&library, 6, 2, null, "2018-10-06");
+    try addTrack(&library, .{ .id = 30, .artist = 1, .release = 1 });
+    try listen(&library, 30, noon_s, 1000);
+    try rebuildStats(&library);
+
+    var found: [max_items]Anniversary = undefined;
+    const count = try releaseAnniversaries(&library, timeOnCivilDay(2026, 10, 8), &found);
+    try testing.expectEqual(@as(usize, 6), count);
+    try testing.expectEqual(@as(i64, 2), found[0].release_id);
+    try testing.expectEqual(@as(u32, 10), found[0].years_ago);
+    try testing.expect(found[0].round);
+    try testing.expectEqual(@as(i64, 1), found[1].release_id);
+    try testing.expect(!found[1].round);
+    try testing.expectEqual(@as(i64, 4), found[2].release_id);
+    try testing.expectEqual(@as(i64, 3), found[3].release_id);
+    try testing.expectEqual(@as(i64, 5), found[4].release_id);
+    try testing.expectEqual(@as(i64, 6), found[5].release_id);
+    try testing.expectEqual(@as(i8, -2), found[5].day_offset);
+}
+
+test "anniversaries are bounded to 24" {
+    var library = try openHomeLibrary("anniversary-bound");
+    defer library.close();
+    try addArtist(&library, 1, "Ann");
+    for (1..31) |index| {
+        var date: [10]u8 = undefined;
+        try addTypedRelease(&library, @intCast(index), 1, null, try std.fmt.bufPrint(&date, "{d}-10-08", .{1990 + index}));
+    }
+    var found: [40]Anniversary = undefined;
+    try testing.expectEqual(@as(usize, max_items), try releaseAnniversaries(&library, timeOnCivilDay(2026, 10, 8), &found));
 }

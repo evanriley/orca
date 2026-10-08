@@ -1081,6 +1081,41 @@ pub const HomeTracksView = extern struct {
 
 pub const HomeTracksCallback = *const fn (?*anyopaque, *const HomeTracksView) callconv(.c) void;
 
+pub const HomeReleaseView = extern struct {
+    release_id: i64,
+    title: StringView,
+    artist: StringView,
+    year: i32,
+    release_class: u8,
+    has_year: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const HomeReleasesView = extern struct {
+    releases: [*]const HomeReleaseView,
+    count: usize,
+};
+
+pub const HomeReleasesCallback = *const fn (?*anyopaque, *const HomeReleasesView) callconv(.c) void;
+
+pub const AnniversaryView = extern struct {
+    release_id: i64,
+    title: StringView,
+    artist: StringView,
+    year: i32,
+    years_ago: u32,
+    day_offset: i8,
+    round: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const AnniversariesView = extern struct {
+    anniversaries: [*]const AnniversaryView,
+    count: usize,
+};
+
+pub const AnniversariesCallback = *const fn (?*anyopaque, *const AnniversariesView) callconv(.c) void;
+
 pub const HomeFormatsView = extern struct {
     releases: u64,
     tracks: u64,
@@ -3806,6 +3841,29 @@ fn exportHomeTrack(track: *const core.runtime.HomeTrack) HomeTrackView {
     };
 }
 
+fn exportHomeRelease(release: *const core.runtime.HomeRelease) HomeReleaseView {
+    return .{
+        .release_id = release.release_id,
+        .title = stringView(release.title.slice()),
+        .artist = stringView(release.artist.slice()),
+        .year = release.year orelse 0,
+        .release_class = @backingInt(release.release_class),
+        .has_year = @intFromBool(release.year != null),
+    };
+}
+
+fn exportAnniversary(anniversary: *const core.runtime.HomeAnniversary) AnniversaryView {
+    return .{
+        .release_id = anniversary.release_id,
+        .title = stringView(anniversary.title.slice()),
+        .artist = stringView(anniversary.artist.slice()),
+        .year = anniversary.year,
+        .years_ago = anniversary.years_ago,
+        .day_offset = anniversary.day_offset,
+        .round = @intFromBool(anniversary.round),
+    };
+}
+
 pub export fn orca_library_listening_week(
     runtime: ?*Runtime,
     library: Handle,
@@ -3922,6 +3980,46 @@ pub export fn orca_library_deep_cuts(
     var tracks: [core.runtime.home_max_items]core.runtime.HomeTrack = undefined;
     const found = box.runtime.libraryDeepCuts(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &tracks);
     return visitHomeTracks(box, found, &tracks, context, visit, @src());
+}
+
+pub export fn orca_library_unplayed_releases(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?HomeReleasesCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var releases: [core.runtime.home_max_items]core.runtime.HomeRelease = undefined;
+    const count = box.runtime.libraryUnplayedReleases(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &releases) catch |err|
+        return box.fail(@src(), err);
+    var views: [core.runtime.home_max_items]HomeReleaseView = undefined;
+    for (views[0..count], releases[0..count]) |*view, *release| view.* = exportHomeRelease(release);
+    const result: HomeReleasesView = .{ .releases = &views, .count = count };
+    visit(context, &result);
+    return .ok;
+}
+
+pub export fn orca_library_release_anniversaries(
+    runtime: ?*Runtime,
+    library: Handle,
+    now_s: i64,
+    utc_offset_s: i64,
+    context: ?*anyopaque,
+    callback: ?AnniversariesCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var anniversaries: [core.runtime.home_max_items]core.runtime.HomeAnniversary = undefined;
+    const count = box.runtime.libraryReleaseAnniversaries(importLibrary(library), .{ .now_s = now_s, .utc_offset_s = utc_offset_s }, &anniversaries) catch |err|
+        return box.fail(@src(), err);
+    var views: [core.runtime.home_max_items]AnniversaryView = undefined;
+    for (views[0..count], anniversaries[0..count]) |*view, *anniversary| view.* = exportAnniversary(anniversary);
+    const result: AnniversariesView = .{ .anniversaries = &views, .count = count };
+    visit(context, &result);
+    return .ok;
 }
 
 pub export fn orca_library_top_artists(

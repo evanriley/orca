@@ -7,6 +7,13 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Added
 
+- **Home can list unplayed albums and release anniversaries.**
+  `libraryUnplayedReleases` (C ABI `orca_library_unplayed_releases`) returns
+  Releases with no listen, one per album Artist, albums before Releases of
+  unknown type before EPs and singles, shuffled once per local day.
+  `libraryReleaseAnniversaries` (`orca_library_release_anniversaries`) returns
+  Releases whose full release date falls within 3 days of today's month and
+  day, round anniversaries first, each with its day offset.
 - **Daily Mixes have themes.** Besides genre mixes and Rarely played, Daily
   Mixes include a decade mix (the decade most listened to in 30 days, else
   the one with the most Tracks), New to you (Releases never played by Artists

@@ -1311,6 +1311,67 @@ typedef void (*orca_home_tracks_callback)(
     const orca_home_tracks_view *tracks
 );
 
+/* How a Release's type reads, which sets the order of unplayed Releases. */
+typedef enum orca_home_release_class {
+    ORCA_HOME_RELEASE_CLASS_ALBUM = 0,
+    /* Any other type text, or none. */
+    ORCA_HOME_RELEASE_CLASS_UNKNOWN = 1,
+    ORCA_HOME_RELEASE_CLASS_EP_OR_SINGLE = 2,
+} orca_home_release_class;
+
+/* A Release on the Home page. `artist` is the album artist as written, the
+ * Artist of its first Track when empty. `year` is meaningful only when
+ * `has_year` is 1. `release_class` is an orca_home_release_class. */
+typedef struct orca_home_release {
+    int64_t release_id;
+    orca_string_view title;
+    orca_string_view artist;
+    int32_t year;
+    uint8_t release_class;
+    uint8_t has_year;
+    uint8_t reserved[2];
+} orca_home_release;
+
+/* `releases` holds `count` (at most 24) Releases in order, valid only for the
+ * duration of the callback. */
+typedef struct orca_home_releases_view {
+    const orca_home_release *releases;
+    size_t count;
+} orca_home_releases_view;
+
+typedef void (*orca_home_releases_callback)(
+    void *context,
+    const orca_home_releases_view *releases
+);
+
+/* A Release whose full release date falls near today's month and day. `year`
+ * is the release year, `years_ago` the years from it to the anniversary's
+ * year (at least 1), `day_offset` the days from today to the anniversary (-3
+ * to 3, negative when it has passed) and `round` 1 when `years_ago` is a
+ * multiple of 5. */
+typedef struct orca_release_anniversary {
+    int64_t release_id;
+    orca_string_view title;
+    orca_string_view artist;
+    int32_t year;
+    uint32_t years_ago;
+    int8_t day_offset;
+    uint8_t round;
+    uint8_t reserved[6];
+} orca_release_anniversary;
+
+/* `anniversaries` holds `count` (at most 24) entries in order, valid only for
+ * the duration of the callback. */
+typedef struct orca_release_anniversaries_view {
+    const orca_release_anniversary *anniversaries;
+    size_t count;
+} orca_release_anniversaries_view;
+
+typedef void (*orca_release_anniversaries_callback)(
+    void *context,
+    const orca_release_anniversaries_view *anniversaries
+);
+
 /* The Library by format of each Track's preferred file. flac + alac + mp3 +
  * other equals `tracks`; a Track with no preferred file counts as other. */
 typedef struct orca_home_formats {
@@ -3165,6 +3226,29 @@ orca_status orca_library_deep_cuts(
     int64_t utc_offset_s,
     void *context,
     orca_home_tracks_callback callback
+);
+/* Releases none of whose Tracks was played, at most one per album Artist:
+ * albums, then Releases of unknown type, then EPs and singles. Within a type
+ * the order is a shuffle that holds for one local day. */
+orca_status orca_library_unplayed_releases(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_home_releases_callback callback
+);
+/* Releases with a full release date within 3 days of today's month and day,
+ * dated in an earlier year than the anniversary's: round anniversaries first,
+ * then Releases of Artists with a listen, then the nearest to today. 29
+ * February counts as 28 February outside leap years. */
+orca_status orca_library_release_anniversaries(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t now_s,
+    int64_t utc_offset_s,
+    void *context,
+    orca_release_anniversaries_callback callback
 );
 /* The Artists most played in the last `days` days. */
 orca_status orca_library_top_artists(
