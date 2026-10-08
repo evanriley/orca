@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- **Orca says when an update adds an analysis measurement.**
+  `libraryAnalysisCoverage` (C ABI `orca_library_analysis_coverage`) splits
+  the files analysis would measure into never analyzed and outdated, names
+  the measurements the outdated files lack, and identifies the current
+  measurement set; `orca-cli stats` prints it. When analyzed files lack a
+  measurement, `orca-gtk` shows a banner naming it with Analyze and a close
+  control; a dismissed banner returns only when the measurement set changes.
+
 ### Fixed
 
 - **`orca-gtk`'s right-hand panels share one width.** The Radio options
@@ -10,8 +20,9 @@
   shifts between panels or tabs.
 - **`orca-gtk` says when Radio has nothing left.** When Radio runs out of
   picks under its options, the Radio panel says so; with an Energy focus on a
-  Library that still has unanalyzed files it says Energy needs analyzed music
-  and offers Analyze music.
+  Library that has files without tempo, key and energy it says Energy needs
+  analyzed music and offers Analyze music, or says the music is being analyzed
+  while that runs.
 
 ### Changed
 

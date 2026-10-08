@@ -28,6 +28,7 @@ const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const offline = @import("offline.zig");
+const analysis_notice = @import("analysis_notice.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
 const changes = @import("changes.zig");
@@ -490,6 +491,7 @@ pub const App = struct {
     genres: genres.State = .{},
     folders: folders.State = .{},
     offline: offline.State = .{},
+    analysis_notice: analysis_notice.State = .{},
     folders_count: ?*gtk.Label = null,
     palette: palette.State = .{},
 

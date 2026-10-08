@@ -13,6 +13,7 @@ const transport = @import("transport.zig");
 const page_ui = @import("page.zig");
 const details = @import("details.zig");
 const jobs = @import("jobs.zig");
+const analysis_notice = @import("analysis_notice.zig");
 const main_window = @import("window.zig");
 
 const App = app.App;
@@ -602,9 +603,8 @@ fn hasEnergyFocus(options: liborca.RadioOptions) bool {
     return false;
 }
 
-fn needsAnalysis(self: *App) bool {
-    const library = self.library orelse return false;
-    return (self.runtime.libraryUnanalyzedCount(library) catch 0) != 0;
+fn needsAnalysis(self: *const App) bool {
+    return analysis_notice.lacksFeatures(self) orelse false;
 }
 
 fn paintNotice(self: *App, status: *const liborca.RadioStatus) void {
@@ -613,10 +613,13 @@ fn paintNotice(self: *App, status: *const liborca.RadioStatus) void {
     const text = radio.notice_text orelse return;
     const exhausted = status.state == .exhausted;
     const analysis = exhausted and hasEnergyFocus(status.options) and needsAnalysis(self);
+    const analyzing = analysis and jobs.active(self, .analysis);
     gtk.gtk_widget_set_visible(notice, boolean(exhausted));
-    if (radio.notice_analyze) |button| gtk.gtk_widget_set_visible(button, boolean(analysis));
+    if (radio.notice_analyze) |button| gtk.gtk_widget_set_visible(button, boolean(analysis and !analyzing));
     if (!exhausted) return;
-    gtk.gtk_label_set_text(text, if (analysis)
+    gtk.gtk_label_set_text(text, if (analyzing)
+        "Energy needs analyzed music. Analyzing your music…"
+    else if (analysis)
         "Energy needs analyzed music. Analyze your music to find the energy of each track."
     else
         "Nothing in your library matches these options.");

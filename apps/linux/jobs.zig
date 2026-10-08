@@ -29,6 +29,8 @@ const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const changes = @import("changes.zig");
 const offline = @import("offline.zig");
+const analysis_notice = @import("analysis_notice.zig");
+const radio = @import("radio.zig");
 const art = @import("art.zig");
 const preferences = @import("preferences.zig");
 const track_table = @import("track_table.zig");
@@ -47,6 +49,8 @@ fn begin(self: *App, tracked: app.TrackedTask) void {
     }
     activity.refresh(self);
     health.updateBanner(self);
+    analysis_notice.show(self);
+    if (tracked.task == .analysis) radio.invalidate(self);
     self.updateTracksBody();
     self.requestTick();
 }
@@ -109,6 +113,7 @@ pub fn reloadLibraryViews(self: *App) void {
     self.track_library_total = null;
     self.reload();
     offline.refresh(self);
+    analysis_notice.refresh(self);
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
@@ -792,6 +797,7 @@ fn untrack(self: *App, index: usize) app.TrackedTask {
     const tracked = self.tasks[index];
     std.mem.copyForwards(app.TrackedTask, self.tasks[index .. self.task_count - 1], self.tasks[index + 1 .. self.task_count]);
     self.task_count -= 1;
+    if (tracked.task == .analysis) radio.invalidate(self);
     return tracked;
 }
 
@@ -825,6 +831,7 @@ fn tickTask(self: *App, index: usize) bool {
         const gone = untrack(self, index);
         if (gone.task == .analysis) self.health.then_duplicates = false;
         health.updateBanner(self);
+        analysis_notice.show(self);
         return false;
     };
     if (snapshot.state == .queued or snapshot.state == .waiting) return true;
@@ -856,6 +863,10 @@ fn tickTask(self: *App, index: usize) bool {
         .scan, .tag_write, .submission => health.updateBanner(self),
     }
     if (task == .analysis) health.analysisEnded(self, snapshot.state);
+    switch (task) {
+        .analysis, .scan => analysis_notice.refresh(self),
+        else => analysis_notice.show(self),
+    }
     self.updateTracksBody();
     return false;
 }

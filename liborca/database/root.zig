@@ -93,6 +93,7 @@ pub const ReleaseMember = repository.ReleaseMember;
 pub const ReleaseVisit = repository.ReleaseVisit;
 pub const AnalysisCandidate = repository.AnalysisCandidate;
 pub const AnalysisCandidatePage = repository.AnalysisCandidatePage;
+pub const AnalysisCoverageCounts = repository.AnalysisCoverageCounts;
 pub const AnalysisCacheRepository = repository.AnalysisCacheRepository;
 pub const HealthIssueKind = repository.HealthIssueKind;
 pub const HealthSeverity = repository.HealthSeverity;

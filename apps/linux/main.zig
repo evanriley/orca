@@ -50,6 +50,7 @@ const artwork_review = @import("artwork_review.zig");
 const metadata_issues = @import("metadata_issues.zig");
 const match_review = @import("match_review.zig");
 const offline = @import("offline.zig");
+const analysis_notice = @import("analysis_notice.zig");
 const libraries = @import("libraries.zig");
 
 const App = app.App;
@@ -173,6 +174,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     browse.reload(self);
     self.reload();
     offline.refresh(self);
+    analysis_notice.refresh(self);
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
@@ -728,6 +730,7 @@ pub fn main(init: std.process.Init) !u8 {
     artist_page.shutdown(&self);
     first_run.shutdown(&self);
     offline.shutdown(&self);
+    analysis_notice.shutdown(&self);
     changes.shutdown(&self);
     audio_problems.shutdown(&self);
     artwork_review.shutdown(&self);

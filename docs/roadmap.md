@@ -259,6 +259,9 @@ names each `Runtime` method the C ABI does not reach and why.
   fingerprint in the same decode, and indexed duplicate detection, as
   cancellable jobs. Each duplicate gets the strongest verdict that holds:
   the same bytes, the same lossless audio, or matching fingerprints.
+- Analysis coverage: which files were never analyzed and which lack a
+  measurement added or changed since they were analyzed. `orca-cli stats`
+  prints it, and `orca-gtk` shows a dismissible banner that offers Analyze.
 - Library health issues, each naming the action that resolves it (match or
   edit tags, fetch cover art, compare duplicates, review a correction, reveal
   the file); a dismissed issue stays hidden until its file's bytes change.

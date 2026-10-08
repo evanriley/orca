@@ -431,6 +431,8 @@ pub const ReconcileRequest = runtime.ReconcileRequest;
 pub const ReconcileScope = runtime.ReconcileScope;
 pub const BackfillRequest = runtime.BackfillRequest;
 pub const BackfillPending = runtime.BackfillPending;
+pub const AnalysisCoverage = runtime.AnalysisCoverage;
+pub const MissingMeasurements = runtime.MissingMeasurements;
 pub const AnalysisRequest = runtime.AnalysisRequest;
 /// Logical processors: the most `AnalysisRequest.threads` that can each have
 /// one of their own.

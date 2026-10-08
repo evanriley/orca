@@ -946,7 +946,11 @@ const help_details =
     \\with a location that is not missing), bytes, duration_ms,
     \\last_scan_finished_at, last_analysis_at and last_duplicate_scan_at, in
     \\Unix seconds, or - when no scan has completed, nothing is analysed or no
-    \\duplicate scan has succeeded, then listens, the local play history.
+    \\duplicate scan has succeeded, then listens, the local play history, then
+    \\never_analyzed and outdated, the files an analysis would measure split by
+    \\whether any measurement is stored for their bytes, missing, the
+    \\measurements outdated files lack (loudness_and_checks, fingerprint,
+    \\features, or -), and measurement_set, which changes with them.
     \\
     \\listens prints policy=, record= and listens=. --policy=half keeps a play
     \\heard for half the track or four minutes, ListenBrainz's rule; 30s keeps
@@ -1979,6 +1983,17 @@ fn printLibraryStats(context: Context) !void {
     try printOptionalStat(context.stdout, "last_analysis_at", stats.last_analysis_at);
     try printOptionalStat(context.stdout, "last_duplicate_scan_at", stats.last_duplicate_scan_at);
     try context.stdout.print("listens={d}\n", .{stats.listens});
+    const coverage = try runtime.libraryAnalysisCoverage(library_handle);
+    try context.stdout.print("never_analyzed={d}\noutdated={d}\nmissing=", .{ coverage.never_analyzed, coverage.outdated });
+    var separator: []const u8 = "";
+    inline for (.{ "loudness_and_checks", "fingerprint", "features" }) |name| {
+        if (@field(coverage.missing, name)) {
+            try context.stdout.print("{s}{s}", .{ separator, name });
+            separator = ",";
+        }
+    }
+    if (separator.len == 0) try context.stdout.writeAll("-");
+    try context.stdout.print("\nmeasurement_set={x:0>16}\n", .{coverage.measurement_set});
 }
 
 fn listenSettings(context: Context) !void {

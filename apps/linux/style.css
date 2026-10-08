@@ -9554,3 +9554,16 @@ button.daily-mix-not-for-me:focus-visible {
 .radio-notice .radio-info-text {
   color: @orca_text_2;
 }
+
+
+banner.analysis-banner > revealer > widget {
+  padding-right: 52px;
+}
+
+button.analysis-banner-close {
+  margin-right: 10px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 8px;
+}

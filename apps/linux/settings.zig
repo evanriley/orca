@@ -9,7 +9,8 @@
 //! whether listens and the current track are submitted, how confident a match
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
 //! the music folders are watched, whether idle maintenance runs, how many
-//! files Analyze music decodes at once, whether lyrics are fetched from
+//! files Analyze music decodes at once, which measurement set's analysis
+//! banner was dismissed, whether lyrics are fetched from
 //! LRCLIB, whether artist info is fetched, whether Home shows listening
 //! stats, whether the queue shows what it played, what the inspector shows,
 //! how albums and artists are sorted and laid out, which artists the Artists
@@ -408,6 +409,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.fetch_artist_info = isEnabled(std.mem.span(value));
     }
+    if (getString(keys, "library", "analysis_notice_dismissed")) |value| {
+        defer gtk.g_free(value);
+        self.analysis_notice.dismissed = std.fmt.parseUnsigned(u64, std.mem.span(value), 16) catch null;
+    }
     if (getString(keys, "lyrics", "fetch")) |value| {
         defer gtk.g_free(value);
         self.lyrics.fetch = std.mem.eql(u8, std.mem.span(value), "true");
@@ -612,6 +617,10 @@ pub fn save(self: *App) void {
         gtk.g_key_file_set_string(keys, "library", "analysis_threads", strings.format(&threads_buffer, "{d}", .{threads}).ptr);
     }
     gtk.g_key_file_set_string(keys, "library", "fetch_artist_info", if (self.fetch_artist_info) "true" else "false");
+    if (self.analysis_notice.dismissed) |measurement_set| {
+        var dismissed_buffer: [32]u8 = undefined;
+        gtk.g_key_file_set_string(keys, "library", "analysis_notice_dismissed", strings.format(&dismissed_buffer, "{x:0>16}", .{measurement_set}).ptr);
+    }
     gtk.g_key_file_set_string(keys, "maintenance", "enabled", if (self.idle_maintenance) "true" else "false");
     gtk.g_key_file_set_string(keys, "lyrics", "fetch", if (self.lyrics.fetch) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "queue_history", if (self.queue.history_shown) "true" else "false");
