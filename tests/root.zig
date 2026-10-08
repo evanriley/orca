@@ -1080,6 +1080,15 @@ fn settle(backend: *liborca.internal.audio.output.TestBackend, frames: usize) !v
     if (rendered < frames) return error.EntryRenderedNothing;
 }
 
+fn awaitFullRenderAhead(runtime: *liborca.Runtime, zone: liborca.ZoneHandle) !void {
+    const pipe = &(try runtime.zones.get(zone)).zone.pipe;
+    const full = liborca.internal.audio.zone_runtime.block_count - 1;
+    var attempts: usize = 0;
+    while (pipe.ready.len() < full and attempts < 4_000_000) : (attempts += 1)
+        std.Thread.yield() catch {};
+    if (pipe.ready.len() < full) return error.RenderAheadNeverFilled;
+}
+
 test "a switch to album ReplayGain reaches the audible samples as promptly as a switch to track ReplayGain" {
     var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
@@ -1122,11 +1131,13 @@ test "a switch to album ReplayGain reaches the audible samples as promptly as a 
     _ = try framesUntilPeak(&backend, 0.45, false);
     try settle(&backend, 4 * target_frames);
 
+    try awaitFullRenderAhead(&runtime, zone);
     try runtime.playerSetReplayGainMode(player, .track);
     const to_track = try framesUntilPeak(&backend, 0.5 * (1 + track_gain) / 2, true);
     try runtime.playerSetReplayGainMode(player, .off);
     _ = try framesUntilPeak(&backend, 0.45, false);
     try settle(&backend, 4 * target_frames);
+    try awaitFullRenderAhead(&runtime, zone);
     try runtime.playerSetReplayGainMode(player, .album);
     const to_album = try framesUntilPeak(&backend, 0.5 * (1 + album_gain) / 2, true);
 
