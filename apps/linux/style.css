@@ -9082,6 +9082,11 @@ button.home-link:hover {
   color: @orca_text;
 }
 
+.home-mix-tile.now-playing .home-tile-title {
+  color: @orca_accent_text;
+  font-weight: 600;
+}
+
 .home-tile-detail {
   margin-top: 4px;
   font-size: 12px;
@@ -9466,6 +9471,15 @@ list.daily-mix-rows > row {
 
 list.daily-mix-rows > row:hover {
   background-color: @orca_row_hover;
+}
+
+list.daily-mix-rows > row.now-playing {
+  background-color: color-mix(in srgb, @orca_accent 8%, transparent);
+}
+
+list.daily-mix-rows > row.now-playing .daily-mix-title {
+  color: @orca_accent_text;
+  font-weight: 600;
 }
 
 .daily-mix-number {

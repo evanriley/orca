@@ -508,7 +508,9 @@ opens and when Home is shown, and with `force` after the Daily Mixes setting
 changes; the tiles reload when that Job ends. A Daily Mix page plays,
 shuffles or saves the mix as a playlist, explains each Track with the Radio
 reason wording, and removes a Track with Not for me (`libraryNotForMe`, undone
-from its toast with `libraryClearNotForMe`). Settings › Listening › Reset
+from its toast with `libraryClearNotForMe`). The playing Track's row is
+marked on a Daily Mix page, and a mix tile shows the playing badge while its
+mix holds the playing Track. Settings › Listening › Reset
 recommendations calls `libraryResetRecommendations` after a confirmation.
 
 Run it from the tree:
