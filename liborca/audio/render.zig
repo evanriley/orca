@@ -220,6 +220,7 @@ pub fn RenderContext(comptime capacity: usize) type {
         entry_anchor: ?*std.atomic.Value(u64) = null,
         format_mismatches: std.atomic.Value(u64) = .init(0),
         silenced_callbacks: std.atomic.Value(u64) = .init(0),
+        callbacks: std.atomic.Value(u64) = .init(0),
         /// Callback-private timeline state. Only the render callback reads or
         /// writes these, and only while an output is open, so they need no
         /// synchronization: `published_position` is an exact mirror of what was
@@ -237,6 +238,7 @@ pub fn RenderContext(comptime capacity: usize) type {
             channels: u32,
         ) callconv(.c) void {
             const self: *Self = @ptrCast(@alignCast(opaque_context.?));
+            _ = self.callbacks.fetchAdd(1, .monotonic);
             const output = samples[0 .. frames * channels];
             if (channels != self.channels) {
                 @memset(output, 0);

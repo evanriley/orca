@@ -40,6 +40,10 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **A paused or stopped Player releases the output's rate.** When a Player
+  is paused or stopped, or has played its queue to the end, its PipeWire
+  streams go inactive, so another application can move the device to its own
+  rate and the sink can suspend. Playing makes the streams active again.
 - **`orca-gtk` shows what's playing on Daily Mixes.** A Daily Mix page marks
   the playing Track's row, and the mix's tile on Home and in the mixes grid
   shows the playing badge.

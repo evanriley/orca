@@ -1,6 +1,7 @@
 #ifndef ORCA_PIPEWIRE_SHIM_H
 #define ORCA_PIPEWIRE_SHIM_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef void (*orca_pw_render_fn)(void *userdata, float *samples,
@@ -106,6 +107,7 @@ int orca_pw_output_timing(struct orca_pw_output *output,
 enum orca_pw_output_state orca_pw_output_status(struct orca_pw_output *output);
 void orca_pw_output_set_waker(struct orca_pw_output *output,
                               orca_pw_wake_fn wake, void *context);
+int orca_pw_output_set_active(struct orca_pw_output *output, bool active);
 void orca_pw_fill(orca_pw_render_fn render, void *userdata, float *samples,
                   uint32_t frames, uint32_t channels);
 

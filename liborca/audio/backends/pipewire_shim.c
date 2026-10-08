@@ -990,3 +990,15 @@ void orca_pw_output_set_waker(struct orca_pw_output *output,
     output->wake_context = context;
     pw_thread_loop_unlock(output->loop);
 }
+
+int orca_pw_output_set_active(struct orca_pw_output *output, bool active) {
+    if (output == NULL)
+        return -EINVAL;
+    pw_thread_loop_lock(output->loop);
+    const int result = pw_stream_set_active(output->stream, active);
+    if (result < 0)
+        atomic_store_explicit(&output->state, ORCA_PW_OUTPUT_LOST,
+                              memory_order_release);
+    pw_thread_loop_unlock(output->loop);
+    return result;
+}

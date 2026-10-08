@@ -45,6 +45,19 @@ callback discards prepared blocks of older epochs. A paused Player writes
 silence, consumes no prepared blocks, does not advance position and counts no
 underrun.
 
+A Player that is not playing (paused, stopped, or at the end of its queue with
+every Zone drained) sets each of its active Zone outputs inactive once the
+output's callback has run twice since the Player stopped playing. A PipeWire
+stream delivers the quantum one callback writes in the next graph cycle and
+keeps it across deactivation, so the second callback leaves silence as the held
+quantum: playback that resumes after a stop or a seek starts with no audio from
+the old position, and the last quantum of a queue is heard before the output
+goes inactive. Until then the engine keeps passing instead of parking. An
+inactive output's callback is not called. An output that never calls back stays
+active. Playing again before the output goes inactive keeps it active; playing
+after sets it active again in the next pass, with a fresh stall timeout. The
+same applies to an output opened or reopened while the Player is not playing.
+
 The callback compares only the epoch of a prepared block, never its track: a
 gapless transition appends the successor's blocks under the same epoch, so a
 track comparison would discard the audio gapless depends on. The successor
@@ -319,6 +332,16 @@ holds the device at another rate; otherwise it resamples. The device rate read
 from the stream's timing is reported as `device_rate`. It adds
 `sample_rate_conversion` when it differs from the stream's rate, and
 `path_unknown` until it is known.
+
+An inactive stream stays open and linked but holds no rate, so a paused or
+stopped Player releases the device: another stream may then move the graph to
+its own rate, and when no stream runs the sink suspends. Playing again requests
+the source rate anew, which PipeWire honours only if no other stream now holds
+the device. While the sink is suspended, `device_format` is unknown.
+`scripts/check-rate-release.sh` checks this in `zig build test` under
+`scripts/headless-audio.sh`, and skips outside that private server: with Orca
+paused at 44.1 kHz, a 48 kHz stream moves the graph to 48 kHz; with Orca
+playing, the graph stays at 44.1 kHz.
 
 ### Device format
 
