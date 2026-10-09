@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,6 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      nix: ${{ steps.diff.outputs.nix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,6 +27,7 @@ jobs:
       - id: diff
         env:
           BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           base=${BEFORE:-HEAD^1}
@@ -33,8 +36,14 @@ jobs:
             ! grep -Ev '^(docs|orca-design)/|\.md$' <<<"$files" >/dev/null; then
             code=false
           fi
+          nix=false
+          if [ "$EVENT" = push ] ||
+            grep -Eq '^(flake\.(nix|lock)|nix/|build/|build\.zig$|build\.zig\.zon$)' <<<"$files"; then
+            nix=true
+          fi
           echo "$files"
           echo "code=$code" >>"$GITHUB_OUTPUT"
+          echo "nix=$nix" >>"$GITHUB_OUTPUT"
 
   test:
     needs: changes
@@ -49,7 +58,9 @@ jobs:
       - run: nix develop -c scripts/headless-audio.sh zig build test
       - run: nix develop -c zig build fuzz
 
-  fmt:
+  lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,14 +68,6 @@ jobs:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - run: nix develop -c zig fmt --check liborca apps benchmarks tests build build.zig
-
-  pinact:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - env:
           GITHUB_TOKEN: ${{ github.token }}
         run: nix run --inputs-from . nixpkgs#pinact -- run --check --verify
@@ -81,6 +84,8 @@ jobs:
       - run: nix develop -c zig build lib -Dtarget=aarch64-macos
 
   nix:
+    needs: changes
+    if: needs.changes.outputs.nix == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,27 +117,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: debian:13
-            install: >-
-              apt-get update &&
-              apt-get install --no-install-recommends -y
-              ca-certificates xz-utils pkg-config libsqlite3-dev libflac-dev
-              libogg-dev libvorbis-dev libopus-dev libopusfile-dev
-              libsamplerate0-dev libpipewire-0.3-dev
-              pipewire pipewire-bin wireplumber python3 binutils procps
+          - image: ghcr.io/evanriley/orca/ci-debian:13
             flags: -Dgtk=false
-          - image: fedora:43
-            install: >-
-              dnf install -y
-              tar xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel
-              libvorbis-devel opus-devel opusfile-devel libsamplerate-devel
-              pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
-              pipewire pipewire-utils wireplumber python3 binutils procps-ng
+          - image: ghcr.io/evanriley/orca/ci-fedora:43
             flags: ""
     runs-on: ubuntu-24.04
-    container: ${{ matrix.image }}
+    container:
+      image: ${{ matrix.image }}
+      credentials:
+        username: github
+        password: ${{ github.token }}
     steps:
-      - run: ${{ matrix.install }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -141,11 +136,10 @@ jobs:
           version: 0.17.0
           use-cache: false
       - run: zig build ${{ matrix.flags }}
-      - run: scripts/headless-audio.sh zig build test ${{ matrix.flags }}
 
   required:
     if: always()
-    needs: [changes, test, fmt, pinact, cross-macos, nix, package, distro]
+    needs: [changes, test, lint, cross-macos, nix, package, distro]
     runs-on: ubuntu-24.04
     steps:
       - env:

@@ -48,24 +48,31 @@ omitted device selects the system default output, which is real hardware.
 
 `.github/workflows/test.yml` runs on pull requests and on pushes to `main`:
 
-- `zig build`, `zig build test` under `scripts/headless-audio.sh`, and
-  `zig build fuzz`;
-- `zig fmt --check`;
-- a pinact check that every action is pinned to the commit its version
-  comment names;
-- the static `liborca` cross-build for aarch64 macOS;
-- `nix flake check`: the package build, the NixOS module and the installed
-  tree;
-- `zig build package-check` against the fetched Zig package;
-- a build and test run with the official Zig release against the libraries of
+- `test`: `zig build`, `zig build test` under `scripts/headless-audio.sh`,
+  and `zig build fuzz`;
+- `lint`: `zig fmt --check` and a pinact check that every action is pinned to
+  the commit its version comment names;
+- `cross-macos`: the static `liborca` cross-build for aarch64 macOS;
+- `nix`: `nix flake check`, the package build, the NixOS module and the
+  installed tree;
+- `package`: `zig build package-check` against the fetched Zig package;
+- `distro`: a build with the official Zig release against the libraries of
   Debian 13 (with `-Dgtk=false`) and Fedora 43.
 
 A `required` job fails when any of them fails. A change that touches only
-`docs/`, `orca-design/` or Markdown files skips the test, cross-build, package
-and distribution jobs; the `nix` job takes the package from the cache, because
-its build source excludes those files. On pushes to `main` the `nix` job
-uploads the package to the [orca.cachix.org](https://orca.cachix.org) binary
-cache. Dependabot proposes action updates weekly, a week after their release.
+`docs/`, `orca-design/` or Markdown files skips `test`, `lint`, `cross-macos`,
+`package` and `distro`. The `nix` job runs on every push to `main` and on pull
+requests that change `flake.nix`, `flake.lock`, `nix/`, `build/`, `build.zig`
+or `build.zig.zon`, so packaging changes are checked before merge. Markdown
+files under `liborca/` and `apps/` are not part of the package source, so an
+`AGENTS.md` edit no longer changes the package derivation. On pushes to `main`
+the `nix` job uploads the package to the
+[orca.cachix.org](https://orca.cachix.org) binary cache.
+
+The `distro` jobs run in prebuilt images on GitHub Container Registry, built
+weekly by `.github/workflows/ci-images.yml`, instead of pulling from Docker Hub
+on every run. Dependabot proposes action updates weekly, a week after their
+release.
 
 ## Coding agents
 

@@ -131,8 +131,9 @@ runtime path, per the rule in [architecture.md](architecture.md).
 
 - x86_64 Linux with PipeWire; `-Dgtk=false` builds without `orca-gtk`.
 - A static `liborca` for aarch64 macOS, which has no audio output or watcher.
-- CI runs the test suite against a private PipeWire, and builds on Debian 13
-  and Fedora 43 and through Nix.
+- CI runs the test suite against a private PipeWire on every change, and
+  builds on Debian 13 and Fedora 43 and through Nix on every push to `main`
+  (and pull requests whose packaging inputs change).
 
 ## Known issues
 
