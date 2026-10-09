@@ -1,0 +1,55 @@
+name: ci-images
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian
+            tag: "13"
+            image: debian:13
+            install: >-
+              apt-get update &&
+              apt-get install --no-install-recommends -y
+              ca-certificates xz-utils pkg-config libsqlite3-dev libflac-dev
+              libogg-dev libvorbis-dev libopus-dev libopusfile-dev
+              libsamplerate0-dev libpipewire-0.3-dev binutils &&
+              rm -rf /var/lib/apt/lists/*
+          - distro: fedora
+            tag: "43"
+            image: fedora:43
+            install: >-
+              dnf install -y
+              tar xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel
+              libvorbis-devel opus-devel opusfile-devel libsamplerate-devel
+              pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
+              binutils &&
+              dnf clean all
+    steps:
+      - name: Build
+        env:
+          IMAGE: ${{ matrix.image }}
+          PACKAGES: ${{ matrix.install }}
+        run: |
+          docker build -t "ghcr.io/evanriley/orca/ci-${{ matrix.distro }}:${{ matrix.tag }}" -f- . <<EOF
+          FROM ${IMAGE}
+          RUN ${PACKAGES}
+          EOF
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: github
+          password: ${{ github.token }}
+      - name: Push
+        run: docker push "ghcr.io/evanriley/orca/ci-${{ matrix.distro }}:${{ matrix.tag }}"
