@@ -86,9 +86,10 @@ const Unsupported = struct {
         host_signal: ?*control.HostSignal,
         options: Options,
         ignore: Ignore,
+        io: ?std.Io,
         roots: []const Root,
     ) error{WatchingUnsupported}!*Unsupported {
-        _ = .{ allocator, registration, host_signal, options, ignore, roots };
+        _ = .{ allocator, registration, host_signal, options, ignore, io, roots };
         return error.WatchingUnsupported;
     }
 

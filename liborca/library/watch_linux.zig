@@ -4,6 +4,7 @@ const control = @import("../core/control.zig");
 const spsc = @import("../audio/spsc.zig");
 const work = @import("../core/work.zig");
 const hints = @import("watch_hints.zig");
+const scanner = @import("scanner.zig");
 const volume_check = @import("volume_check.zig");
 const watch = @import("watch.zig");
 
@@ -72,6 +73,9 @@ pub const Watcher = struct {
     inotify_fd: i32,
     wake_fd: i32,
     threaded: std.Io.Threaded = .init_single_threaded,
+    /// Overrides the thread's own `Io`, so a test can drive the walk with an
+    /// `Io` that simulates a filesystem. Null in production.
+    io: ?std.Io = null,
     commands: spsc.Queue(hints.Command, watch.command_capacity) = .{},
     hint_queue: spsc.Queue(hints.Hint, watch.hint_capacity) = .{},
     roots_watched: std.atomic.Value(u32) = .init(0),
@@ -97,6 +101,7 @@ pub const Watcher = struct {
         host_signal: ?*control.HostSignal,
         options: watch.Options,
         ignore: watch.Ignore,
+        io: ?std.Io,
         roots: []const watch.Root,
     ) !*Watcher {
         const inotify_rc = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
@@ -125,6 +130,7 @@ pub const Watcher = struct {
             .host_signal = host_signal,
             .options = options,
             .ignore = .{},
+            .io = io,
             .inotify_fd = inotify_fd,
             .wake_fd = wake_fd,
         };
@@ -222,7 +228,7 @@ pub const Watcher = struct {
     }
 
     fn loop(self: *Watcher) !void {
-        const io = self.threaded.io();
+        const io = self.io orelse self.threaded.io();
         while (!self.cancelled()) {
             self.takeCommands();
             self.runDueFallbacks(io, nowMs(io));
@@ -443,8 +449,10 @@ pub const Watcher = struct {
         var walker = directory.walkSelectively(self.allocator) catch return;
         defer walker.deinit();
         while (!self.cancelled()) {
-            const entry = (walker.next(io) catch continue) orelse return;
-            if (entry.kind != .directory or self.ignore.matches(entry.basename)) continue;
+            var entry = (walker.next(io) catch continue) orelse return;
+            if (self.ignore.matches(entry.basename)) continue;
+            if (entry.kind == .unknown) entry.kind = scanner.resolvedKind(io, entry) orelse continue;
+            if (entry.kind != .directory) continue;
             const child = if (relative.len == 0)
                 entry.path
             else
@@ -684,6 +692,10 @@ const TestWatcher = struct {
     watcher: *Watcher,
 
     fn start(self: *TestWatcher, ignore: watch.Ignore) !void {
+        return self.startWithIo(ignore, null);
+    }
+
+    fn startWithIo(self: *TestWatcher, ignore: watch.Ignore, io: ?std.Io) !void {
         self.temporary = std.testing.tmpDir(.{});
         errdefer self.temporary.cleanup();
         self.path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
@@ -696,6 +708,7 @@ const TestWatcher = struct {
             null,
             .{ .quiet_ms = 20, .max_delay_ms = 1000, .degraded_rescan_ms = 60_000 },
             ignore,
+            io,
             &.{.{ .id = 7, .path = self.path, .volume_key = null }},
         );
         errdefer self.watcher.destroy();
@@ -744,6 +757,21 @@ test "arming publishes the whole root, and a file created in a nested directory 
     const armed = try fixture.nextHint(&path);
     try std.testing.expectEqual(hints.Reason.whole_root, armed.hint.reason);
     try std.testing.expectEqual(@as(i64, 7), armed.hint.root_id);
+    try std.testing.expectEqual(@as(u64, 3), fixture.watcher.status().directories_watched);
+
+    try fixture.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "A/B/new.flac", .data = "fLaC" });
+    const changed = try fixture.nextHint(&path);
+    try std.testing.expectEqual(hints.Reason.subtree, changed.hint.reason);
+    try std.testing.expectEqualStrings("A/B", changed.path);
+}
+
+test "arming watches nested directories whose kind the filesystem does not report" {
+    var fixture: TestWatcher = undefined;
+    try fixture.startWithIo(.{}, scanner.ioReportingUnknownKinds(std.testing.io));
+    defer fixture.stop();
+    var path: [256]u8 = undefined;
+    const armed = try fixture.nextHint(&path);
+    try std.testing.expectEqual(hints.Reason.whole_root, armed.hint.reason);
     try std.testing.expectEqual(@as(u64, 3), fixture.watcher.status().directories_watched);
 
     try fixture.temporary.dir.writeFile(std.testing.io, .{ .sub_path = "A/B/new.flac", .data = "fLaC" });
@@ -834,6 +862,7 @@ test "a root that does not exist is reported unavailable when armed" {
         null,
         .{ .quiet_ms = 20, .max_delay_ms = 1000, .degraded_rescan_ms = 60_000 },
         .{},
+        null,
         &.{.{ .id = 3, .path = ".zig-cache/tmp/orca-watch-no-such-root", .volume_key = null }},
     );
     defer watcher.destroy();

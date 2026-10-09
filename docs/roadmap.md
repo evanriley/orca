@@ -145,9 +145,6 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- The scanner skips a directory entry whose type the filesystem does not
-  report (`DT_UNKNOWN`) and does not count it, so on such a filesystem the
-  files and folders behind those entries are never scanned.
 - `libraryStats` takes `last_analysis_at` from the newest `analysis_results`
   row of any kind, so a fingerprint stored by matching or a kind 4 verdict
   counts as an analysis measurement.

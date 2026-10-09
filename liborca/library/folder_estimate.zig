@@ -22,14 +22,17 @@ pub fn estimateAudioFiles(
     if (token.checkpoint()) return error.Cancelled;
     var root = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer root.close(io);
-    var walker = try root.walk(allocator);
+    var walker = try root.walkSelectively(allocator);
     defer walker.deinit();
     const ignore: watch.Ignore = .{};
     var estimate: FolderEstimate = .{};
-    while (try walker.next(io)) |entry| {
+    while (try walker.next(io)) |listed| {
+        var entry = listed;
         if (token.checkpoint()) return error.Cancelled;
-        if (ignore.matches(entry.basename)) {
-            if (entry.kind == .directory) walker.leave(io);
+        if (ignore.matches(entry.basename)) continue;
+        if (entry.kind == .unknown) entry.kind = scanner.resolvedKind(io, entry) orelse continue;
+        if (entry.kind == .directory) {
+            try walker.enter(io, entry);
             continue;
         }
         if (entry.kind != .file) continue;
@@ -66,6 +69,29 @@ test "an estimate counts the files whose bytes are audio and nothing else" {
     defer std.testing.allocator.free(root_path);
 
     const estimate = try estimateAudioFiles(std.testing.io, std.testing.allocator, root_path, &token, default_limit);
+    try std.testing.expectEqual(FolderEstimate{ .audio_files = 2, .truncated = false }, estimate);
+}
+
+test "an estimate descends directories whose kind the filesystem does not report" {
+    var token: CancellationToken = .{};
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Artist/Album");
+    const flac = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/tagged-reference.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(flac);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Artist/Album/01.flac", .data = flac });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Artist/Album/renamed.txt", .data = flac });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Artist/Album/notes.flac", .data = "not audio" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+
+    const estimate = try estimateAudioFiles(
+        scanner.ioReportingUnknownKinds(std.testing.io),
+        std.testing.allocator,
+        root_path,
+        &token,
+        default_limit,
+    );
     try std.testing.expectEqual(FolderEstimate{ .audio_files = 2, .truncated = false }, estimate);
 }
 
