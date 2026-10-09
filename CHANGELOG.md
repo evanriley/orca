@@ -40,6 +40,10 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **A pause keeps an output's stall count.** Resuming preserves the count a
+  Zone had earned, so an output that was already stuck when the Player paused
+  stays out of the shared decode cursor instead of blocking the other Zones
+  again for up to 128 ms; each resume still gives it a fresh 2 s loss timeout.
 - **A paused or stopped Player releases the output's rate.** When a Player
   is paused or stopped, or has played its queue to the end, its PipeWire
   streams go inactive, so another application can move the device to its own

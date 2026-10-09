@@ -139,8 +139,6 @@ runtime path, per the rule in [architecture.md](architecture.md).
 Each fix adds a test that fails without it, or a headless screenshot for a
 display-only defect, and removes its entry.
 
-- A pause resets an output's stall count, so a stuck output can cost the
-  other outputs up to 128 ms after resume.
 - Recovery that finishes an interrupted undo does not check that the files it
   restores are writable.
 - The check for SQLite connections open before the lock replacement is

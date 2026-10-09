@@ -55,8 +55,9 @@ the old position, and the last quantum of a queue is heard before the output
 goes inactive. Until then the engine keeps passing instead of parking. An
 inactive output's callback is not called. An output that never calls back stays
 active. Playing again before the output goes inactive keeps it active; playing
-after sets it active again in the next pass, with a fresh stall timeout. The
-same applies to an output opened or reopened while the Player is not playing.
+after sets it active again in the next pass, giving it a fresh stall timeout
+while keeping the stall count it has earned. The same applies to an output
+opened or reopened while the Player is not playing.
 
 The callback compares only the epoch of a prepared block, never its track: a
 gapless transition appends the successor's blocks under the same epoch, so a
@@ -388,16 +389,16 @@ playing Player has failed this way, the engine pauses the Player (see
 
 An output that stops consuming is handled in two stages. A pass counts as
 stalled for a Zone when its Player is playing, the Zone holds prepared blocks
-and its output handed none back since the previous pass. A block handed back,
-a paused or stopped Player, or an empty Zone resets the count.
+and its output handed none back since the previous pass. A block handed back or
+an empty Zone resets the count. A paused or stopped Player freezes it.
 
 1. After `ZoneRuntime.stall_limit` (64) consecutive stalled passes, the Zone
    stops holding the shared decode cursor, so the other Zones keep playing. It
    rejoins once its output hands a block back.
 2. Once the stall has also lasted `engine.stall_timeout_ns` (2 s) on the
-   engine's monotonic clock, measured from the first stalled pass or from the
-   output's latest open, whichever is later, the output is lost and recovered
-   as above.
+   engine's monotonic clock, measured from the first stalled pass, the
+   output's latest open, or its latest resume or activation, whichever is
+   later, the output is lost and recovered as above.
 
 The pass count alone is not enough: control operations run many passes inside
 one device quantum, and a sink resuming from suspend reports active before its

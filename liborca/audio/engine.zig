@@ -119,6 +119,11 @@ pub const PlayerEngine = struct {
     scratch: [frames_per_block * max_channels]f32 = undefined,
     elapsed_ns: u64 = 0,
     last_pass_ns: u64 = 0,
+    /// Whether the previous pass ran with the Player playing. A non-playing
+    /// pass freezes every Zone's `stalled_passes` but not its stall clock, so
+    /// the first playing pass after one re-stamps the clock for a Zone whose
+    /// count survived the pause.
+    prev_pass_playing: bool = false,
     last_telemetry_ns: u64 = 0,
     hinted_frames: u64 = 0,
     hint_owed: bool = false,
@@ -350,10 +355,12 @@ pub const PlayerEngine = struct {
         const zones = self.adopted;
         const silenced = self.player.silenced.load(.acquire);
         const playing = !silenced and self.player.state.load(.acquire) == .playing;
+        const resumed = playing and !self.prev_pass_playing;
+        self.prev_pass_playing = playing;
         for (zones) |runtime_zone| {
             const reclaimed = runtime_zone.reclaim();
             runtime_zone.silenced.store(silenced, .release);
-            self.watchConsumption(runtime_zone, reclaimed, playing);
+            self.watchConsumption(runtime_zone, reclaimed, playing, resumed);
             self.countStableConsumption(runtime_zone, reclaimed);
         }
         self.serviceSeek();
@@ -656,7 +663,6 @@ pub const PlayerEngine = struct {
                 if (runtime_zone.output_active) continue;
                 active.setActive(true);
                 runtime_zone.output_active = true;
-                runtime_zone.stalled_passes = 0;
                 runtime_zone.stall_started_ns = self.elapsed_ns;
                 continue;
             }
@@ -900,11 +906,25 @@ pub const PlayerEngine = struct {
         self.publishZoneState(runtime_zone);
     }
 
-    fn watchConsumption(self: *PlayerEngine, runtime_zone: *ZoneRuntime, reclaimed: usize, playing: bool) void {
-        if (reclaimed != 0 or !playing or runtime_zone.quiescent()) {
+    fn watchConsumption(
+        self: *PlayerEngine,
+        runtime_zone: *ZoneRuntime,
+        reclaimed: usize,
+        playing: bool,
+        resumed: bool,
+    ) void {
+        if (reclaimed != 0 or runtime_zone.quiescent()) {
             runtime_zone.stalled_passes = 0;
             return;
         }
+        if (!playing) return;
+        // The count survives a pause, but the stall clock must not: a Zone that
+        // was already stalled when the Player paused would otherwise be lost on
+        // the first pass after a pause longer than the timeout. Re-stamp here,
+        // before the loss check, so it also covers a Zone whose output never
+        // deactivated and so was not re-stamped by `serviceActivity`.
+        if (resumed and runtime_zone.stalled_passes != 0)
+            runtime_zone.stall_started_ns = self.elapsed_ns;
         if (runtime_zone.stalled_passes == 0) runtime_zone.stall_started_ns = self.elapsed_ns;
         runtime_zone.stalled_passes +|= 1;
         if (runtime_zone.stalled_passes < ZoneRuntime.stall_limit) return;
@@ -1368,6 +1388,141 @@ test "a Zone that stops consuming leaves the shared decoder and is lost while th
     }
     try std.testing.expect(healthy.quiescent());
     try std.testing.expect(harness.engine.isDrained());
+}
+
+test "a pause keeps a stuck Zone's stall count so it stays out of the shared pump" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const healthy = try openZone(allocator);
+    defer healthy.destroy();
+    const stuck = try openZone(allocator);
+    defer stuck.destroy();
+    stuck.requested_device_id.store(5, .release);
+    try harness.engine.publishZones(&.{ healthy, stuck });
+    harness.player.play();
+    harness.engine.pass();
+    harness.backend.fail_device_id = 5;
+
+    var scratch: [frames_per_block]f32 = undefined;
+    for (0..ZoneRuntime.stall_limit + 8) |_| {
+        passAfter(harness.engine, park_ns);
+        liveStreamFor(&harness.backend, healthy).?.pump(&scratch, frames_per_block);
+    }
+    try std.testing.expect(stuck.stalled_passes >= ZoneRuntime.stall_limit);
+    try std.testing.expectEqual(zone_model.OutputState.active, stuck.outputState());
+
+    // Pause while the stuck Zone still holds its blocks. A silenced callback
+    // does not consume, so pumping each stream twice deactivates both outputs
+    // without returning any block; the count must survive the pause and the
+    // activation, so the stuck Zone stays out of the participant set.
+    harness.player.pause();
+    harness.engine.pass();
+    const healthy_stream = liveStreamFor(&harness.backend, healthy).?;
+    const stuck_stream = liveStreamFor(&harness.backend, stuck).?;
+    pumpQuanta(healthy_stream, 2);
+    pumpQuanta(stuck_stream, 2);
+    harness.engine.pass();
+    try std.testing.expect(!healthy_stream.isActive());
+    try std.testing.expect(!stuck_stream.isActive());
+    try std.testing.expect(stuck.stalled_passes >= ZoneRuntime.stall_limit);
+
+    const underruns_before = healthy.pipe.underruns.load(.monotonic);
+    harness.player.play();
+    harness.engine.pass();
+    const activated_ns = harness.engine.elapsed_ns;
+    try std.testing.expect(stuck.stalled_passes >= ZoneRuntime.stall_limit);
+    try std.testing.expect(healthy_stream.isActive());
+
+    // The first pump returns the quantum held from before the pause; the next
+    // pass already carries freshly decoded blocks, with no underrun.
+    healthy_stream.pump(&scratch, frames_per_block);
+    passAfter(harness.engine, park_ns);
+    healthy_stream.pump(&scratch, frames_per_block);
+    try std.testing.expect(std.mem.max(f32, &scratch) > 0);
+
+    var lost_at_ns: ?u64 = null;
+    for (0..2 * stall_timeout_ns / park_ns) |_| {
+        if (stuck.recoveryExhausted() and stuck.quiescent()) break;
+        passAfter(harness.engine, park_ns);
+        healthy_stream.pump(&scratch, frames_per_block);
+        try std.testing.expect(std.mem.max(f32, &scratch) > 0);
+        if (lost_at_ns == null and stuck.outputState() == .lost)
+            lost_at_ns = harness.engine.elapsed_ns;
+    }
+    try std.testing.expect(lost_at_ns != null);
+    try std.testing.expect(lost_at_ns.? >= activated_ns + stall_timeout_ns);
+    try std.testing.expectEqual(underruns_before, healthy.pipe.underruns.load(.monotonic));
+    try std.testing.expectEqual(zone_model.OutputState.active, healthy.outputState());
+}
+
+test "a long pause grants a stuck Zone a fresh stall timeout on resume" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const healthy = try openZone(allocator);
+    defer healthy.destroy();
+    const stuck = try openZone(allocator);
+    defer stuck.destroy();
+    stuck.requested_device_id.store(5, .release);
+    try harness.engine.publishZones(&.{ healthy, stuck });
+    harness.player.play();
+    harness.engine.pass();
+    harness.backend.fail_device_id = 5;
+
+    var scratch: [frames_per_block]f32 = undefined;
+    for (0..ZoneRuntime.stall_limit + 8) |_| {
+        passAfter(harness.engine, park_ns);
+        liveStreamFor(&harness.backend, healthy).?.pump(&scratch, frames_per_block);
+    }
+    try std.testing.expect(stuck.stalled_passes >= ZoneRuntime.stall_limit);
+
+    // The pause lasts several timeouts. Driving both outputs inactive lets the
+    // pre-pause stall clock fall far behind; the resume must re-stamp it rather
+    // than lose the already-stuck Zone on the first playing pass.
+    harness.player.pause();
+    harness.engine.pass();
+    const healthy_stream = liveStreamFor(&harness.backend, healthy).?;
+    const stuck_stream = liveStreamFor(&harness.backend, stuck).?;
+    pumpQuanta(healthy_stream, 2);
+    pumpQuanta(stuck_stream, 2);
+    harness.engine.pass();
+    try std.testing.expect(!stuck_stream.isActive());
+    passAfter(harness.engine, 3 * stall_timeout_ns);
+    try std.testing.expectEqual(zone_model.OutputState.active, stuck.outputState());
+
+    harness.player.play();
+    harness.engine.pass();
+    const activated_ns = harness.engine.elapsed_ns;
+    try std.testing.expect(stuck.stalled_passes >= ZoneRuntime.stall_limit);
+
+    const underruns_before = healthy.pipe.underruns.load(.monotonic);
+    healthy_stream.pump(&scratch, frames_per_block);
+    passAfter(harness.engine, park_ns);
+    healthy_stream.pump(&scratch, frames_per_block);
+    try std.testing.expect(std.mem.max(f32, &scratch) > 0);
+
+    while (harness.engine.elapsed_ns + park_ns < activated_ns + stall_timeout_ns) {
+        passAfter(harness.engine, park_ns);
+        healthy_stream.pump(&scratch, frames_per_block);
+        try std.testing.expectEqual(zone_model.OutputState.active, stuck.outputState());
+        try std.testing.expect(std.mem.max(f32, &scratch) > 0);
+    }
+    for (0..2 * stall_timeout_ns / park_ns) |_| {
+        if (stuck.outputState() == .lost) break;
+        passAfter(harness.engine, park_ns);
+        healthy_stream.pump(&scratch, frames_per_block);
+    }
+    try std.testing.expectEqual(zone_model.OutputState.lost, stuck.outputState());
+    try std.testing.expect(harness.engine.elapsed_ns >= activated_ns + stall_timeout_ns);
+    try std.testing.expectEqual(underruns_before, healthy.pipe.underruns.load(.monotonic));
+    try std.testing.expectEqual(zone_model.OutputState.active, healthy.outputState());
 }
 
 test "a stalled output reopened after its loss gets a full timeout and rejoins once it consumes" {
