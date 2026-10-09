@@ -102,7 +102,8 @@ Every implementation change updates the Unreleased section of `CHANGELOG.md`.
 ## Documentation index
 
 - [Architecture and subsystem index](docs/architecture.md)
-- [Feature status and release process](docs/roadmap.md)
+- [Feature status](docs/roadmap.md)
+- [Release process](docs/releasing.md)
 - [CLI command catalogue](docs/cli.md)
 - [Public Zig API](docs/api.md)
 - [Runtime ownership and shutdown](docs/api.md#runtime-ownership-and-shutdown)

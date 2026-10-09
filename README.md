@@ -21,8 +21,8 @@ it receives.
 | # | Feature | Status |
 | --- | --- | --- |
 | 1 | Local library, gapless playback, journaled tag writes, identification | ✅ 0.1.0 |
-| 2 | Stable Zig API, C ABI and Library schema (1.0) | ⚠️ [release gates](docs/roadmap.md#release-gates) open |
-| 3 | Library radio and mixes | ❌ |
+| 2 | Stable Zig API, C ABI and Library schema (1.0) | ⚠️ [1.0 gates](docs/roadmap.md#before-10) open |
+| 3 | Library radio and mixes | ✅ 0.3.0 |
 | 4 | Tag writing for M4A, Ogg, WAV and AIFF | ❌ |
 | 5 | Full multichannel playback | ❌ |
 | 6 | Fixed output rate with a band-limited resampler | ❌ |
@@ -32,8 +32,8 @@ it receives.
 | 10 | Secure CD ripping | ❌ |
 | 11 | Terminal client, macOS and Windows apps | ❌ |
 
-[The roadmap](docs/roadmap.md) lists what works today, the release gates,
-known issues and everything planned.
+[The roadmap](docs/roadmap.md) lists releases, what works, known issues, what
+is next, what is planned, ideas and what is not planned.
 
 ## Install with Nix
 
@@ -270,7 +270,8 @@ output.
 
 - [Architecture](docs/architecture.md): subsystems, dependencies and licences,
   supported formats.
-- [Roadmap](docs/roadmap.md): feature status, release gates and releases.
+- [Roadmap](docs/roadmap.md): releases, feature status and the 1.0 gates.
+- [Releasing](docs/releasing.md): versioning and the release procedure.
 - [Privacy](docs/privacy.md): what each outside service receives.
 - [CLI](docs/cli.md), [Zig API](docs/api.md) and
   [C ABI and frontends](docs/frontends.md).

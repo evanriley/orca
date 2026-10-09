@@ -28,6 +28,10 @@ Each service's requests are spaced by its own minimum interval, the provider
 module's `minimum_interval_ms`, taken from what the service publishes. A Gateway
 configured without an interval waits 1000 ms.
 
+Each interval is the service's published rate with no margin added. Back-off
+the service asks for, through `Retry-After`, a `429` or a `503`, is honoured in
+full; see [429 and 503](#429-and-503).
+
 | Service | Interval |
 | --- | --- |
 | MusicBrainz | 1000 ms |

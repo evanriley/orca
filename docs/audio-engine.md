@@ -343,6 +343,11 @@ the device. While the sink is suspended, `device_format` is unknown.
 paused at 44.1 kHz, a 48 kHz stream moves the graph to 48 kHz; with Orca
 playing, the graph stays at 44.1 kHz.
 
+The check waits for Orca's streams to go idle before the 48 kHz stream joins.
+On PipeWire 1.4.2, which the CI Debian 13 job runs, a stream that joins the
+graph before then keeps the running rate; PipeWire 1.4.11 and 1.6.9 switch to
+the new stream's rate.
+
 ### Device format
 
 The device's own format is the format of the sink node the stream feeds. Once

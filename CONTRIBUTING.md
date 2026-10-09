@@ -44,6 +44,29 @@ scripts/headless-audio.sh zig build test
 Playback checks receive an explicit device from `scripts/silent-sink.sh`; an
 omitted device selects the system default output, which is real hardware.
 
+## Continuous integration
+
+`.github/workflows/test.yml` runs on pull requests and on pushes to `main`:
+
+- `zig build`, `zig build test` under `scripts/headless-audio.sh`, and
+  `zig build fuzz`;
+- `zig fmt --check`;
+- a pinact check that every action is pinned to the commit its version
+  comment names;
+- the static `liborca` cross-build for aarch64 macOS;
+- `nix flake check`: the package build, the NixOS module and the installed
+  tree;
+- `zig build package-check` against the fetched Zig package;
+- a build and test run with the official Zig release against the libraries of
+  Debian 13 (with `-Dgtk=false`) and Fedora 43.
+
+A `required` job fails when any of them fails. A change that touches only
+`docs/`, `orca-design/` or Markdown files skips the test, cross-build, package
+and distribution jobs; the `nix` job takes the package from the cache, because
+its build source excludes those files. On pushes to `main` the `nix` job
+uploads the package to the [orca.cachix.org](https://orca.cachix.org) binary
+cache. Dependabot proposes action updates weekly, a week after their release.
+
 ## Licence boundary
 
 Orca is MPL-2.0. Everything vendored, compiled into or statically linked by
