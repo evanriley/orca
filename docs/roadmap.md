@@ -139,10 +139,6 @@ runtime path, per the rule in [architecture.md](architecture.md).
 Each fix adds a test that fails without it, or a headless screenshot for a
 display-only defect, and removes its entry.
 
-- The check for SQLite connections open before the lock replacement is
-  installed reads SQLite's memory accounting. It sees nothing when SQLite is
-  built without memory statistics, and refuses a host that holds SQLite
-  memory with no connection open.
 - On macOS, which has no OFD locks, opening and closing a Library's
   database, `-wal` or `-shm` file from another part of the same process
   drops SQLite's POSIX locks on it. A second Orca process can then

@@ -6,7 +6,7 @@ pub const Error = error{SqliteLocksNotInstalled};
 
 pub const Outcome = enum {
     installed,
-    connections_open,
+    database_file_open,
     no_unix_vfs,
     no_system_calls,
     refused_by_sqlite,
@@ -43,22 +43,54 @@ const linux_locks = struct {
     const Target = struct {
         vfs: ?*c.sqlite3_vfs,
         replacement: c.sqlite3_syscall_ptr,
-        liveAllocations: *const fn () i64,
+        database_file_open: *const fn () bool,
     };
 
     fn processTarget() Target {
         return .{
             .vfs = c.sqlite3_vfs_find("unix"),
             .replacement = @ptrCast(&ofdFcntl),
-            .liveAllocations = sqliteLiveAllocations,
+            .database_file_open = sqliteDatabaseFileOpen,
         };
     }
 
-    fn sqliteLiveAllocations() i64 {
-        var current: c.sqlite3_int64 = 0;
-        var highwater: c.sqlite3_int64 = 0;
-        if (c.sqlite3_status64(c.SQLITE_STATUS_MALLOC_COUNT, &current, &highwater, 0) != c.SQLITE_OK) return 0;
-        return current;
+    const database_magic = "SQLite format 3\x00";
+
+    fn sqliteDatabaseFileOpen() bool {
+        const opened = linux.openat(linux.AT.FDCWD, "/proc/self/fd", .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+        if (linux.errno(opened) != .SUCCESS) return false;
+        const directory: linux.fd_t = @intCast(opened);
+        defer _ = linux.close(directory);
+
+        var entries: [4096]u8 align(@alignOf(linux.dirent64)) = undefined;
+        while (true) {
+            const bytes = linux.getdents64(directory, &entries, @intCast(entries.len));
+            if (linux.errno(bytes) != .SUCCESS or bytes == 0) return false;
+            var offset: usize = 0;
+            while (offset < bytes) {
+                const entry: *const linux.dirent64 = @ptrCast(@alignCast(&entries[offset]));
+                defer offset += entry.reclen;
+                const name = std.mem.span(@as([*:0]const u8, @ptrCast(&entry.name)));
+                if (!allDigits(name)) continue;
+                var path_buffer: [64]u8 = undefined;
+                const path = std.fmt.bufPrintSentinel(&path_buffer, "/proc/self/fd/{s}", .{name}, 0) catch continue;
+                const probe = linux.openat(linux.AT.FDCWD, path.ptr, .{ .NONBLOCK = true, .CLOEXEC = true }, 0);
+                if (linux.errno(probe) != .SUCCESS) continue;
+                const fd: linux.fd_t = @intCast(probe);
+                defer _ = linux.close(fd);
+                var header: [database_magic.len]u8 = undefined;
+                const read = linux.pread(fd, &header, header.len, 0);
+                if (linux.errno(read) == .SUCCESS and read == header.len and std.mem.eql(u8, &header, database_magic)) return true;
+            }
+        }
+    }
+
+    fn allDigits(name: []const u8) bool {
+        if (name.len == 0) return false;
+        for (name) |character| {
+            if (character < '0' or character > '9') return false;
+        }
+        return true;
     }
 
     fn replacing(target: Target) bool {
@@ -91,7 +123,7 @@ const linux_locks = struct {
             const set_system_call = vfs.xSetSystemCall orelse return .no_system_calls;
             const fcntl = get_system_call(vfs, "fcntl") orelse return .no_system_calls;
             // A connection open across the swap keeps POSIX locks that the OFD fcntl can never release.
-            if (target.liveAllocations() != 0) return .connections_open;
+            if (target.database_file_open()) return .database_file_open;
             self.original_fcntl = @ptrCast(fcntl);
             // Any close of the database in this process drops its POSIX locks, which lets another process delete the live WAL.
             if (set_system_call(vfs, "fcntl", target.replacement) != c.SQLITE_OK) return .refused_by_sqlite;
@@ -102,7 +134,7 @@ const linux_locks = struct {
     fn report(outcome: Outcome) void {
         const reason = switch (outcome) {
             .installed => return,
-            .connections_open => "SQLite connections were already open; create the first Orca runtime before opening any other SQLite connection in the process",
+            .database_file_open => "an SQLite database file is open in this process; create the first Orca runtime before opening any SQLite database in the process",
             .no_unix_vfs => "SQLite has no unix VFS",
             .no_system_calls => "SQLite's unix VFS cannot replace its fcntl",
             .refused_by_sqlite => "SQLite refused the replacement fcntl",
@@ -185,16 +217,77 @@ test "a foreign open and close of the database leaves the Library's locks in pla
     try expectLibraryLocksHeld(database_probe, shm_probe);
 }
 
+test "the scan finds an open SQLite database file and ignores other descriptors" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    try temporary.dir.writeFile(io, .{ .sub_path = "other", .data = "not a database at all" });
+    try temporary.dir.writeFile(io, .{ .sub_path = "database", .data = "SQLite format 3\x00rest of the file" });
+
+    const other = try temporary.dir.openFile(io, "other", .{});
+    defer other.close(io);
+    try std.testing.expect(!linux_locks.sqliteDatabaseFileOpen());
+
+    const database = try temporary.dir.openFile(io, "database", .{});
+    try std.testing.expect(linux_locks.sqliteDatabaseFileOpen());
+    database.close(io);
+    try std.testing.expect(!linux_locks.sqliteDatabaseFileOpen());
+}
+
+test "the scan sees a real SQLite connection's database file" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const database_path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/live.db", .{temporary.sub_path}, 0);
+    defer std.testing.allocator.free(database_path);
+
+    var handle: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open_v2(
+        database_path.ptr,
+        &handle,
+        c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_FULLMUTEX,
+        null,
+    ));
+    defer {
+        if (handle) |live| _ = c.sqlite3_close(live);
+    }
+
+    // The pager opens the file at connection open, but the magic appears only once a write creates the header.
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_exec(handle.?, "CREATE TABLE t(x);", null, null, null));
+    try std.testing.expect(linux_locks.sqliteDatabaseFileOpen());
+
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_close(handle.?));
+    handle = null;
+    try std.testing.expect(!linux_locks.sqliteDatabaseFileOpen());
+}
+
+test "the scan skips a read-only FIFO with no writer" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.mknodat(temporary.dir.handle, "fifo", linux.S.IFIFO | 0o600, 0)));
+    const opened = linux.openat(temporary.dir.handle, "fifo", .{ .NONBLOCK = true, .CLOEXEC = true }, 0);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(opened));
+    const fifo: linux.fd_t = @intCast(opened);
+    defer _ = linux.close(fifo);
+
+    try std.testing.expect(!linux_locks.sqliteDatabaseFileOpen());
+}
+
 const FakeUnixVfs = struct {
     vfs: c.sqlite3_vfs = std.mem.zeroes(c.sqlite3_vfs),
     fcntl: c.sqlite3_syscall_ptr = @ptrCast(&fakeOriginalFcntl),
     replacements: std.atomic.Value(u32) = .init(0),
 
-    fn target(self: *FakeUnixVfs, liveAllocations: *const fn () i64) linux_locks.Target {
+    fn target(self: *FakeUnixVfs, database_file_open: *const fn () bool) linux_locks.Target {
         self.vfs.pAppData = self;
         self.vfs.xGetSystemCall = getSystemCall;
         self.vfs.xSetSystemCall = setSystemCall;
-        return .{ .vfs = &self.vfs, .replacement = @ptrCast(&fakeReplacementFcntl), .liveAllocations = liveAllocations };
+        return .{ .vfs = &self.vfs, .replacement = @ptrCast(&fakeReplacementFcntl), .database_file_open = database_file_open };
     }
 
     fn of(vfs: [*c]c.sqlite3_vfs) *FakeUnixVfs {
@@ -220,12 +313,12 @@ const FakeUnixVfs = struct {
         std.mem.doNotOptimizeAway(@as(u8, 2));
     }
 
-    fn noLiveAllocations() i64 {
-        return 0;
+    fn noDatabaseFileOpen() bool {
+        return false;
     }
 
-    fn oneLiveAllocation() i64 {
-        return 1;
+    fn databaseFileOpen() bool {
+        return true;
     }
 };
 
@@ -236,7 +329,7 @@ fn ensureInto(installation: *linux_locks.Installation, target: linux_locks.Targe
 test "concurrent first installs replace fcntl once and every caller sees it installed" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var fake: FakeUnixVfs = .{};
-    const target = fake.target(FakeUnixVfs.noLiveAllocations);
+    const target = fake.target(FakeUnixVfs.noDatabaseFileOpen);
     var installation: linux_locks.Installation = .{};
     var outcomes: [8]Outcome = undefined;
     var threads: [8]std.Thread = undefined;
@@ -251,15 +344,15 @@ test "concurrent first installs replace fcntl once and every caller sees it inst
     try std.testing.expect(linux_locks.replacing(target));
 }
 
-test "an install while SQLite connections are open leaves fcntl alone and stays refused" {
+test "an install while a database file is open leaves fcntl alone and stays refused" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var fake: FakeUnixVfs = .{};
     var installation: linux_locks.Installation = .{};
 
-    try std.testing.expectEqual(Outcome.connections_open, installation.ensure(fake.target(FakeUnixVfs.oneLiveAllocation)));
-    try std.testing.expectEqual(Outcome.connections_open, installation.ensure(fake.target(FakeUnixVfs.noLiveAllocations)));
+    try std.testing.expectEqual(Outcome.database_file_open, installation.ensure(fake.target(FakeUnixVfs.databaseFileOpen)));
+    try std.testing.expectEqual(Outcome.database_file_open, installation.ensure(fake.target(FakeUnixVfs.noDatabaseFileOpen)));
     try std.testing.expectEqual(@as(u32, 0), fake.replacements.load(.acquire));
-    try std.testing.expect(!linux_locks.replacing(fake.target(FakeUnixVfs.noLiveAllocations)));
+    try std.testing.expect(!linux_locks.replacing(fake.target(FakeUnixVfs.noDatabaseFileOpen)));
 }
 
 test "a Library open is refused while SQLite's fcntl is not the OFD replacement" {

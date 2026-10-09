@@ -40,6 +40,12 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **The SQLite lock install detects open connections by their database
+  file.** The install no longer reads SQLite's memory accounting, which is
+  absent on builds without memory statistics and nonzero for a host that
+  merely holds SQLite memory. It scans `/proc/self/fd` for the SQLite
+  database magic instead: a file-backed connection is refused, while raw
+  `sqlite3_malloc` memory and in-memory connections do not refuse it.
 - **Recovery refuses a read-only file instead of replacing it.** Finishing an
   interrupted undo or rolling back an interrupted write checks the file is
   writable before restoring it, exactly as a fresh undo does. The Library

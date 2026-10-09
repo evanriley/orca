@@ -48,9 +48,16 @@ These rules hold for every host, through the C ABI or the Zig API.
   Destroying a runtime never removes it, so a second runtime, created before or
   after, keeps it.
 - **Install before any SQLite connection.** The host creates its first runtime
-  before it opens any SQLite connection of its own. If a connection is open
-  when the install runs, liborca leaves `fcntl` unchanged for the life of the
-  process, logs a warning, and every Library open fails with
+  before it opens any SQLite connection of its own. The install is refused
+  when an open file descriptor of an SQLite database file exists in the
+  process: liborca scans `/proc/self/fd` for the database magic. A connection
+  to an in-memory database takes no file locks and does not refuse the
+  install. A connection to a file never yet written holds the descriptor, but
+  the file has no magic and holds no locks, so it does not refuse the install
+  either. Raw `sqlite3_malloc` memory no longer refuses the install, and
+  memory statistics are no longer read. If the install is refused, liborca
+  leaves `fcntl` unchanged for the life of the process, logs a warning, and
+  every Library open fails with
   `ORCA_STATUS_INVALID_STATE` (Zig: `error.SqliteLocksNotInstalled`). The same
   failure follows when the host or another library replaces SQLite's `fcntl`
   afterwards. The host's own connections opened after the install take OFD
