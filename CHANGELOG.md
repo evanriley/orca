@@ -86,6 +86,15 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
   counted and examined, directories are entered and watched, and symbolic
   links are counted skipped. An entry that cannot be stat'ed is skipped as
   before.
+- **Fingerprinting refuses a file with more than two channels.** The
+  standalone AcoustID fingerprinter now calls the decoder's channel check
+  before decoding, as playback and the analysis pass already do, so a
+  multichannel file fails with `UnsupportedChannelCount` instead of
+  storing a kind 3 fingerprint of its mono downmix beside the verdict that
+  records no measurement. With a `file_id`, the refusal is recorded as a
+  kind 5 failure under the file's quick hash, so matching selects it no
+  more while the quick hash holds; `libraryTrackFingerprint` returns
+  `ORCA_STATUS_UNSUPPORTED` for it.
 
 ### Changed
 

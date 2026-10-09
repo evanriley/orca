@@ -146,9 +146,6 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- Matching and AcoustID submission fingerprint a file with more than two
-  channels and store a kind 3 row for it, beside the verdict that records no
-  measurement for that file.
 - `orca-gtk` logs `Gtk-CRITICAL: Allocation width too small. Tried to
   allocate 183x716, but AdwBin/GtkStack needs at least 214x716` at start,
   and has logged `gtk_scrolled_window_get_vadjustment` and
@@ -201,8 +198,8 @@ release itself is the maintainer's call.
   tests, but no runtime entry point or client reaches them.
 - Full multichannel. Canonical PCM carries a channel count but no layout, so
   decoding, loudness analysis (BS.1770 channel weights, LFE excluded), DSP and
-  PipeWire channel positions need one. Until then playback and loudness
-  analysis refuse a file with more than two channels
+  PipeWire channel positions need one. Until then playback, loudness analysis
+  and AcoustID fingerprinting refuse a file with more than two channels
   (`UnsupportedChannelCount`).
 - An optional fixed output rate with a band-limited resampler, for devices
   held at another rate and for gapless playback across sample-rate changes,

@@ -22,14 +22,18 @@ surround layout's loudness.
 `fpcalc` does: the first 120 s of a file, decoded by Orca's codecs, mixed to
 mono, resampled to 11,025 Hz by libsamplerate (`resampler.SampleRate`,
 `sinc_fastest`), converted to 16-bit and fed to Chromaprint's default algorithm
-(`TEST2`) behind `chromaprint_shim.c`. The result is Chromaprint's compressed,
-base64 fingerprint and the whole file's length; a shorter file is fingerprinted
-whole. Chromaprint is built without its own LGPL resampler; see
-[architecture.md](architecture.md#dependencies-and-licences). A decode error
-while reading the window fails the fingerprint and nothing is sent. When every
-read of the file succeeded, the file did not change during the decode, and the
-error is the bytes' own rather than cancellation, memory or a missing codec or
-fingerprinter, the failure is recorded as kind 5 under the same algorithm,
+(`TEST2`) behind `chromaprint_shim.c`. Only mono and stereo are fingerprinted,
+as the pass measures: canonical PCM carries no layout, so the mono downmix of
+a surround file is not a signal AcoustID should be trusted with, and a file
+with more than two channels fails with `UnsupportedChannelCount`. The result is
+Chromaprint's compressed, base64 fingerprint and the whole file's length; a
+shorter file is fingerprinted whole. Chromaprint is built without its own LGPL
+resampler; see [architecture.md](architecture.md#dependencies-and-licences). A
+decode error while reading the window, or an unsupported channel count, fails
+the fingerprint and nothing is sent. When every read of the file succeeded, the
+file did not change during the decode, and the error is the bytes' own rather
+than cancellation, memory or a missing codec or fingerprinter, the failure is
+recorded as kind 5 under the same algorithm,
 version and parameter hash, keyed by the file's quick hash, with the error name
 as its result. Matching does not offer AcoustID a file whose recorded quick hash
 has such a row ([providers.md](providers.md#what-is-searched)); a file that
