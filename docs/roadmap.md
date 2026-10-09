@@ -139,8 +139,6 @@ runtime path, per the rule in [architecture.md](architecture.md).
 Each fix adds a test that fails without it, or a headless screenshot for a
 display-only defect, and removes its entry.
 
-- Recovery that finishes an interrupted undo does not check that the files it
-  restores are writable.
 - The check for SQLite connections open before the lock replacement is
   installed reads SQLite's memory accounting. It sees nothing when SQLite is
   built without memory statistics, and refuses a host that holds SQLite

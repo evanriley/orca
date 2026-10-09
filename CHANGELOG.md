@@ -40,6 +40,12 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **Recovery refuses a read-only file instead of replacing it.** Finishing an
+  interrupted undo or rolling back an interrupted write checks the file is
+  writable before restoring it, exactly as a fresh undo does. The Library
+  stays closed with `error.FileReadOnly` (C ABI
+  `ORCA_STATUS_INVALID_STATE`) until
+  the file is writable again, then the next open finishes the recovery.
 - **A pause keeps an output's stall count.** Resuming preserves the count a
   Zone had earned, so an output that was already stuck when the Player paused
   stays out of the shared decode cursor instead of blocking the other Zones

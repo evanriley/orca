@@ -9873,7 +9873,7 @@ fn mapError(err: anyerror) Status {
         error.AlreadyWatching, error.SqliteLocksNotInstalled => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty, error.FolderEmpty => .invalid_state,
         error.PlaylistIsSmart, error.PlaylistIsManual => .invalid_state,
-        error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable => .invalid_state,
+        error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable, error.FileReadOnly => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.TrackFolderUnavailable, error.UnknownRoot, error.UnknownPlaylist, error.UnknownFile => .not_found,
         error.TrackNotFound, error.UnknownTagWritePlan, error.MutationGroupNotFound, error.UnknownDailyMix => .not_found,
         error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
