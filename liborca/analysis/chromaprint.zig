@@ -231,14 +231,19 @@ pub const Analyzer = struct {
     }
 };
 
-/// Fingerprints what `decoder` produces from its current position. Any decode
-/// error fails the whole fingerprint: a partial one is never returned.
+/// Fingerprints what `decoder` produces from its current position. Only mono
+/// and stereo are fingerprinted, as the analysis pass measures: canonical PCM
+/// carries no channel layout, so the mono downmix of a surround file is not a
+/// signal AcoustID should be trusted with. A decoder with any other channel
+/// count fails with `error.UnsupportedChannelCount`. Any decode error fails
+/// the whole fingerprint: a partial one is never returned.
 pub fn fingerprintDecoder(
     allocator: std.mem.Allocator,
     decoder: codec.Decoder,
     parameters: Parameters,
     cancellation: ?*const scanner.CancellationToken,
 ) !Fingerprint {
+    try decoder.requireSupportedChannels();
     const channels: usize = decoder.format.channels;
     var analyzer = try Analyzer.init(allocator, decoder.format.sample_rate, decoder.format.channels, parameters);
     defer analyzer.deinit();
@@ -344,7 +349,10 @@ pub fn bitAgreement(first: []const u32, second: []const u32) f64 {
 }
 
 /// Fingerprints files, keeping each result in `analysis_results` under the
-/// identity of the bytes it was taken from.
+/// identity of the bytes it was taken from. Only mono and stereo are
+/// fingerprinted: a file with any other channel count fails with
+/// `error.UnsupportedChannelCount` and, when it has a `file_id`, is recorded
+/// as a kind 5 failure under its quick hash.
 pub const Fingerprinter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -494,6 +502,7 @@ const testing = std.testing;
 
 const SyntheticDecoder = struct {
     total_frames: u64,
+    channels: u16 = 1,
     fail_after: ?u64 = null,
     declare_length: bool = true,
     position: u64 = 0,
@@ -508,10 +517,10 @@ const SyntheticDecoder = struct {
             .codec = codec.decoder.codec_id.pcm_float,
             .format = .{
                 .sample_format = .float_32,
-                .channels = 1,
+                .channels = self.channels,
                 .sample_rate = 11_025,
                 .bits_per_sample = 32,
-                .bytes_per_frame = 4,
+                .bytes_per_frame = 4 * self.channels,
             },
             .frame_count = if (self.declare_length) self.total_frames else null,
         };
@@ -563,6 +572,15 @@ test "a cancelled fingerprint stops before decoding" {
     var token: scanner.CancellationToken = .{};
     token.cancel();
     try testing.expectError(error.Cancelled, fingerprintDecoder(testing.allocator, synthetic.decoder(), .{}, &token));
+    try testing.expectEqual(@as(u64, 0), synthetic.position);
+}
+
+test "a decoder with more than two channels is refused before any fingerprinting" {
+    var synthetic: SyntheticDecoder = .{ .total_frames = 60 * 11_025, .channels = 3 };
+    try testing.expectError(
+        error.UnsupportedChannelCount,
+        fingerprintDecoder(testing.allocator, synthetic.decoder(), .{}, null),
+    );
     try testing.expectEqual(@as(u64, 0), synthetic.position);
 }
 
@@ -666,6 +684,89 @@ test "bytes that cannot be fingerprinted are recorded under their quick hash, an
     defer taken.fingerprint.deinit();
     try testing.expectEqual(@as(i64, 1), try database.columns.scalar(library.database, "SELECT count(*) FROM analysis_results WHERE kind = 5;"));
     try testing.expectEqual(@as(i64, 1), try database.columns.scalar(library.database, markers));
+}
+
+const TestWav = struct {
+    directory: std.testing.TmpDir,
+
+    fn init() TestWav {
+        return .{ .directory = std.testing.tmpDir(.{}) };
+    }
+
+    fn deinit(self: *TestWav) void {
+        self.directory.cleanup();
+    }
+
+    fn write(
+        self: *TestWav,
+        name: []const u8,
+        sample_rate: u32,
+        channels: u16,
+        bits: u16,
+        samples: []const i32,
+    ) ![]u8 {
+        const allocator = testing.allocator;
+        const width: usize = bits / 8;
+        const data_len = samples.len * width;
+        const bytes = try allocator.alloc(u8, 44 + data_len);
+        defer allocator.free(bytes);
+        @memcpy(bytes[0..4], "RIFF");
+        std.mem.writeInt(u32, bytes[4..8], @intCast(36 + data_len), .little);
+        @memcpy(bytes[8..16], "WAVEfmt ");
+        std.mem.writeInt(u32, bytes[16..20], 16, .little);
+        std.mem.writeInt(u16, bytes[20..22], 1, .little);
+        std.mem.writeInt(u16, bytes[22..24], channels, .little);
+        std.mem.writeInt(u32, bytes[24..28], sample_rate, .little);
+        std.mem.writeInt(u32, bytes[28..32], @intCast(sample_rate * channels * width), .little);
+        std.mem.writeInt(u16, bytes[32..34], @intCast(channels * width), .little);
+        std.mem.writeInt(u16, bytes[34..36], bits, .little);
+        @memcpy(bytes[36..40], "data");
+        std.mem.writeInt(u32, bytes[40..44], @intCast(data_len), .little);
+        for (samples, 0..) |sample, index| {
+            const encoded: u32 = @bitCast(sample);
+            for (0..width) |byte|
+                bytes[44 + index * width + byte] = @truncate(encoded >> @intCast(8 * byte));
+        }
+        try self.directory.dir.writeFile(testing.io, .{ .sub_path = name, .data = bytes });
+        return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ self.directory.sub_path, name });
+    }
+};
+
+test "a file with more than two channels is refused and recorded as a kind 5 failure, not fingerprinted" {
+    const channels = 3;
+    var files = TestWav.init();
+    defer files.deinit();
+    var samples: [4 * 11_025 * channels]i32 = undefined;
+    var seed: u32 = 1;
+    for (&samples, 0..) |*sample, index| {
+        const frame = index / channels;
+        const time = @as(f32, @floatFromInt(frame)) / 11_025.0;
+        seed = seed *% 1_103_515_245 +% 12_345;
+        const noise = @as(f32, @floatFromInt(seed >> 16 & 0x7fff)) / 32_768.0 - 0.5;
+        const value = 0.3 * @sin(2.0 * std.math.pi * (220.0 + 30.0 * @floor(time)) * time) + 0.1 * noise;
+        sample.* = @intFromFloat(value * 2_147_483_647.0);
+    }
+    const path = try files.write("surround.wav", 11_025, channels, 32, &samples);
+    defer testing.allocator.free(path);
+
+    var library = try database.LibraryDatabase.open(testing.allocator, testing.io, "file:orca-chromaprint-multichannel?mode=memory&cache=shared");
+    defer library.close();
+    const binding = try library.resolveOrCreateFile(testing.io, path, .{ .stable_key = "test:chromaprint-multichannel" });
+    const codecs = codec.CodecRegistry.builtins();
+    const fingerprinter: Fingerprinter = .{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .codecs = &codecs,
+        .cache = &library.analysis_cache,
+    };
+
+    try testing.expectError(error.UnsupportedChannelCount, fingerprinter.fingerprintFile(binding.file_id, path));
+
+    const failures = "SELECT count(*) FROM analysis_results JOIN files ON files.id = analysis_results.file_id " ++
+        "WHERE analysis_results.kind = 5 AND analysis_results.source_identity = files.quick_hash " ++
+        "AND CAST(analysis_results.result AS TEXT) = 'UnsupportedChannelCount';";
+    try testing.expectEqual(@as(i64, 1), try database.columns.scalar(library.database, failures));
+    try testing.expectEqual(@as(i64, 0), try database.columns.scalar(library.database, "SELECT count(*) FROM analysis_results WHERE kind = 3;"));
 }
 
 test "a decode error is the bytes' fault only when every read succeeded and nothing else stopped the decode" {
