@@ -288,12 +288,14 @@ pub const Scanner = struct {
         }
         try open_folders.append(self.allocator, try self.allocator.dupe(u8, ""));
 
-        while (try walker.next(self.io)) |entry| {
+        while (try walker.next(self.io)) |listed| {
+            var entry = listed;
             if (self.cancellation) |token| if (token.checkpoint()) {
                 result.cancelled = true;
                 break;
             };
             if (self.ignore.matches(entry.basename)) continue;
+            if (entry.kind == .unknown) entry.kind = resolvedKind(self.io, entry) orelse continue;
             try self.enterFolder(&open_folders, std.fs.path.dirnamePosix(entry.path) orelse "", subtree);
             if (entry.kind == .directory) {
                 walker.enter(self.io, entry) catch |err| switch (err) {
@@ -741,6 +743,45 @@ pub fn pathUnder(allocator: std.mem.Allocator, root_path: []const u8, relative: 
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ root_path, relative });
 }
 
+/// The kind of a walk entry. When the filesystem does not report one
+/// (`DT_UNKNOWN`), stat it. `follow_symlinks = false` keeps a symbolic link a
+/// link, so it is counted skipped rather than followed. Null when the entry
+/// vanished or cannot be stat'ed.
+pub fn resolvedKind(io: std.Io, entry: std.Io.Dir.Walker.Entry) ?std.Io.File.Kind {
+    const stat = entry.dir.statFile(io, entry.basename, .{ .follow_symlinks = false }) catch return null;
+    return stat.kind;
+}
+
+const DirReadFn = *const fn (?*anyopaque, *std.Io.Dir.Reader, []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize;
+
+/// The wrapped vtable for `ioReportingUnknownKinds` and the real directory
+/// read it shims. The copy lives at file scope so the wrapped `Io`'s vtable
+/// pointer stays valid for as long as a test holds it.
+var unknown_kinds_vtable: std.Io.VTable = undefined;
+var unknown_kinds_dir_read: DirReadFn = undefined;
+
+fn readEntriesAsUnknown(
+    userdata: ?*anyopaque,
+    reader: *std.Io.Dir.Reader,
+    entries: []std.Io.Dir.Entry,
+) std.Io.Dir.Reader.Error!usize {
+    const count = try unknown_kinds_dir_read(userdata, reader, entries);
+    for (entries[0..count]) |*entry| entry.kind = .unknown;
+    return count;
+}
+
+/// An `Io` like `base` whose directory reads report every entry as
+/// `.unknown`, the kind a filesystem returning `DT_UNKNOWN` gives. Stat,
+/// open and every other operation delegate to `base`, so the shim is a
+/// faithful `DT_UNKNOWN` filesystem for tests. The returned `Io` is valid
+/// until the next call; do not hold two of different bases at once.
+pub fn ioReportingUnknownKinds(base: std.Io) std.Io {
+    unknown_kinds_dir_read = base.vtable.dirRead;
+    unknown_kinds_vtable = base.vtable.*;
+    unknown_kinds_vtable.dirRead = readEntriesAsUnknown;
+    return .{ .userdata = base.userdata, .vtable = &unknown_kinds_vtable };
+}
+
 pub fn countFiles(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -763,9 +804,11 @@ pub fn countFiles(
     var walker = try start.walkSelectively(allocator);
     defer walker.deinit();
     var files: u64 = 0;
-    while (try walker.next(io)) |entry| {
+    while (try walker.next(io)) |listed| {
+        var entry = listed;
         if (cancellation) |token| if (token.checkpoint()) return null;
         if (ignore.matches(entry.basename)) continue;
+        if (entry.kind == .unknown) entry.kind = resolvedKind(io, entry) orelse continue;
         switch (entry.kind) {
             .file => files += 1,
             .directory => walker.enter(io, entry) catch |err| switch (err) {
@@ -1148,6 +1191,105 @@ test "a scan counts each symbolic link under the root as skipped and records non
     const rescan = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 3), rescan.symlinks_skipped);
     try std.testing.expectEqual(@as(u64, 1), rescan.unchanged);
+}
+
+test "a scan resolves entries whose kind the filesystem does not report" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Artist/Album");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Artist/Album/song.flac", .data = "fLaCgenerated song" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Artist/Album/cover.jpg", .data = "\xff\xd8\xff\xe0 a jpeg" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Artist/Album/notes.txt", .data = "not audio" });
+    try temporary.dir.symLink(std.testing.io, "song.flac", "Artist/Album/link.flac", .{});
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+
+    const unknown_io = ioReportingUnknownKinds(std.testing.io);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-unknown-kinds?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:unknown-kinds" });
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = unknown_io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .volume_id = binding.volume_id,
+        .root_id = binding.root_id,
+    };
+    defer scanner.deinit();
+
+    const result = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 3), result.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), result.changed);
+    try std.testing.expectEqual(@as(u64, 1), result.images);
+    try std.testing.expectEqual(@as(u64, 1), result.unsupported);
+    try std.testing.expectEqual(@as(u64, 1), result.symlinks_skipped);
+    try std.testing.expectEqual(@as(u64, 0), result.errors);
+    try std.testing.expectEqual(@as(u64, 1), try library.files.count());
+    for ([_][]const u8{ "", "Artist", "Artist/Album" }) |folder| {
+        const page = try library.locations.folderPage(std.testing.allocator, binding.root_id, folder, 512, 0);
+        defer page.deinit();
+        try std.testing.expect(page.last_scanned_at != null);
+    }
+    const album = try library.locations.folderPage(std.testing.allocator, binding.root_id, "Artist/Album", 512, 0);
+    defer album.deinit();
+    try std.testing.expectEqual(@as(u32, 1), album.image_count);
+
+    // The same tree walked by a filesystem that reports kinds agrees.
+    var reported = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-reported-kinds?mode=memory&cache=shared",
+    );
+    defer reported.close();
+    const reported_binding = try reported.ensureRoot(std.testing.io, root_path, .{ .stable_key = "test:reported-kinds" });
+    var reported_scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &reported.files,
+        .locations = &reported.locations,
+        .observed_tags = &reported.observed_tags,
+        .write_lane = reported.write_lane,
+        .database_handle = reported.database,
+        .volume_id = reported_binding.volume_id,
+        .root_id = reported_binding.root_id,
+    };
+    defer reported_scanner.deinit();
+    const baseline = try reported_scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 3), baseline.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), baseline.symlinks_skipped);
+    const baseline_album = try reported.locations.folderPage(
+        std.testing.allocator,
+        reported_binding.root_id,
+        "Artist/Album",
+        512,
+        0,
+    );
+    defer baseline_album.deinit();
+    try std.testing.expectEqual(album.image_count, baseline_album.image_count);
+}
+
+test "a file count descends unknown-kind directories" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "Album/Disc 2");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/01.flac", .data = "x" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "Album/Disc 2/01.flac", .data = "x" });
+    const root_path = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+
+    const unknown_io = ioReportingUnknownKinds(std.testing.io);
+    try std.testing.expectEqual(
+        @as(?u64, 2),
+        try countFiles(unknown_io, std.testing.allocator, root_path, null, .{}, null),
+    );
 }
 
 test "cancelled scans stop before filesystem work" {

@@ -75,6 +75,13 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 - **Home's never-played share rounds down.** `onThisDay`'s
   `never_played_percent` reads 100 only when no Track has been played, and
   `orca-gtk`'s Collection panel hides formats with no Tracks.
+- **The scanner, folder estimate and watcher resolve a directory entry whose
+  type the filesystem does not report.** On a filesystem that returns
+  `DT_UNKNOWN` from `getdents64`, an entry is stat'ed following no symbolic
+  link and handled as if the filesystem had reported its kind: files are
+  counted and examined, directories are entered and watched, and symbolic
+  links are counted skipped. An entry that cannot be stat'ed is skipped as
+  before.
 
 ### Changed
 

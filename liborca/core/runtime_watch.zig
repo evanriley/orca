@@ -263,6 +263,7 @@ fn startWatch(
             .watch_limit = self.watch_limit,
         },
         watch.Ignore.forLibrary(library_database),
+        null,
         roots.items,
     );
     errdefer watcher.destroy();

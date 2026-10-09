@@ -80,6 +80,14 @@ was not scanned. `orca-cli scan`, `reconcile` and `watch` print
 "N symbolic links skipped". Through the C ABI it is
 `orca_scan_stats_v3.symlinks_skipped`.
 
+A filesystem may not report a directory entry's type (`DT_UNKNOWN`). The
+walk, the folder estimate and the watcher's initial subtree walk resolve such
+an entry with a stat that follows no symbolic link, and then treat the
+resolved kind exactly like a reported one: a file is counted and examined, a
+directory is entered, and a link is counted skipped. An entry that cannot be
+stat'ed — it vanished between the listing and the stat, or its directory
+denies search — is skipped as before.
+
 ### Scan runs and sweeps
 
 Each walk of a root opens a `scan_runs` row with the root's next generation and
