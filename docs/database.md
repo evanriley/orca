@@ -73,9 +73,15 @@ An OFD lock belongs to the open file and survives other closes.
   per process; concurrent first calls install it once and all see the result.
   Nothing removes it.
 - SQLite's system-call table must not change under open connections, so the
-  install is refused when any SQLite connection is open. It is decided once:
-  after a refusal, or when the `fcntl` in effect is no longer the replacement,
-  every database open fails with `error.SqliteLocksNotInstalled`.
+  install is refused when an open file descriptor of an SQLite database file
+  exists in the process, found by scanning `/proc/self/fd` for the database
+  magic. A connection to an in-memory database takes no file locks and does
+  not refuse the install, and a database file that has never been written has
+  no magic and holds no locks, so it does not refuse the install either.
+  Detection no longer depends on SQLite's memory statistics. It is decided
+  once: after a refusal, or when the `fcntl` in effect is no longer the
+  replacement, every database open fails with
+  `error.SqliteLocksNotInstalled`.
 - An embedder's own multi-connection SQLite use in rollback-journal mode in the
   same process can see spurious `SQLITE_BUSY`.
 - macOS has no OFD locks and keeps POSIX locks
