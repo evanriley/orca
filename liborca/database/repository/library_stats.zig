@@ -29,6 +29,14 @@ pub const LibraryStats = struct {
     listens: u64,
 };
 
+/// `last_analysis_at` counts only the analysis pass's three measurements:
+/// diagnostics (kind 1, `analysis.service.diagnostics_cache_kind`), temporal
+/// fingerprint (kind 2, `analysis.service.fingerprint_cache_kind`) and audio
+/// features (kind 6, `analysis.audio_features.cache_kind`). Kind 3 (AcoustID,
+/// also stored by matching and submission), kind 4 (an undecodable verdict)
+/// and kind 5 (an unfingerprintable note) hold no measurement and do not
+/// count. The numbers are hard-coded because the database layer does not
+/// import the analysis layer.
 pub const library_stats_sql =
     \\SELECT (SELECT count(*) FROM artists),
     \\       (SELECT count(*) FROM releases),
@@ -36,7 +44,7 @@ pub const library_stats_sql =
     \\       present.files, present.bytes,
     \\       (SELECT COALESCE(sum(max(duration_ms, 0)), 0) FROM tracks),
     \\       (SELECT max(finished_at) FROM scan_runs WHERE state = 'completed'),
-    \\       (SELECT max(created_at) FROM analysis_results),
+    \\       (SELECT max(created_at) FROM analysis_results WHERE kind IN (1, 2, 6)),
     \\       (SELECT max(finished_at) FROM job_history WHERE kind = 'duplicate_scan' AND state = 'succeeded'),
     \\       (SELECT count(*) FROM listens)
     \\FROM (SELECT count(*) AS files, COALESCE(sum(max(files.size_bytes, 0)), 0) AS bytes
@@ -143,13 +151,30 @@ test "the last analysis time is null before any measurement and the latest measu
     const file_id = try addFile(&library, "music/measured.flac", 100, .present);
     try std.testing.expectEqual(@as(?i64, null), (try library.stats.stats()).last_analysis_at);
 
-    var sql: [320]u8 = undefined;
+    var sql: [2048]u8 = undefined;
     try library.database.exec(try std.fmt.bufPrintSentinel(&sql,
         \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result, created_at)
         \\VALUES ({d}, 1, 'orca.diagnostics', 1, x'00', x'01', x'00', 1700000000),
-        \\       ({d}, 2, 'orca.temporal-fingerprint', 2, x'00', x'01', x'00', 1700000300);
-    , .{ file_id, file_id }, 0));
+        \\       ({d}, 2, 'orca.temporal-fingerprint', 2, x'00', x'01', x'00', 1700000300),
+        \\       ({d}, 3, 'orca.acoustid', 1, x'00', x'02', x'00', 1700000600),
+        \\       ({d}, 4, 'orca.decoder-set', 1, x'00', x'03', x'00', 1700000900),
+        \\       ({d}, 5, 'orca.acoustid', 1, x'00', x'04', x'00', 1700001200);
+    , .{ file_id, file_id, file_id, file_id, file_id }, 0));
     try std.testing.expectEqual(@as(?i64, 1_700_000_300), (try library.stats.stats()).last_analysis_at);
+}
+
+test "the last analysis time ignores rows that hold no measurement" {
+    var library = try openStatsLibrary("analysis-without-measurement");
+    defer library.close();
+    const file_id = try addFile(&library, "music/matched.flac", 100, .present);
+    var sql: [1024]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql,
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result, created_at)
+        \\VALUES ({d}, 3, 'orca.acoustid', 1, x'00', x'01', x'00', 1700000000),
+        \\       ({d}, 4, 'orca.decoder-set', 1, x'00', x'02', x'00', 1700000100),
+        \\       ({d}, 5, 'orca.acoustid', 1, x'00', x'03', x'00', 1700000200);
+    , .{ file_id, file_id, file_id }, 0));
+    try std.testing.expectEqual(@as(?i64, null), (try library.stats.stats()).last_analysis_at);
 }
 
 test "the last scan time is when the latest completed scan run finished" {

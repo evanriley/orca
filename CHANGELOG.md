@@ -40,6 +40,10 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **`libraryStats.last_analysis_at` counts measurements only.** The stat takes
+  the newest diagnostics, temporal-fingerprint or audio-features row, so an
+  AcoustID fingerprint stored by matching or submission, an undecodable
+  verdict or an unfingerprintable note no longer moves it.
 - **The SQLite lock install detects open connections by their database
   file.** The install no longer reads SQLite's memory accounting, which is
   absent on builds without memory statistics and nonzero for a host that
