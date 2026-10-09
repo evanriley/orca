@@ -687,6 +687,10 @@ pub const Executor = struct {
             );
             return error.MutationNeedsReconciliation;
         }
+        // Recovery restoring a file is an undo like any other: a file the
+        // person made read-only is refused before this operation's restore,
+        // leaving its stage, backup and journal row for the next open.
+        try requireWritableFile(self.io, operation.source_path);
         try file_mutation.restoreFromBackup(
             self.io,
             operation.source_path,

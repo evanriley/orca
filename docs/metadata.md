@@ -698,6 +698,9 @@ changes the file's permissions.
 - An undo refuses with `error.FileReadOnly` while a file it would restore is
   read-only. It changes no file and no journal row, and runs once the file is
   writable again.
+- [Recovery](#recovery) restoring a file refuses a read-only one the same way.
+  The Library stays closed until the file is writable again, then the next
+  open finishes the recovery.
 
 ### Undo
 
@@ -751,6 +754,7 @@ or undone is decided by identity alone:
 | File is the original | delete stage, restore file and backup | `rolled_back` |
 | Nothing was staged | delete a torn stage | `rolled_back` |
 | File is the result, backup is the original | restore as an undo does | `rolled_back` |
+| File is the result, backup is the original, file read-only | keep every file | refuses to open; retried at the next open |
 | File is the result, backup missing or damaged | keep every file | `needs_reconciliation` |
 | File's folder missing, as on an unmounted drive | keep every file | refuses to open; retried at the next open |
 | File missing or matching neither | keep every file | `needs_reconciliation` |

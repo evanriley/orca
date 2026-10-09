@@ -1065,3 +1065,95 @@ test "a crashed undo of a moved and re-tagged file restores the path before the 
     try harness.expectOriginal();
     try harness.expectNoResidue();
 }
+
+test "recovery finishing an interrupted undo refuses a read-only file and retries once it is writable" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.writeGroup();
+    try harness.crashUndo(.{ .point = .undo_after_intent });
+    try harness.temporary.dir.setFilePermissions(
+        std.testing.io,
+        "source.mp3",
+        .fromMode(0o444),
+        .{},
+    );
+
+    {
+        var lock = try harness.holdForeignLock();
+        defer Harness.releaseForeignLock(&lock);
+        var deferred = try harness.open();
+        defer deferred.close();
+        try std.testing.expect(deferred.recovery_deferred.load(.acquire));
+        try std.testing.expectEqual(database.MutationState.undoing, try stateIn(&deferred, 1));
+        try std.testing.expectEqual(database.MutationState.undoing, try stateIn(&deferred, 2));
+        try expectTitle(harness.source, "Replaced");
+        try expectTitle(harness.second, "Replaced");
+        try std.testing.expectEqual(
+            @as(std.posix.mode_t, 0o444),
+            (try std.Io.Dir.cwd().statFile(std.testing.io, harness.source, .{})).permissions.toMode() & 0o7777,
+        );
+        try std.testing.expect(harness.original.eql(try file_mutation.identity(std.testing.io, harness.backup)));
+    }
+
+    try std.testing.expectError(error.FileReadOnly, harness.open());
+
+    // Recovery unwinds a group in reverse action order, so the second file was
+    // rolled back before the read-only first one was refused. The refused
+    // operation keeps its backup and its `undoing` state.
+    {
+        var lock = try harness.holdForeignLock();
+        defer Harness.releaseForeignLock(&lock);
+        var deferred = try harness.open();
+        defer deferred.close();
+        try std.testing.expect(deferred.recovery_deferred.load(.acquire));
+        try std.testing.expectEqual(database.MutationState.undoing, try stateIn(&deferred, 1));
+        try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&deferred, 2));
+        try expectTitle(harness.source, "Replaced");
+        try expectTitle(harness.second, "Original");
+        try std.testing.expectEqual(
+            @as(std.posix.mode_t, 0o444),
+            (try std.Io.Dir.cwd().statFile(std.testing.io, harness.source, .{})).permissions.toMode() & 0o7777,
+        );
+        try std.testing.expect(harness.original.eql(try file_mutation.identity(std.testing.io, harness.backup)));
+    }
+
+    try harness.temporary.dir.setFilePermissions(
+        std.testing.io,
+        "source.mp3",
+        .fromMode(0o644),
+        .{},
+    );
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try harness.expectBothOriginal();
+    try harness.expectNoGroupResidue();
+}
+
+test "recovery rolling back an interrupted write refuses a read-only file and retries once it is writable" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.crashWrite(.after_source_rename);
+    try harness.temporary.dir.setFilePermissions(
+        std.testing.io,
+        "source.mp3",
+        .fromMode(0o444),
+        .{},
+    );
+
+    try std.testing.expectError(error.FileReadOnly, harness.open());
+    try expectTitle(harness.source, "Replaced");
+
+    try harness.temporary.dir.setFilePermissions(
+        std.testing.io,
+        "source.mp3",
+        .fromMode(0o644),
+        .{},
+    );
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try harness.expectOriginal();
+    try harness.expectNoResidue();
+}
