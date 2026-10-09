@@ -67,6 +67,14 @@ its build source excludes those files. On pushes to `main` the `nix` job
 uploads the package to the [orca.cachix.org](https://orca.cachix.org) binary
 cache. Dependabot proposes action updates weekly, a week after their release.
 
+## Coding agents
+
+[AGENTS.md](AGENTS.md) holds the working rules for coding agents: toolchain
+constraints, architecture invariants and verification.
+[liborca/AGENTS.md](liborca/AGENTS.md) and
+[apps/linux/AGENTS.md](apps/linux/AGENTS.md) add rules for those trees. Point
+an agent that does not read `AGENTS.md` files by itself at them.
+
 ## Licence boundary
 
 Orca is MPL-2.0. Everything vendored, compiled into or statically linked by

@@ -45,6 +45,6 @@ Verify affected pages at 1440x900 (the default), 1920x1080, 2560x1440 and
 3440x1440, set through `ORCA_HEADLESS_SIZE` as `WIDTHxHEIGHT`, and check
 interaction state, keyboard path, and focus behavior. Compare screenshots
 visually and inspect the captured log for warnings. Do not run the GUI on the
-user's desktop or play through a real output device. The complete driver
-syntax and isolation guarantees are in
+host's desktop session or play through a real output device. The complete
+driver syntax and isolation guarantees are in
 [the screenshot contract](../../docs/frontends.md#screenshots).
