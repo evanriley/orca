@@ -130,7 +130,9 @@ pub const ZoneRuntime = struct {
     /// Consecutive playing passes in which this Zone held prepared blocks and
     /// its active output handed none back. A backend that stops consuming must
     /// neither stall the shared decode cursor for every other Zone nor keep its
-    /// Player from draining.
+    /// Player from draining. A pass while paused, with no block reclaimed,
+    /// freezes the count rather than forgiving it; a reclaimed block or an
+    /// empty pool resets it.
     stalled_passes: u32 = 0,
     stall_started_ns: u64 = 0,
     recovery_wait_ns: u64 = 0,
