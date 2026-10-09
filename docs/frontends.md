@@ -187,6 +187,8 @@ lib/liborca.so   -> liborca.so.0
   non-reserved field offset of any struct in it, the value of any of its enum
   constants or defines, or the parameters of any of its functions, or when
   liborca stops providing one of them (`tests/abi/compat.zig`).
+- `tests/c_abi_layout.zig` checks every struct layout and enum value in
+  `orca.h` against the Zig side.
 - `scripts/check-abi-coverage.sh`, which `zig build test` runs, fails when a
   public `Runtime` method has no C ABI path and no stated reason for having
   none. Its list of reasons is the record of what the C ABI leaves out.
@@ -466,6 +468,28 @@ processed audio still playing. While a view is on screen and playback runs, it
 re-reads the path every 250 ms until that processing clears. It also re-reads
 it up to eight times after an output starts or the popover opens while the
 device has not reported its rate or format.
+
+Pages fill the window. Lists and text columns stretch with it, and only prose
+keeps a readable line length. A row of tiles has a minimum and a maximum tile
+size and adds columns as the window widens; it never grows its tiles past the
+maximum.
+
+The sidebar opens Home, Albums, Artists, Tracks, Genres, Folders, Loved,
+Playlists, Now Playing, Queue, Health, Matches and Settings. Album, artist and
+playlist pages, Edit Metadata, Write to Files and the Smart Playlist editor open
+over them. Health leads to Duplicates, Audio Problems, Artwork Review and
+Metadata Issues; Matches to Match Review; the activity popover to Activity and
+Change History. First Run and Scan cover an empty library. Around the pages are
+a top bar with Back, Forward, a trail and the library search, a search overlay
+and command palette, an inspector with track, lyrics and signal path modes,
+context menus, a player bar with cover art, format, output picker and volume, a
+banner for offline music folders, toasts and a shortcuts dialog.
+
+Settings has eight tabs: General, Library, Playback, Sound, Listening,
+Appearance, Advanced and About. With Contribute to AcoustID on (off by default)
+and a user key saved, `orca-gtk` submits fingerprints after each confirmed match
+and every 15 minutes; Submit Now and the command palette's Submit to AcoustID
+start a submission at once.
 
 The Queue page shows an entry whose Track left the Library as "Removed from
 library", dimmed, in its own position in Up Next and History, and Now Playing

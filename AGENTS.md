@@ -1,5 +1,9 @@
 # Orca repository guidance
 
+Working rules for coding agents, whichever agent is used, and for the people
+directing them. `liborca/AGENTS.md` and `apps/linux/AGENTS.md` add rules for
+their trees; read them before changing files there.
+
 ## Project
 
 Orca is a local-files-first music player and library-maintenance application
@@ -7,7 +11,7 @@ written in Zig. `liborca/` is the reusable headless engine and the product;
 `apps/` contains thin native clients of its public API.
 
 Feature status belongs only in [docs/roadmap.md](docs/roadmap.md). Subsystem
-behavior and contracts belong in `docs/*.md`. Change a `CLAUDE.md` file only
+behavior and contracts belong in `docs/*.md`. Change an `AGENTS.md` file only
 when an agent working rule changes.
 
 ## Licence boundary
@@ -25,10 +29,12 @@ Its build-time licence check must remain enabled. See
 
 ## Toolchain
 
-- Use Zig 0.17.0 from `nix develop` or direnv. This codebase uses `std.Io`,
-  not the older `std.fs` and `std.io` APIs.
+- Use Zig 0.17.0, from `nix develop` or direnv, or installed as
+  [the README's requirements](README.md#requirements) describe for a build
+  outside Nix. This codebase uses `std.Io`, not the older `std.fs` and
+  `std.io` APIs.
 - The dev shell supplies SQLite, the codec libraries, PipeWire, GTK4, and
-  libsecret. Do not assume paths under `/usr`.
+  libsecret. Never hard-code library paths under `/usr` or `/nix/store`.
 - When `build.zig.zon` dependencies change, update the
   `zig_0_17.fetchDeps` hash in `nix/package.nix`; set it to `lib.fakeHash`
   and rebuild to obtain the hash.
@@ -71,12 +77,13 @@ Zig 0.17 constraints that affect correctness:
   clocks, and local mocks; never live services.
 
 Read [docs/architecture.md](docs/architecture.md) before crossing subsystem
-boundaries. More specific rules are loaded from `liborca/CLAUDE.md` and
-`apps/linux/CLAUDE.md` while working in those trees.
+boundaries. Read `liborca/AGENTS.md` before changing `liborca/` and
+`apps/linux/AGENTS.md` before changing `apps/linux/`.
 
 ## Verification
 
-Run commands from the repository root inside the dev shell.
+Run commands from the repository root inside the dev shell. Outside Nix, run
+the `zig` commands; CI runs the `nix` ones.
 
 ```sh
 zig fmt --check liborca apps benchmarks tests build build.zig
@@ -102,7 +109,8 @@ Every implementation change updates the Unreleased section of `CHANGELOG.md`.
 ## Documentation index
 
 - [Architecture and subsystem index](docs/architecture.md)
-- [Feature status and release process](docs/roadmap.md)
+- [Feature status](docs/roadmap.md)
+- [Release process](docs/releasing.md)
 - [CLI command catalogue](docs/cli.md)
 - [Public Zig API](docs/api.md)
 - [Runtime ownership and shutdown](docs/api.md#runtime-ownership-and-shutdown)

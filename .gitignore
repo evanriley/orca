@@ -9,3 +9,4 @@ result*
 .DS_Store
 *.swp
 *.swo
+.claude/

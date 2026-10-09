@@ -1,7 +1,7 @@
 //! Turning observed files into a browsable library.
 //!
-//! `CLAUDE.md` states a locked law: *scanner observations never update Track
-//! metadata*. This module is how that law and a populated `tracks` table
+//! `liborca/AGENTS.md` states a locked law: *scanner observations never update
+//! Track metadata*. This module is how that law and a populated `tracks` table
 //! coexist. The scanner still writes only `files`, `locations` and
 //! `observed_file_tags`. The projection is a separate pass that reads
 //! `EffectiveMetadata` — observation plus Orca overrides under an explicit

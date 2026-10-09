@@ -81,6 +81,11 @@ Each C or C++ library sits behind one shim file in `liborca/codec/`
 `vorbis_shim.c`, `qoa_shim.c`). No library type, and no C type beyond
 fixed-width integers, is visible above its shim.
 
+A new format uses an existing Zig decoder that is correct first, then the
+format's reference C library behind one shim, and Orca writes its own decoder
+only when neither exists. Correctness outranks a pure-Zig tree: a Zig FLAC
+package that did not decode losslessly was replaced by libFLAC.
+
 - WAV reads integer PCM at 8, 16, 24 and 32 bits and IEEE float at 32 and 64
   bits, in `fmt ` or `WAVE_FORMAT_EXTENSIBLE`. AIFC is accepted only
   uncompressed (`NONE`, `twos`, `sowt`, `fl32`, `fl64`). 8-bit WAV is unsigned

@@ -174,6 +174,10 @@ root is bound to (`library/volume_check.zig`).
   filesystem has no UUID either is not caught.
 - A root on the fallback volume (`volumes.id` 1) always passes.
 
+On Linux the filesystem UUID comes from the `/dev/disk/by-uuid` link that
+points at the mount's source device, which also names device-mapper volumes
+such as `/dev/mapper/cryptroot`; no device is opened to identify a volume.
+
 Orca reads `.orca-volume-id` but never writes it. A root on a mount with no
 filesystem UUID and no marker, such as NFS, SMB or tmpfs, binds to `root:<id>`.
 The limits of that binding:
