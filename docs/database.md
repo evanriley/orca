@@ -700,7 +700,10 @@ are found by skip scan, one seek per child, skipping a folder's whole subtree.
 one row: counts of `artists`, `releases` and `tracks`; `files` and `total_bytes`
 for files with at least one location whose state is not `missing`, each counted
 once; `total_duration_ms`, the sum of `tracks.duration_ms` with null or negative
-as zero; `last_scan_finished_at` over `completed` runs only; `last_analysis_at`;
+as zero; `last_scan_finished_at` over `completed` runs only; `last_analysis_at`
+over the measurement kinds only (1 diagnostics, 2 temporal fingerprint, 6 audio
+features), so an AcoustID fingerprint stored by matching or submission, an
+undecodable verdict and an unfingerprintable note do not count;
 `last_duplicate_scan_at` from `job_history` (host Jobs only and the newest 1,000
 rows, so a scan run by itself or pruned away does not count); and the `listens`
 count.
