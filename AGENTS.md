@@ -83,7 +83,10 @@ boundaries. Read `liborca/AGENTS.md` before changing `liborca/` and
 ## Verification
 
 Run commands from the repository root inside the dev shell. Outside Nix, run
-the `zig` commands; CI runs the `nix` ones.
+the `zig` commands; CI runs the `nix` ones. CI runs the test suite against a
+private PipeWire on every change, and builds on Debian 13 and Fedora 43 and
+through Nix on every push to `main` (and pull requests whose packaging inputs
+change).
 
 ```sh
 zig fmt --check liborca apps benchmarks tests build build.zig

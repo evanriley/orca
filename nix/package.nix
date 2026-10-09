@@ -29,8 +29,8 @@ stdenv.mkDerivation (finalAttrs: {
       ../build.zig
       ../build.zig.zon
       ../build
-      ../liborca
-      ../apps
+      (lib.fileset.fileFilter (file: !file.hasExt "md") ../liborca)
+      (lib.fileset.fileFilter (file: !file.hasExt "md") ../apps)
       ../LICENSE
       ../fixtures/eq/hd650.txt
     ];
