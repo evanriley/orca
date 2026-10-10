@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Ships Library schema version 3; opening a 0.3.0 Library upgrades it in
+Ships Library schema version 4; opening a 0.3.0 Library upgrades it in
 place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Added
@@ -40,6 +40,14 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **A saved queue entry follows its Track and Recording.** `player_queue_entries`
+  now carries `track_id` and `recording_id` foreign keys with `ON DELETE SET
+  NULL` and indexes on both, so removing a root no longer leaves a saved entry
+  pointing at an id a later scan reuses. A restore skips the cleared entry
+  instead of playing whatever took the id, a Recording kept by another Track
+  still resolves through the fallback, and a save whose queue holds a Track
+  already gone stores a null entry that keeps its position, so the saved cursor
+  stays aligned.
 - **Match Review's Release ID row says why it is ticked.** The field covers
   the release-group, album-artist, release-track and recording IDs and the
   disc and track numbers, so the row can tick while both columns show the
@@ -127,10 +135,11 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Changed
 
-- Library schema version 3. Opening a version 2 Library upgrades it in place
-  in one transaction, rebuilding the Daily Mix tables (their mixes are made
-  again on the next run) and keeping every other row. An upgraded Library
-  cannot be opened by 0.3.0.
+- Library schema version 4. Opening an older Library upgrades it in place
+  in one transaction, rebuilding `player_queue_entries` to add its foreign
+  keys and, from version 2, the Daily Mix tables (their mixes are made again
+  on the next run), and keeping every other row. An upgraded Library cannot
+  be opened by 0.3.0.
 - **`orca-gtk`'s Home drops the Never played list and the On this day
   facts.** Albums you haven't played replaces the list, and This week in
   music replaces the Added this week, Added this year and Never played facts.

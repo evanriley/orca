@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 const WriteLane = @import("write_lane.zig").WriteLane;
+const scalar = @import("../columns.zig").scalar;
 
 /// How many queue entries a saved state keeps: the playback queue's capacity.
 pub const max_saved_entries: usize = 10_000;
@@ -49,7 +50,11 @@ pub const PlayerStateRepository = struct {
 
     /// Replaces the saved state in one transaction. Each entry keeps its
     /// Track's Recording beside it, so a Track a later projection replaces is
-    /// found again through its Recording.
+    /// found again through its Recording. An entry whose Track is already
+    /// gone when it is saved is stored as a null row that resolves to nothing
+    /// and is skipped on restore; a Track deleted after the save is cleared
+    /// from its row by the foreign key and the entry then resolves to
+    /// nothing too.
     pub fn save(
         self: *PlayerStateRepository,
         state: SavedPlayerState,
@@ -63,9 +68,14 @@ pub const PlayerStateRepository = struct {
         defer self.write_lane.release();
         var insert = try self.db.prepare(
             \\INSERT INTO player_queue_entries(position, entry, track_id, recording_id)
-            \\VALUES (?1, ?2, ?3, (SELECT recording_id FROM tracks WHERE id = ?3));
+            \\SELECT ?1, ?2, id, recording_id FROM tracks WHERE id = ?3;
         );
         defer insert.deinit();
+        var insert_missing = try self.db.prepare(
+            \\INSERT INTO player_queue_entries(position, entry, track_id, recording_id)
+            \\VALUES (?1, ?2, NULL, NULL);
+        );
+        defer insert_missing.deinit();
         var head = try self.db.prepare(
             \\INSERT INTO player_state(id, cursor, position_ms, repeat, shuffle, saved_at)
             \\VALUES (1, ?1, ?2, ?3, ?4, ?5)
@@ -81,6 +91,12 @@ pub const PlayerStateRepository = struct {
             try insert.bindInt64(2, entry.entry);
             try insert.bindInt64(3, entry.track_id);
             if (try insert.step() != .done) return error.SqlFailed;
+            if (self.db.changes() == 0) {
+                try insert_missing.bindInt64(1, @intCast(position));
+                try insert_missing.bindInt64(2, entry.entry);
+                if (try insert_missing.step() != .done) return error.SqlFailed;
+                try insert_missing.reset();
+            }
             try insert.reset();
         }
         try head.bindInt64(1, state.cursor);
@@ -95,7 +111,8 @@ pub const PlayerStateRepository = struct {
     /// The saved state with each entry resolved, or null when nothing was
     /// saved. An entry resolves to its saved Track while that Track still
     /// belongs to the saved Recording, otherwise to the lowest-numbered
-    /// Track of that Recording, otherwise to null.
+    /// Track of that Recording, otherwise to null. A null entry is one whose
+    /// Track was gone when saved or deleted afterwards.
     pub fn load(self: *const PlayerStateRepository, allocator: std.mem.Allocator) !?RestoredPlayerState {
         var head = try self.db.prepare(
             "SELECT cursor, position_ms, repeat, shuffle, saved_at FROM player_state WHERE id = 1;",
@@ -235,6 +252,70 @@ test "a saved entry whose track is gone resolves through its recording, or to nu
         .{ .entry = 0, .track_id = 20 },
         .{ .entry = 1, .track_id = null },
         .{ .entry = 2, .track_id = null },
+    }, loaded.entries);
+}
+
+test "a loose entry whose reused Track id is taken by a new song resolves to null" {
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, "file:orca-test-player-state-reused-track?mode=memory&cache=shared");
+    defer library.close();
+    try seedTracks(&library);
+    try library.player_state.save(
+        .{ .cursor = 0, .position_ms = 0, .repeat = 0, .shuffle = false },
+        &.{.{ .entry = 0, .track_id = 13 }},
+        0,
+    );
+    try library.database.exec(
+        \\DELETE FROM tracks WHERE id = 13;
+        \\INSERT INTO tracks(release_id, title, recording_id) VALUES (1, 'New song', NULL);
+    );
+
+    const loaded = (try library.player_state.load(std.testing.allocator)).?;
+    defer loaded.deinit();
+    try std.testing.expectEqualSlices(RestoredQueueEntry, &.{
+        .{ .entry = 0, .track_id = null },
+    }, loaded.entries);
+}
+
+test "an entry whose reused Recording id is taken by a new song resolves to null" {
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, "file:orca-test-player-state-reused-recording?mode=memory&cache=shared");
+    defer library.close();
+    try seedTracks(&library);
+    try library.player_state.save(
+        .{ .cursor = 0, .position_ms = 0, .repeat = 0, .shuffle = false },
+        &.{.{ .entry = 0, .track_id = 12 }},
+        0,
+    );
+    try library.database.exec(
+        \\DELETE FROM tracks WHERE id = 12;
+        \\DELETE FROM recordings WHERE id = 3;
+        \\INSERT INTO recordings(title) VALUES ('New recording');
+        \\INSERT INTO tracks(release_id, title, recording_id) VALUES (1, 'New song', 3);
+    );
+
+    const loaded = (try library.player_state.load(std.testing.allocator)).?;
+    defer loaded.deinit();
+    try std.testing.expectEqualSlices(RestoredQueueEntry, &.{
+        .{ .entry = 0, .track_id = null },
+    }, loaded.entries);
+}
+
+test "a save with a Track that is already gone stores the null entry and load returns it" {
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, "file:orca-test-player-state-missing-at-save?mode=memory&cache=shared");
+    defer library.close();
+    try seedTracks(&library);
+    try library.player_state.save(
+        .{ .cursor = 1, .position_ms = 0, .repeat = 0, .shuffle = false },
+        &.{ .{ .entry = 0, .track_id = 10 }, .{ .entry = 1, .track_id = 99 } },
+        0,
+    );
+    try std.testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM player_queue_entries;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM player_queue_entries WHERE position = 1 AND track_id IS NULL AND recording_id IS NULL;"));
+
+    const loaded = (try library.player_state.load(std.testing.allocator)).?;
+    defer loaded.deinit();
+    try std.testing.expectEqualSlices(RestoredQueueEntry, &.{
+        .{ .entry = 0, .track_id = 10 },
+        .{ .entry = 1, .track_id = null },
     }, loaded.entries);
 }
 

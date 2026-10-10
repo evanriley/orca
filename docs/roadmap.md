@@ -146,9 +146,6 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- A saved queue entry has no foreign key, and SQLite reuses the highest
-  deleted id, so after a root is removed and another scanned, a restored entry
-  can play a different song that took the removed Track's or Recording's id.
 
 ## Next
 

@@ -181,10 +181,32 @@ test "a restore after a Track is deleted skips and counts it, resuming paused wh
     try std.testing.expectEqual(@as(u64, 1_499), (try savedPosition(&rig)).position_ms);
 
     const library_database = try rig.libraryDatabase();
+    var recording = try library_database.database.prepare("SELECT recording_id FROM tracks WHERE id = ?1;");
+    defer recording.deinit();
+    try recording.bindInt64(1, rig.ids[0]);
+    try std.testing.expectEqual(.row, try recording.step());
+    const recording_id = recording.columnInt64(0);
     var statement = try library_database.database.prepare("DELETE FROM tracks WHERE id = ?1;");
     defer statement.deinit();
     try statement.bindInt64(1, rig.ids[0]);
     try std.testing.expectEqual(.done, try statement.step());
+    var unlink = try library_database.database.prepare("UPDATE files SET recording_id = NULL WHERE recording_id = ?1;");
+    defer unlink.deinit();
+    try unlink.bindInt64(1, recording_id);
+    try std.testing.expectEqual(.done, try unlink.step());
+    var orphan = try library_database.database.prepare("DELETE FROM recordings WHERE id = ?1;");
+    defer orphan.deinit();
+    try orphan.bindInt64(1, recording_id);
+    try std.testing.expectEqual(.done, try orphan.step());
+    var reused_recording = try library_database.database.prepare("INSERT INTO recordings(id, title) VALUES (?1, 'Reused recording');");
+    defer reused_recording.deinit();
+    try reused_recording.bindInt64(1, recording_id);
+    try std.testing.expectEqual(.done, try reused_recording.step());
+    var reused = try library_database.database.prepare("INSERT INTO tracks(id, title, recording_id) VALUES (?1, 'Reused', ?2);");
+    defer reused.deinit();
+    try reused.bindInt64(1, rig.ids[0]);
+    try reused.bindInt64(2, recording_id);
+    try std.testing.expectEqual(.done, try reused.step());
 
     rig.player = try rig.newPlayer();
     const outcome = try rig.runtime.playerRestoreState(rig.player, rig.library, .paused);
