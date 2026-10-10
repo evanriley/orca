@@ -999,10 +999,7 @@ pub const App = struct {
         }
         // A scroller left deep in the previous listing would show rows far
         // below a listing that may now be short.
-        if (self.scroller) |scroller| gtk.gtk_adjustment_set_value(
-            gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
-            0.0,
-        );
+        if (self.scroller) |scroller| if (gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller))) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0.0);
         paged.reset(self.track_count);
         if (self.tracks_totals == .idle) self.showListing();
         if (self.debug_frames) {

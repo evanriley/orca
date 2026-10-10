@@ -8983,6 +8983,14 @@ checkbutton.metadata-issues-check-box check:checked {
   font-size: 26px;
 }
 
+.narrow .home-card {
+  padding: 20px 12px;
+}
+
+.narrow .home-playing {
+  padding: 10px 8px;
+}
+
 .home-subline {
   font-size: 14px;
   color: @orca_text_2;

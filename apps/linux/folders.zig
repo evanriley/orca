@@ -58,6 +58,7 @@ pub const State = struct {
     card_detail: ?*gtk.Label = null,
     files_button: ?*gtk.Widget = null,
     library_button: ?*gtk.Widget = null,
+    reveal: ?*gtk.Widget = null,
     roots: std.ArrayList(Root) = .empty,
     entries: std.ArrayList(Entry) = .empty,
     root_id: ?i64 = null,
@@ -1090,6 +1091,7 @@ fn buildBar(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, switcher), library);
 
     const reveal = folderButton("Show in File Manager", "orca-external-link-symbolic");
+    self.folders.reveal = reveal;
     _ = gtk.signalConnect(reveal, "clicked", gtk.callback(showInFilesClicked), self);
 
     const end = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
@@ -1157,6 +1159,7 @@ fn buildWelcome() *gtk.Widget {
 
 fn setNarrow(self: *App, narrow: bool) void {
     self.folders.narrow = narrow;
+    if (self.folders.reveal) |reveal| gtk.gtk_widget_set_visible(reveal, @intFromBool(!narrow));
     const view = self.folders.files_view orelse return;
     if (part(view, "orca-kind-heading")) |heading| gtk.gtk_widget_set_visible(heading, @intFromBool(!narrow));
     var row = gtk.gtk_widget_get_first_child(view);

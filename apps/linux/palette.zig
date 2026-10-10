@@ -613,7 +613,7 @@ fn refreshPalette(self: *App) void {
         gtk.gtk_widget_add_css_class(empty, "palette-empty");
         gtk.gtk_box_append(list, empty);
     }
-    if (palette.scroller) |scroller| gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), 0);
+    if (palette.scroller) |scroller| if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0);
     selectPalette(self, 0);
 }
 
@@ -750,7 +750,7 @@ fn reveal(scroller: ?*gtk.ScrolledWindow, content: *gtk.Widget, row: *gtk.Widget
     const scrolled = scroller orelse return;
     var bounds: gtk.Rect = .{};
     if (gtk.gtk_widget_compute_bounds(row, content, &bounds) == 0) return;
-    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(scrolled);
+    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(scrolled) orelse return;
     const top = gtk.gtk_adjustment_get_value(adjustment);
     const page = gtk.gtk_adjustment_get_page_size(adjustment);
     const row_top: f64 = bounds.y;
@@ -1010,7 +1010,7 @@ fn runSearch(self: *App, force: bool) void {
     search.searched = true;
 
     clearResults(self);
-    if (search.scroller) |scroller| gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), 0);
+    if (search.scroller) |scroller| if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0);
     if (query.len == 0) return message(self, "Search artists, albums, tracks, playlists and genres");
     const library = self.library orelse return message(self, "No library is open");
     search.results = self.runtime.librarySearch(library, query, limitsFor(search.kind)) catch return message(self, "Search failed");

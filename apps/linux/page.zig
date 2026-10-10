@@ -226,7 +226,8 @@ fn underBarScrolled(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn scrolledUnderBar(self: *App) bool {
     const page_root = shownUnderBarPage(self) orelse return false;
     const scroller = gtk.g_object_get_data(page_root, under_bar_scroller_key) orelse return false;
-    return gtk.gtk_adjustment_get_value(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller))) > 0;
+    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)) orelse return false;
+    return gtk.gtk_adjustment_get_value(adjustment) > 0;
 }
 
 fn shownUnderBarPage(self: *App) ?*gtk.Widget {
@@ -311,7 +312,8 @@ fn hasEnd(self: *App) bool {
 
 fn showEnd(self: *App) void {
     const end = self.top_bar.end orelse return;
-    const shown = hasEnd(self);
+    // The page's own end controls do not fit beside the trail in a narrow window.
+    const shown = hasEnd(self) and !self.window_narrow;
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, end), @intFromBool(shown));
     if (shown) gtk.gtk_stack_set_visible_child_name(end, self.current_page.name());
 }
@@ -411,6 +413,7 @@ fn showSearch(self: *App) void {
 pub fn setCompact(self: *App, compact: bool) void {
     self.header_compact = compact;
     showSearch(self);
+    showEnd(self);
 }
 
 pub const Title = struct {
@@ -468,12 +471,13 @@ pub const Scroll = struct {
     value: f64,
 };
 
-fn verticalAdjustment(scroller: *gtk.Widget) *gtk.Adjustment {
+fn verticalAdjustment(scroller: *gtk.Widget) ?*gtk.Adjustment {
     return gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller));
 }
 
 pub fn scrollOf(scroller: *gtk.Widget) Scroll {
-    return .{ .scroller = scroller, .value = gtk.gtk_adjustment_get_value(verticalAdjustment(scroller)) };
+    const adjustment = verticalAdjustment(scroller) orelse return .{ .scroller = scroller, .value = 0 };
+    return .{ .scroller = scroller, .value = gtk.gtk_adjustment_get_value(adjustment) };
 }
 
 pub fn visibleScroll(body: ?*gtk.Stack) ?Scroll {
@@ -555,7 +559,7 @@ pub fn restoreScroll(self: *App, scroll: Scroll) void {
 fn restoreScrollIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const pending: *PendingScroll = @ptrCast(@alignCast(data.?));
     const scroller = pending.scroll.scroller;
-    if (gtk.gtk_widget_get_root(scroller) != null) gtk.gtk_adjustment_set_value(verticalAdjustment(scroller), pending.scroll.value);
+    if (gtk.gtk_widget_get_root(scroller) != null) if (verticalAdjustment(scroller)) |adjustment| gtk.gtk_adjustment_set_value(adjustment, pending.scroll.value);
     gtk.g_object_unref(scroller);
     pending.allocator.destroy(pending);
     return gtk.SOURCE_REMOVE;

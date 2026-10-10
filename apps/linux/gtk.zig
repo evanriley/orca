@@ -956,7 +956,7 @@ pub extern fn gtk_scrolled_window_set_policy(window: *ScrolledWindow, hscrollbar
 pub extern fn gtk_scrolled_window_set_propagate_natural_height(window: *ScrolledWindow, propagate: gboolean) void;
 pub extern fn gtk_scrolled_window_set_max_content_height(window: *ScrolledWindow, height: c_int) void;
 pub extern fn gtk_scrolled_window_set_min_content_height(window: *ScrolledWindow, height: c_int) void;
-pub extern fn gtk_scrolled_window_get_vadjustment(window: *ScrolledWindow) *Adjustment;
+pub extern fn gtk_scrolled_window_get_vadjustment(window: *ScrolledWindow) ?*Adjustment;
 pub extern fn gtk_scrolled_window_get_hadjustment(window: *ScrolledWindow) *Adjustment;
 
 pub extern fn gtk_adjustment_new(

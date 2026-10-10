@@ -490,5 +490,5 @@ fn reload(self: *App) void {
     if (problems.more) |more| gtk.gtk_widget_set_visible(more, gtk.false_);
     if (problems.count != 0) loadMore(self);
     if (problems.empty) |empty| gtk.gtk_widget_set_visible(empty, if (problems.loaded == 0) gtk.true_ else gtk.false_);
-    if (problems.scroller) |scroller| gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), 0);
+    if (problems.scroller) |scroller| if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0);
 }

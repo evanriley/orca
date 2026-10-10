@@ -928,13 +928,13 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(again, "clicked", gtk.callback(matchAgainClicked), self);
     title.add(again);
 
-    const tabs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    const tabs = adw.adw_wrap_box_new();
     gtk.gtk_widget_add_css_class(tabs, "match-tabs");
     var first: ?*gtk.Widget = null;
     for (std.enums.values(Bucket)) |bucket| {
         const button = tabButton(self, bucket, first);
         if (first == null) first = button;
-        gtk.gtk_box_append(gtk.cast(gtk.Box, tabs), button);
+        adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, tabs), button);
     }
 
     const corrections = gtk.gtk_list_box_new();
@@ -1058,7 +1058,7 @@ fn restoreScroll(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const value = self.matches.restore_scroll orelse return gtk.false_;
     self.matches.restore_scroll = null;
     const scroller = self.matches.scroller orelse return gtk.false_;
-    gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), value);
+    if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_set_value(adjustment, value);
     return gtk.false_;
 }
 
@@ -1135,7 +1135,10 @@ fn request(self: *App, want: Want) void {
 fn adoptPage(self: *App, loader: *Loader) void {
     const matches = &self.matches;
     const kept_scroll: ?f64 = if (listsCurrent(self, loader.bucket, &loader.filter))
-        if (matches.scroller) |scroller| gtk.gtk_adjustment_get_value(gtk.gtk_scrolled_window_get_vadjustment(scroller)) else null
+        if (matches.scroller) |scroller|
+            if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_get_value(adjustment) else null
+        else
+            null
     else
         null;
     matches.deinit();

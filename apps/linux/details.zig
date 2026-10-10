@@ -2304,7 +2304,7 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(body), "details");
 
     adw.adw_overlay_split_view_set_sidebar(split, root);
-    adw.adw_overlay_split_view_set_min_sidebar_width(split, @floatFromInt(page_ui.side_panel_width));
+    adw.adw_overlay_split_view_set_min_sidebar_width(split, 0);
     adw.adw_overlay_split_view_set_max_sidebar_width(split, @floatFromInt(page_ui.side_panel_width));
 
     panel.* = .{
