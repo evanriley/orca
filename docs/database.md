@@ -24,16 +24,18 @@ state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
 [metadata.md](metadata.md#tag-write-files)). A Library with no file (in-memory)
 has none of them.
 
-`PRAGMA user_version` selects the schema. The current version is 3. Each
+`PRAGMA user_version` selects the schema. The current version is 4. Each
 version has one step in `migrations.steps`: `baseline` creates version 1, `v2`
-adds to it without rebuilding any table, and `v3` drops and recreates the Daily
-Mix tables, whose rows are made again on the next run. `migrations.apply` runs
+adds to it without rebuilding any table, `v3` drops and recreates the Daily
+Mix tables, whose rows are made again on the next run, and `v4` rebuilds
+`player_queue_entries` to add its foreign keys, nulling a dangling side while
+keeping the row and its position. `migrations.apply` runs
 every step after the database's version, and sets the new version, in one
 transaction, so a failed step leaves the database at its old version. A
-database at version 0 gets the whole schema, versions 1 and 2 are upgraded in
-place, version 3 opens unchanged, and any other `user_version`, negative or
+database at version 0 gets the whole schema, versions 1, 2 and 3 are upgraded
+in place, version 4 opens unchanged, and any other `user_version`, negative or
 newer, is refused with `error.SchemaVersionTooNew` and left untouched. A
-Library at version 3 cannot be opened by Orca 0.3.0 or earlier.
+Library at version 4 cannot be opened by Orca 0.3.0 or earlier.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
 
@@ -749,9 +751,13 @@ counted nor cleared.
 `player_queue_entries` row in one transaction, at most 10,000 entries in
 playback order; `entry` is the index in the unshuffled list, so a shuffled queue
 restores in the same order. Each row stores the Track id and Recording id it had
-when saved, with no foreign key to either. A load resolves each row to the saved
-Track while it still has the saved Recording, else to the lowest Track id of
-that Recording, else skips it, so reprojection keeps the queue.
+when saved, both foreign keys (`ON DELETE SET NULL`): deleting the Track or the
+Recording clears that side and keeps the row and its position. A load resolves
+each row to the saved Track while it still has the saved Recording, else to
+the lowest Track id of
+that Recording, else skips it, so reprojection keeps the queue. A save whose
+Track is already gone stores an entry with both ids null, so the saved cursor
+still names the right entry and the restore skips it.
 `track_positions` keeps where a long Track was left, cascading with its Track; a
 position of zero or a gone Track deletes the row ([api.md](api.md)).
 

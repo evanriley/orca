@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 
-pub const current_version = 3;
+pub const current_version = 4;
 
 const baseline =
     \\CREATE TABLE volumes (
@@ -1321,7 +1321,27 @@ const v3 =
     \\CREATE INDEX daily_mix_entries_by_recording ON daily_mix_entries(recording_id);
 ;
 
-const steps = [_][:0]const u8{ baseline, v2, v3 };
+const v4 =
+    \\CREATE TABLE player_queue_entries_next (
+    \\    position INTEGER PRIMARY KEY CHECK (position BETWEEN 0 AND 9999),
+    \\    entry INTEGER NOT NULL CHECK (entry BETWEEN 0 AND 9999),
+    \\    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    \\    recording_id INTEGER REFERENCES recordings(id) ON DELETE SET NULL
+    \\);
+    \\INSERT INTO player_queue_entries_next(position, entry, track_id, recording_id)
+    \\SELECT q.position, q.entry,
+    \\    CASE WHEN tracks.id IS NULL THEN NULL ELSE q.track_id END,
+    \\    CASE WHEN recordings.id IS NULL THEN NULL ELSE q.recording_id END
+    \\FROM player_queue_entries q
+    \\LEFT JOIN tracks ON tracks.id = q.track_id
+    \\LEFT JOIN recordings ON recordings.id = q.recording_id;
+    \\DROP TABLE player_queue_entries;
+    \\ALTER TABLE player_queue_entries_next RENAME TO player_queue_entries;
+    \\CREATE INDEX player_queue_entries_by_track ON player_queue_entries(track_id);
+    \\CREATE INDEX player_queue_entries_by_recording ON player_queue_entries(recording_id);
+;
+
+const steps = [_][:0]const u8{ baseline, v2, v3, v4 };
 
 comptime {
     std.debug.assert(steps.len == current_version);
@@ -2000,6 +2020,9 @@ test "the saved player state is one bounded row, and saved positions go with the
     try db.exec("DELETE FROM tracks WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT track_id FROM track_positions;"));
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM player_queue_entries WHERE position = 1 AND track_id IS NULL AND recording_id = 1;
+    ));
 }
 
 test "metadata proposals check their category, state, gap and track count, and go with their release and track" {
@@ -2120,13 +2143,13 @@ fn atVersion2() !sqlite.Database {
     return db;
 }
 
-test "a version 2 library upgrades to version 3 keeping Not for me and its other rows, with the fresh schema" {
+test "a version 2 library upgrades to the current version keeping Not for me and its other rows, with the fresh schema" {
     const db = try atVersion2();
     defer db.close();
 
     try apply(db);
 
-    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try expectBaselineRowsKept(db);
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM recommendation_feedback WHERE created_at * 10 = expires_at;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM daily_mixes;"));
@@ -2152,6 +2175,65 @@ test "a failing version 3 step rolls back and leaves the library at version 2 wi
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mixes;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM daily_mix_entries;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM recommendation_feedback;"));
+}
+
+fn atVersion3() !sqlite.Database {
+    const db = try atVersion2();
+    errdefer db.close();
+    try db.exec(v3);
+    try db.exec(
+        \\PRAGMA user_version=3;
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Mix', 'mix');
+        \\INSERT INTO tracks(id, release_id, title, recording_id) VALUES (10, 1, 'Live', 1), (11, 1, 'Other', 2);
+        \\INSERT INTO player_state(id, cursor, position_ms, repeat, shuffle, saved_at) VALUES (1, 0, 0, 0, 0, 0);
+        \\INSERT INTO player_queue_entries(position, entry, track_id, recording_id) VALUES
+        \\    (0, 0, 10, 1), (1, 1, 99, 1), (2, 2, 11, 98);
+    );
+    return db;
+}
+
+test "a version 3 library upgrades to version 4 nulling dangling queue sides and matching the fresh schema" {
+    const db = try atVersion3();
+    defer db.close();
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM player_queue_entries
+        \\WHERE position = 0 AND entry = 0 AND track_id = 10 AND recording_id = 1;
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM player_queue_entries
+        \\WHERE position = 1 AND entry = 1 AND track_id IS NULL AND recording_id = 1;
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM player_queue_entries
+        \\WHERE position = 2 AND entry = 2 AND track_id = 11 AND recording_id IS NULL;
+    ));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
+    const upgraded = try schemaObjects(std.testing.allocator, db);
+    defer std.testing.allocator.free(upgraded);
+    const created = try fresh();
+    defer created.close();
+    const fresh_schema = try schemaObjects(std.testing.allocator, created);
+    defer std.testing.allocator.free(fresh_schema);
+    try std.testing.expectEqualStrings(fresh_schema, upgraded);
+}
+
+test "a failing version 4 step rolls back and leaves the library at version 3 with its queue" {
+    const db = try atVersion3();
+    defer db.close();
+    try db.exec("CREATE TABLE player_queue_entries_next (id INTEGER);");
+
+    try std.testing.expectError(error.SqlFailed, apply(db));
+
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM player_state;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM recommendation_feedback;"));
 }
 
