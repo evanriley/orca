@@ -332,6 +332,153 @@ test "Stop Radio removes the pending picks and keeps the playing and user-queued
     try rig.runtime.playerStopRadio(rig.player);
 }
 
+test "starting Radio over a playing queue replaces the upcoming entries with the picks" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-replace-upcoming?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerPlayTracksBound(rig.player, rig.library, &.{ 20, 21, 22, 23, 24 }, 0);
+    try std.testing.expectEqual(@as(u32, 5), (try rig.runtime.playerQueueSnapshot(rig.player)).entries);
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .track = 1 }, .{});
+    try rig.settle();
+    const status = try rig.status();
+    try std.testing.expectEqual(@as(u32, 8), status.pending);
+    var queue_buffer: [64]TrackRef = undefined;
+    const entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 9), entries.len);
+    try std.testing.expectEqual(@as(i64, 20), entries[0].track_id);
+    const playing = (try rig.runtime.playerNowPlaying(rig.player)).?;
+    try std.testing.expectEqual(@as(i64, 20), playing.track_id);
+    try std.testing.expectEqual(audio.player.TransportState.playing, (try rig.runtime.playerSnapshot(rig.player)).state);
+    var pick_buffer: [runtime_module.max_radio_reported_picks]RadioQueuePick = undefined;
+    const reported = try rig.picks(&pick_buffer);
+    try std.testing.expectEqual(@as(usize, 8), reported.len);
+    try std.testing.expectEqual(@as(u32, 1), reported[0].position);
+    try expectPicksMatchQueue(&rig);
+}
+
+test "an idle Player's queue is emptied when a non-Track seed starts Radio" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-idle-nontrack?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerEnqueueTracksBound(rig.player, rig.library, &.{ 30, 31, 32 });
+    try rig.runtime.stopPlayer(rig.player);
+    try std.testing.expectEqual(@as(u32, 3), (try rig.runtime.playerQueueSnapshot(rig.player)).entries);
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .artist = 3 }, .{});
+    try rig.settle();
+    const status = try rig.status();
+    try std.testing.expectEqual(@as(u32, 8), status.pending);
+    var queue_buffer: [64]TrackRef = undefined;
+    const entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 9), entries.len);
+    const playing = (try rig.runtime.playerNowPlaying(rig.player)).?;
+    try std.testing.expectEqual(entries[0].track_id, playing.track_id);
+    try std.testing.expectEqual(@as(u32, 0), try rig.cursor());
+    try std.testing.expectEqual(audio.player.TransportState.playing, (try rig.runtime.playerSnapshot(rig.player)).state);
+    try expectPicksMatchQueue(&rig);
+}
+
+test "a Track seed on an idle Player with queued entries replaces them" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-idle-track?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerEnqueueTracksBound(rig.player, rig.library, &.{ 30, 31, 32 });
+    try rig.runtime.stopPlayer(rig.player);
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .track = 5 }, .{});
+    try rig.settle();
+    const status = try rig.status();
+    try std.testing.expectEqual(@as(u32, 8), status.pending);
+    var queue_buffer: [64]TrackRef = undefined;
+    const entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 9), entries.len);
+    try std.testing.expectEqual(@as(i64, 5), entries[0].track_id);
+    try std.testing.expectEqual(@as(i64, 5), (try rig.runtime.playerNowPlaying(rig.player)).?.track_id);
+    try expectPicksMatchQueue(&rig);
+}
+
+test "restarting Radio with another seed removes user-queued entries after the committed span" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-restart?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .track = 1 }, .{});
+    try rig.settle();
+    try rig.runtime.playerEnqueueTracksBound(rig.player, rig.library, &.{ 44, 45 });
+    var queue_buffer: [64]TrackRef = undefined;
+    var entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 11), entries.len);
+    try std.testing.expectEqual(@as(i64, 44), entries[1].track_id);
+    try std.testing.expectEqual(@as(i64, 45), entries[2].track_id);
+    const queue = (try rig.runtime.players.get(rig.player)).queue;
+    const removed_a = queue.idAt(1).?;
+    const removed_b = queue.idAt(2).?;
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .artist = 3 }, .{});
+    try rig.settle();
+    const status = try rig.status();
+    try std.testing.expectEqual(@as(u32, 8), status.pending);
+    entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 9), entries.len);
+    try std.testing.expectEqual(@as(i64, 1), entries[0].track_id);
+    try std.testing.expect(queue.positionOfId(removed_a) == null);
+    try std.testing.expect(queue.positionOfId(removed_b) == null);
+    try expectPicksMatchQueue(&rig);
+}
+
+test "starting Radio on a paused Player removes the queue behind the pause and resumes into the picks" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-paused?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerPlayTracksBound(rig.player, rig.library, &.{ 20, 21, 22, 23, 24 }, 0);
+    try rig.runtime.pausePlayer(rig.player);
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .track = 1 }, .{});
+    try rig.settle();
+    const status = try rig.status();
+    try std.testing.expectEqual(@as(u32, 8), status.pending);
+    var queue_buffer: [64]TrackRef = undefined;
+    const entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 9), entries.len);
+    try std.testing.expectEqual(@as(i64, 20), entries[0].track_id);
+    try std.testing.expectEqual(@as(u32, 0), try rig.cursor());
+    try std.testing.expectEqual(audio.player.TransportState.paused, (try rig.runtime.playerSnapshot(rig.player)).state);
+    try std.testing.expectEqual(@as(i64, 20), (try rig.runtime.playerNowPlaying(rig.player)).?.track_id);
+    try expectPicksMatchQueue(&rig);
+
+    try rig.runtime.playPlayer(rig.player);
+    try rig.finishCurrent();
+    try std.testing.expectEqual(@as(u32, 1), try rig.cursor());
+    try std.testing.expectEqual(entries[1].track_id, (try rig.runtime.playerNowPlaying(rig.player)).?.track_id);
+}
+
+test "starting Radio on a shuffled Player removes the entries past the committed position" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-radio-shuffled?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try rig.runtime.playerPlayTracksBound(rig.player, rig.library, &.{ 20, 21, 22, 23, 24 }, 0);
+    try rig.runtime.playerSetShuffle(rig.player, true);
+
+    try rig.runtime.playerStartRadio(rig.player, rig.library, .{ .track = 1 }, .{});
+    try rig.settle();
+    const status = try rig.status();
+    try std.testing.expectEqual(@as(u32, 8), status.pending);
+    var queue_buffer: [64]TrackRef = undefined;
+    const entries = try rig.queue(&queue_buffer);
+    try std.testing.expectEqual(@as(usize, 9), entries.len);
+    try std.testing.expectEqual(@as(i64, 20), entries[0].track_id);
+    try std.testing.expectEqual(@as(u32, 0), try rig.cursor());
+    try std.testing.expectEqual(audio.player.TransportState.playing, (try rig.runtime.playerSnapshot(rig.player)).state);
+    try std.testing.expectEqual(@as(i64, 20), (try rig.runtime.playerNowPlaying(rig.player)).?.track_id);
+    try expectPicksMatchQueue(&rig);
+}
+
 test "less like this removes the pick and keeps its Artist out of the next top-up; undo restores the weights only" {
     var rig: Rig = undefined;
     try rig.init("file:orca-radio-less?mode=memory&cache=shared");
