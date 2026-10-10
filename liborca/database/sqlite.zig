@@ -1,6 +1,12 @@
 const std = @import("std");
 const sqlite_locks = @import("sqlite_locks.zig");
 
+/// How long a statement blocked by a shared-cache table lock waits for the
+/// blocking transaction to finish, one millisecond per attempt. The busy
+/// handler does not cover `SQLITE_LOCKED`, so this stands in for it; it
+/// matches the five-second `busy_timeout` every connection sets.
+const locked_wait_ms: usize = 5_000;
+
 pub const c = @import("sqlite");
 
 pub const Error = error{
@@ -13,6 +19,21 @@ pub const Error = error{
 
 pub const Database = struct {
     handle: *c.sqlite3,
+    /// Set only on the dynamic handle a Library hands to its repositories. Its
+    /// owner probe picks the writer for a lane holder's thread and the reader
+    /// for every other thread; null means this handle is used directly.
+    connections: ?*Connections = null,
+    /// How a statement that meets a shared-cache table lock waits it out. Null
+    /// for a standalone handle, whose statements never retry.
+    io: ?std.Io = null,
+
+    fn resolved(self: Database) Database {
+        const connections = self.connections orelse return self;
+        return if (connections.ownsLane(connections.context))
+            connections.writer
+        else
+            connections.reader;
+    }
 
     pub fn open(path: [:0]const u8) Error!Database {
         const flags = c.SQLITE_OPEN_READWRITE |
@@ -48,45 +69,61 @@ pub const Database = struct {
     }
 
     pub fn exec(self: Database, sql: [:0]const u8) Error!void {
+        const db = self.resolved();
         var message: [*c]u8 = null;
-        const result = c.sqlite3_exec(self.handle, sql.ptr, null, null, &message);
+        const result = c.sqlite3_exec(db.handle, sql.ptr, null, null, &message);
         if (message != null) c.sqlite3_free(message);
         if (result != c.SQLITE_OK) return error.SqlFailed;
     }
 
     pub fn prepare(self: Database, sql: [:0]const u8) Error!Statement {
+        const db = self.resolved();
         var raw: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &raw, null) != c.SQLITE_OK) {
+        if (c.sqlite3_prepare_v2(db.handle, sql.ptr, -1, &raw, null) != c.SQLITE_OK) {
             return error.SqlFailed;
         }
-        return .{ .handle = raw.? };
+        return .{ .handle = raw.?, .io = db.io };
     }
 
     pub fn filename(self: Database) ?[]const u8 {
-        const name = c.sqlite3_db_filename(self.handle, "main") orelse return null;
+        const db = self.resolved();
+        const name = c.sqlite3_db_filename(db.handle, "main") orelse return null;
         const path = std.mem.span(name);
         return if (path.len == 0) null else path;
     }
 
     pub fn lastError(self: Database) []const u8 {
-        return std.mem.span(c.sqlite3_errmsg(self.handle));
+        return std.mem.span(c.sqlite3_errmsg(self.resolved().handle));
     }
 
     pub fn changes(self: Database) u64 {
-        return @intCast(c.sqlite3_changes64(self.handle));
+        return @intCast(c.sqlite3_changes64(self.resolved().handle));
     }
 
     pub fn lastInsertRowId(self: Database) i64 {
-        return c.sqlite3_last_insert_rowid(self.handle);
+        return c.sqlite3_last_insert_rowid(self.resolved().handle);
     }
 
     pub fn interrupt(self: Database) void {
-        c.sqlite3_interrupt(self.handle);
+        c.sqlite3_interrupt(self.resolved().handle);
     }
+};
+
+/// The two handles a Library routes between, and the probe that tells a
+/// dynamic `Database` which one the calling thread must use. The probe lives
+/// here as a function pointer so this file need not know about `WriteLane`.
+/// Context points at the Library's lane; `ownsLane` reports whether the
+/// calling thread holds it.
+pub const Connections = struct {
+    writer: Database,
+    reader: Database,
+    context: *anyopaque,
+    ownsLane: *const fn (context: *anyopaque) bool,
 };
 
 pub const Statement = struct {
     handle: *c.sqlite3_stmt,
+    io: ?std.Io = null,
 
     pub fn deinit(self: Statement) void {
         _ = c.sqlite3_finalize(self.handle);
@@ -149,11 +186,21 @@ pub const Statement = struct {
     }
 
     pub fn step(self: Statement) Error!Step {
-        return switch (c.sqlite3_step(self.handle)) {
-            c.SQLITE_ROW => .row,
-            c.SQLITE_DONE => .done,
-            else => error.SqlFailed,
-        };
+        var remaining = locked_wait_ms;
+        while (true) {
+            return switch (c.sqlite3_step(self.handle)) {
+                c.SQLITE_ROW => .row,
+                c.SQLITE_DONE => .done,
+                c.SQLITE_LOCKED => locked: {
+                    if (self.io == null or remaining == 0) break :locked error.SqlFailed;
+                    _ = c.sqlite3_reset(self.handle);
+                    if (self.io) |io| io.sleep(.fromMilliseconds(1), .awake) catch {};
+                    remaining -= 1;
+                    continue;
+                },
+                else => error.SqlFailed,
+            };
+        }
     }
 
     pub fn reset(self: Statement) Error!void {

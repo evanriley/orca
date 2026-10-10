@@ -146,9 +146,6 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- Writers use the Library's primary SQLite connection, which queries and other
-  Jobs also read through, so a read on another thread can see a batch's rows
-  before it commits, even rows a rolled-back batch never commits.
 - Match Review in `orca-gtk` ticks the Release ID row as differing while both
   columns show the same MusicBrainz release ID, when only the release-group,
   album-artist, release-track or recording IDs or the disc or track numbers

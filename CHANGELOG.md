@@ -40,6 +40,14 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **A read on a thread without the write lane sees only committed rows.**
+  Every Library opens a read-only connection beside its write connection, and
+  the database layer routes each call by write-lane ownership: a lane holder
+  reads and writes its own transaction, and every other thread reads committed
+  state. Home, Daily Mixes, the metadata-issue surface, radio previews, and
+  the runtime's query surface no longer see rows a scan batch has not
+  committed, nor rows a rollback removes. Open-time setup and raw-SQL writes
+  keep the write connection.
 - **The C ABI smoke suite does not assume the default cache exists.**
   `tests/c_abi_smoke.c` creates `.zig-cache` and `.zig-cache/tmp` before its
   fixtures, as the Zig tests' `tmpDir` does, so it runs in a fresh tree or

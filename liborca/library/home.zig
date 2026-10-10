@@ -204,7 +204,7 @@ fn topArtistsBetween(db: sqlite.Database, since_s: i64, until_s: i64, output: []
 }
 
 pub fn listeningWeek(library: *const LibraryDatabase, time: LocalTime) !ListeningWeek {
-    const db = library.database;
+    const db = library.queryDatabase();
     const today = time.localDay();
     const week_start_day = today - (week_days - 1);
     const week_start = time.dayStart(week_start_day);
@@ -275,7 +275,7 @@ const played_releases =
 /// The Releases most recently played, latest first.
 pub fn recentReleases(library: *const LibraryDatabase, time: LocalTime, output: []PlayedRelease) !usize {
     const limit = @min(output.len, max_items);
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         played_releases ++ "HAVING max(stats.last_played_at) <= ?1\n" ++
             "ORDER BY max(stats.last_played_at) DESC, releases.id LIMIT ?2;",
     );
@@ -289,7 +289,7 @@ pub fn recentReleases(library: *const LibraryDatabase, time: LocalTime, output: 
 /// played first, the longest unheard first among equals.
 pub fn rediscover(library: *const LibraryDatabase, time: LocalTime, output: []PlayedRelease) !usize {
     const limit = @min(output.len, max_items);
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         played_releases ++ "HAVING sum(stats.play_count) >= " ++ std.fmt.comptimePrint("{d}", .{rediscover_min_plays}) ++
             " AND max(stats.last_played_at) <= ?1\n" ++
             "ORDER BY sum(stats.play_count) DESC, max(stats.last_played_at), releases.id LIMIT ?2;",
@@ -324,7 +324,7 @@ const track_columns =
 /// Tracks whose Recording has no listen, newest added first.
 pub fn neverPlayed(library: *const LibraryDatabase, output: []HomeTrack) !usize {
     const limit = @min(output.len, max_items);
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         track_columns ++ "    0, tracks.created_at\n" ++
             "FROM tracks WHERE NOT EXISTS (SELECT 1 FROM recording_play_stats AS stats WHERE stats.recording_id = tracks.recording_id)\n" ++
             "ORDER BY tracks.created_at DESC, tracks.id DESC LIMIT ?1;",
@@ -346,7 +346,7 @@ pub const deep_cut_favorites =
 /// days: unplayed first, then the most played Artist's.
 pub fn deepCuts(library: *const LibraryDatabase, time: LocalTime, output: []HomeTrack) !usize {
     const limit = @min(output.len, max_items);
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         deep_cut_favorites ++ track_columns ++ "    COALESCE(stats.play_count, 0), tracks.created_at\n" ++
             "FROM favorites JOIN tracks ON tracks.artist_id = favorites.artist_id\n" ++
             "LEFT JOIN recording_play_stats AS stats ON stats.recording_id = tracks.recording_id\n" ++
@@ -400,7 +400,7 @@ fn readHomeReleases(statement: sqlite.Statement, output: []HomeRelease) !usize {
 /// An Artist is represented by its first Release in that order.
 pub fn unplayedReleases(library: *const LibraryDatabase, time: LocalTime, output: []HomeRelease) !usize {
     const limit = @min(output.len, max_items);
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         "WITH candidates AS (\n" ++
             "    SELECT releases.id AS id, releases.title AS title, " ++ release_artist_or_track ++ " AS artist,\n" ++
             "        " ++ release_year ++ " AS year,\n" ++
@@ -460,7 +460,7 @@ pub fn releaseAnniversaries(library: *const LibraryDatabase, time: LocalTime, ou
     const limit = @min(output.len, max_items);
     var days_buffer: [256]u8 = undefined;
     const days = try anniversaryDays(time.localDay(), &days_buffer);
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         "WITH days AS (\n" ++
             "    SELECT json_extract(value, '$[0]') AS day_offset, json_extract(value, '$[1]') AS year,\n" ++
             "        json_extract(value, '$[2]') AS month_day, json_extract(value, '$[3]') AS alias_day FROM json_each(?1)\n" ++
@@ -500,11 +500,11 @@ pub fn releaseAnniversaries(library: *const LibraryDatabase, time: LocalTime, ou
 
 /// The Artists most played in the last `days` days, most played first.
 pub fn topArtists(library: *const LibraryDatabase, time: LocalTime, days: u32, output: []TopArtist) !usize {
-    return topArtistsBetween(library.database, time.now_s - @as(i64, days) * day_s, time.now_s, output);
+    return topArtistsBetween(library.queryDatabase(), time.now_s - @as(i64, days) * day_s, time.now_s, output);
 }
 
 pub fn formats(library: *const LibraryDatabase) !Formats {
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         \\SELECT (SELECT count(*) FROM releases), count(*), COALESCE(sum(max(tracks.duration_ms, 0)), 0),
         \\       COALESCE(sum(files.codec = 'flac'), 0), COALESCE(sum(files.codec = 'alac'), 0),
         \\       COALESCE(sum(files.codec = 'mp3'), 0)
@@ -573,7 +573,7 @@ fn tracksAddedSince(db: sqlite.Database, since_s: i64, until_s: i64) !u32 {
 }
 
 pub fn onThisDay(library: *const LibraryDatabase, time: LocalTime) !OnThisDay {
-    const db = library.database;
+    const db = library.queryDatabase();
     const today = time.localDay();
     var result: OnThisDay = .{};
 
@@ -612,7 +612,7 @@ pub fn onThisDay(library: *const LibraryDatabase, time: LocalTime) !OnThisDay {
 }
 
 pub fn historyAge(library: *const LibraryDatabase, time: LocalTime) !HistoryAge {
-    var statement = try library.database.prepare(
+    var statement = try library.queryDatabase().prepare(
         "SELECT min(started_at), count(DISTINCT " ++ comptime localDayOf("started_at", "?2") ++ ") FROM listens WHERE started_at <= ?1;",
     );
     defer statement.deinit();

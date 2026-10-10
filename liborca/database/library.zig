@@ -43,6 +43,13 @@ pub const FileBinding = struct {
     identity: repository.StorageIdentityKey,
 };
 
+/// Which connection a Library's dynamic database should use: the holder's own
+/// writes are the only transaction it may read.
+fn laneHeldByCurrentThread(context: *anyopaque) bool {
+    const write_lane: *repository.WriteLane = @ptrCast(@alignCast(context));
+    return write_lane.heldByCurrentThread();
+}
+
 /// One independently openable Library and its serialized write connection.
 pub const LibraryDatabase = struct {
     allocator: std.mem.Allocator,
@@ -56,6 +63,10 @@ pub const LibraryDatabase = struct {
     /// left to the next holder; `recoverPendingMutations` clears it.
     recovery_deferred: std.atomic.Value(bool),
     database: sqlite.Database,
+    /// The writer/reader pair every repository routes between, selected by
+    /// write-lane ownership. Held by pointer so the repositories can point at
+    /// it without the Library struct becoming self-referential.
+    connections: *sqlite.Connections,
     write_lane: *repository.WriteLane,
     tracks: repository.TrackRepository,
     artists: repository.ArtistRepository,
@@ -109,8 +120,9 @@ pub const LibraryDatabase = struct {
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
         errdefer allocator.free(owned_path);
-        const database = try sqlite.Database.open(path);
+        var database = try sqlite.Database.open(path);
         errdefer database.close();
+        database.io = io;
         const write_lane = try allocator.create(repository.WriteLane);
         errdefer allocator.destroy(write_lane);
         write_lane.* = .{ .io = io };
@@ -131,6 +143,18 @@ pub const LibraryDatabase = struct {
             null;
         errdefer if (walk_lock_path) |lock_path| allocator.free(lock_path);
         try migrations.apply(database);
+        const reader = try sqlite.Database.openReadOnly(path);
+        errdefer reader.close();
+        const connections = try allocator.create(sqlite.Connections);
+        errdefer allocator.destroy(connections);
+        connections.* = .{
+            .writer = database,
+            .reader = reader,
+            .context = @ptrCast(write_lane),
+            .ownsLane = laneHeldByCurrentThread,
+        };
+        connections.reader.io = io;
+        const dynamic = sqlite.Database{ .handle = database.handle, .connections = connections };
         try database.exec(
             \\CREATE TEMP TABLE IF NOT EXISTS swept_cover_releases(id INTEGER PRIMARY KEY);
             \\CREATE TEMP TABLE IF NOT EXISTS cleared_cover_releases(id INTEGER PRIMARY KEY);
@@ -160,49 +184,50 @@ pub const LibraryDatabase = struct {
             .walk_lock_path = walk_lock_path,
             .recovery_deferred = .init(recovery_deferred),
             .database = database,
+            .connections = connections,
             .write_lane = write_lane,
-            .tracks = .{ .db = database, .write_lane = write_lane },
-            .artists = .{ .db = database, .write_lane = write_lane },
-            .releases = .{ .db = database, .write_lane = write_lane },
-            .release_artwork = .{ .db = database, .write_lane = write_lane },
-            .recordings = .{ .db = database, .write_lane = write_lane },
-            .volumes = .{ .db = database, .write_lane = write_lane },
-            .library_roots = .{ .db = database, .write_lane = write_lane },
-            .scan_runs = .{ .db = database, .write_lane = write_lane },
-            .files = .{ .db = database, .write_lane = write_lane },
-            .locations = .{ .db = database, .write_lane = write_lane },
-            .observed_tags = .{ .db = database, .write_lane = write_lane },
-            .orca_metadata = .{ .db = database, .write_lane = write_lane },
-            .mutation_journal = .{ .db = database, .write_lane = write_lane },
-            .analysis_cache = .{ .db = database, .write_lane = write_lane },
-            .health_issues = .{ .db = database, .write_lane = write_lane },
-            .duplicate_groups = .{ .db = database, .write_lane = write_lane },
-            .provider_cache = .{ .db = database, .write_lane = write_lane },
-            .provider_state = .{ .db = database, .write_lane = write_lane },
-            .scrobbles = .{ .db = database, .write_lane = write_lane },
-            .listens = .{ .db = database, .write_lane = write_lane },
-            .feedback = .{ .db = database, .write_lane = write_lane },
-            .ratings = .{ .db = database, .write_lane = write_lane },
-            .release_loves = .{ .db = database, .write_lane = write_lane },
-            .artist_loves = .{ .db = database, .write_lane = write_lane },
-            .artist_info = .{ .db = database, .write_lane = write_lane },
-            .release_info = .{ .db = database, .write_lane = write_lane },
-            .release_tracklists = .{ .db = database, .write_lane = write_lane },
-            .release_track_pairings = .{ .db = database, .write_lane = write_lane },
-            .reviewed_releases = .{ .db = database, .write_lane = write_lane },
-            .settings = .{ .db = database, .write_lane = write_lane },
-            .player_state = .{ .db = database, .write_lane = write_lane },
-            .job_history = .{ .db = database, .write_lane = write_lane },
-            .stats = .{ .db = database },
-            .audio_features = .{ .db = database },
-            .fetched_cache = .{ .db = database, .write_lane = write_lane },
-            .genres = .{ .db = database, .write_lane = write_lane },
-            .search = .{ .db = database },
-            .track_lyrics = .{ .db = database, .write_lane = write_lane },
-            .playlists = .{ .db = database, .write_lane = write_lane },
-            .identification_proposals = .{ .db = database, .write_lane = write_lane },
-            .recording_verifications = .{ .db = database, .write_lane = write_lane },
-            .acoustid_submissions = .{ .db = database, .write_lane = write_lane },
+            .tracks = .{ .db = dynamic, .write_lane = write_lane },
+            .artists = .{ .db = dynamic, .write_lane = write_lane },
+            .releases = .{ .db = dynamic, .write_lane = write_lane },
+            .release_artwork = .{ .db = dynamic, .write_lane = write_lane },
+            .recordings = .{ .db = dynamic, .write_lane = write_lane },
+            .volumes = .{ .db = dynamic, .write_lane = write_lane },
+            .library_roots = .{ .db = dynamic, .write_lane = write_lane },
+            .scan_runs = .{ .db = dynamic, .write_lane = write_lane },
+            .files = .{ .db = dynamic, .write_lane = write_lane },
+            .locations = .{ .db = dynamic, .write_lane = write_lane },
+            .observed_tags = .{ .db = dynamic, .write_lane = write_lane },
+            .orca_metadata = .{ .db = dynamic, .write_lane = write_lane },
+            .mutation_journal = .{ .db = dynamic, .write_lane = write_lane },
+            .analysis_cache = .{ .db = dynamic, .write_lane = write_lane },
+            .health_issues = .{ .db = dynamic, .write_lane = write_lane },
+            .duplicate_groups = .{ .db = dynamic, .write_lane = write_lane },
+            .provider_cache = .{ .db = dynamic, .write_lane = write_lane },
+            .provider_state = .{ .db = dynamic, .write_lane = write_lane },
+            .scrobbles = .{ .db = dynamic, .write_lane = write_lane },
+            .listens = .{ .db = dynamic, .write_lane = write_lane },
+            .feedback = .{ .db = dynamic, .write_lane = write_lane },
+            .ratings = .{ .db = dynamic, .write_lane = write_lane },
+            .release_loves = .{ .db = dynamic, .write_lane = write_lane },
+            .artist_loves = .{ .db = dynamic, .write_lane = write_lane },
+            .artist_info = .{ .db = dynamic, .write_lane = write_lane },
+            .release_info = .{ .db = dynamic, .write_lane = write_lane },
+            .release_tracklists = .{ .db = dynamic, .write_lane = write_lane },
+            .release_track_pairings = .{ .db = dynamic, .write_lane = write_lane },
+            .reviewed_releases = .{ .db = dynamic, .write_lane = write_lane },
+            .settings = .{ .db = dynamic, .write_lane = write_lane },
+            .player_state = .{ .db = dynamic, .write_lane = write_lane },
+            .job_history = .{ .db = dynamic, .write_lane = write_lane },
+            .stats = .{ .db = dynamic },
+            .audio_features = .{ .db = dynamic },
+            .fetched_cache = .{ .db = dynamic, .write_lane = write_lane },
+            .genres = .{ .db = dynamic, .write_lane = write_lane },
+            .search = .{ .db = dynamic },
+            .track_lyrics = .{ .db = dynamic, .write_lane = write_lane },
+            .playlists = .{ .db = dynamic, .write_lane = write_lane },
+            .identification_proposals = .{ .db = dynamic, .write_lane = write_lane },
+            .recording_verifications = .{ .db = dynamic, .write_lane = write_lane },
+            .acoustid_submissions = .{ .db = dynamic, .write_lane = write_lane },
         };
     }
 
@@ -221,6 +246,8 @@ pub const LibraryDatabase = struct {
     }
 
     pub fn close(self: *LibraryDatabase) void {
+        self.connections.reader.close();
+        self.allocator.destroy(self.connections);
         self.database.close();
         self.allocator.destroy(self.write_lane);
         if (self.backup_directory) |directory| self.allocator.free(directory);
@@ -233,7 +260,18 @@ pub const LibraryDatabase = struct {
     /// Opens an independent read connection suitable for a bounded query or
     /// snapshot. The caller owns the returned connection.
     pub fn openReader(self: *const LibraryDatabase) !sqlite.Database {
-        return sqlite.Database.openReadOnly(self.path);
+        var reader = try sqlite.Database.openReadOnly(self.path);
+        reader.io = self.database.io;
+        return reader;
+    }
+
+    /// The handle whose use the write lane selects: the writer for a thread
+    /// that holds the lane, the reader for every other thread. Raw-SQL reads
+    /// that may run either way (Home, Daily Mixes, the metadata-issue surface)
+    /// use this so a lane-less read sees committed rows; open-time setup and
+    /// flows that know they hold the lane keep using `database` directly.
+    pub fn queryDatabase(self: *const LibraryDatabase) sqlite.Database {
+        return .{ .handle = self.database.handle, .connections = self.connections };
     }
 
     /// The volume a path lives on, asking the platform adapter and falling back
@@ -4882,4 +4920,118 @@ test "a read in progress survives a root removal" {
     const removal = try probe.library.library_roots.remove(std.testing.allocator, probe.removable_root_id);
     removal.deinit();
     try probe.finish();
+}
+
+const PinnedWrite = struct {
+    library: *LibraryDatabase,
+    inserting: *std.atomic.Value(bool),
+    release: *std.atomic.Value(bool),
+    failed: *std.atomic.Value(bool),
+    wait_for_release: bool,
+    hold_ms: u32,
+
+    fn run(self: PinnedWrite) void {
+        self.library.write_lane.acquire();
+        defer self.library.write_lane.release();
+        self.library.database.exec("BEGIN IMMEDIATE;") catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.library.database.exec("INSERT INTO tracks(title) VALUES ('Uncommitted');") catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.inserting.store(true, .release);
+        var waited: u32 = 0;
+        while (!self.release.load(.acquire) and (self.wait_for_release or waited < self.hold_ms)) : (waited += 1) {
+            const pause: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+            _ = std.c.nanosleep(&pause, null);
+        }
+        self.library.database.exec("ROLLBACK;") catch self.failed.store(true, .release);
+    }
+};
+
+fn expectLaneLessReadHidesOpenWrite(library: *LibraryDatabase, wait_for_release: bool, hold_ms: u32) !void {
+    try library.tracks.upsertTracks(&.{.{ .title = "Committed" }});
+    const committed = try library.tracks.count();
+
+    var inserting: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+    var failed: std.atomic.Value(bool) = .init(false);
+    const thread = try std.Thread.spawn(.{}, PinnedWrite.run, .{PinnedWrite{
+        .library = library,
+        .inserting = &inserting,
+        .release = &release,
+        .failed = &failed,
+        .wait_for_release = wait_for_release,
+        .hold_ms = hold_ms,
+    }});
+    var joined = false;
+    defer if (!joined) {
+        release.store(true, .release);
+        thread.join();
+    };
+    while (!inserting.load(.acquire)) {
+        const pause: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&pause, null);
+    }
+    const during = try library.tracks.count();
+    const raw_during = raw: {
+        var statement = try library.queryDatabase().prepare("SELECT count(*) FROM tracks;");
+        defer statement.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+        break :raw @as(u64, @intCast(statement.columnInt64(0)));
+    };
+    release.store(true, .release);
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(committed, during);
+    try std.testing.expectEqual(committed, raw_during);
+    try std.testing.expect(!failed.load(.acquire));
+    try std.testing.expectEqual(committed, try library.tracks.count());
+}
+
+test "a lane-less read during an open write transaction sees only committed rows" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/library.db",
+        .{temporary.sub_path},
+        0,
+    );
+    defer std.testing.allocator.free(path);
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, path);
+    defer library.close();
+    try expectLaneLessReadHidesOpenWrite(&library, true, 0);
+}
+
+test "a lane-less read during an open write transaction on an in-memory shared-cache library sees only committed rows" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-reader-isolation-memory?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try expectLaneLessReadHidesOpenWrite(&library, false, 200);
+}
+
+test "an under-lane read sees its own uncommitted transaction through a repository" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-reader-isolation-under-lane?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.tracks.upsertTracks(&.{.{ .title = "Committed" }});
+    const committed = try library.tracks.count();
+
+    library.write_lane.acquire();
+    defer library.write_lane.release();
+    try library.database.exec("BEGIN IMMEDIATE;");
+    errdefer library.database.exec("ROLLBACK;") catch {};
+    try library.database.exec("INSERT INTO tracks(title) VALUES ('Uncommitted');");
+    try std.testing.expectEqual(committed + 1, try library.tracks.count());
+    try library.database.exec("ROLLBACK;");
+    try std.testing.expectEqual(committed, try library.tracks.count());
 }

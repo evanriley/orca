@@ -906,7 +906,7 @@ pub const OrcaRuntime = struct {
                 undecodableFormats(),
             ),
             .covers = try database.repository.measurableCoverCount(
-                library_database.database,
+                library_database.queryDatabase(),
                 availability.offline_ids,
             ),
         };
@@ -1304,13 +1304,13 @@ pub const OrcaRuntime = struct {
         offset: u32,
     ) !database.ReleaseArtworkProblemPage {
         const library_database = try libraryDatabase(self, library);
-        return database.repository.releaseArtworkProblemPage(library_database.database, self.allocator, limit, offset);
+        return database.repository.releaseArtworkProblemPage(library_database.queryDatabase(), self.allocator, limit, offset);
     }
 
     /// How many Releases `libraryArtworkProblemReleasePage` pages through.
     pub fn libraryArtworkProblemReleaseCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         const library_database = try libraryDatabase(self, library);
-        return database.repository.releaseArtworkProblemCount(library_database.database);
+        return database.repository.releaseArtworkProblemCount(library_database.queryDatabase());
     }
 
     /// Asks for a cover without waiting for it. The lookup runs on the

@@ -9,11 +9,15 @@ const std = @import("std");
 pub const WriteLane = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
+    /// The thread that holds the lane, or 0 when no one does. `Id` is an
+    /// integer on every platform, so the atomic load is portable.
+    owner: std.atomic.Value(std.Thread.Id) = .init(0),
 
     /// Uncancelable on purpose: a half-applied write transaction is not a state
     /// this lane is allowed to leave behind.
     pub fn acquire(self: *WriteLane) void {
         self.mutex.lockUncancelable(self.io);
+        self.owner.store(std.Thread.getCurrentId(), .release);
     }
 
     /// Takes the lane only if it is free. For a writer that would rather skip
@@ -21,10 +25,21 @@ pub const WriteLane = struct {
     /// since a job worker holds this lane across a whole batch commit and a
     /// producer parked behind one starves the render callback into underruns.
     pub fn tryAcquire(self: *WriteLane) bool {
-        return self.mutex.tryLock();
+        if (!self.mutex.tryLock()) return false;
+        self.owner.store(std.Thread.getCurrentId(), .release);
+        return true;
     }
 
     pub fn release(self: *WriteLane) void {
+        self.owner.store(0, .release);
         self.mutex.unlock(self.io);
+    }
+
+    /// Which connection a Database built on this lane should use: the holder's
+    /// own writes are the only ones it may see. A thread that does not hold
+    /// the lane is not the owner, whatever any other thread stored.
+    pub fn heldByCurrentThread(self: *const WriteLane) bool {
+        const owner = self.owner.load(.acquire);
+        return owner != 0 and owner == std.Thread.getCurrentId();
     }
 };

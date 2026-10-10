@@ -11,7 +11,9 @@ that carry identity or a contract.
 A Library is one SQLite database file at a path the caller gives
 `Runtime.openLibrary`; `orca-gtk` uses `$XDG_DATA_HOME/orca/library.db` unless
 `ORCA_LIBRARY` names another. Each `LibraryDatabase` owns one write connection,
-one serialized write lane and independent read-only connections for snapshots.
+one read-only connection selected by write-lane ownership, and one serialized
+write lane. `openReader()` remains for a caller that wants an independent
+read-only connection for a bounded query or a longer-lived snapshot.
 The path is copied at open. `Runtime.openLibrary` associates the database with a
 typed generational `LibraryHandle`; explicit removal or ordered runtime shutdown
 closes it.
@@ -37,16 +39,35 @@ lock; when another process holds it, recovery is deferred to the next holder.
 
 ## Concurrency
 
-- The primary connection uses WAL and `synchronous=NORMAL`. Every connection
-  sets `foreign_keys=ON`, a five-second busy timeout and SQLite's full-mutex
-  mode.
+- A Library opens two connections to the same file (or shared cache): the
+  primary write connection and a read-only connection. Every connection sets
+  `foreign_keys=ON`, a five-second busy timeout and SQLite's full-mutex mode.
+- Which connection a call uses is chosen inside the database layer, not at the
+  call site. A thread that holds the write lane reads and writes through the
+  primary connection, so a flow inside a write transaction sees its own
+  uncommitted rows. Every other thread reads through the read-only connection,
+  so it sees only committed rows. Open-time setup (migrations, recovery, TEMP
+  scratch creation) and raw SQL that writes use the primary connection
+  directly; every other raw-SQL read goes through the same ownership-selected
+  handle as repository reads.
+- A file Library uses WAL and `synchronous=NORMAL`, so a read-only connection
+  sees a per-statement snapshot of committed state: never a batch's in-flight
+  rows, never a half-applied transaction.
+- An in-memory `cache=shared` Library has no WAL; SQLite isolates its
+  connections with table locks instead. A read against an open write
+  transaction, or a write against a reader holding the table, gets
+  `SQLITE_LOCKED`, which the busy handler does not cover, so the statement
+  waits it out for up to five seconds and never surfaces it.
 - The primary connection creates the scratch TEMP tables of sweeps, cache
   clears and root removal when it opens, and those paths only empty and fill
-  them. A TEMP schema change on a connection expires every statement prepared
-  on it, which aborts a read in progress on another thread.
+  them. They are per-connection objects, so every query that touches one runs
+  under the write lane on the primary. A TEMP schema change on a connection
+  expires every statement prepared on it, which aborts a read in progress on
+  another thread.
 - One write lane (`std.Io.Mutex`, futex-backed, not a spinlock) serializes
   complete write transactions. A scan holds it across one bounded 256-row
-  transaction while UI threads read.
+  transaction while UI threads read committed state on the read-only
+  connection.
 - One process at a time owns the mutation journal: the holder of an exclusive
   `flock` on `<database>.orca-journal.lock`, taken without waiting by open's
   recovery and by each tag write, undo and prune

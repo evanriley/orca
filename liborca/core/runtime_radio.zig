@@ -288,7 +288,7 @@ fn startSession(
         .continued = continued,
         .jitter_seed = std.hash.Wyhash.hash(@bitCast(now.mono_ms), std.mem.asBytes(&player)),
     };
-    session.title_len = try readSeedTitle(library_database.database, seed, &session.title_buffer);
+    session.title_len = try readSeedTitle(library_database.queryDatabase(), seed, &session.title_buffer);
 
     const object_value = try self.players.get(player);
     if (object_value.radio != null) {
