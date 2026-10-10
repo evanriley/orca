@@ -281,6 +281,7 @@ pub const ReleaseApplyTrack = repository.ReleaseApplyTrack;
 pub const ReleaseApplyPlan = repository.ReleaseApplyPlan;
 pub const ReleaseField = repository.ReleaseField;
 pub const ReleaseFieldSet = repository.ReleaseFieldSet;
+pub const ReleaseIdentity = repository.ReleaseIdentity;
 pub const ReleaseMatchProposal = repository.ReleaseMatchProposal;
 pub const ReleaseMatchTrack = repository.ReleaseMatchTrack;
 pub const ReleaseMatchView = repository.ReleaseMatchView;

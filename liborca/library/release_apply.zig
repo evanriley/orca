@@ -98,7 +98,7 @@ pub fn apply(
     outcome.values_written = try library.identification_proposals.applyReleasePlanLocked(allocator, &.{
         .tracklist = &planned.tracklist.record,
         .tracks = planned.apply_tracks.items,
-    }, fields, false, written);
+    }, fields, false, null, written);
     try library.database.exec("COMMIT;");
     return outcome;
 }
@@ -225,7 +225,7 @@ pub fn applySnapshotToDiff(
         row.candidate_title = try owned.dupe(u8, on_release.title);
         row.candidate_artist = try owned.dupe(u8, on_release.artist_credit);
         row.delta_ms = lengthDelta(track.duration_ms, on_release.length_ms);
-        row.differs = try differingValues(allocator, library, &planned, &.{apply_track.?}, .initOne(.track_titles)) != 0;
+        row.differs = try differingValues(allocator, library, &planned, &.{apply_track.?}, .initOne(.track_titles), null) != 0;
         if (row.differs) titles_differ += 1;
     }
     diff.aligned = placed;
@@ -245,7 +245,14 @@ pub fn applySnapshotToDiff(
             .release_type, .genre, .artwork => continue,
         };
         field_diff.candidate = try owned.dupe(u8, candidate);
-        field_diff.differs = try differingValues(allocator, library, &planned, planned.apply_tracks.items, .initOne(field_diff.field)) != 0;
+        field_diff.differs = try differingValues(
+            allocator,
+            library,
+            &planned,
+            planned.apply_tracks.items,
+            .initOne(field_diff.field),
+            if (field_diff.field == .release_id) &field_diff.identity else null,
+        ) != 0;
     }
 }
 
@@ -293,11 +300,12 @@ fn differingValues(
     planned: *const Plan,
     tracks: []const database.ReleaseApplyTrack,
     fields: database.ReleaseFieldSet,
+    identity: ?*database.ReleaseIdentity,
 ) !u32 {
     return library.identification_proposals.applyReleasePlanLocked(allocator, &.{
         .tracklist = &planned.tracklist.record,
         .tracks = tracks,
-    }, fields, true, null);
+    }, fields, true, identity, null);
 }
 
 fn fallbackPosition(track: *const database.ReleaseMatchTrack, index: usize) u32 {

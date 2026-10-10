@@ -967,6 +967,20 @@ pub const ReleaseField = enum(u8) {
     track_titles,
 };
 
+/// How many Tracks an Apply of `ReleaseField.release_id` would change a
+/// value on, by the kind of value, saturating at 255. The album-level counts
+/// are per Track with a play file; the rest are per Track its release track
+/// places.
+pub const ReleaseIdentity = struct {
+    release: u8 = 0,
+    release_group: u8 = 0,
+    album_artist: u8 = 0,
+    release_track: u8 = 0,
+    recording: u8 = 0,
+    /// Disc and track numbers together, counted once per Track.
+    numbers: u8 = 0,
+};
+
 /// The fields an apply stores. `release_type`, `genre` and `artwork` are
 /// compared but never stored: a release lookup gives no value for the first
 /// two, and a cover comes from the Cover Art Archive fetch.
@@ -2401,6 +2415,17 @@ pub const IdentificationProposalRepository = struct {
         }
     }
 
+    /// Which `ReleaseIdentity` categories one Track's files changed a value
+    /// in.
+    const IdentityBits = struct {
+        release: bool = false,
+        release_group: bool = false,
+        album_artist: bool = false,
+        release_track: bool = false,
+        recording: bool = false,
+        numbers: bool = false,
+    };
+
     /// Stores `fields` of `plan`'s snapshot, locked, on every file of each
     /// of its Tracks, for a caller holding the write lane and an open
     /// transaction. The release's own values go to every Track; a placed
@@ -2410,13 +2435,16 @@ pub const IdentificationProposalRepository = struct {
     /// alone when the snapshot does not know the credit's artist IDs, and
     /// the album artist ID also unless it credits one artist. Returns how
     /// many values were stored, or with `dry_run`, stores nothing and
-    /// returns how many would change the value in effect.
+    /// returns how many would change the value in effect. With `identity`,
+    /// counts per Track the categories of `release_id` a dry run would
+    /// change.
     pub fn applyReleasePlanLocked(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         plan: *const ReleaseApplyPlan,
         fields: ReleaseFieldSet,
         dry_run: bool,
+        identity: ?*ReleaseIdentity,
         written: ?*std.ArrayList(i64),
     ) !u32 {
         var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -2431,6 +2459,8 @@ pub const IdentificationProposalRepository = struct {
         defer writer.deinit();
         writer.dry_run = dry_run;
         for (plan.tracks) |track| {
+            const placed = track.placed;
+            var identity_bits: IdentityBits = .{};
             for (try self.filesOfTracks(scratch, &.{track.track_id}, track.play_file)) |file_id| {
                 if (fields.contains(.album)) try writer.text(file_id, .album, tracklist.title);
                 if (fields.contains(.album_artist)) {
@@ -2439,21 +2469,44 @@ pub const IdentificationProposalRepository = struct {
                 }
                 if (fields.contains(.release_date)) try writer.text(file_id, .date, tracklist.release_date);
                 if (fields.contains(.release_id)) {
+                    var before = writer.values_written;
                     try writer.text(file_id, .musicbrainz_release_id, tracklist.release_mbid);
+                    if (writer.values_written != before) identity_bits.release = true;
+                    before = writer.values_written;
                     try writer.text(file_id, .musicbrainz_release_group_id, tracklist.release_group_mbid);
+                    if (writer.values_written != before) identity_bits.release_group = true;
+                    before = writer.values_written;
                     try writer.text(file_id, .musicbrainz_album_artist_id, album_artist_mbid);
+                    if (writer.values_written != before) identity_bits.album_artist = true;
                 }
-                const placed = track.placed orelse continue;
-                if (fields.contains(.release_id)) {
-                    try writer.number(file_id, .disc_number, placed.disc);
-                    try writer.number(file_id, .track_number, placed.position);
-                    try writer.text(file_id, .musicbrainz_release_track_id, placed.release_track_mbid);
-                    try writer.text(file_id, .musicbrainz_recording_id, placed.recording_mbid);
+                if (placed) |placed_track| {
+                    if (fields.contains(.release_id)) {
+                        var before = writer.values_written;
+                        try writer.number(file_id, .disc_number, placed_track.disc);
+                        if (writer.values_written != before) identity_bits.numbers = true;
+                        before = writer.values_written;
+                        try writer.number(file_id, .track_number, placed_track.position);
+                        if (writer.values_written != before) identity_bits.numbers = true;
+                        before = writer.values_written;
+                        try writer.text(file_id, .musicbrainz_release_track_id, placed_track.release_track_mbid);
+                        if (writer.values_written != before) identity_bits.release_track = true;
+                        before = writer.values_written;
+                        try writer.text(file_id, .musicbrainz_recording_id, placed_track.recording_mbid);
+                        if (writer.values_written != before) identity_bits.recording = true;
+                    }
+                    if (fields.contains(.track_titles)) {
+                        try writer.text(file_id, .title, placed_track.title);
+                        try writer.text(file_id, .artist, placed_track.artist_credit);
+                    }
                 }
-                if (fields.contains(.track_titles)) {
-                    try writer.text(file_id, .title, placed.title);
-                    try writer.text(file_id, .artist, placed.artist_credit);
-                }
+            }
+            if (identity) |counts| {
+                if (identity_bits.release) counts.release +|= 1;
+                if (identity_bits.release_group) counts.release_group +|= 1;
+                if (identity_bits.album_artist) counts.album_artist +|= 1;
+                if (identity_bits.release_track) counts.release_track +|= 1;
+                if (identity_bits.recording) counts.recording +|= 1;
+                if (identity_bits.numbers) counts.numbers +|= 1;
             }
             if (dry_run or !fields.contains(.release_id)) continue;
             const proposal_id = track.accept orelse continue;

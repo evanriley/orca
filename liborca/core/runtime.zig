@@ -570,6 +570,7 @@ pub const LeftAloneTrack = library_pass.release_apply.LeftAloneTrack;
 pub const LeftAloneReason = library_pass.release_apply.LeftAloneReason;
 pub const ReleaseField = database.ReleaseField;
 pub const ReleaseFieldSet = database.ReleaseFieldSet;
+pub const ReleaseIdentity = database.ReleaseIdentity;
 pub const MatchEvidence = library_pass.matching.MatchEvidence;
 pub const ReleaseFieldDiff = library_pass.matching.ReleaseFieldDiff;
 pub const ReleaseTrackAlignment = library_pass.matching.ReleaseTrackAlignment;
