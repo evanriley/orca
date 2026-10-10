@@ -8,6 +8,7 @@ const albums = @import("albums.zig");
 const artist_page = @import("artist_page.zig");
 const details = @import("details.zig");
 const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
 const menu = @import("menu.zig");
 const playlists = @import("playlists.zig");
 const settings = @import("settings.zig");
@@ -48,6 +49,8 @@ const Summary = struct {
 const Track = struct {
     target: feedback.Target,
     row: ?*gtk.Widget = null,
+    stars: ?*gtk.Widget = null,
+    heart: ?*gtk.Widget = null,
 };
 
 pub const State = struct {
@@ -632,6 +635,21 @@ fn artistActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv
     artist_page.openArtist(self, navigation, self.genres.artist_ids[position]);
 }
 
+fn trackStarClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const stars = ratings.starsOf(button) orelse return;
+    const position = marked(stars) orelse return;
+    if (position >= self.genres.track_count) return;
+    ratings.change(self, &.{self.genres.tracks[position].target}, ratings.chosen(button));
+}
+
+fn trackHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const position = marked(button) orelse return;
+    if (position >= self.genres.track_count) return;
+    feedback.toggle(self, self.genres.tracks[position].target);
+}
+
 fn trackRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
     gtk.gtk_widget_add_css_class(row, "artist-track-row");
@@ -654,12 +672,22 @@ fn trackRow(self: *App, summary: liborca.TrackSummary, position: usize) *gtk.Wid
     gtk.gtk_widget_add_css_class(duration_label, "numeric");
     gtk.gtk_widget_add_css_class(duration_label, "artist-track-duration");
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), titles);
+    const stars = ratings.newRowStars(gtk.callback(trackStarClicked), self);
+    ratings.show(stars, summary.rating);
+    markPosition(stars, position);
+    const heart = feedback.newRowButton(gtk.callback(trackHeartClicked), self);
+    feedback.showRowButton(heart, summary.feedback);
+    markPosition(heart, position);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), stars);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), heart);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), duration_label);
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
     self.genres.tracks[position] = .{
         .target = .{ .track_id = summary.id, .recording_id = summary.recording_id, .feedback = summary.feedback },
         .row = row,
+        .stars = stars,
+        .heart = heart,
     };
     self.genres.track_ids[position] = summary.id;
     return row;
@@ -731,13 +759,16 @@ fn trackKeyPressed(_: ?*anyopaque, keyval: c_uint, _: c_uint, modifiers: c_uint,
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
-    const value = switch (change) {
-        .feedback => |value| value,
-        .rating => return,
-    };
     for (self.genres.tracks[0..self.genres.track_count]) |*track| {
         const recording = track.target.recording_id orelse continue;
-        if (changed.contains(recording)) track.target.feedback = value;
+        if (!changed.contains(recording)) continue;
+        switch (change) {
+            .feedback => |value| {
+                track.target.feedback = value;
+                if (track.heart) |heart| feedback.showRowButton(heart, value);
+            },
+            .rating => |value| if (track.stars) |stars| ratings.show(stars, value),
+        }
     }
 }
 

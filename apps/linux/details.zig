@@ -31,6 +31,9 @@ const artists = @import("artists.zig");
 const artist_page = @import("artist_page.zig");
 const tag_editor = @import("tags.zig");
 const playlists = @import("playlists.zig");
+const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
+const track_model = @import("track_model.zig");
 
 const App = app.App;
 
@@ -184,6 +187,10 @@ pub const Panel = struct {
     caution: *gtk.Widget,
     caution_key: ?CautionKey = null,
     caution_shown: bool = false,
+    opinion_section: *gtk.Widget,
+    opinion_stars: *gtk.Widget,
+    opinion_heart: *gtk.Widget,
+    opinion_target: feedback.Target = .{ .track_id = 0, .recording_id = null, .feedback = .none },
     album_view: Album,
     signal_status: *gtk.Label,
     signal_content: *gtk.Widget,
@@ -530,6 +537,9 @@ fn show(panel: *Panel, track_id: ?i64) void {
         return showPlaceholder(panel);
     defer details.deinit();
     populate(panel, details);
+    const summary = (self.runtime.libraryTrackSummary(library, id) catch null);
+    defer if (summary) |found| found.deinit(self.allocator);
+    populateOpinion(panel, summary);
     showOnly(panel, panel.content);
 }
 
@@ -1188,6 +1198,45 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
         .modified_at = details.modified_at,
         .metadata = metadataHash(details),
     });
+}
+
+fn populateOpinion(panel: *Panel, summary: ?liborca.TrackSummary) void {
+    const self = panel.self;
+    if (summary) |found| {
+        const value = if (panel.shown) |shown| if (shown == self.shown_track_id) self.shown_feedback else found.feedback else found.feedback;
+        panel.opinion_target = .{ .track_id = found.id, .recording_id = found.recording_id, .feedback = value };
+        ratings.show(panel.opinion_stars, found.rating);
+        feedback.showRowButton(panel.opinion_heart, value);
+        gtk.gtk_widget_set_visible(panel.opinion_section, gtk.true_);
+        return;
+    }
+    panel.opinion_target = .{ .track_id = 0, .recording_id = null, .feedback = .none };
+    gtk.gtk_widget_set_visible(panel.opinion_section, gtk.false_);
+}
+
+fn opinionStarClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    if (panel.opinion_target.track_id == 0) return;
+    ratings.change(panel.self, &.{panel.opinion_target}, ratings.chosen(button));
+}
+
+fn opinionHeartClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    if (panel.opinion_target.track_id == 0) return;
+    feedback.toggle(panel.self, panel.opinion_target);
+}
+
+pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
+    const panel = self.inspector orelse return;
+    const recording = panel.opinion_target.recording_id orelse return;
+    if (!changed.contains(recording)) return;
+    switch (change) {
+        .feedback => |value| {
+            panel.opinion_target.feedback = value;
+            feedback.showRowButton(panel.opinion_heart, value);
+        },
+        .rating => |value| ratings.show(panel.opinion_stars, value),
+    }
 }
 
 const CautionKey = struct {
@@ -2210,13 +2259,20 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         modified_row.root,
     }, copy_button);
 
+    const opinion_stars = ratings.newRowStars(gtk.callback(opinionStarClicked), panel);
+    const opinion_heart = feedback.newRowButton(gtk.callback(opinionHeartClicked), panel);
+    const opinion_controls = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, opinion_controls), opinion_stars);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, opinion_controls), opinion_heart);
+    const opinion_section = newSection(feedback.outline_icon, "Opinion", &.{opinion_controls}, null);
+
     const album_view = newAlbum(panel);
     const artist_view = newArtistView(panel);
     const playlist_view = newPlaylistView(panel);
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, file_section, caution }) |section|
+    for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, opinion_section, file_section, caution }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
 
     const placeholder = gtk.gtk_label_new("Select a track to see its details.");
@@ -2353,6 +2409,9 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         .modified_row = modified_row,
         .copy_button = copy_button,
         .caution = caution,
+        .opinion_section = opinion_section,
+        .opinion_stars = opinion_stars,
+        .opinion_heart = opinion_heart,
         .album_view = album_view,
         .artist_view = artist_view,
         .playlist_view = playlist_view,

@@ -18,6 +18,8 @@ const nowplaying = @import("nowplaying.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
 const genres = @import("genres.zig");
+const home = @import("home.zig");
+const details = @import("details.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -197,6 +199,8 @@ pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_
     playlists.repaint(self, changed, change_value);
     loved.repaint(self, changed, change_value);
     genres.repaint(self, changed, change_value);
+    home.repaint(self, changed, change_value);
+    details.repaint(self, changed, change_value);
 }
 
 /// Replaces, in place, each row of `store` whose recording changed, with a copy

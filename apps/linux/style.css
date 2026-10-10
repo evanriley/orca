@@ -4058,7 +4058,15 @@ row:selected button.row-heart {
 .row-stars:focus-within,
 row:hover .row-stars,
 row:selected .row-stars,
-.queue-row:hover .row-stars {
+.queue-row:hover .row-stars,
+.queue-row:focus-within .row-stars,
+.artist-track-row:hover .row-stars,
+.artist-track-row:selected .row-stars,
+.artist-track .row-stars:focus-within,
+.daily-mix-row:hover .row-stars,
+.daily-mix-row:focus-within .row-stars,
+.now-up-next:hover .row-stars,
+.now-up-next .row-stars:focus-within {
   opacity: 1;
 }
 

@@ -66,6 +66,7 @@ pub const State = struct {
 
 var up_next_targets: [up_next_rows]feedback.Target = undefined;
 var up_next_hearts: [up_next_rows]*gtk.Widget = undefined;
+var up_next_stars: [up_next_rows]*gtk.Widget = undefined;
 var up_next_shown: usize = 0;
 var stars: ?*gtk.Widget = null;
 var stars_recording: ?i64 = null;
@@ -520,6 +521,13 @@ fn upNextHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void 
     feedback.toggle(state(data), up_next_targets[marked - 1]);
 }
 
+fn upNextStarClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const star_row = ratings.starsOf(button) orelse return;
+    const marked = @intFromPtr(gtk.g_object_get_data(star_row, "orca-position"));
+    if (marked == 0 or marked > up_next_shown) return;
+    ratings.change(state(data), &.{up_next_targets[marked - 1]}, ratings.chosen(button));
+}
+
 pub fn repaint(changed: *const feedback.Recordings, change: track_model.Change) void {
     switch (change) {
         .feedback => |value| for (up_next_targets[0..up_next_shown], up_next_hearts[0..up_next_shown]) |*target, heart| {
@@ -529,8 +537,12 @@ pub fn repaint(changed: *const feedback.Recordings, change: track_model.Change) 
             feedback.showRowButton(heart, value);
         },
         .rating => |value| {
-            const recording = stars_recording orelse return;
-            if (changed.contains(recording)) ratings.show(stars orelse return, value);
+            if (stars_recording) |recording| if (changed.contains(recording)) if (stars) |rating| ratings.show(rating, value);
+            for (up_next_targets[0..up_next_shown], up_next_stars[0..up_next_shown]) |*target, star_row| {
+                const recording = target.recording_id orelse continue;
+                if (!changed.contains(recording)) continue;
+                ratings.show(star_row, value);
+            }
         },
     }
 }
@@ -697,6 +709,12 @@ fn upNextRow(self: *App, entry: liborca.QueueTrack, position: u32, current: bool
         .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback }
     else
         .{ .track_id = entry.id, .recording_id = null, .feedback = .none };
+    const row_stars = ratings.newRowStars(gtk.callback(upNextStarClicked), self);
+    ratings.show(row_stars, if (entry.track) |item| item.rating else null);
+    gtk.gtk_widget_set_visible(row_stars, boolean(entry.track != null));
+    gtk.gtk_widget_set_valign(row_stars, gtk.ALIGN_CENTER);
+    gtk.g_object_set_data(row_stars, "orca-position", @ptrFromInt(slot + 1));
+    append(row, row_stars);
     const heart = feedback.newRowButton(gtk.callback(upNextHeartClicked), self);
     feedback.showRowButton(heart, target.feedback);
     gtk.gtk_widget_set_visible(heart, boolean(entry.track != null));
@@ -715,5 +733,6 @@ fn upNextRow(self: *App, entry: liborca.QueueTrack, position: u32, current: bool
 
     up_next_targets[slot] = target;
     up_next_hearts[slot] = heart;
+    up_next_stars[slot] = row_stars;
     return list_row;
 }

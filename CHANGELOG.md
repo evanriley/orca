@@ -37,6 +37,11 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
   measurement set; `orca-cli stats` prints it. When analyzed files lack a
   measurement, `orca-gtk` shows a banner naming it with Analyze and a close
   control; a dismissed banner returns only when the measurement set changes.
+- **`orca-gtk` shows ratings and love on every track row.** Queue now, next,
+  history and radio picks; Now Playing's Up Next; artist and genre Top
+  Tracks; Home's Daily Mix rows; and the inspector's track view all carry the
+  five-star rating and the heart, hidden for a track that left the library.
+  A rating or love change repaints every open surface.
 
 ### Fixed
 
