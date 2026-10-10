@@ -525,9 +525,10 @@ section lists the entry points, errors and limits.
   null when it does not exist, for naming an `often_after` reason; the caller
   frees it with `deinit(allocator)`.
 - `playerStartRadio(player, library, seed, options)` starts a Library Radio
-  session on a Player bound to `library`, replacing any it had. The playing
-  entry and the user's queued entries stay; an idle Player plays a Track seed
-  at once, or another seed's first pick when it arrives. Picks are ranked on a
+  session on a Player bound to `library`, replacing any it had and the entries
+  queued after the playing entry. The playing entry stays and the picks follow
+  it; an idle Player's queue is emptied, then a Track seed plays at once, or
+  another seed's first pick when it arrives. Picks are ranked on a
   worker and kept `max_radio_pending` (8) ahead, topped up from `pump`; an
   enqueue lands before the first pick not yet committed to. Seed and options
   fail as for the preview. `playerStopRadio` ends the session and removes its

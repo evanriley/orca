@@ -323,6 +323,33 @@ pub fn playerQueueRemove(self: *OrcaRuntime, player: PlayerHandle, position: u32
     if (engine) |value| value.refreshSharedRelease();
 }
 
+/// Starting Radio replaces the upcoming queue: with audio held, every entry
+/// past the engine's committed span (cursor, decode-ahead and any opened
+/// successor) is removed; idle, every entry is removed.
+pub fn clearUpcoming(self: *OrcaRuntime, object_value: *PlayerObject) !void {
+    _ = self;
+    const queue = object_value.queue;
+    const engine = object_value.engine;
+    if (engine) |value| value.quiesce();
+    defer if (engine) |value| value.release();
+    const pending: ?*u32 = if (engine) |value|
+        (if (value.pending_source != null) &value.pending_position else null)
+    else
+        null;
+    var floor: u32 = 0;
+    const holds_audio = object_value.player.sources != null;
+    var committed = queue.cursorPosition();
+    if (holds_audio) committed = @max(committed, queue.decodePosition());
+    if (pending) |value| committed = @max(committed, value.*);
+    if (holds_audio) floor = committed + 1;
+    var position = queue.len();
+    while (position > floor) {
+        position -= 1;
+        try queue.removeAt(position, pending);
+    }
+    if (engine) |value| value.refreshSharedRelease();
+}
+
 pub fn playerQueueMove(self: *OrcaRuntime, player: PlayerHandle, from: u32, to: u32) !void {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);

@@ -135,6 +135,11 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Changed
 
+- **Starting Radio replaces the upcoming queue.** `playerStartRadio` removes
+  every entry queued after the playing one, and an idle Player's whole queue,
+  so a mid-album Player's picks follow the playing entry instead of the rest
+  of the album. Entries enqueued during a session still land before the first
+  pick not yet committed to.
 - Library schema version 4. Opening an older Library upgrades it in place
   in one transaction, rebuilding `player_queue_entries` to add its foreign
   keys and, from version 2, the Daily Mix tables (their mixes are made again

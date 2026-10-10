@@ -195,10 +195,11 @@ most one session, and it is never saved.
 
 `playerStartRadio(player, library, seed, options)` needs a Player bound to
 `library` and replaces any session the Player had, removing that session's
-pending picks. The playing entry and the user's queued entries stay. On an
-idle Player a `track` seed is appended and plays at once; any other seed plays
-its first pick when it arrives. The call reads the seed's title and returns;
-picks are ranked on a worker thread.
+pending picks and the entries queued after the playing entry, so the picks
+follow it; an idle Player's whole queue is emptied. On an idle Player a
+`track` seed is appended and plays at once; any other seed plays its first
+pick when it arrives. The call reads the seed's title and returns; picks are
+ranked on a worker thread.
 
 ### Picks and top-ups
 

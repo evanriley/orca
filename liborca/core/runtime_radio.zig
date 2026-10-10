@@ -295,6 +295,7 @@ fn startSession(
         try removePendingPicks(self, object_value);
         endSession(self, object_value);
     }
+    try runtime_queue.clearUpcoming(self, object_value);
     const idle = object_value.player.sources == null;
     if (idle) switch (seed) {
         .track => |track_id| try playSeedTrack(self, player, library, track_id),
