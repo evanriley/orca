@@ -1146,7 +1146,6 @@ fn measureBar(
         var column_natural: c_int = 0;
         gtk.gtk_widget_measure(column, orientation, -1, &column_minimum, &column_natural, null, null);
         if (horizontal) {
-            minimum.* += column_minimum;
             natural.* += column_natural;
         } else {
             minimum.* = @max(minimum.*, column_minimum);

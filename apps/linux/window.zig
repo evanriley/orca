@@ -1384,6 +1384,7 @@ fn narrowTables(self: *App, narrow: bool) void {
 fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.window) |w| gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, w), "narrow");
+    self.window_narrow = true;
     page_ui.setCompact(self, true);
     details.setNarrow(self, true);
     narrowTables(self, true);
@@ -1399,6 +1400,7 @@ fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.window) |w| gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, w), "narrow");
+    self.window_narrow = false;
     page_ui.setCompact(self, false);
     details.setNarrow(self, false);
     narrowTables(self, false);
@@ -1516,6 +1518,8 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     self.toasts = gtk.cast(adw.ToastOverlay, overlay);
     adw.adw_toast_overlay_set_child(self.toasts.?, first_run.wrap(self, root));
     adw.adw_application_window_set_content(gtk.cast(adw.ApplicationWindow, window), palette.wrapWindow(self, overlay));
+    // The first-run flow's hidden pages are much wider than the shell; a homogeneous stack would leak their minimum into every window.
+    gtk.gtk_stack_set_hhomogeneous(self.first_run.shell.?, gtk.false_);
     overlayInspectorWhenCrowded(self, window);
     compactWhenNarrow(self, window);
     adaptWhenNarrow(self, window, split);

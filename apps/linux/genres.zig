@@ -79,6 +79,7 @@ pub const State = struct {
     release_count: usize = 0,
     artist_ids: [artist_limit]i64 = @splat(0),
     artist_count: usize = 0,
+    pair: ?*gtk.Widget = null,
     tracks: [track_limit]Track = undefined,
     track_ids: [track_limit]i64 = @splat(0),
     track_count: usize = 0,
@@ -851,6 +852,7 @@ fn buildDetail(self: *App, bin: *gtk.Widget) *gtk.Widget {
     gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, pair), gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, pair), artist_section);
     gtk.gtk_box_append(gtk.cast(gtk.Box, pair), track_section);
+    self.genres.pair = pair;
     gtk.gtk_box_append(gtk.cast(gtk.Box, detail), pair);
     stackBelow(bin, "max-width: 950px", pair, null);
     return detail;
@@ -902,7 +904,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(row, "genre-page");
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), buildIndex(self));
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), buildDetail(self, bin));
-    stackBelow(bin, "max-width: 890px", row, null);
+    stackBelow(bin, "max-width: 890px", row, self.genres.pair);
 
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);

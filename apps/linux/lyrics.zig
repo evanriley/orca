@@ -420,7 +420,8 @@ fn halfPage(adjustment: *gtk.Adjustment) c_int {
 fn applyMargins(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const view: *View = @ptrCast(@alignCast(data.?));
     view.margin_idle = 0;
-    const half = halfPage(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller)));
+    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller)) orelse return gtk.SOURCE_REMOVE;
+    const half = halfPage(adjustment);
     if (half != view.margin) {
         view.margin = half;
         gtk.gtk_widget_set_margin_top(view.list, half);
@@ -540,7 +541,7 @@ fn showSynced(view: *View, lyrics: liborca.Lyrics) void {
         gtk.gtk_list_box_append(list, row);
         view.labels.appendAssumeCapacity(label);
     }
-    gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller)), 0.0);
+    if (gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller))) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0.0);
     gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, view.stack), "synced");
 }
 
@@ -577,7 +578,7 @@ fn centre(view: *View) void {
     if (index >= view.labels.items.len) return;
     var bounds: gtk.Rect = .{};
     if (gtk.gtk_widget_compute_bounds(view.labels.items[index], view.scroller, &bounds) == 0) return;
-    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller));
+    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller)) orelse return;
     const page = gtk.gtk_adjustment_get_page_size(adjustment);
     const middle: f64 = bounds.y + bounds.height / 2;
     const anchor: f64 = switch (view.placement) {

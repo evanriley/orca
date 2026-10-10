@@ -676,7 +676,7 @@ fn scrollToTop(self: *App) void {
     const body = self.albums_body orelse return;
     for ([_][*:0]const u8{ "grid", "list" }) |name| {
         const scroller = gtk.gtk_stack_get_child_by_name(body, name) orelse continue;
-        gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)), 0.0);
+        if (gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller))) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0.0);
     }
 }
 
@@ -1631,7 +1631,7 @@ fn setBuckets(self: *App, buckets: []const liborca.LetterBucket) void {
     if (sections.model) |model| model.set(buckets, sectionColumns(self));
     if (old.len != 0) self.allocator.free(old);
     if (sections.scroller) |scroller|
-        gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)), 0);
+        if (gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller))) |adjustment| gtk.gtk_adjustment_set_value(adjustment, 0);
     showLetters(self);
 }
 

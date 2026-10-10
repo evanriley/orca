@@ -95,6 +95,13 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
   kind 5 failure under the file's quick hash, so matching selects it no
   more while the quick hash holds; `libraryTrackFingerprint` returns
   `ORCA_STATUS_UNSUPPORTED` for it.
+- **`orca-gtk` fits a narrow window.** The window content's minimum width is
+  350 px: the first-run flow no longer floors every window, the player bar
+  reports only its gaps and squeezes its own controls, the inspector and
+  Radio panels fold, and the pages that held fixed widths (Genres, Folders,
+  Health, Matches, the header search and Match tabs) collapse at the 760 px
+  breakpoint. The adaptive layout engages under a tiling window manager, and
+  the scrolled-window adjustment readers guard a missing adjustment.
 
 ### Changed
 

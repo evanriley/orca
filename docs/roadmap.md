@@ -146,10 +146,6 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- `orca-gtk` logs `Gtk-CRITICAL: Allocation width too small. Tried to
-  allocate 183x716, but AdwBin/GtkStack needs at least 214x716` at start,
-  and has logged `gtk_scrolled_window_get_vadjustment` and
-  `gtk_adjustment_get_value` assertions.
 - `watch_smoke` in `tests/c_abi_smoke.c` returns 210 when `./.zig-cache` does
   not exist, as in a fresh tree built with `--cache-dir` elsewhere.
 - Writers use the Library's primary SQLite connection, which queries and other

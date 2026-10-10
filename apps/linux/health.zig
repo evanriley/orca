@@ -150,6 +150,7 @@ const View = struct {
     kind_offset: u32 = 0,
     number: ?*gtk.Label = null,
     unit: ?*gtk.Label = null,
+    tally: ?*gtk.Widget = null,
     detail: ?*gtk.Label = null,
     action: ?*gtk.Widget = null,
     toggle: ?*gtk.Widget = null,
@@ -626,6 +627,8 @@ fn rowWidget(self: *App, row: Row) *gtk.Widget {
     append(tally, &.{ number, unit });
 
     const detail = wrapped(row_info.detail, "health-detail");
+    view.detail = gtk.cast(gtk.Label, detail);
+    view.tally = tally;
     gtk.gtk_label_set_lines(gtk.cast(gtk.Label, detail), 2);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, detail), gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, detail), 30);
@@ -792,6 +795,12 @@ pub fn build(self: *App) *gtk.Widget {
     const bin = adw.adw_breakpoint_bin_new();
     gtk.gtk_widget_set_size_request(bin, 1, 1);
     adw.adw_breakpoint_bin_set_child(gtk.cast(adw.BreakpointBin, bin), scroller);
+    if (adw.adw_breakpoint_condition_parse("max-width: 700px")) |condition| {
+        const breakpoint = adw.adw_breakpoint_new(condition);
+        _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(narrowed), self);
+        _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(widened), self);
+        adw.adw_breakpoint_bin_add_breakpoint(gtk.cast(adw.BreakpointBin, bin), breakpoint);
+    }
     self.health.built = true;
     return bin;
 }
@@ -873,8 +882,7 @@ pub fn reload(self: *App) void {
     if (!self.health.built) return;
     const scroller = self.health.scroller orelse return;
     const library = self.library orelse return;
-    const scrolled = self.health.restore_scroll orelse
-        gtk.gtk_adjustment_get_value(gtk.gtk_scrolled_window_get_vadjustment(scroller));
+    const scrolled = self.health.restore_scroll orelse if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_get_value(adjustment) else 0;
 
     self.health.issues_shown = self.runtime.libraryHealthIssueCount(library) catch 0;
     const unanalysed = unanalysedCount(self, library);
@@ -908,6 +916,22 @@ pub fn showMismatched(self: *App) void {
     showRow(self, .mismatched, metadata_issues.openCount(self), 0);
 }
 
+fn setNarrow(self: *App, narrow: bool) void {
+    for (std.enums.values(Row)) |row| {
+        const view = self.health.views.getPtr(row);
+        if (view.detail) |detail| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, detail), @intFromBool(!narrow));
+        if (view.tally) |tally| gtk.gtk_widget_set_visible(tally, @intFromBool(!narrow));
+    }
+}
+
+fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    setNarrow(state(data), true);
+}
+
+fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    setNarrow(state(data), false);
+}
+
 fn scrollerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.health.scroller = null;
@@ -919,6 +943,6 @@ fn restoreScroll(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const value = self.health.restore_scroll orelse return gtk.false_;
     self.health.restore_scroll = null;
     const scroller = self.health.scroller orelse return gtk.false_;
-    gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), value);
+    if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_set_value(adjustment, value);
     return gtk.false_;
 }
