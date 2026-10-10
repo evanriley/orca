@@ -869,7 +869,7 @@ const visible_entries =
 
 /// The stored mixes with what a client shows of them at `now_s`.
 pub fn read(library: *const LibraryDatabase, now_s: i64, utc_offset_s: i64) !DailyMixes {
-    const db = library.database;
+    const db = library.queryDatabase();
     const settings = try discovery.readSettings(&library.settings);
     if (settings.mix_count == .off) return .{ .state = .off };
 
@@ -970,7 +970,7 @@ fn readMixDetails(db: sqlite.Database, mix: *Mix, now_s: i64) !void {
 /// me at `now_s` and those with no present file, into `output`, which holds
 /// `max_entries`. Returns how many were written.
 pub fn entries(library: *const LibraryDatabase, mix_id: i64, now_s: i64, output: []Entry) !usize {
-    const db = library.database;
+    const db = library.queryDatabase();
     var exists = try db.prepare("SELECT 1 FROM daily_mixes WHERE id = ?1;");
     defer exists.deinit();
     try exists.bindInt64(1, mix_id);
@@ -1003,7 +1003,7 @@ fn reasonAt(statement: sqlite.Statement, column: c_int) ?ReasonPart {
 /// Leaves the Track's Recording out of Radio and Daily Mixes for
 /// `not_for_me_days` from `now_s`, or extends that.
 pub fn notForMe(library: *LibraryDatabase, track_id: i64, now_s: i64) !void {
-    const recording_id = try trackRecording(library.database, track_id);
+    const recording_id = try trackRecording(library.queryDatabase(), track_id);
     library.write_lane.acquire();
     defer library.write_lane.release();
     var statement = try library.database.prepare(
@@ -1018,7 +1018,7 @@ pub fn notForMe(library: *LibraryDatabase, track_id: i64, now_s: i64) !void {
 }
 
 pub fn clearNotForMe(library: *LibraryDatabase, track_id: i64) !void {
-    const recording_id = try trackRecording(library.database, track_id);
+    const recording_id = try trackRecording(library.queryDatabase(), track_id);
     library.write_lane.acquire();
     defer library.write_lane.release();
     var statement = try library.database.prepare("DELETE FROM recommendation_feedback WHERE recording_id = ?1;");

@@ -336,7 +336,7 @@ pub const Source = struct {
     audio_features: database.AudioFeatureRepository,
 
     pub fn of(library: *const database.LibraryDatabase) Source {
-        return onConnection(library.database, library.write_lane);
+        return onConnection(library.queryDatabase(), library.write_lane);
     }
 
     pub fn onConnection(connection: sqlite.Database, write_lane: *database.repository.WriteLane) Source {

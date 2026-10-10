@@ -78,7 +78,7 @@ pub const MetadataIssueChoice = union(enum) {
 };
 
 pub fn libraryMetadataIssueCount(self: *OrcaRuntime, library: LibraryHandle, category: ?IssueCategory) !u64 {
-    const db = (try runtime.libraryDatabase(self, library)).database;
+    const db = (try runtime.libraryDatabase(self, library)).queryDatabase();
     var statement = try db.prepare(if (category == null)
         "SELECT count(*) FROM metadata_proposals WHERE id = group_id AND state = 0;"
     else
@@ -90,7 +90,7 @@ pub fn libraryMetadataIssueCount(self: *OrcaRuntime, library: LibraryHandle, cat
 }
 
 pub fn libraryMetadataIssueStatus(self: *OrcaRuntime, library: LibraryHandle) !MetadataIssueStatus {
-    const db = (try runtime.libraryDatabase(self, library)).database;
+    const db = (try runtime.libraryDatabase(self, library)).queryDatabase();
     var status: MetadataIssueStatus = .{
         .open = 0,
         .releases = 0,
@@ -142,7 +142,7 @@ pub fn libraryMetadataIssuePage(
     offset: u32,
 ) !MetadataIssuePage {
     if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-    const db = (try runtime.libraryDatabase(self, library)).database;
+    const db = (try runtime.libraryDatabase(self, library)).queryDatabase();
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = .init(allocator);
     const page: MetadataIssuePage = .{ .arena = arena, .items = &.{} };
@@ -345,7 +345,7 @@ pub fn libraryApplyMetadataIssues(
 ) !u64 {
     if (applications.len > max_page) return error.PageOutOfRange;
     const library_database = try runtime.libraryDatabase(self, library);
-    const db = library_database.database;
+    const db = library_database.queryDatabase();
     var arena_state: std.heap.ArenaAllocator = .init(self.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -402,7 +402,7 @@ fn applyPrepared(
     arena: std.mem.Allocator,
     entry: *const Prepared,
 ) !u64 {
-    const db = library_database.database;
+    const db = library_database.queryDatabase();
     const header = entry.header;
     const issue = entry.issue;
     const value = entry.value;
@@ -476,7 +476,7 @@ fn applyPrepared(
 /// Hides an open issue until its tracks' values change.
 pub fn librarySkipMetadataIssue(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !void {
     const library_database = try runtime.libraryDatabase(self, library);
-    const db = library_database.database;
+    const db = library_database.queryDatabase();
     var arena_state: std.heap.ArenaAllocator = .init(self.allocator);
     defer arena_state.deinit();
     const header = try loadHeader(arena_state.allocator(), db, group_id);
