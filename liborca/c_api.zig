@@ -2081,7 +2081,12 @@ pub const MatchEvidenceCallback = *const fn (?*anyopaque, *const MatchEvidenceVi
 pub const ReleaseFieldDiffView = extern struct {
     field: u8,
     differs: u8,
-    _reserved: [6]u8 = @splat(0),
+    identity_release: u8,
+    identity_release_group: u8,
+    identity_album_artist: u8,
+    identity_release_track: u8,
+    identity_recording: u8,
+    identity_numbers: u8,
     local: StringView,
     candidate: StringView,
 };
@@ -6528,6 +6533,12 @@ pub export fn orca_library_release_match_diff(
     for (fields, diff.fields) |*view, field| view.* = .{
         .field = @backingInt(field.field),
         .differs = @intFromBool(field.differs),
+        .identity_release = field.identity.release,
+        .identity_release_group = field.identity.release_group,
+        .identity_album_artist = field.identity.album_artist,
+        .identity_release_track = field.identity.release_track,
+        .identity_recording = field.identity.recording,
+        .identity_numbers = field.identity.numbers,
         .local = stringView(field.local),
         .candidate = stringView(field.candidate),
     };

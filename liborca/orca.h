@@ -5599,11 +5599,18 @@ orca_status orca_library_release_match_evidence(
 );
 
 /* One orca_release_field beside the candidate's. `differs` is set when the
- * candidate has a value that is not the local one. */
+ * candidate has a value that is not the local one. The identity_* bytes are
+ * the RELEASE_ID field's per-category Track counts of what an Apply of it
+ * would change, and zero otherwise. */
 typedef struct orca_release_field_diff_view {
     uint8_t field;
     uint8_t differs;
-    uint8_t reserved[6];
+    uint8_t identity_release;
+    uint8_t identity_release_group;
+    uint8_t identity_album_artist;
+    uint8_t identity_release_track;
+    uint8_t identity_recording;
+    uint8_t identity_numbers;
     orca_string_view local;
     orca_string_view candidate;
 } orca_release_field_diff_view;

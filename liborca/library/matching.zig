@@ -1151,6 +1151,9 @@ pub const ReleaseFieldDiff = struct {
     local: []const u8,
     candidate: []const u8,
     differs: bool,
+    /// For `release_id`, what an Apply of it would change, by category; all
+    /// zero otherwise.
+    identity: database.ReleaseIdentity = .{},
 };
 
 /// A Track beside its track on the candidate. `candidate_title` is empty

@@ -40,6 +40,15 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **Match Review's Release ID row says why it is ticked.** The field covers
+  the release-group, album-artist, release-track and recording IDs and the
+  disc and track numbers, so the row can tick while both columns show the
+  same MusicBrainz release ID. `ReleaseFieldDiff` now carries a
+  `ReleaseIdentity`, per-category Track counts from the same dry run that
+  sets `differs`, and `orca-gtk` appends them to the local value with a
+  tooltip for the full text. The C ABI's `orca_release_field_diff_view`
+  fills six bytes that were reserved for the counts; zero keeps the old
+  behaviour.
 - **A read on a thread without the write lane sees only committed rows.**
   Every Library opens a read-only connection beside its write connection, and
   the database layer routes each call by write-lane ownership: a lane holder

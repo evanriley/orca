@@ -282,7 +282,14 @@ Apply of `track_titles` would change either. The `track_titles` field counts
 those Tracks. A field among `album`, `album_artist`, `release_date`,
 `release_id` and `track_titles` differs exactly when an Apply of that field
 alone would change a value in effect, computed by the dry run the Apply uses.
-`release_type`, `genre` and `artwork` come from proposals and stored covers.
+`release_id` also carries an `identity`, a `ReleaseIdentity` of per-category
+counts of the Tracks that dry run would change a value on: `release`,
+`release_group` and `album_artist` per Track with a play file, and
+`release_track`, `recording` and `numbers` per placed Track, where `numbers`
+combines disc and track numbers and counts a Track once. Each count saturates at
+255. They come from the same writer calls as `differs`, so a nonzero count is
+exactly a differing `release_id` field. `release_type`, `genre` and `artwork`
+come from proposals and stored covers.
 
 `Runtime.libraryReleaseMatchEvidence` takes the candidate's title, artist
 credit and date from its snapshot when there is one, and compares each placed

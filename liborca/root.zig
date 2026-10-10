@@ -350,6 +350,7 @@ pub const LeftAloneTrack = runtime.LeftAloneTrack;
 pub const LeftAloneReason = runtime.LeftAloneReason;
 pub const ReleaseField = runtime.ReleaseField;
 pub const ReleaseFieldSet = runtime.ReleaseFieldSet;
+pub const ReleaseIdentity = runtime.ReleaseIdentity;
 pub const MatchEvidence = runtime.MatchEvidence;
 pub const ReleaseFieldDiff = runtime.ReleaseFieldDiff;
 pub const ReleaseTrackAlignment = runtime.ReleaseTrackAlignment;

@@ -10065,6 +10065,12 @@ test "the diff shows the snapshot's values, a field differs exactly when an Appl
         const release = diff.fields[@backingInt(ReleaseField.release_id)];
         try std.testing.expectEqualStrings(nightcall_mbid, release.candidate);
         try std.testing.expect(release.differs);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release_group);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.album_artist);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release_track);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.recording);
+        try std.testing.expectEqual(@as(u8, 1), release.identity.numbers);
         const titles = diff.fields[@backingInt(ReleaseField.track_titles)];
         try std.testing.expectEqualStrings("0 of 4 differ", titles.local);
         try std.testing.expectEqualStrings("4 of 4 on the release", titles.candidate);
@@ -10094,6 +10100,103 @@ test "the diff shows the snapshot's values, a field differs exactly when an Appl
         try std.testing.expect(!titles.differs);
     }
     try expectMarkingReviews(&runtime, library, album);
+}
+
+const identity_artist_mbid = "1a2b3c4d-5e6f-4789-abcd-ef0123456789";
+const identity_release_group_mbid = "b2c3d4e5-f6a7-4890-9bcd-ef0123456789";
+const identity_other_recording = "a1b2c3d4-e5f6-4789-8abc-def012345678";
+
+fn snapshotIdentifiedNightcall(library_database: *database.LibraryDatabase) !void {
+    var tracks: [4]database.ReleaseTracklistTrack = undefined;
+    for (&tracks, 0..) |*track, index| track.* = .{
+        .disc = 1,
+        .position = @intCast(index + 1),
+        .title = nightcall_titles[index],
+        .artist_credit = "Kavinsky",
+        .length_ms = 258_000,
+        .recording_mbid = nightcall_recordings[index],
+        .release_track_mbid = nightcall_track_mbids[index],
+    };
+    const credits = [_][]const u8{identity_artist_mbid};
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = nightcall_mbid,
+        .title = "Nightcall",
+        .artist_credit = "Kavinsky",
+        .release_group_mbid = identity_release_group_mbid,
+        .artist_credit_mbids = &credits,
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &tracks,
+    });
+}
+
+test "the release_id diff's identity counts each category by Track and an Apply of it zeroes them" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-diff-identity?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [4]i64 = undefined;
+    inline for (0..4) |index| {
+        files[index] = try observeFullNightcall(library_database, index);
+        try library_database.observed_tags.upsert(.{ .file_id = files[index], .values = .{
+            .title = nightcall_titles[index],
+            .artist = "Kavinsky",
+            .album = "Nightcall",
+            .album_artist = "Kavinsky",
+            .track_number = index + 1,
+            .disc_number = 1,
+            .musicbrainz_recording_id = if (index == 1) identity_other_recording else nightcall_recordings[index],
+            .musicbrainz_release_id = nightcall_mbid,
+            .musicbrainz_release_track_id = nightcall_track_mbids[index],
+        } });
+    }
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, files[0]);
+    try snapshotIdentifiedNightcall(library_database);
+    const editions = [_][]const u8{nightcall_mbid};
+    _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, files[1], .{ .musicbrainz = true }, &[_]database.ProposalEvidence{.{
+        .recording_mbid = nightcall_recordings[1],
+        .found_by = .{ .musicbrainz = true },
+        .payload = .{
+            .title = nightcall_titles[1],
+            .artist = "Kavinsky",
+            .release_mbid = nightcall_mbid,
+            .release_mbids = &editions,
+            .mb_score = 100,
+            .musicbrainz_confidence = 0.95,
+        },
+    }});
+
+    {
+        const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, null);
+        defer diff.deinit();
+        const release = diff.fields[@backingInt(ReleaseField.release_id)];
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release);
+        try std.testing.expectEqual(@as(u8, 4), release.identity.release_group);
+        try std.testing.expectEqual(@as(u8, 4), release.identity.album_artist);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release_track);
+        try std.testing.expectEqual(@as(u8, 1), release.identity.recording);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.numbers);
+        const any = release.identity.release != 0 or release.identity.release_group != 0 or
+            release.identity.album_artist != 0 or release.identity.release_track != 0 or
+            release.identity.recording != 0 or release.identity.numbers != 0;
+        try std.testing.expectEqual(any, release.differs);
+    }
+
+    const applied = try runtime.libraryApplyRelease(library, std.testing.allocator, album, .initOne(.release_id));
+    defer applied.deinit();
+    {
+        const diff = try runtime.libraryReleaseMatchDiff(library, std.testing.allocator, album, null);
+        defer diff.deinit();
+        const release = diff.fields[@backingInt(ReleaseField.release_id)];
+        try std.testing.expect(!release.differs);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release_group);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.album_artist);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.release_track);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.recording);
+        try std.testing.expectEqual(@as(u8, 0), release.identity.numbers);
+    }
 }
 
 fn snapshotFeaturedNightcall(library_database: *database.LibraryDatabase) !void {

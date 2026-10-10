@@ -179,6 +179,7 @@ pub const ReleaseApplyTrack = identification.ReleaseApplyTrack;
 pub const ReleaseApplyPlan = identification.ReleaseApplyPlan;
 pub const ReleaseField = identification.ReleaseField;
 pub const ReleaseFieldSet = identification.ReleaseFieldSet;
+pub const ReleaseIdentity = identification.ReleaseIdentity;
 pub const ReleaseMatchProposal = identification.ReleaseMatchProposal;
 pub const ReleaseMatchTrack = identification.ReleaseMatchTrack;
 pub const ReleaseMatchView = identification.ReleaseMatchView;

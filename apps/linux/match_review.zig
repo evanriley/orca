@@ -7,6 +7,7 @@ const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
+const release_identity = @import("release_identity.zig");
 const app = @import("app.zig");
 const art = @import("art.zig");
 const jobs = @import("jobs.zig");
@@ -270,15 +271,29 @@ fn howTracksDiffer(diff: liborca.ReleaseMatchDiff) TracksDiffer {
     return if (case_only) .case_only else .other;
 }
 
+fn hasReleaseIdentity(identity: liborca.ReleaseIdentity) bool {
+    return identity.release != 0 or identity.release_group != 0 or identity.album_artist != 0 or
+        identity.release_track != 0 or identity.recording != 0 or identity.numbers != 0;
+}
+
+fn releaseIdText(buffer: []u8, each: liborca.ReleaseFieldDiff) [:0]const u8 {
+    var id_buffer: [64]u8 = undefined;
+    const base: []const u8 = if (each.local.len == 0)
+        "—"
+    else if (std.mem.eql(u8, each.local, each.candidate))
+        "MusicBrainz release ID"
+    else
+        std.fmt.bufPrint(&id_buffer, "{s}…", .{each.local[0..@min(each.local.len, 8)]}) catch "";
+    var identity_buffer: [384]u8 = undefined;
+    const identity = release_identity.summary(&identity_buffer, each.identity);
+    if (identity.len == 0) return strings.terminated(buffer, base);
+    return strings.format(buffer, "{s}" ++ separator ++ "{s}", .{ base, identity });
+}
+
 fn localText(buffer: []u8, diff: liborca.ReleaseMatchDiff, each: liborca.ReleaseFieldDiff) [:0]const u8 {
     return switch (each.field) {
         .artwork => artworkText(buffer, each.local, diff.local_artwork_size),
-        .release_id => if (each.local.len == 0)
-            strings.terminated(buffer, "—")
-        else if (std.mem.eql(u8, each.local, each.candidate))
-            strings.terminated(buffer, "MusicBrainz release ID")
-        else
-            strings.format(buffer, "{s}…", .{each.local[0..@min(each.local.len, 8)]}),
+        .release_id => releaseIdText(buffer, each),
         .track_titles => switch (titlesDiffer(diff)) {
             0 => strings.terminated(buffer, "All agree"),
             1 => strings.terminated(buffer, "1 differs"),
@@ -414,12 +429,15 @@ fn fieldRow(self: *App, diff: liborca.ReleaseMatchDiff, each: liborca.ReleaseFie
     const name = cell(fieldName(each.field), "match-review-name", 118);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, name), gtk.ELLIPSIZE_NONE);
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, name), gtk.true_);
+    const local = cell(localText(&buffer, diff, each).ptr, "match-review-local", 175);
+    if (each.field == .release_id and hasReleaseIdentity(each.identity))
+        gtk.gtk_widget_set_tooltip_text(local, localText(&buffer, diff, each).ptr);
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(row, "match-review-field");
     append(row, &.{
         check,
         name,
-        cell(localText(&buffer, diff, each).ptr, "match-review-local", 175),
+        local,
         cell(candidateText(&buffer, diff, each).ptr, "match-review-candidate", 0),
     });
     self.match_review.checks.set(each.field, check);
