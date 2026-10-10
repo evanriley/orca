@@ -146,8 +146,6 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
-- `watch_smoke` in `tests/c_abi_smoke.c` returns 210 when `./.zig-cache` does
-  not exist, as in a fresh tree built with `--cache-dir` elsewhere.
 - Writers use the Library's primary SQLite connection, which queries and other
   Jobs also read through, so a read on another thread can see a batch's rows
   before it commits, even rows a rolled-back batch never commits.

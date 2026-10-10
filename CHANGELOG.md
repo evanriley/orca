@@ -40,6 +40,11 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Fixed
 
+- **The C ABI smoke suite does not assume the default cache exists.**
+  `tests/c_abi_smoke.c` creates `.zig-cache` and `.zig-cache/tmp` before its
+  fixtures, as the Zig tests' `tmpDir` does, so it runs in a fresh tree or
+  one built with `--cache-dir` elsewhere instead of `watch_smoke` returning
+  210.
 - **`libraryStats.last_analysis_at` counts measurements only.** The stat takes
   the newest diagnostics, temporal-fingerprint or audio-features row, so an
   AcoustID fingerprint stored by matching or submission, an undecodable

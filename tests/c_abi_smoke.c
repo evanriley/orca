@@ -640,6 +640,14 @@ static int await_job(orca_runtime *runtime, orca_handle job, uint8_t *state,
     }
 }
 
+/* std.testing.tmpDir creates .zig-cache and .zig-cache/tmp itself; a
+   tree built with --cache-dir elsewhere has neither, so make both. */
+static int make_test_tmp_parent(void) {
+    if (mkdir(".zig-cache", 0700) != 0 && errno != EEXIST) return -1;
+    if (mkdir(".zig-cache/tmp", 0700) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 static int copy_file(const char *source, const char *destination) {
     char buffer[65536];
     FILE *input = fopen(source, "rb");
@@ -2288,7 +2296,7 @@ static int playlist_smoke(orca_runtime *runtime, orca_handle library, orca_handl
     SMOKE_CHECK(playlist_metadata_smoke(runtime, library, playlist_id) == 0);
 
     char directory[] = ".zig-cache/tmp/orca-c-smoke-playlist-XXXXXX";
-    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(make_test_tmp_parent() == 0);
     SMOKE_CHECK(mkdtemp(directory) != 0);
     int files_failed = playlist_files_smoke(runtime, library, playlist_id, directory, 4);
     rmdir(directory);
@@ -3314,7 +3322,7 @@ static int watch_smoke(orca_runtime *runtime) {
     char absolute[1024];
     char album[sizeof root + 16];
     char track[sizeof album + 16];
-    if (mkdir(".zig-cache/tmp", 0700) != 0 && errno != EEXIST) return 210;
+    if (make_test_tmp_parent() != 0) return 210;
     if (mkdtemp(root) == 0) return 211;
     if (getcwd(absolute, sizeof absolute - sizeof root - 1) == 0) {
         rmdir(root);
@@ -3860,7 +3868,7 @@ static int coverless_release_steps(orca_runtime *runtime, const char *root,
 
 static int coverless_release_smoke(orca_runtime *runtime) {
     char relative[] = ".zig-cache/tmp/orca-c-smoke-coverless-XXXXXX";
-    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(make_test_tmp_parent() == 0);
     SMOKE_CHECK(mkdtemp(relative) != 0);
     char root[1024];
     int failed = getcwd(root, sizeof root - sizeof relative - 1) == 0;
@@ -4034,7 +4042,7 @@ static int removed_queue_track_steps(orca_runtime *runtime, orca_handle library,
 
 static int removed_queue_track_smoke(orca_runtime *runtime, uint64_t device_id) {
     char relative[] = ".zig-cache/tmp/orca-c-smoke-removed-queue-XXXXXX";
-    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(make_test_tmp_parent() == 0);
     SMOKE_CHECK(mkdtemp(relative) != 0);
     char root[1024];
     char kept[1024];
@@ -4556,7 +4564,7 @@ static int review_library_steps(orca_runtime *runtime, orca_handle library, cons
 
 static int release_review_steps(orca_runtime *runtime) {
     char relative[] = ".zig-cache/tmp/orca-c-smoke-review-XXXXXX";
-    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(make_test_tmp_parent() == 0);
     SMOKE_CHECK(mkdtemp(relative) != 0);
     char root[1024];
     char music[1024];
@@ -4847,7 +4855,7 @@ static int tag_write_smoke(orca_runtime *runtime, orca_handle library) {
                 ORCA_STATUS_INVALID_STATE);
 
     char relative[] = ".zig-cache/tmp/orca-c-smoke-tags-XXXXXX";
-    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(make_test_tmp_parent() == 0);
     SMOKE_CHECK(mkdtemp(relative) != 0);
     char root[1024];
     int failed = getcwd(root, sizeof root - sizeof relative - 1) == 0;
