@@ -17,6 +17,9 @@ const radio_reason = @import("radio_reason.zig");
 const queue = @import("queue.zig");
 const transport = @import("transport.zig");
 const preferences = @import("preferences.zig");
+const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
+const track_model = @import("track_model.zig");
 
 const App = app.App;
 
@@ -161,6 +164,9 @@ pub const State = struct {
     entries: [liborca.max_daily_mix_entries]liborca.DailyMixEntry = undefined,
     entry_count: usize = 0,
     entry_ids: [liborca.max_daily_mix_entries]i64 = @splat(0),
+    mix_targets: [liborca.max_daily_mix_entries]feedback.Target = undefined,
+    mix_stars: [liborca.max_daily_mix_entries]?*gtk.Widget = @splat(null),
+    mix_hearts: [liborca.max_daily_mix_entries]?*gtk.Widget = @splat(null),
     mix_tracks: [liborca.max_daily_mixes][liborca.max_daily_mix_entries]i64 = undefined,
     mix_track_counts: [liborca.max_daily_mixes]usize = @splat(0),
 
@@ -290,6 +296,21 @@ fn mixHasTrack(self: *const App, index: usize, track_id: ?i64) bool {
     const id = track_id orelse return false;
     if (index >= self.home.mix_tracks.len) return false;
     return std.mem.indexOfScalar(i64, self.home.mix_tracks[index][0..self.home.mix_track_counts[index]], id) != null;
+}
+
+pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
+    const home = &self.home;
+    for (home.mix_targets[0..home.entry_count], 0..) |*target, index| {
+        const recording = target.recording_id orelse continue;
+        if (!changed.contains(recording)) continue;
+        switch (change) {
+            .feedback => |value| {
+                target.feedback = value;
+                if (home.mix_hearts[index]) |heart| feedback.showRowButton(heart, value);
+            },
+            .rating => |value| if (home.mix_stars[index]) |stars| ratings.show(stars, value),
+        }
+    }
 }
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
@@ -1916,6 +1937,27 @@ fn buildMixPage(self: *App) *adw.NavigationPage {
     return page;
 }
 
+fn mixEntryIndex(widget: ?*anyopaque) ?usize {
+    const position = @intFromPtr(gtk.g_object_get_data(widget.?, "orca-entry"));
+    if (position == 0) return null;
+    return position - 1;
+}
+
+fn mixStarClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const stars = ratings.starsOf(button) orelse return;
+    const index = mixEntryIndex(stars) orelse return;
+    if (index >= self.home.entry_count) return;
+    ratings.change(self, &.{self.home.mix_targets[index]}, ratings.chosen(button));
+}
+
+fn mixHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const index = mixEntryIndex(button) orelse return;
+    if (index >= self.home.entry_count) return;
+    feedback.toggle(self, self.home.mix_targets[index]);
+}
+
 fn mixRow(self: *App, index: usize, entry: *const liborca.DailyMixEntry, clock: radio_reason.Clock) *gtk.Widget {
     const library = self.library.?;
     const summary = (self.runtime.libraryTrackSummary(library, entry.track_id) catch null);
@@ -1969,7 +2011,22 @@ fn mixRow(self: *App, index: usize, entry: *const liborca.DailyMixEntry, clock: 
     setAccessibleLabel(remove, strings.format(&accessible, "Not for me: remove {s} from mixes", .{title_text}).ptr);
     gtk.g_object_set_data(remove, "orca-entry", @ptrFromInt(index + 1));
     _ = gtk.signalConnect(remove, "clicked", gtk.callback(notForMeClicked), self);
-    append(row, &.{ number_column, middle, time, remove });
+    const stars = ratings.newRowStars(gtk.callback(mixStarClicked), self);
+    gtk.g_object_set_data(stars, "orca-entry", @ptrFromInt(index + 1));
+    const heart = feedback.newRowButton(gtk.callback(mixHeartClicked), self);
+    gtk.g_object_set_data(heart, "orca-entry", @ptrFromInt(index + 1));
+    const target: feedback.Target = if (summary) |found|
+        .{ .track_id = found.id, .recording_id = found.recording_id, .feedback = found.feedback }
+    else
+        .{ .track_id = entry.track_id, .recording_id = null, .feedback = .none };
+    ratings.show(stars, if (summary) |found| found.rating else null);
+    feedback.showRowButton(heart, target.feedback);
+    gtk.gtk_widget_set_visible(stars, boolean(summary != null));
+    gtk.gtk_widget_set_visible(heart, boolean(summary != null));
+    self.home.mix_targets[index] = target;
+    self.home.mix_stars[index] = stars;
+    self.home.mix_hearts[index] = heart;
+    append(row, &.{ number_column, middle, stars, heart, time, remove });
     const list_row = gtk.gtk_list_box_row_new();
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, list_row), row);
     gtk.g_object_set_data(list_row, "orca-number", number_column);
@@ -2133,6 +2190,10 @@ fn loadMix(self: *App) void {
 
     const rows = home.mix_rows orelse return;
     gtk.gtk_list_box_remove_all(rows);
+    for (&home.mix_stars, 0..) |*stars, index| {
+        stars.* = null;
+        home.mix_hearts[index] = null;
+    }
     const clock = queue.localClock();
     for (home.entries[0..home.entry_count], 0..) |*entry, index| gtk.gtk_list_box_append(rows, mixRow(self, index, entry, clock));
     markMixRows(self, self.shown_track_id);

@@ -15,6 +15,7 @@ const transport = @import("transport.zig");
 const menu = @import("menu.zig");
 const details = @import("details.zig");
 const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
 const track_model = @import("track_model.zig");
 const window = @import("window.zig");
 const page_ui = @import("page.zig");
@@ -49,6 +50,8 @@ const Track = struct {
     release_id: ?i64,
     artist_id: ?i64,
     row: ?*gtk.Widget = null,
+    stars: ?*gtk.Widget = null,
+    heart: ?*gtk.Widget = null,
 };
 
 const Related = struct {
@@ -262,14 +265,17 @@ pub fn setNarrow(self: *App) void {
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
-    const value = switch (change) {
-        .feedback => |value| value,
-        .rating => return,
-    };
     for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
         for (page.top_tracks[0..page.track_count]) |*track| {
             const recording = track.target.recording_id orelse continue;
-            if (changed.contains(recording)) track.target.feedback = value;
+            if (!changed.contains(recording)) continue;
+            switch (change) {
+                .feedback => |value| {
+                    track.target.feedback = value;
+                    if (track.heart) |heart| feedback.showRowButton(heart, value);
+                },
+                .rating => |value| if (track.stars) |stars| ratings.show(stars, value),
+            }
         }
     }
 }
@@ -596,6 +602,21 @@ fn trackSubtitle(buffer: []u8, summary: liborca.TrackSummary, by_plays: bool) [:
     return strings.format(buffer, "{s} · {d} {s}", .{ summary.album, summary.play_count, plays });
 }
 
+fn trackStarClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    const stars = ratings.starsOf(button) orelse return;
+    const position = marked(stars) orelse return;
+    if (position >= page.track_count) return;
+    ratings.change(page.self, &.{page.top_tracks[position].target}, ratings.chosen(button));
+}
+
+fn trackHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    const position = marked(button) orelse return;
+    if (position >= page.track_count) return;
+    feedback.toggle(page.self, page.top_tracks[position].target);
+}
+
 fn trackRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize, by_plays: bool) *gtk.Widget {
     const self = page.self;
     const row = gtk.gtk_list_box_row_new();
@@ -644,7 +665,14 @@ fn trackRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize, b
     markPosition(more, position);
     _ = gtk.signalConnect(more, "clicked", gtk.callback(trackMoreClicked), page);
 
-    for ([_]*gtk.Widget{ number, thumb, titles, duration_label, more }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
+    const stars = ratings.newRowStars(gtk.callback(trackStarClicked), page);
+    ratings.show(stars, summary.rating);
+    markPosition(stars, position);
+    const heart = feedback.newRowButton(gtk.callback(trackHeartClicked), page);
+    feedback.showRowButton(heart, summary.feedback);
+    markPosition(heart, position);
+
+    for ([_]*gtk.Widget{ number, thumb, titles, stars, heart, duration_label, more }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, box), piece);
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
     menu.onSecondaryClick(row, trackMenu, page);
@@ -653,6 +681,8 @@ fn trackRow(page: *ArtistPage, summary: liborca.TrackSummary, position: usize, b
         .release_id = summary.release_id,
         .artist_id = summary.artist_id,
         .row = row,
+        .stars = stars,
+        .heart = heart,
     };
     page.track_ids[position] = summary.id;
     return row;
