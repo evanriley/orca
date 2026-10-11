@@ -14,6 +14,12 @@ pub fn build(b: *std.Build) void {
         "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
     ) orelse "https://github.com/evanriley/orca";
     const gtk = b.option(bool, "gtk", "Build and install orca-gtk on Linux") orelse true;
+    const embeddings = b.option(bool, "embeddings", "Build audio embeddings into liborca; needs ONNX Runtime") orelse true;
+    const embedding_model = b.option(
+        []const u8,
+        "embedding-model",
+        "Path of the pinned embedding model, absolute or relative to the repository; the tests that need it are skipped without it",
+    );
     const app_options = b.addOptions();
     app_options.addOption([]const u8, "acoustid_key", acoustid_key);
     app_options.addOption([]const u8, "provider_contact", provider_contact);
@@ -30,6 +36,8 @@ pub fn build(b: *std.Build) void {
     const sqlite_module = sqlite_translate.createModule();
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    version_options.addOption(bool, "embeddings", embeddings);
+    version_options.addOption(?[]const u8, "embedding_test_model", embedding_model);
 
     const liborca_module = b.addModule("liborca", .{
         .root_source_file = b.path("liborca/root.zig"),
@@ -81,6 +89,13 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("samplerate", .{ .use_pkg_config = .force });
+    if (embeddings) {
+        liborca_module.addCSourceFile(.{
+            .file = b.path("liborca/analysis/embedding_shim.c"),
+            .flags = &.{ "-std=c11", "-DNDEBUG" },
+        });
+        liborca_module.linkSystemLibrary("libonnxruntime", .{ .use_pkg_config = .force });
+    }
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/aac_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
@@ -126,7 +141,7 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(liborca_shared);
     const pkg_config = b.addInstallFile(
-        b.addWriteFiles().add("orca.pc", pkgConfigFile(b, target.result.os.tag)),
+        b.addWriteFiles().add("orca.pc", pkgConfigFile(b, target.result.os.tag, embeddings)),
         "lib/pkgconfig/orca.pc",
     );
     b.getInstallStep().dependOn(&pkg_config.step);
@@ -232,7 +247,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     // Built as its own project, so the documented way to embed liborca as a
     // Zig package dependency is exercised rather than asserted.
-    const embed_example = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+    const embed_example = b.addSystemCommand(&.{ b.graph.zig_exe, "build", b.fmt("-Dembeddings={}", .{embeddings}) });
     embed_example.setCwd(b.path("examples/embed"));
     test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
@@ -577,7 +592,7 @@ fn versionScript(b: *std.Build, header: []const u8) []const u8 {
     return script.items;
 }
 
-fn pkgConfigFile(b: *std.Build, os: std.Target.Os.Tag) []const u8 {
+fn pkgConfigFile(b: *std.Build, os: std.Target.Os.Tag, embeddings: bool) []const u8 {
     return b.fmt(
         \\prefix=${{pcfiledir}}/../..
         \\libdir=${{prefix}}/lib
@@ -588,11 +603,12 @@ fn pkgConfigFile(b: *std.Build, os: std.Target.Os.Tag) []const u8 {
         \\Version: {s}
         \\Cflags: -I${{includedir}}
         \\Libs: -L${{libdir}} -lorca
-        \\Requires.private: sqlite3 flac opusfile vorbisfile samplerate{s}
+        \\Requires.private: sqlite3 flac opusfile vorbisfile samplerate{s}{s}
         \\Libs.private: -lc++ -lm
         \\
     , .{
         @import("build.zig.zon").version,
+        if (embeddings) " libonnxruntime" else "",
         if (os == .linux) " libpipewire-0.3" else "",
     });
 }

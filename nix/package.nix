@@ -11,6 +11,7 @@
   opusfile,
   libvorbis,
   libsamplerate,
+  onnxruntime,
   pipewire,
   gtk4,
   libadwaita,
@@ -55,6 +56,7 @@ stdenv.mkDerivation (finalAttrs: {
     opusfile
     libvorbis
     libsamplerate
+    onnxruntime
     pipewire
     gtk4
     libadwaita

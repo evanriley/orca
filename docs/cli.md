@@ -22,6 +22,7 @@ zig fmt --check liborca apps benchmarks tests build build.zig
 
 zig build                     # static + shared liborca, orca-cli, headers; orca-gtk
 zig build -Dgtk=false         # the same without orca-gtk and its files
+zig build -Dembeddings=false  # liborca without audio embeddings and ONNX Runtime
 zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
 zig build test                # unit, integration, C ABI smoke and ABI checks and the PipeWire link smoke
 zig build abi-compat          # orca.h keeps the layouts, values and functions of tests/abi/orca-0.1.0.h

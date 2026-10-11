@@ -140,13 +140,17 @@ Debian 13 and Ubuntu 24.04.
   ALAC, libxaac and Chromaprint), so no separate C or C++ compiler is needed.
 - pkg-config.
 - For `liborca` and `orca-cli`: development files for SQLite, libFLAC, libogg,
-  libvorbis, Opus, opusfile, libsamplerate and PipeWire.
+  libvorbis, Opus, opusfile, libsamplerate, PipeWire and ONNX Runtime 1.20 or
+  newer.
 - For `orca-gtk`: development files for GTK 4.18 or newer, libadwaita 1.8 or
   newer, Pango 1.56 or newer and libsecret.
 
 Debian 13 ships libadwaita 1.7, and Ubuntu 24.04 ships GTK 4.14, libadwaita
 1.5 and Pango 1.52. Both build `liborca` and `orca-cli`; build them with
 `-Dgtk=false`, which leaves `orca-gtk` out.
+
+Ubuntu 24.04 has no ONNX Runtime package. Build it with `-Dembeddings=false`,
+which builds `liborca` without audio embeddings and without ONNX Runtime.
 
 ### Install Zig
 
@@ -166,23 +170,24 @@ zig version
 Arch Linux:
 
 ```sh
-sudo pacman -S --needed curl pkgconf sqlite flac libogg libvorbis opus opusfile libsamplerate pipewire gtk4 libadwaita libsecret
+sudo pacman -S --needed curl pkgconf sqlite flac libogg libvorbis opus opusfile libsamplerate onnxruntime-cpu pipewire gtk4 libadwaita libsecret
 ```
 
 Fedora:
 
 ```sh
-sudo dnf install curl xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel libvorbis-devel opus-devel opusfile-devel libsamplerate-devel pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
+sudo dnf install curl xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel libvorbis-devel opus-devel opusfile-devel libsamplerate-devel onnxruntime-devel pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
 ```
 
 Debian and Ubuntu:
 
 ```sh
-sudo apt-get install --no-install-recommends ca-certificates curl xz-utils pkg-config libsqlite3-dev libflac-dev libogg-dev libvorbis-dev libopus-dev libopusfile-dev libsamplerate0-dev libpipewire-0.3-dev
+sudo apt-get install --no-install-recommends ca-certificates curl xz-utils pkg-config libsqlite3-dev libflac-dev libogg-dev libvorbis-dev libopus-dev libopusfile-dev libsamplerate0-dev libonnxruntime-dev libpipewire-0.3-dev
 ```
 
 Add `libgtk-4-dev libadwaita-1-dev libsecret-1-dev` on a release whose GTK and
-libadwaita meet the requirements above.
+libadwaita meet the requirements above. Leave `libonnxruntime-dev` out on
+Ubuntu 24.04.
 
 ### Build and install
 
@@ -190,8 +195,9 @@ libadwaita meet the requirements above.
 zig build -Doptimize=ReleaseSafe -p ~/.local
 ```
 
-`-p` sets the install prefix. Add `-Dgtk=false` to build without `orca-gtk`,
-and pass it to `zig build test` as well. The install holds:
+`-p` sets the install prefix. Add `-Dgtk=false` to build without `orca-gtk`
+or `-Dembeddings=false` to build without ONNX Runtime, and pass the same
+options to `zig build test`. The install holds:
 
 - `bin/orca-gtk` and `bin/orca-cli`;
 - `lib/liborca.a`, `lib/liborca.so` and `lib/pkgconfig/orca.pc`;
@@ -221,6 +227,10 @@ sudo apt-get install --no-install-recommends pipewire pipewire-bin wireplumber p
 ```sh
 scripts/headless-audio.sh zig build test
 ```
+
+The tests that run the embedding model are skipped unless
+`-Dembedding-model=PATH` names the `clap_audio_int8.onnx` that
+`scripts/embedding/export_model.py` writes.
 
 ## Runtime requirements
 
