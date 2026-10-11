@@ -70,7 +70,8 @@ session seed, so the pool varies between sessions without favouring low ids.
 ## Scoring
 
 Each candidate gets seven component values from 0 to 1. The total is their
-weighted sum, plus any session adjustments for its Artist and genres.
+weighted sum, plus any session adjustments for its Artist and genres, plus the
+play-history tilt.
 
 | Component | Weight at explore 0 | Weight at explore 100 |
 |---|---|---|
@@ -83,6 +84,13 @@ weighted sum, plus any session adjustments for its Artist and genres.
 | Jitter | 0.05 | 0.15 |
 
 Weights move linearly with `explore`; the default is 35.
+
+The play-history tilt comes from `radio.familiarity` (0 to 100), or
+`RadioOptions.familiarity` when set. It adds
+`familiarity / 100 × 0.15 × min(1, play count / 5)` to a candidate's score,
+zero for a never-played one. It is an additive adjustment, not a component:
+the table above and the pick views are unchanged. Daily Mixes apply the same
+tilt from the setting.
 
 - Artist: 1.0 for a profile Artist at its profile weight, or its related
   weight.
@@ -112,8 +120,9 @@ Candidates are taken best first, subject to:
 
 - no more than 2 consecutive picks by one Artist;
 - no more than 2 picks from one Release in any 10;
-- when unplayed Recordings are allowed, at most 1 never-played pick in any 4;
-  otherwise none.
+- when unplayed Recordings are allowed, at most 1 never-played pick in the
+  window `radio.familiarity` sets: none capped at 0, one in 2 at 1–50, one in
+  3 at 51–75 and one in 4 at 76–100; otherwise none.
 
 When no candidate satisfies the Release rule it is relaxed first, then the
 Artist rule. The unplayed rule holds while any played candidate remains; once
@@ -165,21 +174,25 @@ Stored in `library_settings`:
 |---|---|---|
 | `radio.continue` | 0, 1 | 1 |
 | `radio.include_unplayed` | 0, 1 | 1 |
+| `radio.familiarity` | 0–100 | 0 |
 | `discovery.avoid_days` | 0, 1, 3, 7 | 3 |
 | `mixes.count` | 0, 4, 6 | 6 |
 
 A stored value outside its set reads as the default.
-`RadioOptions.include_unplayed` and `avoid_recent` default to these settings;
-`avoid_recent = true` with `discovery.avoid_days` 0 avoids the last 3 days.
+`RadioOptions.include_unplayed`, `avoid_recent` and `familiarity` default to
+these settings; `avoid_recent = true` with `discovery.avoid_days` 0 avoids the
+last 3 days; `familiarity` above 100 is `InvalidFamiliarity`.
 
 ## Radio preview
 
 `Runtime.libraryRadioPreview` ranks up to 512 picks for a seed without a
 Player, with each pick's Track, Recording, Artist, Release, total score,
 component values and reasons, and the weights used. A preview session fixes
-`now` and the session seed; left out, they come from the clock. The C ABI
-counterpart is `orca_library_radio_preview`, and `orca-cli radio` prints a
-preview ([cli.md](cli.md)).
+`now` and the session seed; left out, they come from the clock. A preview
+carries the same `RadioOptions` as a live session, including `explore`,
+focus, `include_unplayed`, `avoid_recent`, `include_live` and `familiarity`.
+The C ABI counterpart is `orca_library_radio_preview`, and `orca-cli radio`
+prints a preview ([cli.md](cli.md)).
 
 The scoring core also takes a `Session`: up to 4,096 excluded Recordings, up
 to 256 Artist and 256 genre score adjustments, and up to 16 recent picks,

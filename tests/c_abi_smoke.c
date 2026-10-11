@@ -6059,15 +6059,21 @@ int main(int argc, char **argv) {
         discovery.radio_continue != 1 || discovery.include_unplayed != 1 ||
         discovery.avoid_days != 3 || discovery.mix_count != 6)
         return 622;
-    orca_discovery_settings invalid_discovery = {1, 1, 2, 6, {0}};
+    orca_discovery_settings invalid_discovery = {1, 1, 2, 6, 0, 0, {0}};
     if (orca_library_set_discovery_settings(runtime, library, &invalid_discovery) !=
         ORCA_STATUS_INVALID_ARGUMENT)
         return 623;
-    orca_discovery_settings fewer_mixes = {1, 1, 7, 4, {0}};
+    orca_discovery_settings fewer_mixes = {1, 1, 7, 4, 1, 25, {0}};
     if (orca_library_set_discovery_settings(runtime, library, &fewer_mixes) != ORCA_STATUS_OK ||
         orca_library_discovery_settings(runtime, library, &discovery) != ORCA_STATUS_OK ||
-        discovery.avoid_days != 7 || discovery.mix_count != 4)
+        discovery.avoid_days != 7 || discovery.mix_count != 4 ||
+        discovery.has_familiarity != 1 || discovery.familiarity != 25)
         return 624;
+    orca_discovery_settings keep_familiarity = {1, 1, 3, 6, 0, 0, {0}};
+    if (orca_library_set_discovery_settings(runtime, library, &keep_familiarity) != ORCA_STATUS_OK ||
+        orca_library_discovery_settings(runtime, library, &discovery) != ORCA_STATUS_OK ||
+        discovery.familiarity != 25)
+        return 655;
 
     /* Nothing was played, so every pick is a Recording never played. */
     orca_radio_seed radio_seed = {capture.first_playable_id, ORCA_RADIO_SEED_TRACK, {0}};
@@ -6089,7 +6095,7 @@ int main(int argc, char **argv) {
     if (orca_library_radio_preview(runtime, library, &radio_seed, NULL, NULL, 8, &radio,
                                    capture_radio) != ORCA_STATUS_INVALID_ARGUMENT)
         return 627;
-    orca_discovery_settings default_discovery = {1, 1, 3, 6, {0}};
+    orca_discovery_settings default_discovery = {1, 1, 3, 6, 0, 0, {0}};
     if (orca_library_set_discovery_settings(runtime, library, &default_discovery) != ORCA_STATUS_OK)
         return 628;
     /* Nothing was played, so a Daily Mixes job clears the mixes and reports

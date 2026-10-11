@@ -917,9 +917,11 @@ typedef struct orca_radio_focus {
 /* `explore` runs from 0, close to the seed, to 100; the default is 35. The
  * first `focus_count` (at most 4) entries of `focus` apply. Each `has_*` flag
  * of 0 reads the Library's setting instead of its value: `include_unplayed`
- * lets one pick in four be a Recording never played, and `avoid_recent`
+ * lets Radio pick Recordings that were never played, and `avoid_recent`
  * leaves out what was played within discovery.avoid_days (3 days when that is
- * 0). `include_live` admits live Releases. */
+ * 0). `include_live` admits live Releases. `familiarity` runs from 0, ranking
+ * by the match alone, to 100, leaning on play history; 255 reads the
+ * Library's radio.familiarity setting. */
 typedef struct orca_radio_options {
     orca_radio_focus focus[4];
     uint8_t focus_count;
@@ -929,7 +931,7 @@ typedef struct orca_radio_options {
     uint8_t has_avoid_recent;
     uint8_t avoid_recent;
     uint8_t include_live;
-    uint8_t reserved[1];
+    uint8_t familiarity;
 } orca_radio_options;
 
 /* The moment and seed a preview ranks at: the same pair ranks the same
@@ -1082,13 +1084,19 @@ typedef void (*orca_radio_queue_picks_callback)(
  * Radio from what was heard when the queue ends; `include_unplayed` 1 lets
  * Radio pick Recordings never played; `avoid_days` (0, 1, 3 or 7) leaves out
  * what was played that recently; `mix_count` (0, 4 or 6) is how many Daily
- * Mixes to make. The defaults are 1, 1, 3 and 6. */
+ * Mixes to make; `familiarity` (0 to 100 when `has_familiarity` is 1) is the
+ * Play history dial. The defaults are 1, 1, 3, 6 and 0. `has_familiarity` 0
+ * keeps the stored `radio.familiarity` and leaves `familiarity` ignored, so
+ * zero-initialising the struct preserves the stored dial; set
+ * `has_familiarity` to 1 to change it. */
 typedef struct orca_discovery_settings {
     uint8_t radio_continue;
     uint8_t include_unplayed;
     uint8_t avoid_days;
     uint8_t mix_count;
-    uint8_t reserved[4];
+    uint8_t has_familiarity;
+    uint8_t familiarity;
+    uint8_t reserved[2];
 } orca_discovery_settings;
 
 /* What orca_library_start_daily_mixes is asked. `now_s` is Unix seconds and

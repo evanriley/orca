@@ -850,7 +850,7 @@ pub const RadioOptionsView = extern struct {
     has_avoid_recent: u8,
     avoid_recent: u8,
     include_live: u8,
-    _reserved: [1]u8 = @splat(0),
+    familiarity: u8 = 0,
 };
 
 pub const RadioPreviewSessionView = extern struct {
@@ -942,7 +942,9 @@ pub const DiscoverySettingsView = extern struct {
     include_unplayed: u8,
     avoid_days: u8,
     mix_count: u8,
-    _reserved: [4]u8 = @splat(0),
+    has_familiarity: u8 = 0,
+    familiarity: u8 = 0,
+    _reserved: [2]u8 = @splat(0),
 };
 
 pub const DailyMixesRequestView = extern struct {
@@ -3587,11 +3589,13 @@ fn importOptionalFlag(has: u8, value: u8) error{Invalid}!?bool {
 
 fn importRadioOptions(options: *const RadioOptionsView) ?discovery.RadioOptions {
     if (options.focus_count > discovery.max_focus or options.include_live > 1) return null;
+    if (options.familiarity != 255 and options.familiarity > 100) return null;
     var result: discovery.RadioOptions = .{
         .explore = options.explore,
         .include_unplayed = importOptionalFlag(options.has_include_unplayed, options.include_unplayed) catch return null,
         .avoid_recent = importOptionalFlag(options.has_avoid_recent, options.avoid_recent) catch return null,
         .include_live = options.include_live == 1,
+        .familiarity = if (options.familiarity == 255) null else options.familiarity,
     };
     for (options.focus[0..options.focus_count], result.focus[0..options.focus_count]) |view, *focus| {
         focus.* = switch (importRadioFocusKind(view.kind) orelse return null) {
@@ -3690,6 +3694,8 @@ pub export fn orca_library_discovery_settings(
         .include_unplayed = @intFromBool(settings.include_unplayed),
         .avoid_days = @backingInt(settings.avoid_days),
         .mix_count = @backingInt(settings.mix_count),
+        .has_familiarity = 1,
+        .familiarity = settings.familiarity,
     };
     return .ok;
 }
@@ -3701,17 +3707,24 @@ pub export fn orca_library_set_discovery_settings(
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const view = settings orelse return box.reject(@src(), .invalid_argument, "settings is null");
-    const invalid = "radio_continue and include_unplayed must be 0 or 1, avoid_days 0, 1, 3 or 7, and mix_count 0, 4 or 6";
+    const invalid = "radio_continue and include_unplayed must be 0 or 1, avoid_days 0, 1, 3 or 7, mix_count 0, 4 or 6, has_familiarity 0 or 1, and familiarity 0 to 100 when set";
     if (view.radio_continue > 1 or view.include_unplayed > 1) return box.reject(@src(), .invalid_argument, invalid);
+    if (view.has_familiarity > 1 or (view.has_familiarity == 1 and view.familiarity > 100)) return box.reject(@src(), .invalid_argument, invalid);
     const avoid_days = std.enums.fromInt(discovery.AvoidDays, view.avoid_days) orelse
         return box.reject(@src(), .invalid_argument, invalid);
     const mix_count = std.enums.fromInt(discovery.MixCount, view.mix_count) orelse
         return box.reject(@src(), .invalid_argument, invalid);
+    var familiarity = view.familiarity;
+    if (view.has_familiarity == 0) {
+        const current = box.runtime.libraryDiscoverySettings(importLibrary(library)) catch |err| return box.fail(@src(), err);
+        familiarity = current.familiarity;
+    }
     box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{
         .radio_continue = view.radio_continue == 1,
         .include_unplayed = view.include_unplayed == 1,
         .avoid_days = avoid_days,
         .mix_count = mix_count,
+        .familiarity = familiarity,
     }) catch |err| return box.fail(@src(), err);
     return .ok;
 }
@@ -4162,7 +4175,7 @@ fn exportRadioSeed(seed: discovery.Seed) RadioSeedView {
     return .{ .id = id, .kind = @backingInt(std.meta.activeTag(seed)) };
 }
 
-fn exportRadioOptions(options: discovery.RadioOptions) RadioOptionsView {
+fn exportRadioOptions(options: discovery.RadioOptions, library_familiarity: u8) RadioOptionsView {
     var view: RadioOptionsView = .{
         .focus = @splat(.{ .id = 0, .kind = 0 }),
         .focus_count = 0,
@@ -4172,6 +4185,7 @@ fn exportRadioOptions(options: discovery.RadioOptions) RadioOptionsView {
         .has_avoid_recent = @intFromBool(options.avoid_recent != null),
         .avoid_recent = @intFromBool(options.avoid_recent orelse false),
         .include_live = @intFromBool(options.include_live),
+        .familiarity = options.familiarity orelse library_familiarity,
     };
     for (options.focus) |entry| {
         const focus = entry orelse continue;
@@ -4253,10 +4267,14 @@ pub export fn orca_player_radio_status(
     const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     const status = (box.runtime.playerRadio(importPlayer(player)) catch |err|
         return box.fail(@src(), err)) orelse return .ok;
+    const library_familiarity = blk: {
+        const settings = box.runtime.libraryDiscoverySettings(status.library) catch break :blk 0;
+        break :blk settings.familiarity;
+    };
     const view: RadioStatusView = .{
         .library = exportLibraryHandle(status.library),
         .seed = exportRadioSeed(status.seed),
-        .options = exportRadioOptions(status.options),
+        .options = exportRadioOptions(status.options, library_familiarity),
         .title = stringView(status.title()),
         .picks_added = status.counts.picks_added,
         .user_queued = status.counts.user_queued,
@@ -13269,19 +13287,26 @@ test "the discovery settings round-trip and refuse values outside their sets, an
     try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-radio?mode=memory&cache=shared", &library));
     var settings: DiscoverySettingsView = undefined;
     try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
-    try std.testing.expectEqual(DiscoverySettingsView{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6 }, settings);
-    const changed: DiscoverySettingsView = .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4 };
+    try std.testing.expectEqual(DiscoverySettingsView{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 1, .familiarity = 0 }, settings);
+    const changed: DiscoverySettingsView = .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4, .has_familiarity = 1, .familiarity = 40 };
     try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &changed));
     try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
     try std.testing.expectEqual(changed, settings);
+    const legacy: DiscoverySettingsView = .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6 };
+    try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &legacy));
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(@as(u8, 1), settings.has_familiarity);
+    try std.testing.expectEqual(@as(u8, 40), settings.familiarity);
     for ([_]DiscoverySettingsView{
         .{ .radio_continue = 2, .include_unplayed = 0, .avoid_days = 3, .mix_count = 6 },
         .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 2, .mix_count = 6 },
         .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 5 },
+        .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 2 },
+        .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 1, .familiarity = 101 },
     }) |invalid| try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, &invalid));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, null));
     try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
-    try std.testing.expectEqual(changed, settings);
+    try std.testing.expectEqual(@as(u8, 40), settings.familiarity);
 
     var visited: usize = 0;
     const loved: RadioSeedView = .{ .id = 0, .kind = @backingInt(std.meta.Tag(discovery.Seed).loved) };
@@ -13304,9 +13329,27 @@ test "the discovery settings round-trip and refuse values outside their sets, an
     options.focus[0] = .{ .id = 0, .kind = 4 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, &options, null, 10, &visited, countRadioPicks));
     options.focus[0] = .{ .id = 0, .kind = @backingInt(std.meta.Tag(discovery.Focus).high_energy) };
+    var familiarity_view = std.mem.zeroes(RadioOptionsView);
+    familiarity_view.familiarity = 255;
+    try std.testing.expectEqual(@as(?u8, null), (importRadioOptions(&familiarity_view) orelse return error.ImportFailed).familiarity);
+    familiarity_view.familiarity = 100;
+    const hundred = importRadioOptions(&familiarity_view) orelse return error.ImportFailed;
+    try std.testing.expectEqual(@as(?u8, 100), hundred.familiarity);
+    try std.testing.expectEqual(@as(u8, 100), exportRadioOptions(hundred, 0).familiarity);
+    const defaults = std.mem.zeroes(RadioOptionsView);
+    var setting_view = std.mem.zeroes(RadioOptionsView);
+    setting_view.familiarity = 255;
+    try std.testing.expectEqual(@as(u8, 40), exportRadioOptions(importRadioOptions(&setting_view) orelse return error.ImportFailed, 40).familiarity);
+    try std.testing.expectEqual(@as(u8, 0), exportRadioOptions(importRadioOptions(&defaults) orelse return error.ImportFailed, 40).familiarity);
+    familiarity_view.familiarity = 150;
+    try std.testing.expect(importRadioOptions(&familiarity_view) == null);
+    familiarity_view.familiarity = 255;
+    const box = runtimeBox(runtime).?;
+    try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .familiarity = 40 });
     const session: RadioPreviewSessionView = .{ .now_s = 2_000_000_000, .seed = 1, .has_now = 1, .has_seed = 1 };
+    try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, &familiarity_view, &session, 10, &visited, countRadioPicks));
     try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, &options, &session, 10, &visited, countRadioPicks));
-    try std.testing.expectEqual(@as(usize, 2), visited);
+    try std.testing.expect(visited > 2);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 

@@ -346,6 +346,7 @@ pub const setting_listen_policy = library_settings.listen_policy;
 pub const setting_listen_recording = library_settings.listen_recording;
 pub const setting_radio_continue = library_settings.radio_continue;
 pub const setting_radio_include_unplayed = library_settings.radio_include_unplayed;
+pub const setting_radio_familiarity = library_settings.radio_familiarity;
 pub const setting_discovery_avoid_days = library_settings.discovery_avoid_days;
 pub const setting_mixes_count = library_settings.mixes_count;
 pub const setting_mixes_generated_day = library_settings.mixes_generated_day;

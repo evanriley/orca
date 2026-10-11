@@ -349,7 +349,7 @@ const commands = [_]Command{
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
-    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--limit N] [--explain]", .min_arguments = 2, .max_arguments = 8, .run = previewRadio },
+    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--explain]", .min_arguments = 2, .max_arguments = 10, .run = previewRadio },
     .{ .name = "home", .usage = "home DATABASE", .min_arguments = 1, .max_arguments = 1, .run = showHome },
     .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N]", .min_arguments = 1, .max_arguments = 4, .run = showDailyMixes },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
@@ -5204,6 +5204,8 @@ fn previewRadio(context: Context) !void {
             const value = context.arguments[index];
             if (std.mem.eql(u8, argument, "--explore")) {
                 options.explore = try std.fmt.parseInt(u8, value, 10);
+            } else if (std.mem.eql(u8, argument, "--familiarity")) {
+                options.familiarity = try std.fmt.parseInt(u8, value, 10);
             } else if (std.mem.eql(u8, argument, "--limit")) {
                 limit = try std.fmt.parseInt(usize, value, 10);
             } else {

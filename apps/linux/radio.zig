@@ -71,6 +71,9 @@ pub const State = struct {
     explore: ?*gtk.Widget = null,
     explore_note: ?*gtk.Label = null,
     explore_timer: c_uint = 0,
+    familiarity: ?*gtk.Widget = null,
+    familiarity_note: ?*gtk.Label = null,
+    familiarity_timer: c_uint = 0,
     focus_box: ?*gtk.Widget = null,
     unplayed_switch: ?*gtk.Widget = null,
     avoid_switch: ?*gtk.Widget = null,
@@ -436,6 +439,46 @@ fn showExplore(self: *App, explore: u8) void {
         gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, scale), gtk.ACCESSIBLE_PROPERTY_VALUE_TEXT, bandText(explore), @as(c_int, -1));
 }
 
+fn familiarityBand(familiarity: u8) [*:0]const u8 {
+    if (familiarity == 0) return "Discovery — ranks by what matches, played or not";
+    if (familiarity <= 50) return "Light — no two never-played picks in a row";
+    if (familiarity <= 75) return "Balanced — at most 1 never played in 3";
+    return "Familiar — at most 1 never played in 4, leaning to what you've played";
+}
+
+fn showFamiliarity(self: *App, familiarity: u8) void {
+    const radio = &self.radio;
+    const text = familiarityBand(familiarity);
+    if (radio.familiarity_note) |note| gtk.gtk_label_set_text(note, text);
+    if (radio.familiarity) |scale|
+        gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, scale), gtk.ACCESSIBLE_PROPERTY_VALUE_TEXT, text, @as(c_int, -1));
+}
+
+fn familiarityValue(self: *App) u8 {
+    const scale = self.radio.familiarity orelse return 0;
+    const value = gtk.gtk_range_get_value(gtk.cast(gtk.Range, scale));
+    return @intFromFloat(std.math.clamp(@round(value), 0, 100));
+}
+
+fn familiarityChanged(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.radio.painting) return;
+    showFamiliarity(self, familiarityValue(self));
+    if (self.radio.familiarity_timer != 0) _ = gtk.g_source_remove(self.radio.familiarity_timer);
+    self.radio.familiarity_timer = gtk.g_timeout_add(explore_settle_ms, familiaritySettled, self);
+}
+
+fn familiaritySettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    self.radio.familiarity_timer = 0;
+    var options = currentOptions(self) orelse return gtk.SOURCE_REMOVE;
+    const familiarity = familiarityValue(self);
+    if (options.familiarity == familiarity) return gtk.SOURCE_REMOVE;
+    options.familiarity = familiarity;
+    setOptions(self, options);
+    return gtk.SOURCE_REMOVE;
+}
+
 fn keepSubject(self: *App, text: []const u8, is_artist: bool) void {
     const radio = &self.radio;
     var length = @min(text.len, subject_capacity);
@@ -646,6 +689,11 @@ fn repaint(self: *App, seed_changed: bool, focus_changed: bool) void {
     setSwitch(radio.unplayed_switch, options.include_unplayed orelse settings.include_unplayed);
     setSwitch(radio.avoid_switch, options.avoid_recent orelse (settings.avoid_days != .none));
     setSwitch(radio.live_switch, options.include_live);
+    if (radio.familiarity_timer == 0) {
+        const familiarity = options.familiarity orelse settings.familiarity;
+        if (radio.familiarity) |scale| gtk.gtk_range_set_value(gtk.cast(gtk.Range, scale), @floatFromInt(familiarity));
+        showFamiliarity(self, familiarity);
+    }
     if (radio.avoid_note) |note| {
         const days = avoidDays(settings);
         var buffer: [64]u8 = undefined;
@@ -907,8 +955,17 @@ fn buildExplore(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(scale, "value-changed", gtk.callback(exploreChanged), self);
     const note = wrapped(null, "radio-panel-note");
     radio.explore_note = gtk.cast(gtk.Label, note);
+    const familiarity_adjustment = gtk.gtk_adjustment_new(0, 0, 100, 1, 10, 0);
+    const familiarity_scale = gtk.gtk_scale_new(gtk.ORIENTATION_HORIZONTAL, familiarity_adjustment);
+    gtk.gtk_scale_set_draw_value(gtk.cast(gtk.Scale, familiarity_scale), gtk.false_);
+    gtk.gtk_widget_add_css_class(familiarity_scale, "radio-explore");
+    setAccessibleName(familiarity_scale, "How much your play history steers Radio");
+    radio.familiarity = familiarity_scale;
+    _ = gtk.signalConnect(familiarity_scale, "value-changed", gtk.callback(familiarityChanged), self);
+    const familiarity_note = wrapped(null, "radio-panel-note");
+    radio.familiarity_note = gtk.cast(gtk.Label, familiarity_note);
     const group = vertical(10, null);
-    append(group, &.{ ends, scale, note });
+    append(group, &.{ ends, scale, note, heading("Play history"), familiarity_scale, familiarity_note });
     return group;
 }
 
@@ -945,7 +1002,7 @@ fn buildSwitches(self: *App) *gtk.Widget {
     radio.avoid_note = gtk.cast(gtk.Label, avoid_note);
     const group = vertical(12, "radio-panel-divided");
     append(group, &.{
-        switchRow("Include tracks you've never played", wrapped("Up to 1 in 4 picks", "radio-switch-note"), unplayed),
+        switchRow("Include tracks you've never played", wrapped("How often they come up follows the Play history dial", "radio-switch-note"), unplayed),
         switchRow("Avoid recently played", avoid_note, avoid),
         switchRow("Include live recordings", null, live),
     });

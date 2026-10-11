@@ -42,6 +42,15 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
   Tracks; Home's Daily Mix rows; and the inspector's track view all carry the
   five-star rating and the heart, hidden for a track that left the library.
   A rating or love change repaints every open surface.
+- **A Play history dial steers Radio and Daily Mixes.** The `radio.familiarity`
+  setting (0 to 100, default 0) caps never-played picks at one in 2, 3 or 4
+  as it rises and adds a small score tilt toward played Recordings, up to
+  0.15. `RadioOptions.familiarity` overrides it per session, `orca-cli radio`
+  takes `--familiarity N`, and `orca-gtk` shows the dial in the Radio picker
+  and in Settings › Radio & Daily Mixes. The `orca_radio_options` C ABI
+  struct consumes its reserved byte for it; 255 reads the Library's setting.
+  `orca_discovery_settings` gains `has_familiarity` and `familiarity`, so a C
+  client that leaves `has_familiarity` 0 keeps the stored dial.
 
 ### Fixed
 
@@ -140,6 +149,11 @@ place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
 
 ### Changed
 
+- **Radio no longer caps never-played picks by default.** `radio.familiarity`
+  defaults to 0, so picks rank by how well they match the seed with no
+  structural preference for played Recordings. Setting it above 0 restores a
+  cap, and 76 to 100 with the tilt is slightly more history-steered than the
+  old 1-in-4 rule.
 - **Starting Radio replaces the upcoming queue.** `playerStartRadio` removes
   every entry queued after the playing one, and an idle Player's whole queue,
   so a mid-album Player's picks follow the playing entry instead of the rest

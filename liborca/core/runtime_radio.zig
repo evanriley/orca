@@ -937,7 +937,7 @@ test "a Radio preview ranks a scanned Library without a Player, and the discover
     }
 
     try std.testing.expectEqual(discovery.Settings{}, try owner.libraryDiscoverySettings(library));
-    const changed: discovery.Settings = .{ .radio_continue = false, .include_unplayed = false, .avoid_days = .none, .mix_count = .off };
+    const changed: discovery.Settings = .{ .radio_continue = false, .include_unplayed = false, .avoid_days = .none, .mix_count = .off, .familiarity = 40 };
     try owner.setLibraryDiscoverySettings(library, changed);
     try std.testing.expectEqual(changed, try owner.libraryDiscoverySettings(library));
     try owner.setLibraryDiscoverySettings(library, .{});
