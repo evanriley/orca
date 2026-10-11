@@ -75,15 +75,19 @@ play-history tilt.
 
 | Component | Weight at explore 0 | Weight at explore 100 |
 |---|---|---|
-| Artist | 0.35 | 0.10 |
-| Genre | 0.20 | 0.10 |
-| Audio | 0.15 | 0.25 |
-| Co-listening | 0.10 | 0.25 |
-| Era | 0.08 | 0.05 |
-| Taste | 0.07 | 0.10 |
-| Jitter | 0.05 | 0.15 |
+| Artist | 0.35 | 0.05 |
+| Genre | 0.20 | 0.05 |
+| Audio | 0.15 | 0.12 |
+| Co-listening | 0.10 | 0.12 |
+| Era | 0.08 | 0.02 |
+| Taste | 0.07 | 0.04 |
+| Jitter | 0.05 | 0.60 |
 
-Weights move linearly with `explore`; the default is 35.
+Weights move linearly with `explore`; the default is 35. `explore` also sets
+the reach and the seed-Artist cap described under Picking. Daily Mixes do not
+use `explore`: they rank with fixed weights (Artist 0.2625, Genre 0.165,
+Audio 0.185, Co-listening 0.1525, Era 0.0695, Taste 0.0805, Jitter 0.085),
+and use none of the reach, the cap or the co-listening floor.
 
 The play-history tilt comes from `radio.familiarity` (0 to 100), or
 `RadioOptions.familiarity` when set. It adds
@@ -104,31 +108,52 @@ tilt from the setting.
   renormalised; a candidate without features scores 0.3. When the seed has no
   features, the Audio weight is spread over the other components.
 - Co-listening: the share of seed listens followed within 30 minutes by this
-  Recording or its Artist.
+  Recording or its Artist. In Radio, a candidate followed by fewer than 2
+  distinct seed listens scores 0; Daily Mixes apply no such floor.
 - Era: `max(0, 1 − distance / 15)` from the seed's year range; 0.3 when either
   year is unknown.
 - Taste: 0.5 when loved, plus rating / 200, plus 0.2 when its Release or
   Artist is loved, capped at 1.
-- Jitter: a hash of the Recording id and the session seed.
+- Jitter: a hash of the Recording id and the session seed. Its weight grows
+  with `explore`, so a high setting draws more randomly among similar
+  candidates.
 
 The same seed, options, session seed and `now` rank the same Library the same
 way.
 
 ## Picking
 
-Candidates are taken best first, subject to:
+Each candidate has a rank value: its total score minus its jitter part
+(jitter weight × jitter value). It includes the session Artist and genre
+adjustments and the play-history tilt, and `Pick.score` stays the full total.
+
+Each pick is drawn from a reach: the allowed unused candidates with the
+highest rank values (ties to the lower Recording id), and of those the one with
+the highest total score (ties likewise). The reach size is
+`clamp(round(0.30 × n × (explore / 100)²), 12, n)` for `n` candidates loaded
+for the call, after the energy focus filter: 12 at explore 0, and with
+`n` = 2,000, 74 at 35 and 600 at 100. The reach re-forms over the remaining
+candidates for every pick, so a request for more picks than the reach is still
+filled. Picks are subject to:
 
 - no more than 2 consecutive picks by one Artist;
 - no more than 2 picks from one Release in any 10;
+- for the `track`, `release`, `artist` and `recent` seeds, picks by the
+  profile's own Artists are capped in any 10 consecutive picks (the candidate
+  and the previous 9, continuing from `Session.recent`): 6 at explore 0–20, 4
+  at 21–45, 2 at 46–70 and 1 at 71–100; a Release by such an Artist uses the
+  larger of 2 and the cap in place of the Release limit; other seeds have no
+  cap;
 - when unplayed Recordings are allowed, at most 1 never-played pick in the
   window `radio.familiarity` sets: none capped at 0, one in 2 at 1–50, one in
   3 at 51–75 and one in 4 at 76–100; otherwise none.
 
-When no candidate satisfies the Release rule it is relaxed first, then the
-Artist rule. The unplayed rule holds while any played candidate remains; once
-none does, never-played candidates fill the rest, under the Release and Artist
-rules again, so a Library with little history still returns as many picks as
-asked for. When unplayed Recordings are not allowed they are never picked.
+When no candidate satisfies every rule they are relaxed in order: the Release
+rule, then the seed-Artist cap, then the consecutive-Artist rule. The unplayed
+rule holds while any played candidate remains; once none does, never-played
+candidates fill the rest, under the other rules again, so a Library with
+little history still returns as many picks as asked for. When unplayed
+Recordings are not allowed they are never picked.
 
 ## Reasons
 

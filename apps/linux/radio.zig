@@ -86,7 +86,6 @@ pub const State = struct {
     undo: ?*gtk.Widget = null,
     subject: [subject_capacity]u8 = undefined,
     subject_len: usize = 0,
-    subject_is_artist: bool = false,
     seed_picker: Picker = .{ .tab = .artist },
     focus_picker: Picker = .{ .tab = .genre },
     home_pickers: [3]Picker = .{ .{ .tab = .artist }, .{ .tab = .genre }, .{ .tab = .decade } },
@@ -402,22 +401,13 @@ fn band(explore: u8) ExploreBand {
     return .explore;
 }
 
-fn describeExplore(buffer: []u8, explore: u8, subject: []const u8, is_artist: bool) [:0]const u8 {
+fn describeExplore(buffer: []u8, explore: u8, subject: []const u8) [:0]const u8 {
     const who = if (subject.len == 0) "the starting track" else subject;
     return switch (band(explore)) {
-        .close => if (is_artist)
-            strings.format(buffer, "Only {s} and the artists closest to them.", .{who})
-        else
-            strings.format(buffer, "Only {s} and its closest matches.", .{who}),
-        .mostly_close => if (is_artist)
-            strings.format(buffer, "Mostly {s} and closely related artists, with an occasional detour.", .{who})
-        else
-            strings.format(buffer, "Mostly {s} and close matches, with an occasional detour.", .{who}),
-        .balanced => if (is_artist)
-            strings.format(buffer, "A balance of {s}, related artists and tracks with a similar sound.", .{who})
-        else
-            strings.format(buffer, "A balance of {s} and tracks with a similar sound.", .{who}),
-        .explore => strings.format(buffer, "Wanders from {s} into similar sounds and what you play together, across genres.", .{who}),
+        .close => strings.format(buffer, "Mostly {s}, then the closest matches.", .{who}),
+        .mostly_close => strings.format(buffer, "Often {s}, with close matches around it.", .{who}),
+        .balanced => strings.format(buffer, "Some {s}, mostly tracks with a similar sound.", .{who}),
+        .explore => strings.format(buffer, "Rarely {s}: a wide draw of similar sounds, across genres.", .{who}),
     };
 }
 
@@ -433,7 +423,7 @@ fn bandText(explore: u8) [*:0]const u8 {
 fn showExplore(self: *App, explore: u8) void {
     const radio = &self.radio;
     var buffer: [subject_capacity + 128]u8 = undefined;
-    const text = describeExplore(&buffer, explore, radio.subject[0..radio.subject_len], radio.subject_is_artist);
+    const text = describeExplore(&buffer, explore, radio.subject[0..radio.subject_len]);
     if (radio.explore_note) |note| gtk.gtk_label_set_text(note, text.ptr);
     if (radio.explore) |scale|
         gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, scale), gtk.ACCESSIBLE_PROPERTY_VALUE_TEXT, bandText(explore), @as(c_int, -1));
@@ -479,13 +469,12 @@ fn familiaritySettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
-fn keepSubject(self: *App, text: []const u8, is_artist: bool) void {
+fn keepSubject(self: *App, text: []const u8) void {
     const radio = &self.radio;
     var length = @min(text.len, subject_capacity);
     while (length != 0 and !std.unicode.utf8ValidateSlice(text[0..length])) length -= 1;
     @memcpy(radio.subject[0..length], text[0..length]);
     radio.subject_len = length;
-    radio.subject_is_artist = is_artist;
 }
 
 fn decadeText(buffer: []u8, year: i64) [:0]const u8 {
@@ -505,55 +494,55 @@ fn paintSeed(self: *App, status: *const liborca.RadioStatus) void {
     switch (status.seed) {
         .track => |track_id| {
             kind = "Track";
-            keepSubject(self, status.title(), false);
+            keepSubject(self, status.title());
             if (self.runtime.libraryTrackSummary(library, track_id) catch null) |summary| {
                 defer summary.deinit(self.allocator);
                 if (summary.artist.len != 0) {
                     kind = strings.format(&kind_buffer, "{s} · track", .{summary.artist});
-                    keepSubject(self, summary.artist, true);
+                    keepSubject(self, summary.artist);
                 }
                 art.show(self, cover, if (summary.release_id) |release| art.Key.release(release, .thumb) else art.Key.track(track_id, .thumb));
             } else art.clear(self, cover);
         },
         .release => |release_id| {
             kind = "Album";
-            keepSubject(self, status.title(), false);
+            keepSubject(self, status.title());
             if (self.runtime.libraryRelease(library, release_id) catch null) |release| {
                 defer release.deinit(self.allocator);
                 if (release.album_artist.len != 0) {
                     kind = strings.format(&kind_buffer, "{s} · album", .{release.album_artist});
-                    keepSubject(self, release.album_artist, true);
+                    keepSubject(self, release.album_artist);
                 }
             }
             art.show(self, cover, art.Key.release(release_id, .thumb));
         },
         .artist => |artist_id| {
             kind = "Artist";
-            keepSubject(self, status.title(), true);
+            keepSubject(self, status.title());
             art.showArtist(self, cover, artist_id, .unknown, null, .thumb);
         },
         .genre => {
             kind = "Genre";
-            keepSubject(self, status.title(), false);
+            keepSubject(self, status.title());
             art.clear(self, cover);
         },
         .decade => |year| {
             title = decadeText(&title_buffer, year);
             kind = "Decade";
             var subject_buffer: [32]u8 = undefined;
-            keepSubject(self, strings.format(&subject_buffer, "the {d}s", .{@as(u64, @intCast(@max(year, 0)))}), false);
+            keepSubject(self, strings.format(&subject_buffer, "the {d}s", .{@as(u64, @intCast(@max(year, 0)))}));
             art.clear(self, cover);
         },
         .loved => {
             title = "Loved tracks";
             kind = "Loved";
-            keepSubject(self, "your loved tracks", false);
+            keepSubject(self, "your loved tracks");
             art.clear(self, cover);
         },
         .recent => {
             title = "Recent listening";
             kind = "Your last five tracks";
-            keepSubject(self, "what you played lately", false);
+            keepSubject(self, "what you played lately");
             art.clear(self, cover);
         },
     }
