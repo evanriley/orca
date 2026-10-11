@@ -27,6 +27,7 @@ const colisten_history_s = 365 * 86_400;
 const recent_seed_tracks = 5;
 const added_reason_window_s = 60 * 86_400;
 const diversity_window = 10;
+const release_limit_per_window = 2;
 
 /// Where a Radio starts.
 pub const Seed = union(enum) {
@@ -132,7 +133,8 @@ pub const Components = struct {
     }
 
     const close: Components = .{ .artist = 0.35, .genre = 0.20, .audio = 0.15, .co_listening = 0.10, .era = 0.08, .taste = 0.07, .jitter = 0.05 };
-    const far: Components = .{ .artist = 0.10, .genre = 0.10, .audio = 0.25, .co_listening = 0.25, .era = 0.05, .taste = 0.10, .jitter = 0.15 };
+    const far: Components = .{ .artist = 0.05, .genre = 0.05, .audio = 0.12, .co_listening = 0.12, .era = 0.02, .taste = 0.04, .jitter = 0.60 };
+    const mix: Components = .{ .artist = 0.2625, .genre = 0.165, .audio = 0.185, .co_listening = 0.1525, .era = 0.0695, .taste = 0.0805, .jitter = 0.085 };
 };
 
 /// Why a Recording was picked. The numbering is stored in
@@ -435,11 +437,17 @@ pub fn pickRadio(
         candidates = try loadCandidates(arena, library, &profile, &filter, energy_focus);
     }
 
-    for (candidates) |*candidate| score(candidate, &profile, weights, session, familiarity);
+    for (candidates) |*candidate| score(candidate, &profile, weights, session, familiarity, radio_colisten_floor);
 
     const order = try arena.alloc(u32, candidates.len);
     for (order, 0..) |*slot, index| slot.* = @intCast(index);
-    std.mem.sort(u32, order, candidates, byScore);
+    std.mem.sort(u32, order, candidates, byRank);
+    const spacing: Spacing = .{
+        .window = window,
+        .reach = reachFor(candidates.len, options.explore),
+        .seed_artists = if (profile.own_artists) &profile.artists else null,
+        .artist_cap = seedArtistCap(options.explore),
+    };
 
     var picks: std.ArrayList(Pick) = .empty;
     errdefer picks.deinit(allocator);
@@ -450,7 +458,7 @@ pub fn pickRadio(
     @memset(used, false);
 
     while (picks.items.len < limit) {
-        const chosen = choose(candidates, order, used, history.items, window) orelse break;
+        const chosen = choose(candidates, order, used, history.items, spacing) orelse break;
         used[chosen] = true;
         const candidate = &candidates[chosen];
         try history.append(arena, .{
@@ -550,13 +558,13 @@ pub fn rankCluster(arena: std.mem.Allocator, library: *const Source, cluster: Cl
 }
 
 fn mixWeights(profile: *const Profile) Components {
-    const weights = Components.weightsAt((RadioOptions{}).explore);
+    const weights = Components.mix;
     return if (profile.sound.isEmpty()) weights.withoutAudio() else weights;
 }
 
 fn rankScored(arena: std.mem.Allocator, candidates: []Candidate, profile: *const Profile, weights: Components, mix: MixFilter) ![]const Ranked {
     const session: Session = .{ .now_s = mix.now_s, .seed = mix.seed };
-    for (candidates) |*candidate| score(candidate, profile, weights, session, mix.familiarity);
+    for (candidates) |*candidate| score(candidate, profile, weights, session, mix.familiarity, 0);
     const order = try arena.alloc(u32, candidates.len);
     for (order, 0..) |*slot, index| slot.* = @intCast(index);
     std.mem.sort(u32, order, candidates, byScore);
@@ -1343,6 +1351,7 @@ const Candidate = struct {
     features: ?AudioFeatures = null,
     components: Components = .{},
     score: f64 = 0,
+    rank: f64 = 0,
     sound_flags: i64 = 0,
     shared_genre: ?i64 = null,
 };
@@ -1484,7 +1493,7 @@ fn topKeys(arena: std.mem.Allocator, map: *const std.AutoHashMapUnmanaged(i64, s
     return ids;
 }
 
-fn score(candidate: *Candidate, profile: *const Profile, weights: Components, session: Session, familiarity: u8) void {
+fn score(candidate: *Candidate, profile: *const Profile, weights: Components, session: Session, familiarity: u8, colisten_floor: usize) void {
     var components: Components = .{};
     if (candidate.artist_id) |artist| {
         const direct = profile.artists.get(artist) orelse 0;
@@ -1516,7 +1525,8 @@ fn score(candidate: *Candidate, profile: *const Profile, weights: Components, se
 
     if (profile.colisten.seed_listens > 0) {
         const count = profile.colisten.count(candidate.recording_id, candidate.artist_id);
-        components.co_listening = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(profile.colisten.seed_listens));
+        if (count >= colisten_floor)
+            components.co_listening = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(profile.colisten.seed_listens));
     }
 
     components.era = eraScore(profile.year_low, profile.year_high, candidate.year);
@@ -1536,6 +1546,7 @@ fn score(candidate: *Candidate, profile: *const Profile, weights: Components, se
     total += historyTilt(familiarity, candidate.play_count);
     candidate.components = components;
     candidate.score = total;
+    candidate.rank = total - weights.jitter * components.jitter;
 }
 
 fn byScore(candidates: []const Candidate, a: u32, b: u32) bool {
@@ -1545,35 +1556,83 @@ fn byScore(candidates: []const Candidate, a: u32, b: u32) bool {
     return x.recording_id < y.recording_id;
 }
 
-fn choose(candidates: []const Candidate, order: []const u32, used: []const bool, history: []const RecentPick, window: ?usize) ?u32 {
+fn byRank(candidates: []const Candidate, a: u32, b: u32) bool {
+    const x = candidates[a];
+    const y = candidates[b];
+    if (x.rank != y.rank) return x.rank > y.rank;
+    return x.recording_id < y.recording_id;
+}
+
+const radio_colisten_floor = 2;
+const reach_floor = 12;
+const relaxation_levels = 4;
+
+const Spacing = struct {
+    window: ?usize,
+    reach: usize,
+    seed_artists: ?*const std.AutoHashMapUnmanaged(i64, f64),
+    artist_cap: usize,
+};
+
+fn reachFor(candidate_count: usize, explore: u8) usize {
+    const e = @as(f64, @floatFromInt(@min(explore, 100))) / 100;
+    const wanted: usize = @intFromFloat(@round(0.30 * @as(f64, @floatFromInt(candidate_count)) * e * e));
+    return @min(@max(wanted, reach_floor), candidate_count);
+}
+
+fn seedArtistCap(explore: u8) usize {
+    return if (explore <= 20) 6 else if (explore <= 45) 4 else if (explore <= 70) 2 else 1;
+}
+
+fn choose(candidates: []const Candidate, order: []const u32, used: []const bool, history: []const RecentPick, spacing: Spacing) ?u32 {
     for ([_]bool{ true, false }) |space_unplayed| {
-        for (0..3) |relaxation| {
+        for (0..relaxation_levels) |relaxation| {
+            var best: ?u32 = null;
+            var taken: usize = 0;
             for (order) |index| {
                 if (used[index]) continue;
-                if (allowed(candidates[index], history, relaxation, space_unplayed, window)) return index;
+                if (!allowed(candidates[index], history, relaxation, space_unplayed, spacing)) continue;
+                if (best == null or byScore(candidates, index, best.?)) best = index;
+                taken += 1;
+                if (taken == spacing.reach) break;
             }
+            if (best) |index| return index;
         }
     }
     return null;
 }
 
-fn allowed(candidate: Candidate, history: []const RecentPick, relaxation: usize, space_unplayed: bool, window: ?usize) bool {
-    if (space_unplayed and candidate.play_count == 0) if (window) |size| {
+fn allowed(candidate: Candidate, history: []const RecentPick, relaxation: usize, space_unplayed: bool, spacing: Spacing) bool {
+    if (space_unplayed and candidate.play_count == 0) if (spacing.window) |size| {
         const recent = history[history.len -| (size - 1)..];
         for (recent) |pick| if (pick.never_played) return false;
     };
-    return diverseAt(history, candidate.artist_id, candidate.release_id, relaxation);
+    const from_seed_artist = isSeedArtist(spacing, candidate.artist_id);
+    if (relaxation < 2 and from_seed_artist) {
+        var same: usize = 0;
+        for (history[history.len -| (diversity_window - 1)..]) |recent| {
+            if (isSeedArtist(spacing, recent.artist_id)) same += 1;
+        }
+        if (same >= spacing.artist_cap) return false;
+    }
+    const release_limit = if (from_seed_artist) @max(release_limit_per_window, spacing.artist_cap) else release_limit_per_window;
+    return diverseAt(history, candidate.artist_id, candidate.release_id, relaxation, release_limit);
+}
+
+fn isSeedArtist(spacing: Spacing, artist_id: ?i64) bool {
+    const artists = spacing.seed_artists orelse return false;
+    return artists.contains(artist_id orelse return false);
 }
 
 /// Whether a pick by `artist_id` from `release_id` after `history` keeps to
 /// at most 2 consecutive picks by one Artist and 2 from one Release in any
 /// 10.
 pub fn diverse(history: []const RecentPick, artist_id: ?i64, release_id: ?i64) bool {
-    return diverseAt(history, artist_id, release_id, 0);
+    return diverseAt(history, artist_id, release_id, 0, release_limit_per_window);
 }
 
-fn diverseAt(history: []const RecentPick, artist_id: ?i64, release_id: ?i64, relaxation: usize) bool {
-    if (relaxation < 2) if (artist_id) |artist| {
+fn diverseAt(history: []const RecentPick, artist_id: ?i64, release_id: ?i64, relaxation: usize, release_limit: usize) bool {
+    if (relaxation < 3) if (artist_id) |artist| {
         if (history.len >= 2 and history[history.len - 1].artist_id == artist and history[history.len - 2].artist_id == artist)
             return false;
     };
@@ -1582,7 +1641,7 @@ fn diverseAt(history: []const RecentPick, artist_id: ?i64, release_id: ?i64, rel
         for (history[history.len -| (diversity_window - 1)..]) |recent| {
             if (recent.release_id == release) same += 1;
         }
-        if (same >= 2) return false;
+        if (same >= release_limit) return false;
     };
     return true;
 }
@@ -1762,17 +1821,17 @@ test "weights move linearly from Close to Explore and always sum to one" {
     try testing.expectApproxEqAbs(@as(f64, 0.35), close.artist, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.05), close.jitter, 1e-12);
     const middle = Components.weightsAt(35);
-    try testing.expectApproxEqAbs(@as(f64, 0.35 - 0.25 * 0.35), middle.artist, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.20 - 0.10 * 0.35), middle.genre, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.15 + 0.10 * 0.35), middle.audio, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.10 + 0.15 * 0.35), middle.co_listening, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.08 - 0.03 * 0.35), middle.era, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.07 + 0.03 * 0.35), middle.taste, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.05 + 0.10 * 0.35), middle.jitter, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.35 - 0.30 * 0.35), middle.artist, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.20 - 0.15 * 0.35), middle.genre, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.15 - 0.03 * 0.35), middle.audio, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.10 + 0.02 * 0.35), middle.co_listening, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.08 - 0.06 * 0.35), middle.era, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.07 - 0.03 * 0.35), middle.taste, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.05 + 0.55 * 0.35), middle.jitter, 1e-12);
     const far = Components.weightsAt(100);
-    try testing.expectApproxEqAbs(@as(f64, 0.10), far.artist, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.25), far.co_listening, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.15), far.jitter, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.05), far.artist, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.12), far.co_listening, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.60), far.jitter, 1e-12);
     const ones: Components = .{ .artist = 1, .genre = 1, .audio = 1, .co_listening = 1, .era = 1, .taste = 1, .jitter = 1 };
     for ([_]Components{ close, middle, far, middle.withoutAudio() }) |weights|
         try testing.expectApproxEqAbs(@as(f64, 1), ones.weighted(weights), 1e-12);
@@ -1977,7 +2036,8 @@ test "picks space out Artists and Releases, and relax only when nothing else fit
         for (picks.items[start..end]) |earlier| {
             if (earlier.release_id == picks.items[end].release_id) same += 1;
         }
-        try testing.expect(same <= 2);
+        const limit: usize = if (picks.items[end].artist_id == 1) seedArtistCap(0) else 2;
+        try testing.expect(same <= limit);
     }
 
     var narrow = try radioFor(&library, .{ .genre = 2 }, .{ .focus = .{ .{ .genre = 2 }, null, null, null } }, 20);
@@ -2071,11 +2131,11 @@ test "familiarity changes the never-played cap and tilts played candidates" {
     var unplayed = played;
     unplayed.play_count = 0;
     unplayed.last_played_at = null;
-    score(&played, &profile, weights, session, 0);
-    score(&unplayed, &profile, weights, session, 0);
+    score(&played, &profile, weights, session, 0, 0);
+    score(&unplayed, &profile, weights, session, 0, 0);
     try testing.expectEqual(played.score, unplayed.score);
-    score(&played, &profile, weights, session, 100);
-    score(&unplayed, &profile, weights, session, 100);
+    score(&played, &profile, weights, session, 100, 0);
+    score(&unplayed, &profile, weights, session, 100, 0);
     try testing.expect(played.score > unplayed.score);
 }
 
@@ -2213,4 +2273,194 @@ test "the same seed and time pick the same Recordings in the same order" {
     var limited = try radioFor(&library, .{ .genre = 1 }, .{}, 0);
     defer limited.deinit();
     try testing.expectEqual(@as(usize, 0), limited.items.len);
+}
+
+fn openWideFixture(comptime name: []const u8) !database.LibraryDatabase {
+    var library = try database.LibraryDatabase.open(testing.allocator, testing.io, "file:orca-test-discovery-" ++ name ++ "?mode=memory&cache=shared");
+    errdefer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, key) SELECT n, 'X' || n, 'x' || n FROM
+        \\    (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30) SELECT n FROM seq);
+        \\INSERT INTO releases(id, title, album_artist_id, release_date, release_type)
+        \\    SELECT id, 'R' || id, id, '2000', 'album' FROM artists;
+        \\WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1500)
+        \\INSERT INTO recordings(id, title) SELECT n, 'r' || n FROM seq;
+        \\INSERT INTO files(id, recording_id, size_bytes, quick_hash, content_hash, content_hash_algorithm, channels)
+        \\    SELECT id, id, 1, CAST(id AS BLOB), CAST(id AS BLOB), 1, 2 FROM recordings;
+        \\INSERT INTO tracks(id, recording_id, release_id, title, artist_id, preferred_file_id, created_at)
+        \\    SELECT id, id, CASE WHEN id <= 20 THEN 1 ELSE 2 + id % 29 END, 't' || id,
+        \\        CASE WHEN id <= 20 THEN 1 ELSE 2 + id % 29 END, id, 1000 FROM recordings;
+        \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
+        \\INSERT INTO locations(file_id, volume_id, uri, state) SELECT id, 1, '/m/' || id, 'present' FROM files;
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Hip Hop', 'hip hop'), (2, 'Jazz', 'jazz');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
+        \\    SELECT id, CASE WHEN artist_id <= 8 THEN 1 ELSE 2 END, 0, 0 FROM tracks;
+        \\INSERT INTO file_audio_features(file_id, source_identity, tempo_bpm, tempo_confidence, key_pitch, key_mode,
+        \\    key_confidence, onset_rate, centroid_hz)
+        \\    SELECT id, content_hash, 80 + (id * 7) % 60, 0.5, id % 12, id % 2, 0.5, (id % 13) * 0.3, 1000 + (id % 17) * 90 FROM files;
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) SELECT id, content_hash, -20 + (id % 11) * 1.5 FROM files;
+        \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+        \\    SELECT id, 1 + id % 5, 1000 FROM recordings;
+    );
+    return library;
+}
+
+fn testCandidate(recording_id: i64, rank: f64, total: f64) Candidate {
+    return .{
+        .recording_id = recording_id,
+        .track_id = recording_id,
+        .artist_id = null,
+        .release_id = null,
+        .year = null,
+        .loved = false,
+        .rating = null,
+        .release_or_artist_loved = false,
+        .play_count = 1,
+        .last_played_at = 1000,
+        .added_at = 0,
+        .rank = rank,
+        .score = total,
+    };
+}
+
+fn maxInAnyTen(picks: Picks, artist_id: i64) usize {
+    var most: usize = 0;
+    for (0..picks.items.len) |start| {
+        var count: usize = 0;
+        for (picks.items[start..@min(picks.items.len, start + diversity_window)]) |pick| count += @intFromBool(pick.artist_id == artist_id);
+        most = @max(most, count);
+    }
+    return most;
+}
+
+test "reach is 12 at explore 0, grows with the square of explore and never passes the candidates" {
+    try testing.expectEqual(@as(usize, 12), reachFor(2000, 0));
+    try testing.expectEqual(@as(usize, 74), reachFor(2000, 35));
+    try testing.expectEqual(@as(usize, 600), reachFor(2000, 100));
+    try testing.expectEqual(@as(usize, 5), reachFor(5, 100));
+    try testing.expectEqual(@as(usize, 0), reachFor(0, 50));
+}
+
+test "choose takes the best total only within the reach of the best ranks, and the reach re-forms" {
+    var candidates: [10]Candidate = undefined;
+    for (&candidates, 0..) |*candidate, index| {
+        const rank = 10 - @as(f64, @floatFromInt(index));
+        candidate.* = testCandidate(@intCast(index + 1), rank, rank + if (index == 2 or index == 7) @as(f64, 5) else 0);
+    }
+    var order: [10]u32 = undefined;
+    for (&order, 0..) |*slot, index| slot.* = @intCast(index);
+    std.mem.sort(u32, &order, @as([]const Candidate, &candidates), byRank);
+    var used: [10]bool = @splat(false);
+    const spacing: Spacing = .{ .window = null, .reach = 3, .seed_artists = null, .artist_cap = 6 };
+
+    try testing.expectEqual(@as(?u32, 2), choose(&candidates, &order, &used, &.{}, spacing));
+    used[2] = true;
+    try testing.expectEqual(@as(?u32, 0), choose(&candidates, &order, &used, &.{}, spacing));
+
+    var taken: usize = 0;
+    used = @splat(false);
+    while (choose(&candidates, &order, &used, &.{}, spacing)) |index| : (taken += 1) {
+        try testing.expect(!used[index]);
+        used[index] = true;
+    }
+    try testing.expectEqual(@as(usize, 10), taken);
+    try testing.expect(used[7]);
+}
+
+test "explore 0 picks the nearest allowed candidates and explore 100 reaches further" {
+    var library = try openWideFixture("reach");
+    defer library.close();
+    var close = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 24);
+    defer close.deinit();
+    for (close.items) |pick| try testing.expect(pick.components.genre > 0 or pick.artist_id == 1);
+    var far = try radioFor(&library, .{ .track = 1 }, .{ .explore = 100 }, 24);
+    defer far.deinit();
+    var outside_genre: usize = 0;
+    for (far.items) |pick| outside_genre += @intFromBool(pick.components.genre == 0 and pick.artist_id != 1);
+    try testing.expect(outside_genre > 0);
+}
+
+test "explore 0 and explore 100 with one session seed share few of their first 24 picks" {
+    var library = try openWideFixture("dial");
+    defer library.close();
+    var close = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 24);
+    defer close.deinit();
+    var far = try radioFor(&library, .{ .track = 1 }, .{ .explore = 100 }, 24);
+    defer far.deinit();
+    try testing.expectEqual(@as(usize, 24), close.items.len);
+    try testing.expectEqual(@as(usize, 24), far.items.len);
+    var shared: usize = 0;
+    for (close.items) |pick| shared += @intFromBool(picked(far, pick.recording_id));
+    try testing.expect(shared <= 6);
+}
+
+test "the seed Artist is capped at 6, 4, 2 and 1 in any 10 picks across the explore bands" {
+    var library = try openWideFixture("cap");
+    defer library.close();
+    const bands = [_]struct { explore: u8, cap: usize }{
+        .{ .explore = 0, .cap = 6 },
+        .{ .explore = 20, .cap = 6 },
+        .{ .explore = 21, .cap = 4 },
+        .{ .explore = 45, .cap = 4 },
+        .{ .explore = 46, .cap = 2 },
+        .{ .explore = 70, .cap = 2 },
+        .{ .explore = 71, .cap = 1 },
+        .{ .explore = 100, .cap = 1 },
+    };
+    for (bands) |band_case| {
+        try testing.expectEqual(band_case.cap, seedArtistCap(band_case.explore));
+        var picks = try radioFor(&library, .{ .track = 1 }, .{ .explore = band_case.explore }, 40);
+        defer picks.deinit();
+        try testing.expect(maxInAnyTen(picks, 1) <= band_case.cap);
+    }
+    var close = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 10);
+    defer close.deinit();
+    try testing.expectEqual(@as(usize, 6), maxInAnyTen(close, 1));
+    var far = try radioFor(&library, .{ .track = 1 }, .{ .explore = 100 }, 10);
+    defer far.deinit();
+    try testing.expect(maxInAnyTen(far, 1) <= 1);
+
+    const uncapped: Spacing = .{ .window = null, .reach = 12, .seed_artists = null, .artist_cap = 1 };
+    try testing.expect(!isSeedArtist(uncapped, 1));
+}
+
+test "a candidate followed by fewer than 2 seed listens has no co-listening in Radio but keeps it in mix scoring" {
+    var library = try openFixture("floor");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist) VALUES
+        \\    (1, 1, 9000000, 1000, 't', 'a'), (20, 20, 9000100, 1000, 't', 'a'),
+        \\    (1, 1, 9100000, 1000, 't', 'a'), (20, 20, 9100100, 1000, 't', 'a'),
+        \\    (1, 1, 9200000, 1000, 't', 'a'), (30, 30, 9200100, 1000, 't', 'a');
+    );
+    var picks = try radioFor(&library, .{ .track = 1 }, .{}, max_picks);
+    defer picks.deinit();
+    for (picks.items) |pick| switch (pick.recording_id) {
+        20 => try testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), pick.components.co_listening, 1e-12),
+        30 => try testing.expectEqual(@as(f64, 0), pick.components.co_listening),
+        else => {},
+    };
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source: Source = .of(&library);
+    const profile = try buildProfile(arena, &source, .{ .track = 1 }, test_now);
+    var once = testCandidate(30, 0, 0);
+    once.artist_id = 5;
+    score(&once, &profile, Components.mix, .{ .now_s = test_now, .seed = 42 }, 0, 0);
+    try testing.expectApproxEqAbs(@as(f64, 1.0 / 3.0), once.components.co_listening, 1e-12);
+    score(&once, &profile, Components.weightsAt(35), .{ .now_s = test_now, .seed = 42 }, 0, radio_colisten_floor);
+    try testing.expectEqual(@as(f64, 0), once.components.co_listening);
+}
+
+test "a request for more picks than the reach is filled" {
+    var library = try openWideFixture("refill");
+    defer library.close();
+    var picks = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 100);
+    defer picks.deinit();
+    try testing.expectEqual(@as(usize, 100), picks.items.len);
+    var again = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 100);
+    defer again.deinit();
+    for (picks.items, again.items) |a, b| try testing.expectEqual(a.recording_id, b.recording_id);
 }

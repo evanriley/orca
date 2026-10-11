@@ -914,7 +914,9 @@ typedef struct orca_radio_focus {
     uint8_t reserved[7];
 } orca_radio_focus;
 
-/* `explore` runs from 0, close to the seed, to 100; the default is 35. The
+/* `explore` runs from 0, close to the seed, to 100; the default is 35. It
+ * sets how far down the closeness ranking Radio reaches, how random the draw
+ * within that reach is, and how much of the seed's own Artist is played. The
  * first `focus_count` (at most 4) entries of `focus` apply. Each `has_*` flag
  * of 0 reads the Library's setting instead of its value: `include_unplayed`
  * lets Radio pick Recordings that were never played, and `avoid_recent`

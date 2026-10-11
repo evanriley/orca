@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Radio's Stay close to Explore dial changes which tracks are picked.**
+  `RadioOptions.explore` sets how far down the closeness ranking Radio may
+  reach (12 candidates at 0, 600 of 2,000 at 100), how random the draw within
+  that reach is (the Explore weights lean on jitter), and how much of the
+  seed's own Artist is played (at most 6 in any 10 at 0–20 down to 1 at
+  71–100). In Radio a candidate needs 2 distinct seed listens before
+  co-listening counts. Daily Mixes rank as before. `orca-cli radio` takes
+  `--seed N`, and `orca-gtk` describes the dial in new words.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in

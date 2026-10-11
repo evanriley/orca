@@ -349,7 +349,7 @@ const commands = [_]Command{
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
-    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--explain]", .min_arguments = 2, .max_arguments = 10, .run = previewRadio },
+    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--seed N] [--explain]", .min_arguments = 2, .max_arguments = 12, .run = previewRadio },
     .{ .name = "home", .usage = "home DATABASE", .min_arguments = 1, .max_arguments = 1, .run = showHome },
     .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N]", .min_arguments = 1, .max_arguments = 4, .run = showDailyMixes },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
@@ -5190,6 +5190,7 @@ fn previewRadio(context: Context) !void {
     var options: liborca.RadioOptions = .{};
     var limit: usize = 25;
     var explain = false;
+    var session: liborca.RadioPreviewSession = .{};
     var index: usize = 1;
     while (index < context.arguments.len) : (index += 1) {
         const argument = context.arguments[index];
@@ -5208,6 +5209,8 @@ fn previewRadio(context: Context) !void {
                 options.familiarity = try std.fmt.parseInt(u8, value, 10);
             } else if (std.mem.eql(u8, argument, "--limit")) {
                 limit = try std.fmt.parseInt(usize, value, 10);
+            } else if (std.mem.eql(u8, argument, "--seed")) {
+                session.seed = try std.fmt.parseInt(u64, value, 10);
             } else {
                 if (seed != null) return error.InvalidArguments;
                 const id = try std.fmt.parseInt(i64, value, 10);
@@ -5229,7 +5232,7 @@ fn previewRadio(context: Context) !void {
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    var picks = try runtime.libraryRadioPreview(library, context.allocator, seed orelse return error.InvalidArguments, options, limit, .{});
+    var picks = try runtime.libraryRadioPreview(library, context.allocator, seed orelse return error.InvalidArguments, options, limit, session);
     defer picks.deinit();
 
     var summaries: std.ArrayList(liborca.TrackSummary) = .empty;
