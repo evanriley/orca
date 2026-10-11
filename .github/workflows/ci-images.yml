@@ -24,7 +24,7 @@ jobs:
               apt-get install --no-install-recommends -y
               ca-certificates xz-utils pkg-config libsqlite3-dev libflac-dev
               libogg-dev libvorbis-dev libopus-dev libopusfile-dev
-              libsamplerate0-dev libpipewire-0.3-dev binutils &&
+              libsamplerate0-dev libonnxruntime-dev libpipewire-0.3-dev binutils &&
               rm -rf /var/lib/apt/lists/*
           - distro: fedora
             tag: "43"
@@ -33,7 +33,7 @@ jobs:
               dnf install -y
               tar xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel
               libvorbis-devel opus-devel opusfile-devel libsamplerate-devel
-              pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
+              onnxruntime-devel pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
               binutils &&
               dnf clean all
     steps:

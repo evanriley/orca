@@ -3,7 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const orca = b.dependency("orca", .{ .target = target, .optimize = optimize });
+    const embeddings = b.option(bool, "embeddings", "Build liborca with audio embeddings; needs ONNX Runtime") orelse true;
+    const orca = b.dependency("orca", .{ .target = target, .optimize = optimize, .embeddings = embeddings });
 
     const exe = b.addExecutable(.{
         .name = "orca-embed-example",

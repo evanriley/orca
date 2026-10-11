@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- **`liborca` can run a pinned audio-embedding model through ONNX Runtime.**
+  The new build option `-Dembeddings` (default `true`) compiles the binding
+  and links `libonnxruntime`, 1.20 or newer, found through pkg-config;
+  `-Dembeddings=false` builds without it. The model is one file checked by
+  size and SHA-256 before it is loaded, and `scripts/embedding/` holds the
+  scripts that export it and its test references. Nothing computes
+  embeddings yet.
+
 ### Changed
 
 - **Radio's Stay close to Explore dial changes which tracks are picked.**
