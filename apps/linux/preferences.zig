@@ -2164,6 +2164,16 @@ fn radioUnplayedSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) ca
     saveDiscoverySettings(self, discovery);
 }
 
+fn radioFamiliarityChanged(scale: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const value = gtk.gtk_range_get_value(gtk.cast(gtk.Range, scale));
+    var discovery = discoverySettings(self);
+    const familiarity: u8 = @intFromFloat(std.math.clamp(@round(value), 0, 100));
+    if (discovery.familiarity == familiarity) return;
+    discovery.familiarity = familiarity;
+    saveDiscoverySettings(self, discovery);
+}
+
 fn avoidPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
@@ -2217,9 +2227,20 @@ fn radioCard(self: *App) *gtk.Widget {
     );
     const discovery = discoverySettings(self);
     const has_library = @intFromBool(self.library != null);
+    const familiarity_row = actionRow("Play history", "How much your listening steers picks");
+    const familiarity_adjustment = gtk.gtk_adjustment_new(@floatFromInt(discovery.familiarity), 0, 100, 1, 10, 0);
+    const familiarity_scale = gtk.gtk_scale_new(gtk.ORIENTATION_HORIZONTAL, familiarity_adjustment);
+    gtk.gtk_scale_set_draw_value(gtk.cast(gtk.Scale, familiarity_scale), gtk.false_);
+    gtk.gtk_widget_set_size_request(familiarity_scale, 160, -1);
+    gtk.gtk_widget_set_valign(familiarity_scale, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(familiarity_scale, "settings-scale");
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, familiarity_scale), gtk.ACCESSIBLE_PROPERTY_LABEL, "Play history", @as(c_int, -1));
+    _ = gtk.signalConnect(familiarity_scale, "value-changed", gtk.callback(radioFamiliarityChanged), self);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, familiarity_row), familiarity_scale);
     const library_rows = [_]*gtk.Widget{
         switchRow("Continue with Radio when the queue ends", "", discovery.radio_continue, gtk.callback(radioContinueSwitched), self),
-        switchRow("Include tracks you've never played", "Up to 1 in 4 picks", discovery.include_unplayed, gtk.callback(radioUnplayedSwitched), self),
+        switchRow("Include tracks you've never played", "How often they come up follows the Play history dial", discovery.include_unplayed, gtk.callback(radioUnplayedSwitched), self),
+        familiarity_row,
         selectRow(
             "Avoid tracks played in the last",
             "",

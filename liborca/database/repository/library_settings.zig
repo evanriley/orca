@@ -12,6 +12,8 @@ pub const listen_recording = "listens.record";
 pub const radio_continue = "radio.continue";
 /// Whether Radio may pick Recordings that were never played.
 pub const radio_include_unplayed = "radio.include_unplayed";
+/// How much play history steers Radio and Daily Mixes, 0 to 100.
+pub const radio_familiarity = "radio.familiarity";
 /// How many days a played Recording is left out of Radio and Daily Mixes.
 pub const discovery_avoid_days = "discovery.avoid_days";
 /// How many Daily Mixes are made each day.

@@ -195,6 +195,7 @@ pub const setting_listen_policy = repository.setting_listen_policy;
 pub const setting_listen_recording = repository.setting_listen_recording;
 pub const setting_radio_continue = repository.setting_radio_continue;
 pub const setting_radio_include_unplayed = repository.setting_radio_include_unplayed;
+pub const setting_radio_familiarity = repository.setting_radio_familiarity;
 pub const setting_discovery_avoid_days = repository.setting_discovery_avoid_days;
 pub const setting_mixes_count = repository.setting_mixes_count;
 pub const setting_mixes_generated_day = repository.setting_mixes_generated_day;

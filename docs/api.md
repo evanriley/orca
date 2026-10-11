@@ -510,15 +510,18 @@ section lists the entry points, errors and limits.
   relaxed avoid window. The caller frees the result with `deinit`.
   `RadioOptions` sets `explore` (0 to 100, default 35, else
   `error.InvalidExplore`), up to 4 `RadioFocus` filters, `include_unplayed`,
-  `avoid_recent` and `include_live`. `RadioPreviewSession` fixes `now_s` and
+  `avoid_recent`, `include_live` and `familiarity` (0 to 100, else
+  `error.InvalidFamiliarity`; null reads `radio.familiarity`).
+  `RadioPreviewSession` fixes `now_s` and
   the jitter seed; null reads the clock. An unknown Track, Release, Artist or
   genre fails with `error.UnknownRadioSeed`, a decade that is not a multiple
   of 10 with `error.InvalidDecade`. Reads the database alone. See
   [discovery.md](discovery.md).
 - `libraryDiscoverySettings(library)` returns the `DiscoverySettings`:
   `radio_continue`, `include_unplayed`, `avoid_days` (`DiscoveryAvoidDays`:
-  0, 1, 3 or 7) and `mix_count` (`DailyMixCount`: 0, 4 or 6).
-  `setLibraryDiscoverySettings` stores all four. See
+  0, 1, 3 or 7), `mix_count` (`DailyMixCount`: 0, 4 or 6) and `familiarity`
+  (0 to 100, the play-history dial for Radio and Daily Mixes).
+  `setLibraryDiscoverySettings` stores all five. See
   [discovery.md](discovery.md#settings).
 - `libraryRecordingSummary(library, recording_id)` returns a
   `RecordingSummary` with the Recording's title, artist credit and Artist, or

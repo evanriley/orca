@@ -27,7 +27,6 @@ const colisten_history_s = 365 * 86_400;
 const recent_seed_tracks = 5;
 const added_reason_window_s = 60 * 86_400;
 const diversity_window = 10;
-const unplayed_window = 4;
 
 /// Where a Radio starts.
 pub const Seed = union(enum) {
@@ -64,6 +63,9 @@ pub const RadioOptions = struct {
     /// does so even when that setting is 0, for its default of 3 days.
     avoid_recent: ?bool = null,
     include_live: bool = false,
+    /// How much play history steers the picks, 0 to 100. Null reads
+    /// `radio.familiarity`.
+    familiarity: ?u8 = null,
 };
 
 /// A score change for one Artist or genre for the rest of a session.
@@ -207,17 +209,21 @@ pub const Settings = struct {
     include_unplayed: bool = true,
     avoid_days: AvoidDays = .three_days,
     mix_count: MixCount = .six,
+    /// How much play history steers Radio and Daily Mixes, 0 to 100.
+    familiarity: u8 = 0,
 };
 
 pub fn readSettings(settings: *const database.LibrarySettingsRepository) !Settings {
     const defaults: Settings = .{};
     const avoid = try settings.integer(database.setting_discovery_avoid_days, @backingInt(defaults.avoid_days));
     const mixes = try settings.integer(database.setting_mixes_count, @backingInt(defaults.mix_count));
+    const familiarity = try settings.integer(database.setting_radio_familiarity, defaults.familiarity);
     return .{
         .radio_continue = try settings.flag(database.setting_radio_continue, defaults.radio_continue),
         .include_unplayed = try settings.flag(database.setting_radio_include_unplayed, defaults.include_unplayed),
         .avoid_days = enumOr(AvoidDays, avoid, defaults.avoid_days),
         .mix_count = enumOr(MixCount, mixes, defaults.mix_count),
+        .familiarity = if (familiarity >= 0 and familiarity <= 100) @intCast(familiarity) else defaults.familiarity,
     };
 }
 
@@ -226,6 +232,24 @@ pub fn writeSettings(settings: *database.LibrarySettingsRepository, value: Setti
     try settings.setFlag(database.setting_radio_include_unplayed, value.include_unplayed);
     try settings.setInteger(database.setting_discovery_avoid_days, @backingInt(value.avoid_days));
     try settings.setInteger(database.setting_mixes_count, @backingInt(value.mix_count));
+    try settings.setInteger(database.setting_radio_familiarity, @as(i64, value.familiarity));
+}
+
+/// The window the never-played cap looks back on: null at 0 (no cap), then
+/// at most one never-played pick in the window. The old behaviour was 4.
+pub fn unplayedWindow(familiarity: u8) ?usize {
+    if (familiarity == 0) return null;
+    if (familiarity <= 50) return 2;
+    if (familiarity <= 75) return 3;
+    return 4;
+}
+
+/// The additive score a played candidate earns at `familiarity`, zero for a
+/// never-played one.
+pub fn historyTilt(familiarity: u8, play_count: i64) f64 {
+    if (familiarity == 0 or play_count <= 0) return 0;
+    const complete = @min(play_count, 5);
+    return @as(f64, @floatFromInt(familiarity)) / 100 * 0.15 * @as(f64, @floatFromInt(complete)) / 5;
 }
 
 fn enumOr(comptime E: type, value: i64, default: E) E {
@@ -373,6 +397,8 @@ pub fn pickRadio(
 
     const settings = try readSettings(&library.settings);
     const include_unplayed = options.include_unplayed orelse settings.include_unplayed;
+    const familiarity = options.familiarity orelse settings.familiarity;
+    const window = unplayedWindow(familiarity);
     const avoid_days: i64 = if (options.avoid_recent) |avoid|
         (if (!avoid) 0 else if (settings.avoid_days == .none) @backingInt(AvoidDays.three_days) else @backingInt(settings.avoid_days))
     else
@@ -409,7 +435,7 @@ pub fn pickRadio(
         candidates = try loadCandidates(arena, library, &profile, &filter, energy_focus);
     }
 
-    for (candidates) |*candidate| score(candidate, &profile, weights, session);
+    for (candidates) |*candidate| score(candidate, &profile, weights, session, familiarity);
 
     const order = try arena.alloc(u32, candidates.len);
     for (order, 0..) |*slot, index| slot.* = @intCast(index);
@@ -424,7 +450,7 @@ pub fn pickRadio(
     @memset(used, false);
 
     while (picks.items.len < limit) {
-        const chosen = choose(candidates, order, used, history.items) orelse break;
+        const chosen = choose(candidates, order, used, history.items, window) orelse break;
         used[chosen] = true;
         const candidate = &candidates[chosen];
         try history.append(arena, .{
@@ -465,6 +491,8 @@ pub const MixFilter = struct {
     seed: u64,
     /// Played Recordings within this many days are left out; 0 for none.
     avoid_days: i64,
+    /// How much play history tilts the ranking, 0 to 100.
+    familiarity: u8 = 0,
 
     fn filter(self: MixFilter) Filter {
         return .{
@@ -528,7 +556,7 @@ fn mixWeights(profile: *const Profile) Components {
 
 fn rankScored(arena: std.mem.Allocator, candidates: []Candidate, profile: *const Profile, weights: Components, mix: MixFilter) ![]const Ranked {
     const session: Session = .{ .now_s = mix.now_s, .seed = mix.seed };
-    for (candidates) |*candidate| score(candidate, profile, weights, session);
+    for (candidates) |*candidate| score(candidate, profile, weights, session, mix.familiarity);
     const order = try arena.alloc(u32, candidates.len);
     for (order, 0..) |*slot, index| slot.* = @intCast(index);
     std.mem.sort(u32, order, candidates, byScore);
@@ -817,6 +845,7 @@ fn leftOutRows(comptime scope: []const u8) []const u8 {
 
 pub fn validateRadio(seed: Seed, options: RadioOptions) !void {
     if (options.explore > 100) return error.InvalidExplore;
+    if (options.familiarity) |familiarity| if (familiarity > 100) return error.InvalidFamiliarity;
     switch (seed) {
         .decade => |year| if (!validDecade(year)) return error.InvalidDecade,
         else => {},
@@ -1455,7 +1484,7 @@ fn topKeys(arena: std.mem.Allocator, map: *const std.AutoHashMapUnmanaged(i64, s
     return ids;
 }
 
-fn score(candidate: *Candidate, profile: *const Profile, weights: Components, session: Session) void {
+fn score(candidate: *Candidate, profile: *const Profile, weights: Components, session: Session, familiarity: u8) void {
     var components: Components = .{};
     if (candidate.artist_id) |artist| {
         const direct = profile.artists.get(artist) orelse 0;
@@ -1504,6 +1533,7 @@ fn score(candidate: *Candidate, profile: *const Profile, weights: Components, se
             break;
         }
     };
+    total += historyTilt(familiarity, candidate.play_count);
     candidate.components = components;
     candidate.score = total;
 }
@@ -1515,23 +1545,23 @@ fn byScore(candidates: []const Candidate, a: u32, b: u32) bool {
     return x.recording_id < y.recording_id;
 }
 
-fn choose(candidates: []const Candidate, order: []const u32, used: []const bool, history: []const RecentPick) ?u32 {
+fn choose(candidates: []const Candidate, order: []const u32, used: []const bool, history: []const RecentPick, window: ?usize) ?u32 {
     for ([_]bool{ true, false }) |space_unplayed| {
         for (0..3) |relaxation| {
             for (order) |index| {
                 if (used[index]) continue;
-                if (allowed(candidates[index], history, relaxation, space_unplayed)) return index;
+                if (allowed(candidates[index], history, relaxation, space_unplayed, window)) return index;
             }
         }
     }
     return null;
 }
 
-fn allowed(candidate: Candidate, history: []const RecentPick, relaxation: usize, space_unplayed: bool) bool {
-    if (space_unplayed and candidate.play_count == 0) {
-        const window = history[history.len -| (unplayed_window - 1)..];
-        for (window) |recent| if (recent.never_played) return false;
-    }
+fn allowed(candidate: Candidate, history: []const RecentPick, relaxation: usize, space_unplayed: bool, window: ?usize) bool {
+    if (space_unplayed and candidate.play_count == 0) if (window) |size| {
+        const recent = history[history.len -| (size - 1)..];
+        for (recent) |pick| if (pick.never_played) return false;
+    };
     return diverseAt(history, candidate.artist_id, candidate.release_id, relaxation);
 }
 
@@ -1808,13 +1838,35 @@ test "the discovery settings read their defaults, keep what is written, and igno
     var library = try openFixture("settings");
     defer library.close();
     try testing.expectEqual(Settings{}, try readSettings(&library.settings));
-    const changed: Settings = .{ .radio_continue = false, .include_unplayed = false, .avoid_days = .seven_days, .mix_count = .four };
+    const changed: Settings = .{ .radio_continue = false, .include_unplayed = false, .avoid_days = .seven_days, .mix_count = .four, .familiarity = 40 };
     try writeSettings(&library.settings, changed);
     try testing.expectEqual(changed, try readSettings(&library.settings));
     try library.database.exec("UPDATE library_settings SET value = '5' WHERE key IN ('discovery.avoid_days', 'mixes.count');");
+    try library.database.exec("UPDATE library_settings SET value = '200' WHERE key = 'radio.familiarity';");
     const read = try readSettings(&library.settings);
     try testing.expectEqual(AvoidDays.three_days, read.avoid_days);
     try testing.expectEqual(MixCount.six, read.mix_count);
+    try testing.expectEqual(@as(u8, 0), read.familiarity);
+}
+
+test "familiarity maps to a never-played window and a played-count tilt" {
+    try testing.expectEqual(@as(?usize, null), unplayedWindow(0));
+    try testing.expectEqual(@as(?usize, 2), unplayedWindow(1));
+    try testing.expectEqual(@as(?usize, 2), unplayedWindow(25));
+    try testing.expectEqual(@as(?usize, 2), unplayedWindow(50));
+    try testing.expectEqual(@as(?usize, 3), unplayedWindow(51));
+    try testing.expectEqual(@as(?usize, 3), unplayedWindow(60));
+    try testing.expectEqual(@as(?usize, 3), unplayedWindow(75));
+    try testing.expectEqual(@as(?usize, 4), unplayedWindow(76));
+    try testing.expectEqual(@as(?usize, 4), unplayedWindow(80));
+    try testing.expectEqual(@as(?usize, 4), unplayedWindow(100));
+    try testing.expectEqual(@as(f64, 0), historyTilt(0, 5));
+    try testing.expectEqual(@as(f64, 0), historyTilt(100, 0));
+    try testing.expectEqual(@as(f64, 0), historyTilt(100, -1));
+    try testing.expectApproxEqAbs(@as(f64, 0.03), historyTilt(100, 1), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.15), historyTilt(100, 5), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.15), historyTilt(100, 9), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.075), historyTilt(50, 5), 1e-12);
 }
 
 test "every seed kind finds picks in a Library" {
@@ -1953,14 +2005,14 @@ test "never-played Recordings are at most one in four while played ones remain, 
     var library = try openFixture("unplayed");
     defer library.close();
     try library.database.exec("DELETE FROM recording_play_stats WHERE recording_id % 2 = 0;");
-    var picks = try radioFor(&library, .{ .track = 1 }, .{ .include_unplayed = true }, max_picks);
+    var picks = try radioFor(&library, .{ .track = 1 }, .{ .include_unplayed = true, .familiarity = 100 }, max_picks);
     defer picks.deinit();
     var never: usize = 0;
     for (picks.items) |pick| never += @intFromBool(pick.never_played);
     try testing.expect(never > 0);
     try testing.expectEqual(@as(usize, 41), picks.items.len);
     try expectUnplayedSpacedWhilePlayedRemain(picks);
-    var short = try radioFor(&library, .{ .track = 1 }, .{ .include_unplayed = true }, 12);
+    var short = try radioFor(&library, .{ .track = 1 }, .{ .include_unplayed = true, .familiarity = 100 }, 12);
     defer short.deinit();
     for (short.items, 0..) |pick, index| {
         if (!pick.never_played) continue;
@@ -1973,6 +2025,58 @@ test "never-played Recordings are at most one in four while played ones remain, 
     var setting_off = try radioFor(&library, .{ .track = 1 }, .{}, max_picks);
     defer setting_off.deinit();
     for (setting_off.items) |pick| try testing.expect(!pick.never_played);
+}
+
+test "familiarity changes the never-played cap and tilts played candidates" {
+    var library = try openFixture("familiarity");
+    defer library.close();
+    try library.database.exec(
+        "DELETE FROM recording_play_stats;" ++
+            "INSERT INTO recording_play_stats(recording_id, play_count, last_played_at) SELECT id, 5, 1000 FROM recordings WHERE id <= 9;",
+    );
+    var loose = try radioFor(&library, .{ .track = 1 }, .{ .familiarity = 0 }, 20);
+    defer loose.deinit();
+    try testing.expect(loose.items.len > 0);
+    var consecutive = false;
+    for (loose.items, 0..) |pick, index| {
+        if (index == 0) continue;
+        if (pick.never_played and loose.items[index - 1].never_played) consecutive = true;
+    }
+    try testing.expect(consecutive);
+
+    var capped = try radioFor(&library, .{ .track = 1 }, .{ .familiarity = 100 }, 20);
+    defer capped.deinit();
+    try testing.expect(capped.items.len > 0);
+    var saw_never = false;
+    for (capped.items) |pick| saw_never = saw_never or pick.never_played;
+    try testing.expect(saw_never);
+    try expectUnplayedSpacedWhilePlayedRemain(capped);
+
+    const profile: Profile = .{ .seed = .loved, .seed_tracks = &.{}, .own_artists = false };
+    const weights = Components.weightsAt(100);
+    const session: Session = .{ .now_s = 0, .seed = 0 };
+    var played: Candidate = .{
+        .recording_id = 7,
+        .track_id = 7,
+        .artist_id = null,
+        .release_id = null,
+        .year = null,
+        .loved = false,
+        .rating = null,
+        .release_or_artist_loved = false,
+        .play_count = 5,
+        .last_played_at = 1000,
+        .added_at = 0,
+    };
+    var unplayed = played;
+    unplayed.play_count = 0;
+    unplayed.last_played_at = null;
+    score(&played, &profile, weights, session, 0);
+    score(&unplayed, &profile, weights, session, 0);
+    try testing.expectEqual(played.score, unplayed.score);
+    score(&played, &profile, weights, session, 100);
+    score(&unplayed, &profile, weights, session, 100);
+    try testing.expect(played.score > unplayed.score);
 }
 
 test "a Library with almost no history fills a Radio with never-played picks once the played ones run out" {
@@ -1993,7 +2097,7 @@ test "a Library with almost no history fills a Radio with never-played picks onc
         \\INSERT INTO locations(file_id, volume_id, uri, state) SELECT id, 1, '/m/' || id, 'present' FROM files;
         \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at) VALUES (1, 4, 1000), (2, 2, 1000), (3, 1, 1000);
     );
-    var picks = try radioFor(&library, .{ .track = 1 }, .{ .include_unplayed = true }, 25);
+    var picks = try radioFor(&library, .{ .track = 1 }, .{ .include_unplayed = true, .familiarity = 100 }, 25);
     defer picks.deinit();
     try testing.expectEqual(@as(usize, 25), picks.items.len);
     var played: usize = 0;

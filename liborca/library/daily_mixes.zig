@@ -253,13 +253,14 @@ pub fn makeMixes(
         .now_s = now_s,
         .day_seed = day_seed,
         .avoid_days = avoid_days,
+        .familiarity = settings.familiarity,
         .top_artists = top,
         .start = @intCast(@mod(day, theme_kinds.len)),
     };
 
     if (isCancelled(cancellation)) return null;
     const unplayed_since = now_s - rarely_played_after_s;
-    const rarely_mix: discovery.MixFilter = .{ .now_s = now_s, .seed = mixSeed(day_seed, max_mixes), .avoid_days = 0 };
+    const rarely_mix: discovery.MixFilter = .{ .now_s = now_s, .seed = mixSeed(day_seed, max_mixes), .avoid_days = 0, .familiarity = settings.familiarity };
     const rarely = try discovery.rankRarelyPlayed(arena, source, rarely_mix, unplayed_since);
     const others = mix_count - @intFromBool(rarely.items.len > 0 and mix_count > 1);
 
@@ -278,7 +279,7 @@ pub fn makeMixes(
     for (clusters) |cluster| {
         if (builder.mixes.items.len == others - reserved) break;
         if (isCancelled(cancellation)) return null;
-        const mix: discovery.MixFilter = .{ .now_s = now_s, .seed = mixSeed(day_seed, builder.mixes.items.len), .avoid_days = avoid_days };
+        const mix: discovery.MixFilter = .{ .now_s = now_s, .seed = mixSeed(day_seed, builder.mixes.items.len), .avoid_days = avoid_days, .familiarity = settings.familiarity };
         const ranking = try discovery.rankCluster(arena, source, .{ .genre_id = cluster.genre_id, .artists = cluster.artists }, mix);
         if (cluster.artists.len < min_cluster_artists and clusterCandidates(ranking.items, cluster.artists) < min_cluster_candidates) continue;
         const avoid_after = if (ranking.relaxed_recent or avoid_days == 0) null else now_s - avoid_days * day_s;
@@ -326,6 +327,7 @@ const Themes = struct {
     now_s: i64,
     day_seed: u64,
     avoid_days: i64,
+    familiarity: u8 = 0,
     top_artists: []const ArtistPlays,
     start: usize,
     taste: ?discovery.Taste = null,
@@ -370,6 +372,7 @@ const Themes = struct {
             .now_s = self.now_s,
             .seed = mixSeed(self.day_seed, max_mixes + 1 + @as(usize, @backingInt(kind))),
             .avoid_days = self.avoid_days,
+            .familiarity = self.familiarity,
         };
         const ranking = try discovery.rankTheme(self.arena, self.source, &self.taste.?, theme, mix);
         if (ranking.items.len < min_cluster_candidates) return null;
