@@ -19,7 +19,7 @@ runtime path, per the rule in [architecture.md](architecture.md).
 
 | Version | Date | Highlights |
 | --- | --- | --- |
-| Unreleased | on main | Theme mixes, unplayed albums, rate released on pause |
+| 0.4.0 | 2026-10-11 | Theme mixes, unplayed albums, Radio play-history dial, fixes |
 | 0.3.0 | 2026-10-08 | Home, Daily Mixes, Library Radio, audio features |
 | 0.2.0 | 2026-10-06 | Binary cache, AcoustID submitted count, fixes |
 | 0.1.0 | 2026-10-06 | First public release |

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in
 place, and 0.3.0 cannot open it afterwards. The C ABI only adds.
