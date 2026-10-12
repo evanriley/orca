@@ -17,20 +17,32 @@ alike.
 
 ## The audio-embedding model
 
-`clap_audio_int8.onnx` is not in the repository. It is the one asset of the
-release tagged `model-clap-int8-1`, which the Nix package, the README's
-download commands and `Runtime.startEmbeddingModelDownload(model, destination)`
-fetch. liborca accepts only the file with the size and SHA-256 in
-`liborca/analysis/audio_embedding.zig`.
+Two audio-embedding model files exist. Neither is in the repository. Each is
+the one asset of its own release, which the README's download commands and
+`Runtime.startEmbeddingModelDownload(model, destination)` fetch. The Nix
+package fetches only `clap_audio_int8.onnx`. liborca accepts only a file with
+the size and SHA-256 in `liborca/analysis/audio_embedding.zig`.
+
+- `clap_audio_int8.onnx`: release tag `model-clap-int8-1`, written by
+  `scripts/embedding/export_model.py`.
+- `maest_audio_int8.onnx`: release tag `model-maest-int8-1`, written by
+  `scripts/embedding/export_maest.py`.
+
+The MAEST file is derived from
+[mtg-upf/discogs-maest-30s-pw-129e](https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e)
+at the revision pinned in the export script, and is licensed CC BY-NC-SA 4.0.
+Its release notes carry that licence, the attribution (Music Technology Group,
+Universitat Pompeu Fabra), the source repository and revision, and a statement
+that the file is a quantised derivative of the original weights.
 
 A different model is a new file under a new tag, never a replaced asset:
 
-1. Write the file with `scripts/embedding/export_model.py OUTDIR`.
-2. Set `model_size`, `model_sha256` and `model_url` in
-   `liborca/analysis/audio_embedding.zig`.
+1. Write the file with the model's export script and `OUTDIR` as its argument.
+2. Set the release tag, file name, size and SHA-256 of the model's `ModelSpec`
+   in `liborca/analysis/audio_embedding.zig`.
 3. Upload the file as the asset of a new `model-NAME-N` release.
-4. Set the URL and hash of `embeddingModel` in `nix/package.nix`, and the URL
-   and digest in the README.
+4. Set the URL and digest in the README. For the bundled model only, also set
+   the URL and hash of `embeddingModel` in `nix/package.nix`.
 
 ## Steps
 
