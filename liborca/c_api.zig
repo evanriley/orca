@@ -812,6 +812,12 @@ pub const PlayStatsView = extern struct {
     _reserved: [7]u8 = @splat(0),
 };
 
+pub const SimilarTrackView = extern struct {
+    track_id: i64,
+    similarity: f32,
+    _reserved: [4]u8 = @splat(0),
+};
+
 pub const AudioFeaturesView = extern struct {
     tempo_bpm: f64,
     tempo_confidence: f64,
@@ -1665,6 +1671,7 @@ pub const BackfillPendingView = extern struct {
 pub const measurement_loudness_and_checks: u32 = 1;
 pub const measurement_fingerprint: u32 = 2;
 pub const measurement_features: u32 = 4;
+pub const measurement_embedding: u32 = 8;
 
 pub const AnalysisCoverageView = extern struct {
     never_analyzed: u64,
@@ -3625,6 +3632,25 @@ fn exportReasonPart(part: ?discovery.ReasonPart) ReasonPartView {
     return .{ .a = found.a, .b = found.b, .kind = @backingInt(found.kind) };
 }
 
+pub export fn orca_library_similar_tracks(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    buffer: ?[*]SimilarTrackView,
+    capacity: usize,
+    count: ?*usize,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const count_destination = count orelse return box.reject(@src(), .invalid_argument, "count is null");
+    if (capacity > 0 and buffer == null) return box.reject(@src(), .invalid_argument, "buffer is null");
+    var similar = box.runtime.librarySimilarTracks(importLibrary(library), box.runtime.allocator, track_id, capacity) catch |err|
+        return box.fail(@src(), err);
+    defer similar.deinit();
+    for (similar.items, 0..) |item, index| buffer.?[index] = .{ .track_id = item.track_id, .similarity = item.similarity };
+    count_destination.* = similar.items.len;
+    return .ok;
+}
+
 pub export fn orca_library_radio_preview(
     runtime: ?*Runtime,
     library: Handle,
@@ -4492,7 +4518,8 @@ pub export fn orca_library_analysis_coverage(
         .measurement_set = coverage.measurement_set,
         .missing = (if (coverage.missing.loudness_and_checks) measurement_loudness_and_checks else 0) |
             (if (coverage.missing.fingerprint) measurement_fingerprint else 0) |
-            (if (coverage.missing.features) measurement_features else 0),
+            (if (coverage.missing.features) measurement_features else 0) |
+            (if (coverage.missing.embedding) measurement_embedding else 0),
     };
     return .ok;
 }
@@ -5969,6 +5996,22 @@ pub export fn orca_runtime_set_acoustid_client_key(runtime: ?*Runtime, key: ?[*:
     const box = enter(runtime) orelse return refusal(runtime);
     const value: ?[]const u8 = if (key) |text| std.mem.span(text) else null;
     box.runtime.setAcoustIdClientKey(value) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_runtime_set_embedding_model_path(runtime: ?*Runtime, path: ?[*:0]const u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const value: ?[]const u8 = if (path) |text| std.mem.span(text) else null;
+    if (value) |text| if (text.len > std.Io.Dir.max_path_bytes)
+        return box.reject(@src(), .invalid_argument, "path is longer than the maximum path length");
+    box.runtime.setEmbeddingModelPath(value) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_runtime_embedding_model_state(runtime: ?*Runtime, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = @backingInt(box.runtime.embeddingModelState());
     return .ok;
 }
 
@@ -9915,7 +9958,7 @@ fn mapError(err: anyerror) Status {
         error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
         error.UnknownDuplicateGroup, error.NoReleaseCandidate, error.UnknownRadioSeed => .not_found,
         error.NotARadioPick => .not_found,
-        error.RadioNotActive => .invalid_state,
+        error.RadioNotActive, error.NoAudioEmbedding => .invalid_state,
         error.TrackNotOnRelease, error.UnknownReleaseTrack => .not_found,
         error.NoReleaseTracklist, error.ReleaseTrackAlreadyPaired, error.ReleaseNotPlaced => .invalid_state,
         error.ReleaseTooLarge => .unsupported,
@@ -9986,6 +10029,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidExplore,
         error.InvalidDecade,
         error.RadioLimitTooLarge,
+        error.SimilarLimitTooLarge,
         error.RadioSessionTooLarge,
         => .invalid_argument,
         else => .internal,
@@ -12037,6 +12081,71 @@ test "a provider server is copied out of the caller's buffer, refused unless htt
     try std.testing.expectEqualStrings(providers.acoustid.default_server, box.runtime.acoustid_server.view());
     try std.testing.expectEqualStrings(providers.coverartarchive.default_server, box.runtime.coverartarchive_server.view());
     try std.testing.expectEqualStrings(providers.lrclib.default_server, box.runtime.lrclib_server.view());
+}
+
+test "the embedding model path and state are reachable and a similar-tracks search refuses what it cannot answer" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var state: u8 = 255;
+    try std.testing.expectEqual(Status.ok, orca_runtime_embedding_model_state(runtime, &state));
+    try std.testing.expect(state == @backingInt(core.embedding_model.State.missing) or state == @backingInt(core.embedding_model.State.built_without));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_embedding_model_state(runtime, null));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_embedding_model_path(runtime, "/nonexistent/model.onnx"));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_embedding_model_path(runtime, null));
+
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-similar?mode=memory&cache=shared", &library));
+    var buffer: [2]SimilarTrackView = undefined;
+    var count: usize = 99;
+    try std.testing.expectEqual(Status.not_found, orca_library_similar_tracks(runtime, library, 1, &buffer, buffer.len, &count));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_similar_tracks(runtime, library, 1, &buffer, 1001, &count));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_similar_tracks(runtime, library, 1, &buffer, buffer.len, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_similar_tracks(runtime, library, 1, null, buffer.len, &count));
+    try std.testing.expectEqual(@as(usize, 99), count);
+
+    const library_database = try core.runtime.databaseOf(&runtimeBox(runtime).?.runtime, importLibrary(library));
+    try library_database.database.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'r'), (2, 'r'), (3, 'r'), (4, 'r');
+        \\INSERT INTO files(id, recording_id, size_bytes, quick_hash, content_hash, content_hash_algorithm) VALUES
+        \\    (1, 1, 1, x'01', x'01', 1), (2, 2, 1, x'01', x'01', 1), (3, 3, 1, x'01', x'01', 1), (4, 4, 1, x'01', x'01', 1);
+        \\INSERT INTO tracks(id, recording_id, title) VALUES (11, 1, 'seed'), (12, 2, 'far'), (13, 3, 'near'), (14, 4, 'unmeasured');
+    );
+    var embedding = try library_database.database.prepare(
+        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (?1, x'01', ?2);",
+    );
+    defer embedding.deinit();
+    for ([_][2]i8{ .{ 100, 0 }, .{ 0, 100 }, .{ 80, 60 } }, 1..) |head, file_id| {
+        var vector: [512]i8 = @splat(0);
+        vector[0..2].* = head;
+        try embedding.reset();
+        try embedding.bindInt64(1, @intCast(file_id));
+        try embedding.bindBlob(2, std.mem.asBytes(&vector));
+        _ = try embedding.step();
+    }
+
+    var found: [3]SimilarTrackView = @splat(.{ .track_id = -1, .similarity = -1 });
+    try std.testing.expectEqual(Status.ok, orca_library_similar_tracks(runtime, library, 11, &found, found.len, &count));
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(i64, 13), found[0].track_id);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), found[0].similarity, 1e-6);
+    try std.testing.expectEqual(@as(i64, 12), found[1].track_id);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), found[1].similarity, 1e-6);
+    try std.testing.expectEqual(@as(i64, -1), found[2].track_id);
+
+    found = @splat(.{ .track_id = -1, .similarity = -1 });
+    try std.testing.expectEqual(Status.ok, orca_library_similar_tracks(runtime, library, 11, &found, 1, &count));
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(i64, 13), found[0].track_id);
+    try std.testing.expectEqual(@as(i64, -1), found[1].track_id);
+
+    count = 99;
+    try std.testing.expectEqual(Status.ok, orca_library_similar_tracks(runtime, library, 11, null, 0, &count));
+    try std.testing.expectEqual(@as(usize, 0), count);
+
+    count = 99;
+    try std.testing.expectEqual(Status.invalid_state, orca_library_similar_tracks(runtime, library, 14, &found, found.len, &count));
+    try std.testing.expectEqual(@as(usize, 99), count);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
 test "the client identity and AcoustID key are copied, and invalid ones are refused" {

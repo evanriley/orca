@@ -4925,6 +4925,19 @@ static int provider_settings_steps(orca_runtime *runtime) {
     SMOKE_CHECK(orca_runtime_set_acoustid_client_key(runtime, "smoke-key") == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_runtime_set_acoustid_client_key(runtime, "with space") == ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_runtime_set_acoustid_client_key(runtime, 0) == ORCA_STATUS_OK);
+
+    uint8_t model_state = 255;
+    SMOKE_CHECK(orca_runtime_embedding_model_state(runtime, &model_state) == ORCA_STATUS_OK);
+    SMOKE_CHECK(model_state == ORCA_EMBEDDING_MODEL_STATE_MISSING ||
+                model_state == ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT);
+    SMOKE_CHECK(orca_runtime_embedding_model_state(runtime, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_set_embedding_model_path(runtime, "/nonexistent/orca-smoke-model.onnx") ==
+                ORCA_STATUS_OK);
+    uint8_t unset_state = model_state;
+    model_state = 255;
+    SMOKE_CHECK(orca_runtime_embedding_model_state(runtime, &model_state) == ORCA_STATUS_OK);
+    SMOKE_CHECK(model_state == unset_state);
+    SMOKE_CHECK(orca_runtime_set_embedding_model_path(runtime, 0) == ORCA_STATUS_OK);
     return 0;
 }
 
@@ -6095,6 +6108,23 @@ int main(int argc, char **argv) {
     if (orca_library_radio_preview(runtime, library, &radio_seed, NULL, NULL, 8, &radio,
                                    capture_radio) != ORCA_STATUS_INVALID_ARGUMENT)
         return 627;
+    orca_similar_track_view similar[4];
+    size_t similar_count = 99;
+    if (orca_library_similar_tracks(runtime, library, capture.first_playable_id, similar, 4,
+                                    &similar_count) != ORCA_STATUS_INVALID_STATE ||
+        similar_count != 99)
+        return 656;
+    if (orca_library_similar_tracks(runtime, library, 999999999, similar, 4, &similar_count) !=
+        ORCA_STATUS_NOT_FOUND)
+        return 657;
+    if (orca_library_similar_tracks(runtime, library, capture.first_playable_id, similar, 1001,
+                                    &similar_count) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 658;
+    if (orca_library_similar_tracks(runtime, library, capture.first_playable_id, similar, 4, 0) !=
+            ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_similar_tracks(runtime, library, capture.first_playable_id, 0, 4,
+                                    &similar_count) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 659;
     orca_discovery_settings default_discovery = {1, 1, 3, 6, 0, 0, {0}};
     if (orca_library_set_discovery_settings(runtime, library, &default_discovery) != ORCA_STATUS_OK)
         return 628;

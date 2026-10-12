@@ -145,7 +145,10 @@ file is checked by size and SHA-256. Without a usable model an analysis
 measures and stores exactly what it does in a build without embeddings.
 
 `Runtime.embeddingModelState` reports what the last
-`setEmbeddingModelPath` found, as an `EmbeddingModelState`:
+`setEmbeddingModelPath` found, as an `EmbeddingModelState`; the C ABI calls are
+`orca_runtime_set_embedding_model_path` and `orca_runtime_embedding_model_state`,
+which writes an `orca_embedding_model_state` with the same five values in the
+same order, `ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT` 0 to `..._READY` 4:
 
 | State | Meaning |
 | --- | --- |
@@ -250,9 +253,12 @@ for every Recording it reads, the similarity of its nearest vector in
 `similarTracks(allocator, connection, track_id, limit)` searches with the
 vector of the file the Track plays, excludes the Track's own Recording, and
 names each remaining Recording by its lowest Track id.
-`Runtime.librarySimilarTracks` and `orca-cli similar` call it
-([api.md](api.md#matching-and-release-review), [cli.md](cli.md)). The C ABI
-has no call for it.
+`Runtime.librarySimilarTracks`, `orca_library_similar_tracks` and
+`orca-cli similar` call it ([api.md](api.md#matching-and-release-review),
+[frontends.md](frontends.md#surface), [cli.md](cli.md)). The C call maps
+`error.TrackNotFound` to `ORCA_STATUS_NOT_FOUND`, `error.NoAudioEmbedding` to
+`ORCA_STATUS_INVALID_STATE` and `error.SimilarLimitTooLarge` to
+`ORCA_STATUS_INVALID_ARGUMENT`.
 
 ## The pass
 

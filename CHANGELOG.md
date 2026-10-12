@@ -49,8 +49,10 @@
   `MissingMeasurements.embedding` flags it. A job that cannot load the model
   records why in the state and measures without it. `orca-cli analyze-library`
   and `stats` take `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL`, and
-  exit 1 with the reason when the model cannot be used. The C ABI has no call
-  for the model.
+  exit 1 with the reason when the model cannot be used. C hosts call
+  `orca_runtime_set_embedding_model_path` and `orca_runtime_embedding_model_state`
+  (`orca_embedding_model_state`), and `orca_library_analysis_coverage` reports
+  the embedding as `ORCA_MEASUREMENT_EMBEDDING`.
 
 - **The Library keeps each file's audio embedding in a table.** Library schema
   version 5 adds `file_audio_embeddings`, kept by triggers on
@@ -65,8 +67,11 @@
   [--limit N]` prints them, 15 by default, and needs no model file. A Track
   whose file has no current embedding is `error.NoAudioEmbedding`. The search
   reads the vectors a page at a time and builds no index;
-  `AudioEmbeddingRow` carries the file's Recording id. The C ABI has no call
-  for it.
+  `AudioEmbeddingRow` carries the file's Recording id. C hosts call
+  `orca_library_similar_tracks`, which fills an array of
+  `orca_similar_track_view` and answers `ORCA_STATUS_NOT_FOUND`,
+  `ORCA_STATUS_INVALID_STATE` for a Track without an embedding or
+  `ORCA_STATUS_INVALID_ARGUMENT` for a capacity above 1,000.
 
 ### Changed
 
