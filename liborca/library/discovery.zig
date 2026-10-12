@@ -7,6 +7,7 @@ const AudioFeatures = database.AudioFeatures;
 const track_play_file = @import("../database/repository/tracks.zig").track_play_file;
 const optionalInt64 = @import("../database/columns.zig").optionalInt64;
 const home = @import("home.zig");
+const audio_similarity = @import("audio_similarity.zig");
 
 pub const max_pool = 2000;
 pub const max_picks = 512;
@@ -28,6 +29,10 @@ const recent_seed_tracks = 5;
 const added_reason_window_s = 60 * 86_400;
 const diversity_window = 10;
 const release_limit_per_window = 2;
+const sound_neighbours = 300;
+const sound_high_rank = 10;
+const overall_similarity: f32 = 0.9;
+const neutral_audio = 0.3;
 
 /// Where a Radio starts.
 pub const Seed = union(enum) {
@@ -151,7 +156,8 @@ pub const ReasonKind = enum(u8) {
     shared_genre = 4,
     /// a: the Recording (b = 0) or Artist (b = 1) it was often played after.
     often_after = 5,
-    /// a: `sound_tempo`, `sound_key` and `sound_energy` flags.
+    /// a: `sound_tempo`, `sound_key` and `sound_energy` flags, or
+    /// `sound_overall` alone.
     similar_sound = 6,
     never_played = 7,
     /// a: play count.
@@ -163,6 +169,7 @@ pub const ReasonKind = enum(u8) {
 pub const sound_tempo: i64 = 1;
 pub const sound_key: i64 = 2;
 pub const sound_energy: i64 = 4;
+pub const sound_overall: i64 = 8;
 
 pub const ReasonPart = struct {
     kind: ReasonKind,
@@ -305,7 +312,7 @@ pub const AudioScore = struct {
 /// side lacks drop out and the rest are renormalised; a candidate with
 /// nothing to compare scores 0.3.
 pub fn audioScore(seed: Sound, candidate: ?AudioFeatures) AudioScore {
-    const features = candidate orelse return .{ .value = 0.3, .flags = 0 };
+    const features = candidate orelse return .{ .value = neutral_audio, .flags = 0 };
     var sum: f64 = 0;
     var weight: f64 = 0;
     var flags: i64 = 0;
@@ -327,8 +334,29 @@ pub fn audioScore(seed: Sound, candidate: ?AudioFeatures) AudioScore {
         weight += 0.4;
         if (s >= 0.85) flags |= sound_energy;
     };
-    if (weight == 0) return .{ .value = 0.3, .flags = 0 };
+    if (weight == 0) return .{ .value = neutral_audio, .flags = 0 };
     return .{ .value = sum / weight, .flags = flags };
+}
+
+pub const SoundAnchors = struct {
+    high: f32,
+    low: f32,
+
+    pub fn of(nearest: []const audio_similarity.Neighbour) ?SoundAnchors {
+        if (nearest.len == 0) return null;
+        return .{
+            .high = nearest[@min(nearest.len, sound_high_rank) - 1].similarity,
+            .low = nearest[@min(nearest.len, sound_neighbours) - 1].similarity,
+        };
+    }
+};
+
+pub fn embeddingScore(anchors: SoundAnchors, candidate_similarity: ?f32) AudioScore {
+    const similarity = candidate_similarity orelse return .{ .value = neutral_audio, .flags = 0 };
+    const high: f64 = anchors.high;
+    const low: f64 = anchors.low;
+    const value = std.math.clamp(1 - 0.5 * (high - similarity) / @max(high - low, 0.01), 0, 1);
+    return .{ .value = value, .flags = if (value >= 0.5 and similarity >= overall_similarity) sound_overall else 0 };
 }
 
 /// 1 inside the seed's years, falling to 0 at 15 years outside; 0.3 when
@@ -360,6 +388,7 @@ pub const Source = struct {
     settings: database.LibrarySettingsRepository,
     artist_info: database.ArtistInfoRepository,
     audio_features: database.AudioFeatureRepository,
+    audio_embeddings: database.AudioEmbeddingRepository,
 
     pub fn of(library: *const database.LibraryDatabase) Source {
         return onConnection(library.queryDatabase(), library.write_lane);
@@ -371,6 +400,7 @@ pub const Source = struct {
             .settings = .{ .db = connection, .write_lane = write_lane },
             .artist_info = .{ .db = connection, .write_lane = write_lane },
             .audio_features = .{ .db = connection },
+            .audio_embeddings = .{ .db = connection },
         };
     }
 };
@@ -410,7 +440,7 @@ pub fn pickRadio(
     var profile = try buildProfile(arena, library, seed, session.now_s);
 
     var weights = Components.weightsAt(options.explore);
-    if (profile.sound.isEmpty()) weights = weights.withoutAudio();
+    if (!profile.hasSound()) weights = weights.withoutAudio();
 
     var excluded: std.ArrayList(i64) = .empty;
     try excluded.appendSlice(arena, session.excluded_recordings);
@@ -559,7 +589,7 @@ pub fn rankCluster(arena: std.mem.Allocator, library: *const Source, cluster: Cl
 
 fn mixWeights(profile: *const Profile) Components {
     const weights = Components.mix;
-    return if (profile.sound.isEmpty()) weights.withoutAudio() else weights;
+    return if (profile.hasSound()) weights else weights.withoutAudio();
 }
 
 fn rankScored(arena: std.mem.Allocator, candidates: []Candidate, profile: *const Profile, weights: Components, mix: MixFilter) ![]const Ranked {
@@ -730,6 +760,7 @@ fn buildArtistsProfile(arena: std.mem.Allocator, library: *const Source, artists
     try profileGenres(arena, db, &profile);
     profileYears(arena, &profile);
     try profileSound(arena, library, &profile);
+    try profileNeighbours(arena, library, &profile);
     profile.colisten = try loadCoListening(arena, db, tracks.items, now_s);
     return profile;
 }
@@ -939,7 +970,18 @@ const Profile = struct {
     year_low: ?i64 = null,
     year_high: ?i64 = null,
     sound: Sound = .{},
+    neighbours: ?SoundNeighbours = null,
     colisten: CoListening = .{},
+
+    fn hasSound(self: *const Profile) bool {
+        return self.neighbours != null or !self.sound.isEmpty();
+    }
+};
+
+const SoundNeighbours = struct {
+    anchors: SoundAnchors,
+    nearest: []const i64,
+    similarities: audio_similarity.RecordingSimilarities,
 };
 
 pub const year_of_track_release =
@@ -1004,6 +1046,7 @@ fn buildProfile(arena: std.mem.Allocator, library: *const Source, seed: Seed, no
     try profileGenres(arena, db, &profile);
     profileYears(arena, &profile);
     try profileSound(arena, library, &profile);
+    try profileNeighbours(arena, library, &profile);
     profile.colisten = try loadCoListening(arena, db, tracks.items, now_s);
     return profile;
 }
@@ -1152,6 +1195,39 @@ fn profileSound(arena: std.mem.Allocator, library: *const Source, profile: *Prof
         .confidence = 1,
     };
     if (energy_count > 0) profile.sound.energy = energy_sum / @as(f64, @floatFromInt(energy_count));
+}
+
+fn profileNeighbours(arena: std.mem.Allocator, library: *const Source, profile: *Profile) !void {
+    const query = try seedEmbedding(library, profile.seed_tracks) orelse return;
+    const nearest = try arena.alloc(audio_similarity.Neighbour, sound_neighbours);
+    var similarities: audio_similarity.RecordingSimilarities = .empty;
+    const found = try audio_similarity.nearestRecordingsWithSimilarities(arena, &library.audio_embeddings, &query, nearest, &similarities);
+    const anchors = SoundAnchors.of(nearest[0..found]) orelse return;
+    const recordings = try arena.alloc(i64, found);
+    for (recordings, nearest[0..found]) |*id, neighbour| id.* = neighbour.recording_id;
+    profile.neighbours = .{ .anchors = anchors, .nearest = recordings, .similarities = similarities };
+}
+
+fn seedEmbedding(library: *const Source, seed_tracks: []const SeedTrack) !?[audio_similarity.embedding_size]f32 {
+    var play_file = try library.database.prepare("SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1;");
+    defer play_file.deinit();
+    var sum: [audio_similarity.embedding_size]f64 = @splat(0);
+    for (seed_tracks) |track| {
+        try play_file.reset();
+        try play_file.bindInt64(1, track.track_id);
+        if (try play_file.step() != .row) continue;
+        const file_id = optionalInt64(play_file, 0) orelse continue;
+        const stored = try library.audio_embeddings.fileEmbedding(file_id) orelse continue;
+        const unit = audio_similarity.unitVector(&stored) orelse continue;
+        for (&sum, unit) |*total, value| total.* += value;
+    }
+    var squared: f64 = 0;
+    for (sum) |total| squared += total * total;
+    if (squared == 0) return null;
+    const length = @sqrt(squared);
+    var mean: [audio_similarity.embedding_size]f32 = undefined;
+    for (&mean, sum) |*value, total| value.* = @floatCast(total / length);
+    return mean;
 }
 
 const Follow = struct {
@@ -1407,7 +1483,9 @@ fn loadCandidates(
         try pool.add(arena, db, bucket_artists, filter, try jsonIds(arena, followed_artists), 200);
     }
 
-    if (profile.sound.tempo) |tempo| try pool.add(arena, db, bucket_tempo, filter, tempo, 300);
+    if (profile.neighbours) |neighbours| {
+        try pool.add(arena, db, bucket_recordings, filter, try jsonIds(arena, neighbours.nearest), sound_neighbours);
+    } else if (profile.sound.tempo) |tempo| try pool.add(arena, db, bucket_tempo, filter, tempo, 300);
     if (profile.year_low) |low| {
         const range = try std.fmt.allocPrint(arena, "[{d},{d}]", .{ low - 5, profile.year_high.? + 5 });
         try pool.add(arena, db, bucket_era, filter, @as([]const u8, range), 200);
@@ -1517,7 +1595,11 @@ fn score(candidate: *Candidate, profile: *const Profile, weights: Components, se
     }
     if (genre_weight > 0) components.genre = genre_sum / genre_weight;
 
-    if (!profile.sound.isEmpty()) {
+    if (profile.neighbours) |*neighbours| {
+        const audio = embeddingScore(neighbours.anchors, neighbours.similarities.get(candidate.recording_id));
+        components.audio = audio.value;
+        candidate.sound_flags = audio.flags;
+    } else if (!profile.sound.isEmpty()) {
         const audio = audioScore(profile.sound, candidate.features);
         components.audio = audio.value;
         candidate.sound_flags = audio.flags;
@@ -1673,7 +1755,7 @@ fn reasonFor(candidate: *const Candidate, profile: *const Profile, weights: Comp
         options[count] = .{ .strength = weights.co_listening * c.co_listening, .part = part };
         count += 1;
     };
-    if (candidate.features != null and candidate.sound_flags != 0) {
+    if (candidate.sound_flags != 0) {
         options[count] = .{ .strength = weights.audio * c.audio, .part = .{ .kind = .similar_sound, .a = candidate.sound_flags } };
         count += 1;
     }
@@ -2216,45 +2298,84 @@ test "every reason is true of its pick" {
     defer follows.deinit();
 
     var saw_often_after = false;
-    for ([_]u8{ 0, 35, 100 }) |explore| {
-        var picks = try radioFor(&library, .{ .track = 1 }, .{ .explore = explore }, 40);
-        defer picks.deinit();
-        for (picks.items) |pick| for ([_]?ReasonPart{ pick.reason.first, pick.reason.second }) |maybe| {
-            const part = maybe orelse continue;
-            switch (part.kind) {
-                .same_artist => try testing.expectEqual(@as(?i64, 1), pick.artist_id),
-                .related_artist => {
-                    try testing.expectEqual(@as(i64, 1), part.a);
-                    try testing.expect(pick.artist_id == 2 or pick.artist_id == 3);
-                },
-                .shared_genre => {
-                    try seed_genres.bindInt64(1, part.a);
-                    try testing.expectEqual(sqlite.Step.row, try seed_genres.step());
-                    try seed_genres.reset();
-                    try pick_genres.bindInt64(1, pick.track_id);
-                    try pick_genres.bindInt64(2, part.a);
-                    try testing.expectEqual(sqlite.Step.row, try pick_genres.step());
-                    try pick_genres.reset();
-                },
-                .often_after => {
-                    saw_often_after = true;
-                    try testing.expectEqual(@as(i64, 0), part.b);
-                    try follows.bindInt64(1, part.a);
-                    try follows.bindInt64(2, pick.recording_id);
-                    try testing.expectEqual(sqlite.Step.row, try follows.step());
-                    try testing.expect(follows.columnInt64(0) >= 2);
-                    try follows.reset();
-                },
-                .loved => try testing.expectEqual(@as(i64, 8), pick.recording_id),
-                .never_played => try testing.expect(pick.never_played),
-                .rarely_played => try testing.expect(part.a >= 1 and part.a <= 2),
-                .played => try testing.expect(part.a >= 3),
-                .similar_sound => try testing.expect(part.a != 0 and pick.components.audio > 0.3),
-                .added => {},
-            }
-        };
+    var saw_overall = false;
+    for ([_]bool{ false, true }) |embedded| {
+        if (embedded) try embedFan(&library);
+        for ([_]u8{ 0, 35, 100 }) |explore| {
+            var picks = try radioFor(&library, .{ .track = 1 }, .{ .explore = explore }, 40);
+            defer picks.deinit();
+            for (picks.items) |pick| for ([_]?ReasonPart{ pick.reason.first, pick.reason.second }) |maybe| {
+                const part = maybe orelse continue;
+                switch (part.kind) {
+                    .same_artist => try testing.expectEqual(@as(?i64, 1), pick.artist_id),
+                    .related_artist => {
+                        try testing.expectEqual(@as(i64, 1), part.a);
+                        try testing.expect(pick.artist_id == 2 or pick.artist_id == 3);
+                    },
+                    .shared_genre => {
+                        try seed_genres.bindInt64(1, part.a);
+                        try testing.expectEqual(sqlite.Step.row, try seed_genres.step());
+                        try seed_genres.reset();
+                        try pick_genres.bindInt64(1, pick.track_id);
+                        try pick_genres.bindInt64(2, part.a);
+                        try testing.expectEqual(sqlite.Step.row, try pick_genres.step());
+                        try pick_genres.reset();
+                    },
+                    .often_after => {
+                        saw_often_after = true;
+                        try testing.expectEqual(@as(i64, 0), part.b);
+                        try follows.bindInt64(1, part.a);
+                        try follows.bindInt64(2, pick.recording_id);
+                        try testing.expectEqual(sqlite.Step.row, try follows.step());
+                        try testing.expect(follows.columnInt64(0) >= 2);
+                        try follows.reset();
+                    },
+                    .loved => try testing.expectEqual(@as(i64, 8), pick.recording_id),
+                    .never_played => try testing.expect(pick.never_played),
+                    .rarely_played => try testing.expect(part.a >= 1 and part.a <= 2),
+                    .played => try testing.expect(part.a >= 3),
+                    .similar_sound => if (embedded) {
+                        saw_overall = true;
+                        try testing.expectEqual(sound_overall, part.a);
+                        try testing.expect(pick.components.audio >= 0.5);
+                        try testing.expect(fanSimilarity(pick.recording_id) >= overall_similarity);
+                    } else {
+                        try testing.expect(part.a != 0 and part.a & sound_overall == 0 and pick.components.audio > 0.3);
+                    },
+                    .added => {},
+                }
+            };
+        }
     }
     try testing.expect(saw_often_after);
+    try testing.expect(saw_overall);
+}
+
+fn planeVector(x: i8, y: i8) [audio_similarity.embedding_size]i8 {
+    var vector: [audio_similarity.embedding_size]i8 = @splat(0);
+    vector[0] = x;
+    vector[1] = y;
+    return vector;
+}
+
+fn embed(library: *database.LibraryDatabase, file_id: i64, x: i8, y: i8) !void {
+    var statement = try library.database.prepare(
+        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) SELECT id, content_hash, ?2 FROM files WHERE id = ?1;",
+    );
+    defer statement.deinit();
+    const vector = planeVector(x, y);
+    try statement.bindInt64(1, file_id);
+    try statement.bindBlob(2, std.mem.asBytes(&vector));
+    try testing.expectEqual(sqlite.Step.done, try statement.step());
+}
+
+fn embedFan(library: *database.LibraryDatabase) !void {
+    for (1..49) |id| try embed(library, @intCast(id), 100, @intCast((id - 1) * 2));
+}
+
+fn fanSimilarity(recording_id: i64) f64 {
+    const y: f64 = @floatFromInt((recording_id - 1) * 2);
+    return 100 / @sqrt(100 * 100 + y * y);
 }
 
 test "the same seed and time pick the same Recordings in the same order" {
@@ -2463,4 +2584,202 @@ test "a request for more picks than the reach is filled" {
     var again = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 100);
     defer again.deinit();
     for (picks.items, again.items) |a, b| try testing.expectEqual(a.recording_id, b.recording_id);
+}
+
+test "the embedding score is 1 from the high anchor up, a half at the low anchor and 0 well below it" {
+    const anchors: SoundAnchors = .{ .high = 0.9, .low = 0.5 };
+    try testing.expectEqual(@as(f64, 1), embeddingScore(anchors, 0.9).value);
+    try testing.expectEqual(@as(f64, 1), embeddingScore(anchors, 0.99).value);
+    try testing.expectApproxEqAbs(@as(f64, 0.75), embeddingScore(anchors, 0.7).value, 1e-6);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), embeddingScore(anchors, 0.5).value, 1e-6);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), embeddingScore(anchors, 0.3).value, 1e-6);
+    try testing.expectEqual(@as(f64, 0), embeddingScore(anchors, 0.1).value);
+    try testing.expectEqual(@as(f64, 0), embeddingScore(anchors, -0.4).value);
+    try testing.expectEqual(AudioScore{ .value = 0.3, .flags = 0 }, embeddingScore(anchors, null));
+
+    try testing.expectEqual(sound_overall, embeddingScore(anchors, 0.9).flags);
+    try testing.expectEqual(@as(i64, 0), embeddingScore(anchors, 0.89).flags);
+    try testing.expect(embeddingScore(anchors, 0.89).value >= 0.5);
+    const tight: SoundAnchors = .{ .high = 0.99, .low = 0.95 };
+    try testing.expectApproxEqAbs(@as(f64, 0.5), embeddingScore(tight, 0.95).value, 1e-6);
+    try testing.expectEqual(sound_overall, embeddingScore(tight, 0.95).flags);
+    try testing.expectApproxEqAbs(@as(f64, 0.125), embeddingScore(tight, 0.92).value, 1e-6);
+    try testing.expectEqual(@as(i64, 0), embeddingScore(tight, 0.92).flags);
+
+    const level: SoundAnchors = .{ .high = 0.8, .low = 0.8 };
+    try testing.expectEqual(@as(f64, 1), embeddingScore(level, 0.8).value);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), embeddingScore(level, 0.79).value, 1e-5);
+}
+
+test "the anchors are the 10th and 300th nearest, or the last found when there are fewer" {
+    var nearest: [sound_neighbours]audio_similarity.Neighbour = undefined;
+    for (&nearest, 0..) |*neighbour, index| neighbour.* = .{
+        .recording_id = @intCast(index + 1),
+        .file_id = @intCast(index + 1),
+        .similarity = 1 - @as(f32, @floatFromInt(index)) / 1000,
+    };
+    try testing.expectEqual(@as(?SoundAnchors, null), SoundAnchors.of(nearest[0..0]));
+    try testing.expectEqual(SoundAnchors{ .high = nearest[0].similarity, .low = nearest[0].similarity }, SoundAnchors.of(nearest[0..1]).?);
+    try testing.expectEqual(SoundAnchors{ .high = nearest[6].similarity, .low = nearest[6].similarity }, SoundAnchors.of(nearest[0..7]).?);
+    try testing.expectEqual(SoundAnchors{ .high = nearest[9].similarity, .low = nearest[9].similarity }, SoundAnchors.of(nearest[0..10]).?);
+    try testing.expectEqual(SoundAnchors{ .high = nearest[9].similarity, .low = nearest[119].similarity }, SoundAnchors.of(nearest[0..120]).?);
+    try testing.expectEqual(SoundAnchors{ .high = nearest[9].similarity, .low = nearest[299].similarity }, SoundAnchors.of(&nearest).?);
+}
+
+test "a seed's embedding is the unit mean of its Tracks' current vectors, and a seed without one has no neighbours" {
+    var library = try openFixture("seed-embedding");
+    defer library.close();
+    try embed(&library, 1, 100, 0);
+    try embed(&library, 2, 0, 50);
+    try embed(&library, 3, -100, 0);
+    try library.database.exec("UPDATE files SET content_hash = x'ff' WHERE id = 3;");
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source: Source = .of(&library);
+
+    const release = try buildProfile(arena, &source, .{ .release = 1 }, test_now);
+    const mean = (try seedEmbedding(&source, release.seed_tracks)).?;
+    try testing.expectApproxEqAbs(@as(f32, @sqrt(0.5)), mean[0], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, @sqrt(0.5)), mean[1], 1e-6);
+    for (mean[2..]) |value| try testing.expectEqual(@as(f32, 0), value);
+    const neighbours = release.neighbours.?;
+    try testing.expectEqualSlices(i64, &.{ 1, 2 }, neighbours.nearest);
+    try testing.expectApproxEqAbs(@as(f32, @sqrt(0.5)), neighbours.anchors.high, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, @sqrt(0.5)), neighbours.anchors.low, 1e-6);
+    try testing.expectEqual(@as(u32, 2), neighbours.similarities.count());
+
+    const single = try buildProfile(arena, &source, .{ .track = 2 }, test_now);
+    try testing.expectEqual(@as(f32, 1), (try seedEmbedding(&source, single.seed_tracks)).?[1]);
+
+    const stale = try buildProfile(arena, &source, .{ .track = 3 }, test_now);
+    try testing.expectEqual(@as(?SoundNeighbours, null), stale.neighbours);
+    const bare = try buildProfile(arena, &source, .{ .release = 2 }, test_now);
+    try testing.expectEqual(@as(?SoundNeighbours, null), bare.neighbours);
+    try testing.expect(!bare.sound.isEmpty());
+}
+
+test "a seed with an embedding scores candidates by similarity alone, 0.3 for one without a vector" {
+    var library = try openFixture("embedding-score");
+    defer library.close();
+    try embedFan(&library);
+    try library.database.exec(
+        \\DELETE FROM file_audio_embeddings WHERE file_id = 30;
+        \\DELETE FROM file_audio_features;
+        \\DELETE FROM file_loudness;
+    );
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source: Source = .of(&library);
+    const profile = try buildProfile(arena, &source, .{ .track = 1 }, test_now);
+    try testing.expect(profile.sound.isEmpty());
+    try testing.expectEqual(@as(usize, 47), profile.neighbours.?.nearest.len);
+    const session: Session = .{ .now_s = test_now, .seed = 42 };
+    const audio_only: Components = .{ .audio = 1 };
+
+    var tenth = testCandidate(10, 0, 0);
+    score(&tenth, &profile, audio_only, session, 0, 0);
+    try testing.expectEqual(@as(f64, 1), tenth.components.audio);
+    try testing.expectEqual(sound_overall, tenth.sound_flags);
+    try testing.expectEqual(@as(?ReasonPart, .{ .kind = .similar_sound, .a = sound_overall }), reasonFor(&tenth, &profile, audio_only, test_now).first);
+
+    var nearer = testCandidate(2, 0, 0);
+    score(&nearer, &profile, audio_only, session, 0, 0);
+    try testing.expectEqual(@as(f64, 1), nearer.components.audio);
+
+    var last = testCandidate(48, 0, 0);
+    score(&last, &profile, audio_only, session, 0, 0);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), last.components.audio, 1e-6);
+    try testing.expectEqual(@as(i64, 0), last.sound_flags);
+    try testing.expect(reasonFor(&last, &profile, audio_only, test_now).first.?.kind != .similar_sound);
+
+    var between = testCandidate(29, 0, 0);
+    score(&between, &profile, audio_only, session, 0, 0);
+    try testing.expect(between.components.audio > 0.5 and between.components.audio < 1);
+    try testing.expectEqual(@as(i64, 0), between.sound_flags);
+
+    var without = testCandidate(30, 0, 0);
+    without.features = .{ .tempo = .{ .bpm = 82, .confidence = 1 }, .key = null, .onset_rate = null, .centroid_hz = null, .energy = null };
+    score(&without, &profile, audio_only, session, 0, 0);
+    try testing.expectEqual(@as(f64, 0.3), without.components.audio);
+    try testing.expectEqual(@as(i64, 0), without.sound_flags);
+
+    var first = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 30);
+    defer first.deinit();
+    try testing.expect(first.weights.audio > 0);
+    var second = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 30);
+    defer second.deinit();
+    try testing.expectEqual(first.items.len, second.items.len);
+    for (first.items, second.items) |a, b| {
+        try testing.expectEqual(a.recording_id, b.recording_id);
+        try testing.expectEqual(a.score, b.score);
+        try testing.expectEqual(a.reason, b.reason);
+        const expected: f64 = if (a.recording_id == 30) 0.3 else if (a.recording_id <= 10) 1 else a.components.audio;
+        try testing.expectEqual(expected, a.components.audio);
+    }
+}
+
+test "the nearest Recordings are candidates when no other bucket holds them" {
+    var library = try database.LibraryDatabase.open(testing.allocator, testing.io, "file:orca-test-discovery-sound-bucket?mode=memory&cache=shared");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, key) VALUES (1, 'A', 'a'), (2, 'B', 'b');
+        \\INSERT INTO releases(id, title, album_artist_id, release_type) VALUES (1, 'One', 1, 'album'), (2, 'Two', 2, 'album');
+        \\WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
+        \\INSERT INTO recordings(id, title) SELECT n, 'r' || n FROM seq;
+        \\INSERT INTO files(id, recording_id, size_bytes, quick_hash, content_hash, content_hash_algorithm, channels)
+        \\    SELECT id, id, 1, CAST(id AS BLOB), CAST(id AS BLOB), 1, 2 FROM recordings;
+        \\INSERT INTO tracks(id, recording_id, release_id, title, artist_id, preferred_file_id, created_at)
+        \\    SELECT id, id, min(id, 2), 't' || id, min(id, 2), id, 1000 FROM recordings;
+        \\INSERT OR IGNORE INTO volumes(id, stable_key) VALUES (1, 'legacy');
+        \\INSERT INTO locations(file_id, volume_id, uri, state) SELECT id, 1, '/m/' || id, 'present' FROM files;
+    );
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source: Source = .of(&library);
+    const filter: Filter = .{
+        .now_s = test_now,
+        .include_live = false,
+        .focus_genres = "[]",
+        .focus_decades = "[]",
+        .avoid_after = null,
+        .require_played = false,
+        .excluded = "[1]",
+        .jitter_seed = 42,
+    };
+
+    const bare = try buildProfile(arena, &source, .{ .track = 1 }, test_now);
+    try testing.expectEqual(@as(?SoundNeighbours, null), bare.neighbours);
+    const before = try loadCandidates(arena, &source, &bare, &filter, .{});
+    try testing.expectEqual(@as(usize, max_pool), before.len);
+    var held: std.AutoHashMapUnmanaged(i64, void) = .empty;
+    for (before) |candidate| try held.put(arena, candidate.recording_id, {});
+    var outside: [3]i64 = undefined;
+    var found: usize = 0;
+    var id: i64 = 2;
+    while (found < outside.len) : (id += 1) if (!held.contains(id)) {
+        outside[found] = id;
+        found += 1;
+    };
+
+    try embed(&library, 1, 100, 0);
+    try embed(&library, outside[0], 100, 5);
+    try embed(&library, outside[1], 5, 100);
+    const profile = try buildProfile(arena, &source, .{ .track = 1 }, test_now);
+    try testing.expectEqualSlices(i64, &.{ 1, outside[0], outside[1] }, profile.neighbours.?.nearest);
+    const after = try loadCandidates(arena, &source, &profile, &filter, .{});
+    try testing.expectEqual(@as(usize, max_pool), after.len);
+    var near = false;
+    var far = false;
+    for (after) |candidate| {
+        try testing.expect(candidate.recording_id != 1 and candidate.recording_id != outside[2]);
+        near = near or candidate.recording_id == outside[0];
+        far = far or candidate.recording_id == outside[1];
+    }
+    try testing.expect(near and far);
 }

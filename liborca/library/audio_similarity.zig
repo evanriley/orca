@@ -24,6 +24,8 @@ pub const Neighbour = struct {
     similarity: f32,
 };
 
+pub const RecordingSimilarities = std.AutoHashMapUnmanaged(i64, f32);
+
 pub fn nearestRecordings(
     allocator: std.mem.Allocator,
     embeddings: *const AudioEmbeddingRepository,
@@ -31,8 +33,29 @@ pub fn nearestRecordings(
     excluded_recordings: []const i64,
     out: []Neighbour,
 ) !usize {
-    if (out.len > max_neighbours) return error.SimilarLimitTooLarge;
     if (out.len == 0) return 0;
+    return search(allocator, embeddings, query, excluded_recordings, out, null);
+}
+
+pub fn nearestRecordingsWithSimilarities(
+    allocator: std.mem.Allocator,
+    embeddings: *const AudioEmbeddingRepository,
+    query: *const [embedding_size]f32,
+    out: []Neighbour,
+    similarities: *RecordingSimilarities,
+) !usize {
+    return search(allocator, embeddings, query, &.{}, out, similarities);
+}
+
+fn search(
+    allocator: std.mem.Allocator,
+    embeddings: *const AudioEmbeddingRepository,
+    query: *const [embedding_size]f32,
+    excluded_recordings: []const i64,
+    out: []Neighbour,
+    similarities: ?*RecordingSimilarities,
+) !usize {
+    if (out.len > max_neighbours) return error.SimilarLimitTooLarge;
     const page = try allocator.alloc(AudioEmbeddingRow, max_page_rows);
     defer allocator.free(page);
     var found: usize = 0;
@@ -45,7 +68,11 @@ pub fn nearestRecordings(
                 .file_id = row.file_id,
                 .similarity = cosine(query, &row.vector) orelse continue,
             };
-            found = offer(out, found, candidate, excluded_recordings);
+            if (similarities) |nearest_of| {
+                const entry = try nearest_of.getOrPut(allocator, candidate.recording_id);
+                if (!entry.found_existing or candidate.similarity > entry.value_ptr.*) entry.value_ptr.* = candidate.similarity;
+            }
+            if (out.len > 0) found = offer(out, found, candidate, excluded_recordings);
         }
         if (filled < page.len) return found;
         after_file_id = page[filled - 1].file_id;

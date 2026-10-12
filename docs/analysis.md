@@ -240,6 +240,12 @@ The search compares every stored vector. It reads them through
 `AudioEmbeddingRepository.embeddingsAfter` in pages of 4,096 rows, about
 2 MiB, and holds one page and `out` at a time. It builds no index.
 
+`nearestRecordingsWithSimilarities(allocator, embeddings, query, out,
+similarities)` runs the same search with nothing excluded and also records,
+for every Recording it reads, the similarity of its nearest vector in
+`similarities`: one `f32` per Recording. Radio and Daily Mixes rank by it
+([discovery.md](discovery.md#scoring)).
+
 `unitVector` turns a stored vector into a query.
 `similarTracks(allocator, connection, track_id, limit)` searches with the
 vector of the file the Track plays, excludes the Track's own Recording, and

@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Radio and Daily Mixes rank by how alike tracks sound.** A seed whose
+  tracks have a stored audio embedding scores each candidate's Audio component
+  by the cosine similarity of its vector to the seed's mean: 1 from the 10th
+  nearest Recording up, 0.5 at the 300th, 0.3 without a vector. The 300
+  nearest Recordings replace the tempo bucket among the candidates. A pick
+  with a score of at least 0.5 and a similarity of at least 0.9 can carry
+  `similar_sound` with the new flag `liborca.radio_sound_overall` (8) alone,
+  which `orca-cli radio` prints as `Similar sound`; `orca.h` names
+  it `ORCA_SOUND_OVERALL`. A seed without an embedding is ranked by tempo,
+  key and energy as before.
 - **`liborca` can run a pinned audio-embedding model through ONNX Runtime.**
   The new build option `-Dembeddings` (default `true`) compiles the binding
   and links `libonnxruntime`, 1.20 or newer, found through pkg-config;
