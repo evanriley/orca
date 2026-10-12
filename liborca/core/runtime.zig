@@ -10,6 +10,7 @@ const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
+const embedding_model = @import("embedding_model.zig");
 const handle = @import("handle.zig");
 const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
@@ -326,11 +327,8 @@ pub const EditedTracks = struct {
 
 /// One file's measurement from `libraryAnalyzeFile`.
 pub const FileAnalysis = analysis_service.Analysis;
-pub const EmbeddingModel = analysis_embedding.Model;
 pub const AudioEmbedding = analysis_embedding.Result;
-pub const FileAnalysisOptions = struct {
-    embedding_model: ?EmbeddingModel = null,
-};
+pub const EmbeddingModelState = embedding_model.State;
 pub const TrackFingerprint = analysis_chromaprint.Fingerprinter.Outcome;
 
 /// The Library's database, for liborca's own C ABI and tests. Clients use the
@@ -471,6 +469,7 @@ pub const MissingMeasurements = struct {
     fingerprint: bool = false,
     /// Tempo, key and energy.
     features: bool = false,
+    embedding: bool = false,
 };
 
 pub const ScanRequest = job_worker.ScanRequest;
@@ -702,6 +701,7 @@ pub const OrcaRuntime = struct {
     listen_settings: u32 = 0,
     acoustid_server: providers.url.OwnedServer = .fixed(providers.acoustid.default_server),
     acoustid_client_key: ?job_worker.OwnedAcoustIdKey = null,
+    embedding_model: embedding_model.Setting = .{},
     coverartarchive_server: providers.url.OwnedServer = .fixed(providers.coverartarchive.default_server),
     lrclib_server: providers.url.OwnedServer = .fixed(providers.lrclib.default_server),
     wikidata_server: providers.url.OwnedServer = .fixed(providers.wikidata.default_server),
@@ -922,13 +922,13 @@ pub const OrcaRuntime = struct {
     /// Files that still owe the default loudness and fingerprint measurement.
     pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
-            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), .three_measurements),
+            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), analysisSelectionForm(self)),
         );
     }
 
     /// Splits `libraryUnanalyzedCount` into never-analyzed and outdated files.
     pub fn libraryAnalysisCoverage(self: *OrcaRuntime, library: LibraryHandle) !AnalysisCoverage {
-        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), .three_measurements);
+        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), analysisSelectionForm(self));
         const counts = try (try libraryDatabase(self, library)).files.analysisCoverage(selectors);
         return .{
             .never_analyzed = counts.never_analyzed,
@@ -937,6 +937,7 @@ pub const OrcaRuntime = struct {
                 .loudness_and_checks = counts.missing[0],
                 .fingerprint = counts.missing[1],
                 .features = counts.missing[2],
+                .embedding = counts.missing[3],
             },
             .measurement_set = analysis_service.measurementSetId(&selectors),
         };
@@ -952,11 +953,12 @@ pub const OrcaRuntime = struct {
         library: LibraryHandle,
         io: std.Io,
         path: []const u8,
-        options: FileAnalysisOptions,
     ) !FileAnalysis {
         const library_database = try libraryDatabase(self, library);
         const codecs = codec.CodecRegistry.builtins();
-        var front_end: ?analysis_embedding.FrontEnd = if (options.embedding_model == null)
+        var model = openEmbeddingModel(self, io);
+        defer if (model) |*opened| opened.deinit();
+        var front_end: ?analysis_embedding.FrontEnd = if (model == null)
             null
         else
             analysis_embedding.FrontEnd.init(self.allocator) catch null;
@@ -967,7 +969,7 @@ pub const OrcaRuntime = struct {
             .codecs = &codecs,
             .cache = &library_database.analysis_cache,
             .embedding = if (front_end) |*value|
-                .{ .model = options.embedding_model.?, .front_end = value }
+                .{ .model = model.?, .front_end = value }
             else
                 null,
         };
@@ -993,6 +995,8 @@ pub const OrcaRuntime = struct {
         file_id: i64,
     ) !ReanalysisOutcome {
         const library_database = try libraryDatabase(self, library);
+        var model = openEmbeddingModel(self, io);
+        defer if (model) |*opened| opened.deinit();
         var pass: library_pass.LibraryAnalysis = .{
             .allocator = self.allocator,
             .io = io,
@@ -1004,6 +1008,7 @@ pub const OrcaRuntime = struct {
             .threads = 1,
             .batch_size = 1,
             .only_file_id = file_id,
+            .embedding_model = model,
         };
         const result = try pass.run();
         if (result.errors > 0) return .unreadable;
@@ -1499,6 +1504,15 @@ pub const OrcaRuntime = struct {
     /// it. Applies to jobs started afterwards.
     pub fn setAcoustIdClientKey(self: *OrcaRuntime, key: ?[]const u8) !void {
         return runtime_listens.setAcoustIdClientKey(self, key);
+    }
+
+    pub fn setEmbeddingModelPath(self: *OrcaRuntime, path: ?[]const u8) !void {
+        try requireRunning(self);
+        try self.embedding_model.set(self.allocator, self.control_threaded.io(), path);
+    }
+
+    pub fn embeddingModelState(self: *const OrcaRuntime) EmbeddingModelState {
+        return self.embedding_model.state();
     }
 
     /// Points AcoustID lookups and submissions started afterwards at another
@@ -4209,6 +4223,15 @@ pub fn playerOwnerTag(player: PlayerHandle) work.Owner {
 
 pub fn libraryOwnerTag(library: LibraryHandle) work.Owner {
     return .{ .kind = .library, .index = library.index, .generation = library.generation };
+}
+
+pub fn analysisSelectionForm(self: *const OrcaRuntime) database.repository.SelectionForm {
+    return if (self.embedding_model.state() == .ready) .with_embedding else .three_measurements;
+}
+
+fn openEmbeddingModel(self: *OrcaRuntime, io: std.Io) ?embedding_model.Model {
+    const claim = self.embedding_model.claim() orelse return null;
+    return claim.open(self.allocator, io);
 }
 
 pub fn requireRunning(self: *const OrcaRuntime) error{RuntimeNotRunning}!void {

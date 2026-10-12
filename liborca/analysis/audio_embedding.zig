@@ -213,6 +213,22 @@ pub const Model = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Model {
         if (!enabled) return error.EmbeddingsNotBuilt;
+        const bytes = try readVerified(allocator, io, path);
+        defer allocator.free(bytes);
+        var shim: ?*ShimModel = null;
+        return switch (orca_embedding_model_create(bytes.ptr, bytes.len, &shim)) {
+            shim_ok => .{ .shim = shim.? },
+            shim_runtime_too_old => error.EmbeddingRuntimeTooOld,
+            else => error.EmbeddingSessionFailed,
+        };
+    }
+
+    pub fn verify(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+        allocator.free(try readVerified(allocator, io, path));
+    }
+
+    fn readVerified(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+        if (!enabled) return error.EmbeddingsNotBuilt;
         const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.EmbeddingModelMissing,
             else => return err,
@@ -220,18 +236,12 @@ pub const Model = struct {
         defer file.close(io);
         if ((try file.stat(io)).size != model_size) return error.EmbeddingModelMismatch;
         const bytes = try allocator.alloc(u8, model_size);
-        defer allocator.free(bytes);
+        errdefer allocator.free(bytes);
         if (try file.readPositionalAll(io, bytes, 0) != bytes.len) return error.EmbeddingModelMismatch;
         var digest: [model_sha256.len]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         if (!std.mem.eql(u8, &digest, &model_sha256)) return error.EmbeddingModelMismatch;
-
-        var shim: ?*ShimModel = null;
-        return switch (orca_embedding_model_create(bytes.ptr, bytes.len, &shim)) {
-            shim_ok => .{ .shim = shim.? },
-            shim_runtime_too_old => error.EmbeddingRuntimeTooOld,
-            else => error.EmbeddingSessionFailed,
-        };
+        return bytes;
     }
 
     pub fn deinit(self: *Model) void {

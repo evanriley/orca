@@ -139,10 +139,29 @@ analysis with and without the features.
 `analysis/audio_embedding.zig` turns a file into one 512-value vector that
 places it among other files by how it sounds. The vector is the output of the
 pinned CLAP audio model, run through ONNX Runtime; builds with
-`-Dembeddings=false` have no such measurement. The engine never opens or
-downloads the model: the host opens one `EmbeddingModel` from a file, which is
-checked by size and SHA-256, and passes it in. Without a model an analysis
+`-Dembeddings=false` have no such measurement. The engine never downloads the
+model: the host names its file with `Runtime.setEmbeddingModelPath`, and the
+file is checked by size and SHA-256. Without a usable model an analysis
 measures and stores exactly what it does in a build without embeddings.
+
+`Runtime.embeddingModelState` reports what the last
+`setEmbeddingModelPath` found, as an `EmbeddingModelState`:
+
+| State | Meaning |
+| --- | --- |
+| `built_without` | The build has `-Dembeddings=false` |
+| `missing` | No path is set, or no file is there |
+| `wrong_file` | The file's size or SHA-256 differs |
+| `unusable` | The file cannot be read, or ONNX Runtime refused it |
+| `ready` | Analysis measures the embedding |
+
+The setter reads and hashes the file without loading it into ONNX Runtime.
+Each analysis that starts while the state is `ready` copies the path, opens the
+model when it begins and closes it when it ends. An analysis that cannot open
+it changes the state to `missing`, `wrong_file` or `unusable`, unless the path
+was set again meanwhile, and measures without the embedding; it does not fail
+for that reason. A change to the file is seen at the next
+`setEmbeddingModelPath`.
 
 The measurement shares the decode with the others. It keeps at most three
 windows of 10 s as mono (the mean of the channels) at the file's own rate, so
@@ -186,11 +205,11 @@ the model, the resampler or an allocation costs only this result: the file's
 other measurements are stored, and the embedding is tried again by the next
 analysis that has a model.
 
-`Runtime.libraryAnalyzeFile` measures the embedding of one file when its
-options carry a model, and `orca-cli analyze` takes the model's path from
-`--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass measures
-it only when it is given a model
-(see [The embedding in the pass](#the-embedding-in-the-pass)).
+`Runtime.libraryAnalyzeFile`, `Runtime.libraryReanalyzeFile` and the
+`startLibraryAnalysis` Job measure the embedding when the state is `ready`.
+`orca-cli analyze`, `analyze-library` and `stats` take the model's path from
+`--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass is
+described in [The embedding in the pass](#the-embedding-in-the-pass).
 
 The `file_audio_embeddings` table holds each file's current vector
 ([database.md](database.md)).
@@ -350,7 +369,13 @@ selects on three measurements.
 A pass without a model selects on three measurements and stores no kind 7
 row. The two forms are separate SQL texts, so the selection, the coverage
 counts and `measurementSetId` of a pass without a model do not depend on the
-embedding. The runtime, the CLI and the C ABI start the pass without a model.
+embedding.
+
+The runtime gives the pass a model when `embeddingModelState` is `ready` as the
+Job starts, and `libraryUnanalyzedCount`, `libraryAnalysisCoverage` and the
+Job's planned total use the four-measurement form in exactly that state.
+`MissingMeasurements.embedding` is the fourth coverage entry. The C ABI has no
+call that sets the model, so a C host's passes run without one.
 
 ### Threads
 

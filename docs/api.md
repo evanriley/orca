@@ -165,7 +165,9 @@ sleep: 0 to pump now, null to wait for the waker alone. See
   a measurement or changes one's version or parameters. A file whose bytes
   changed since it was measured counts as never analyzed. The two sum to
   `libraryUnanalyzedCount`. `missing` (`MissingMeasurements`) flags what the
-  outdated files lack: `loudness_and_checks`, `fingerprint` or `features`.
+  outdated files lack: `loudness_and_checks`, `fingerprint`, `features` or
+  `embedding`. The audio embedding counts only while `embeddingModelState` is
+  `ready`.
   `measurement_set` identifies the current set of measurements and changes
   only when a measurement is added or its version or parameters change, so a
   host can remember that the user dismissed a prompt to analyze again.
@@ -436,6 +438,13 @@ section lists the entry points, errors and limits.
   `acoustid_client_key_account` overrides it. A job resolves its key once, when
   its AcoustID work begins, from the store or else the key as it was when the
   job was started or queued; a change applies from the next job.
+  `setEmbeddingModelPath(path)` copies the path of the audio-embedding model
+  file, or clears it when null, and checks the file; it fails only when the
+  runtime is not running, the path is longer than a path can be or memory
+  runs out. `embeddingModelState` reports the result, and analysis measures
+  the embedding only when it is `ready`. An analysis takes the path as it was
+  when its worker started; see
+  [analysis.md](analysis.md#audio-embedding).
 - `startArtistInfoFetch(library, artist_id, ArtistInfoOptions)` starts an
   `artist_info` Job that gathers an Artist's photo, biography, years active and
   links, listeners and related artists, and fills genres. Options: `language`
@@ -844,7 +853,8 @@ increments the slot generation, so a stale handle never resolves.
   [control-plane.md](control-plane.md#idle-maintenance).
 - The `CredentialStore` given to `setCredentialStore` is borrowed: its context
   must outlive the runtime, and `get` runs on a listen worker's thread.
-  `setClientIdentity`, the server setters and `setAcoustIdClientKey` copy.
+  `setClientIdentity`, the server setters, `setAcoustIdClientKey` and
+  `setEmbeddingModelPath` copy.
 - Listen workers share one network `std.Io`, created with the first worker and
   deinitialized by `deinit`. Creating it installs Zig's SIGIO and SIGPIPE
   handlers and deinitializing restores the dispositions found. A host sets its
