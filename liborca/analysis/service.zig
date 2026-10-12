@@ -824,6 +824,31 @@ test "the library keeps the audio features a default analysis stores, under the 
     try std.testing.expectEqual(@as(f64, 900.25), statement.columnDouble(4));
 }
 
+test "the library keeps the audio embedding a default analysis stores, under the hash its triggers recognise" {
+    const allocator = std.testing.allocator;
+    var library = try database.LibraryDatabase.open(
+        allocator,
+        std.testing.io,
+        "file:orca-analysis-embedding-table?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.resolveOrCreateFile(
+        std.testing.io,
+        "fixtures/audio/generated-reference.flac",
+        .{ .stable_key = "test:embedding-table" },
+    );
+    var values: [audio_embedding.embedding_size]i8 = undefined;
+    for (&values, 0..) |*value, index| value.* = @truncate(@as(i32, @intCast(index)) - 200);
+    const result: audio_embedding.Result = .{ .embedding = .{ .windows = 2, .scale = 0.5, .values = values } };
+    try library.analysis_cache.put(embeddingKey(binding.file_id, @splat(0x11)), &result.encode());
+
+    var statement = try library.database.prepare("SELECT vector FROM file_audio_embeddings WHERE file_id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, binding.file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&values), statement.columnBlob(0));
+}
+
 fn storedEmbeddings(library: *database.LibraryDatabase, file_id: i64) !i64 {
     var statement = try library.database.prepare(
         "SELECT count(*) FROM analysis_results WHERE file_id = ?1 AND kind = 7;",

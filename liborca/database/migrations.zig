@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 
-pub const current_version = 4;
+pub const current_version = 5;
 
 const baseline =
     \\CREATE TABLE volumes (
@@ -1341,7 +1341,61 @@ const v4 =
     \\CREATE INDEX player_queue_entries_by_recording ON player_queue_entries(recording_id);
 ;
 
-const steps = [_][:0]const u8{ baseline, v2, v3, v4 };
+const embedding_row_from_result =
+    \\    DELETE FROM file_audio_embeddings WHERE file_id = new.file_id;
+    \\    INSERT INTO file_audio_embeddings(file_id, source_identity, vector)
+    \\    SELECT new.file_id, new.source_identity, substr(new.result, 13, 512)
+    \\    WHERE typeof(new.result) = 'blob' AND length(new.result) = 524
+    \\      AND substr(new.result, 1, 6) = X'4F52454D0100'
+    \\      AND substr(new.result, 7, 1) = X'01'
+    \\      AND substr(new.result, 8, 1) IN (X'01', X'02', X'03');
+    \\
+;
+
+const v5 =
+    \\CREATE TABLE file_audio_embeddings (
+    \\    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    \\    source_identity BLOB NOT NULL,
+    \\    vector BLOB NOT NULL CHECK (length(vector) = 512)
+    \\);
+    \\CREATE TRIGGER analysis_results_embedding_ai AFTER INSERT ON analysis_results
+    \\WHEN new.kind = 7 AND new.algorithm_id = 'orca.audio-embedding'
+    \\  AND new.algorithm_version = 1
+    \\  AND new.parameter_hash = X'D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905'
+    \\BEGIN
+    \\
+++ embedding_row_from_result ++
+    \\END;
+    \\CREATE TRIGGER analysis_results_embedding_au AFTER UPDATE OF result ON analysis_results
+    \\WHEN new.kind = 7 AND new.algorithm_id = 'orca.audio-embedding'
+    \\  AND new.algorithm_version = 1
+    \\  AND new.parameter_hash = X'D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905'
+    \\BEGIN
+    \\
+++ embedding_row_from_result ++
+    \\END;
+    \\CREATE TRIGGER analysis_results_embedding_ad AFTER DELETE ON analysis_results
+    \\WHEN old.kind = 7 AND old.algorithm_id = 'orca.audio-embedding'
+    \\  AND old.algorithm_version = 1
+    \\  AND old.parameter_hash = X'D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905'
+    \\BEGIN
+    \\    DELETE FROM file_audio_embeddings WHERE file_id = old.file_id AND source_identity = old.source_identity;
+    \\END;
+    \\INSERT INTO file_audio_embeddings(file_id, source_identity, vector)
+    \\SELECT results.file_id, results.source_identity, substr(results.result, 13, 512)
+    \\FROM analysis_results AS results
+    \\JOIN files ON files.id = results.file_id
+    \\    AND files.content_hash_algorithm = 1 AND files.content_hash = results.source_identity
+    \\WHERE results.kind = 7 AND results.algorithm_id = 'orca.audio-embedding'
+    \\  AND results.algorithm_version = 1
+    \\  AND results.parameter_hash = X'D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905'
+    \\  AND typeof(results.result) = 'blob' AND length(results.result) = 524
+    \\  AND substr(results.result, 1, 6) = X'4F52454D0100'
+    \\  AND substr(results.result, 7, 1) = X'01'
+    \\  AND substr(results.result, 8, 1) IN (X'01', X'02', X'03');
+;
+
+const steps = [_][:0]const u8{ baseline, v2, v3, v4, v5 };
 
 comptime {
     std.debug.assert(steps.len == current_version);
@@ -2199,7 +2253,7 @@ test "a version 3 library upgrades to version 4 nulling dangling queue sides and
 
     try apply(db);
 
-    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try expectBaselineRowsKept(db);
     try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db,
@@ -2309,6 +2363,157 @@ test "an audio features result written, rewritten or removed keeps the file's fe
     try expectFeatureRows(db, "1,01,-,-,-,-,-,0.22,-");
     try db.exec("DELETE FROM analysis_results WHERE file_id = 1; DELETE FROM files WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_features;"));
+}
+
+const embedding_parameter_hash = [32]u8{
+    0xD9, 0x19, 0x4D, 0x8D, 0xF5, 0xB3, 0x2D, 0x76, 0x60, 0xAF, 0xFE, 0x47, 0xB3, 0x17, 0x83, 0x83,
+    0xB5, 0x38, 0x32, 0x7B, 0x1F, 0xC5, 0xF1, 0xD6, 0x54, 0xB6, 0x26, 0x27, 0x2D, 0x38, 0xD9, 0x05,
+};
+
+fn embeddingPayload(flags: u8, windows: u8, seed: u8) [524]u8 {
+    var payload: [524]u8 = @splat(0);
+    @memcpy(payload[0..6], "OREM\x01\x00");
+    payload[6] = flags;
+    payload[7] = windows;
+    for (payload[12..], 0..) |*byte, index| byte.* = @truncate(index *% 5 +% seed);
+    return payload;
+}
+
+fn putEmbeddingResult(db: sqlite.Database, file_id: i64, hash: []const u8, identity: u8, result: []const u8) !void {
+    var statement = try db.prepare(
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result)
+        \\VALUES (?1, 7, 'orca.audio-embedding', 1, ?2, ?3, ?4)
+        \\ON CONFLICT DO UPDATE SET result = excluded.result;
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try statement.bindBlob(2, hash);
+    try statement.bindBlob(3, &.{identity});
+    try statement.bindBlob(4, result);
+    try std.testing.expectEqual(sqlite.Step.done, try statement.step());
+}
+
+fn embeddingMatches(db: sqlite.Database, file_id: i64, payload: []const u8) !bool {
+    var statement = try db.prepare("SELECT vector FROM file_audio_embeddings WHERE file_id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    if (try statement.step() != .row) return false;
+    return std.mem.eql(u8, statement.columnBlob(0), payload[12..]);
+}
+
+test "an audio embedding result written, rewritten or removed keeps the file's embedding row, and malformed or foreign results are ignored" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec("INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 1, x'01'), (2, 1, x'02'), (3, 1, x'03'), (4, 1, x'04'), (5, 1, x'05'), (6, 1, x'06'), (7, 1, x'07'), (8, 1, x'08'), (9, 1, x'09');");
+    const hash = &embedding_parameter_hash;
+
+    const first = embeddingPayload(1, 3, 1);
+    try putEmbeddingResult(db, 1, hash, 0x01, &first);
+    try std.testing.expect(try embeddingMatches(db, 1, &first));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+
+    const none = embeddingPayload(0, 0, 0);
+    try putEmbeddingResult(db, 2, hash, 0x02, &embeddingPayload(1, 1, 2));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings WHERE file_id = 2;"));
+    try putEmbeddingResult(db, 2, hash, 0x02, &none);
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_embeddings WHERE file_id = 2;"));
+    try putEmbeddingResult(db, 3, hash, 0x03, &none);
+
+    var foreign = embedding_parameter_hash;
+    foreign[0] ^= 1;
+    try putEmbeddingResult(db, 4, &foreign, 0x04, &embeddingPayload(1, 1, 4));
+    var bad_magic = embeddingPayload(1, 1, 5);
+    bad_magic[0] = 'X';
+    try putEmbeddingResult(db, 5, hash, 0x05, &bad_magic);
+    var bad_version = embeddingPayload(1, 1, 6);
+    bad_version[4] = 2;
+    try putEmbeddingResult(db, 6, hash, 0x06, &bad_version);
+    try putEmbeddingResult(db, 7, hash, 0x07, &embeddingPayload(1, 0, 7));
+    try putEmbeddingResult(db, 8, hash, 0x08, &embeddingPayload(1, 4, 8));
+    try putEmbeddingResult(db, 9, hash, 0x09, embeddingPayload(1, 1, 9)[0..523]);
+    try putEmbeddingResult(db, 9, hash, 0x0a, &embeddingPayload(3, 1, 9));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+
+    const second = embeddingPayload(1, 2, 11);
+    try putEmbeddingResult(db, 1, hash, 0x01, &second);
+    try std.testing.expect(try embeddingMatches(db, 1, &second));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 1 AND source_identity = x'ff';");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+    try putEmbeddingResult(db, 1, hash, 0x01, &first);
+    try db.exec("DELETE FROM files WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+}
+
+test "an audio embedding is a 512 byte vector" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec("INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 1, x'01');");
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (1, x'01', zeroblob(511));"));
+    try db.exec("INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (1, x'01', zeroblob(512));");
+}
+
+fn atVersion4() !sqlite.Database {
+    const db = try atVersion3();
+    errdefer db.close();
+    try db.exec(v4);
+    try db.exec("PRAGMA user_version=4;");
+    return db;
+}
+
+test "a version 4 library upgrades to version 5 keeping its rows, filling embeddings of unchanged files and matching the fresh schema" {
+    const db = try atVersion4();
+    defer db.close();
+    try db.exec(
+        \\UPDATE files SET content_hash = x'01', content_hash_algorithm = 1 WHERE id = 1;
+        \\UPDATE files SET content_hash = x'02', content_hash_algorithm = 2 WHERE id = 2;
+        \\INSERT INTO files(id, recording_id, audio_format, size_bytes, content_hash, content_hash_algorithm) VALUES
+        \\    (3, 1, 1, 10, x'03', 1), (4, 1, 1, 10, x'04', 1), (5, 1, 1, 10, x'05', 1);
+    );
+    const hash = &embedding_parameter_hash;
+    const stale = embeddingPayload(1, 1, 3);
+    const current = embeddingPayload(1, 2, 1);
+    const none = embeddingPayload(0, 0, 0);
+    var foreign = embedding_parameter_hash;
+    foreign[31] ^= 1;
+    try putEmbeddingResult(db, 1, hash, 0x01, &current);
+    try putEmbeddingResult(db, 2, hash, 0x02, &embeddingPayload(1, 1, 2));
+    try putEmbeddingResult(db, 3, hash, 0x99, &stale);
+    try putEmbeddingResult(db, 4, hash, 0x04, &none);
+    try putEmbeddingResult(db, 5, &foreign, 0x05, &embeddingPayload(1, 1, 5));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+    try std.testing.expect(try embeddingMatches(db, 1, &current));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
+    const upgraded = try schemaObjects(std.testing.allocator, db);
+    defer std.testing.allocator.free(upgraded);
+    const created = try fresh();
+    defer created.close();
+    const fresh_schema = try schemaObjects(std.testing.allocator, created);
+    defer std.testing.allocator.free(fresh_schema);
+    try std.testing.expectEqualStrings(fresh_schema, upgraded);
+}
+
+test "a fresh library has the audio embedding table and its triggers at the current version" {
+    const db = try fresh();
+    defer db.close();
+    try std.testing.expectEqual(@as(i64, 5), current_version);
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db,
+        \\SELECT count(*) FROM sqlite_master WHERE name IN (
+        \\    'file_audio_embeddings', 'analysis_results_embedding_ai',
+        \\    'analysis_results_embedding_au', 'analysis_results_embedding_ad');
+    ));
 }
 
 test "a daily mix keeps one row per ordinal, its artists and entries go with it, and an entry goes with its recording" {

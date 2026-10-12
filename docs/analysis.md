@@ -191,6 +191,9 @@ options carry a model, and `orca-cli analyze` takes the model's path from
 `--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass does not
 measure it.
 
+The `file_audio_embeddings` table holds each file's current vector
+([database.md](database.md)).
+
 `zig build -Doptimize=ReleaseFast analysis-bench -- FILE 3 MODEL` also times
 the capture, the resampling, the log-mel front-end and the model for one file.
 
