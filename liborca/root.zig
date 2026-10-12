@@ -94,6 +94,7 @@ pub const ReasonKind = runtime.ReasonKind;
 pub const radio_sound_tempo = runtime.radio_sound_tempo;
 pub const radio_sound_key = runtime.radio_sound_key;
 pub const radio_sound_energy = runtime.radio_sound_energy;
+pub const radio_sound_overall = runtime.radio_sound_overall;
 pub const DiscoverySettings = runtime.DiscoverySettings;
 pub const DiscoveryAvoidDays = runtime.DiscoveryAvoidDays;
 pub const DailyMixCount = runtime.DailyMixCount;

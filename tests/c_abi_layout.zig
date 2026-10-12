@@ -898,6 +898,7 @@ const non_enum_constants = [_][]const u8{
     "ORCA_SOUND_TEMPO",
     "ORCA_SOUND_KEY",
     "ORCA_SOUND_ENERGY",
+    "ORCA_SOUND_OVERALL",
     "ORCA_ABI_VERSION",
     "ORCA_PUMP_NO_TIMEOUT",
     "ORCA_EQUALIZER_BANDS",
@@ -1205,6 +1206,7 @@ test "the similar-sound flags orca.h declares are liborca's" {
     try std.testing.expectEqual(discovery.sound_tempo, c.ORCA_SOUND_TEMPO);
     try std.testing.expectEqual(discovery.sound_key, c.ORCA_SOUND_KEY);
     try std.testing.expectEqual(discovery.sound_energy, c.ORCA_SOUND_ENERGY);
+    try std.testing.expectEqual(discovery.sound_overall, c.ORCA_SOUND_OVERALL);
     try std.testing.expectEqual(discovery.max_focus, @typeInfo(@FieldType(c_api.RadioOptionsView, "focus")).array.len);
 }
 

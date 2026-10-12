@@ -37,6 +37,13 @@ them holds:
   percentile of seed Release years.
 - Sound: the median tempo, most common key and mean energy of the seed Tracks
   that have [audio features](analysis.md#audio-features).
+- Embedding: the unit-length mean of the unit vectors of the seed Tracks' play
+  files that have a current [audio embedding](analysis.md#audio-embedding). A
+  seed with none has no embedding. For a seed with one, a single
+  [nearest search](analysis.md#similar-tracks) that excludes nothing finds the
+  300 nearest Recordings and the similarity of every Recording with a vector.
+  The similarity of the 10th nearest is the `high` anchor and that of the
+  300th the `low` anchor, each the last found when there are fewer.
 - Co-listening: up to 2,000 listens of seed Recordings in the last 365 days,
   and for each the Recordings and Artists heard within the next 30 minutes.
 
@@ -62,10 +69,12 @@ any of them; filters of different kinds must all match.
 An SQL prefilter caps the pool at 2,000 Recordings, drawn in turn from: the
 profile and related Artists (600), the 8 strongest profile genres (600), the
 300 most co-listened Recordings (300), the 20 most co-listened Artists (200),
-tempo within 10% of the seed's or of its
-half or double (300), Release years within 5 of the seed range (200), and then
-any eligible Recording. Each draw is ordered by a hash of the Recording and the
-session seed, so the pool varies between sessions without favouring low ids.
+the 300 Recordings nearest the seed's embedding (300), Release years within 5
+of the seed range (200), and then any eligible Recording. A seed without an
+embedding draws tempo within 10% of the seed's or of its half or double (300)
+in place of the nearest Recordings. Each draw is ordered by a hash of the
+Recording and the session seed, so the pool varies between sessions without
+favouring low ids.
 
 ## Scoring
 
@@ -100,13 +109,21 @@ tilt from the setting.
   weight.
 - Genre: the mean of the profile weights of the candidate's genres, its first
   genre counting 1.0 and the others 0.5; a genre not in the profile counts 0.
-- Audio: 0.4 tempo, 0.2 key and 0.4 energy. Tempo is
-  `1 − min over r ∈ {½, 1, 2} of |log2(a / (r·b))| / log2(1.25)`, floored at
-  0, so half and double time match. Key is 1 when equal, 0.7 for the relative
-  key or a fifth apart, otherwise 0. Energy is `1 − |Δ|` of the Library
-  percentile. A part missing on either side drops out and the rest are
-  renormalised; a candidate without features scores 0.3. When the seed has no
-  features, the Audio weight is spread over the other components.
+- Audio, for a seed with an embedding:
+  `clamp(1 − 0.5 × (high − s) / max(high − low, 0.01), 0, 1)`, where `s` is
+  the cosine similarity between the seed's embedding and the nearest of the
+  candidate's vectors. The 10th nearest Recording and any closer score 1, the
+  300th scores 0.5, and the score reaches 0 as far below `low` as `low` is
+  below `high`. A candidate without a current vector scores 0.3. Tempo, key
+  and energy play no part.
+- Audio, for a seed without an embedding: 0.4 tempo, 0.2 key and 0.4 energy.
+  Tempo is `1 − min over r ∈ {½, 1, 2} of |log2(a / (r·b))| / log2(1.25)`,
+  floored at 0, so half and double time match. Key is 1 when equal, 0.7 for
+  the relative key or a fifth apart, otherwise 0. Energy is `1 − |Δ|` of the
+  Library percentile. A part missing on either side drops out and the rest
+  are renormalised; a candidate without features scores 0.3. When the seed has
+  neither an embedding nor features, the Audio weight is spread over the other
+  components.
 - Co-listening: the share of seed listens followed within 30 minutes by this
   Recording or its Artist. In Radio, a candidate followed by fewer than 2
   distinct seed listens scores 0; Daily Mixes apply no such floor.
@@ -168,7 +185,7 @@ kind numbers are stored in `daily_mix_entries` and never change.
 | `related_artist` | 3 | a: seed Artist, b: the pick's Artist |
 | `shared_genre` | 4 | a: genre |
 | `often_after` | 5 | a: Recording (b = 0) or Artist (b = 1) |
-| `similar_sound` | 6 | a: flags, 1 tempo, 2 key, 4 energy |
+| `similar_sound` | 6 | a: flags, 1 tempo, 2 key, 4 energy, 8 overall |
 | `never_played` | 7 | |
 | `rarely_played` | 8 | a: play count |
 | `added` | 9 | a: when added, Unix seconds |
@@ -183,8 +200,11 @@ value, and each is true of the pick:
 - `often_after` needs at least two distinct seed listens followed by the
   pick: an Artist for an `artist` seed, otherwise the seed Recording it
   followed most.
-- `similar_sound` sets tempo at a sub-score of at least 0.7, key at 0.7 and
-  energy at 0.85, and appears only when the pick has features.
+- `similar_sound` for a seed with an embedding sets only the overall flag,
+  `sound_overall`, when the pick's Audio score is at least 0.5 and its
+  similarity at least 0.9. For a seed without one it sets tempo at a sub-score
+  of at least 0.7, key at 0.7 and energy at 0.85, never the overall flag, and
+  appears only when the pick has features.
 - `loved` only for a loved Recording.
 
 A remaining slot gets a history fact: `never_played`, `rarely_played` for 1 or

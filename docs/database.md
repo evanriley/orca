@@ -519,7 +519,7 @@ are stored by number, so new states are appended and never reordered
   | 3 | related artist | | |
   | 4 | shared genre | Genre id | |
   | 5 | often after | Recording or Artist id | 0 Recording, 1 Artist |
-  | 6 | similar sound | flags: 1 tempo, 2 key, 4 energy | |
+  | 6 | similar sound | flags: 1 tempo, 2 key, 4 energy, 8 overall | |
   | 7 | never played | | |
   | 8 | rarely played | play count | |
   | 9 | added | added at, Unix seconds | |

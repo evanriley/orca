@@ -5561,7 +5561,8 @@ fn writeRadioReason(
                 .{ liborca.radio_sound_key, "key" },
                 .{ liborca.radio_sound_energy, "energy" },
             };
-            const total = @popCount(part.a & 7);
+            const total = @popCount(part.a & (liborca.radio_sound_tempo | liborca.radio_sound_key | liborca.radio_sound_energy));
+            if (total == 0) try stdout.writeAll(" sound");
             var count: usize = 0;
             for (sounds) |sound| {
                 if (part.a & sound[0] == 0) continue;

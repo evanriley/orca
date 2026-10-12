@@ -977,6 +977,7 @@ typedef enum orca_reason_kind {
 #define ORCA_SOUND_TEMPO 1
 #define ORCA_SOUND_KEY 2
 #define ORCA_SOUND_ENERGY 4
+#define ORCA_SOUND_OVERALL 8
 
 typedef struct orca_reason_part {
     int64_t a;

@@ -630,3 +630,52 @@ test "closing the library during generation joins the job" {
     const state = (try rig.runtime.jobSnapshotSynced(job_handle)).state;
     try testing.expect(state == .succeeded or state == .cancelled);
 }
+
+test "a mix with stored embeddings ranks by them and says so only for entries that sound like its seed" {
+    var plain: Rig = undefined;
+    try plain.init("file:orca-mixes-embeddings-plain?mode=memory&cache=shared");
+    defer plain.deinit();
+    try plain.generateNow();
+    var plain_buffer: [runtime_module.max_daily_mix_entries]DailyMixEntry = undefined;
+    const plain_entries = try plain.entries((try plain.mixes()).items()[0].id, &plain_buffer);
+
+    var rig: Rig = undefined;
+    try rig.init("file:orca-mixes-embeddings?mode=memory&cache=shared");
+    defer rig.deinit();
+    try rig.exec("UPDATE files SET content_hash = CAST(id AS BLOB), content_hash_algorithm = 1;");
+    var embedding = try (try rig.libraryDatabase()).database.prepare(
+        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) SELECT id, content_hash, ?2 FROM files WHERE id % 5 = ?1;",
+    );
+    defer embedding.deinit();
+    for (0..5) |remainder| {
+        var vector: [512]i8 = @splat(0);
+        vector[@intFromBool(remainder == 0)] = 100;
+        try embedding.reset();
+        try embedding.bindInt64(1, @intCast(remainder));
+        try embedding.bindBlob(2, std.mem.asBytes(&vector));
+        try testing.expectEqual(sqlite.Step.done, try embedding.step());
+    }
+    try rig.generateNow();
+
+    const snapshot = try rig.mixes();
+    try testing.expectEqual(runtime_module.DailyMixesState.ready, snapshot.state);
+    var said: usize = 0;
+    var differs = false;
+    for (snapshot.items(), 0..) |*mix, ordinal| {
+        var buffer: [runtime_module.max_daily_mix_entries]DailyMixEntry = undefined;
+        const entries = try rig.entries(mix.id, &buffer);
+        try testing.expect(entries.len > 0);
+        for (entries, 0..) |entry, index| {
+            if (ordinal == 0 and (index >= plain_entries.len or plain_entries[index].recording_id != entry.recording_id)) differs = true;
+            for ([_]?runtime_module.ReasonPart{ entry.reason.first, entry.reason.second }) |maybe| {
+                const part = maybe orelse continue;
+                if (part.kind != .similar_sound) continue;
+                said += 1;
+                try testing.expectEqual(runtime_module.radio_sound_overall, part.a);
+                try testing.expect(@mod(entry.recording_id, 5) != 0);
+            }
+        }
+    }
+    try testing.expect(said > 0);
+    try testing.expect(differs);
+}

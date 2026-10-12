@@ -116,6 +116,7 @@ pub const ReasonKind = library_pass.discovery.ReasonKind;
 pub const radio_sound_tempo = library_pass.discovery.sound_tempo;
 pub const radio_sound_key = library_pass.discovery.sound_key;
 pub const radio_sound_energy = library_pass.discovery.sound_energy;
+pub const radio_sound_overall = library_pass.discovery.sound_overall;
 pub const DiscoverySettings = library_pass.discovery.Settings;
 pub const DiscoveryAvoidDays = library_pass.discovery.AvoidDays;
 pub const DailyMixCount = library_pass.discovery.MixCount;
