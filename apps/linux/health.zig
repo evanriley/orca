@@ -86,7 +86,7 @@ fn info(row: Row) RowInfo {
             .title = "Not analyzed",
             .subtitle = "Needed for ReplayGain, duplicates, Radio and Daily Mixes",
             .detail = "Runs in the background",
-            .about = "Orca has not analyzed these files yet, or could not measure their loudness because the audio is too short or silent. Analyze measures loudness for ReplayGain, checks for clipping and damage, fingerprints files to find duplicates, and finds tempo, key and energy for Radio and Daily Mixes. Files analyzed by an earlier version are analyzed again for what they lack. Stopping keeps what is done.",
+            .about = "Orca has not analyzed these files yet, or could not measure their loudness because the audio is too short or silent. Analyze measures loudness for ReplayGain, checks for clipping and damage, fingerprints files to find duplicates, and finds tempo, key, energy and sound for Radio and Daily Mixes. Files analyzed by an earlier version are analyzed again for what they lack. Stopping keeps what is done.",
             .icon = "orca-gain-symbolic",
             .tone = .neutral,
             .action = "Analyze",

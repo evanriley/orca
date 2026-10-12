@@ -40,6 +40,8 @@ const logging = @import("logging.zig");
 const libraries = @import("libraries.zig");
 const radio = @import("radio.zig");
 const home_page = @import("home.zig");
+const embedding_model = @import("embedding_model.zig");
+const analysis_notice = @import("analysis_notice.zig");
 
 const App = app.App;
 
@@ -2270,6 +2272,37 @@ fn radioCard(self: *App) *gtk.Widget {
     return radio_card.widget;
 }
 
+fn showModel(self: *App) void {
+    const row = self.listening_controls.model_row orelse return;
+    var buffer: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    const status = embedding_model.status(&buffer, self.runtime.embeddingModelState(), self.embedding_model_path.value);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), status.title.ptr);
+    setSubtitle(row, status.subtitle);
+    if (self.listening_controls.model_check) |button| gtk.gtk_widget_set_visible(button, @intFromBool(status.can_check_again));
+}
+
+fn checkModelClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    embedding_model.apply(self);
+    showModel(self);
+    analysis_notice.refresh(self);
+}
+
+fn soundCard(self: *App) *gtk.Widget {
+    const sound = flatCard(
+        "orca-wave-symbolic",
+        "Sound Similarity",
+        "Radio and Daily Mixes compare how tracks sound, using a model file that runs on this computer.",
+    );
+    const row = actionRow("", "");
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
+    self.listening_controls.model_row = row;
+    self.listening_controls.model_check = suffixButton(row, "Check again", null, gtk.callback(checkModelClicked), self);
+    showModel(self);
+    sound.add(row);
+    return sound.widget;
+}
+
 fn listeningTab(self: *App) *gtk.Widget {
     const listenbrainz = flatCard("orca-wave-symbolic", "ListenBrainz", "Share what you listen to with your ListenBrainz profile.");
     ListenBrainzToken.add(self, listenbrainz);
@@ -2306,7 +2339,7 @@ fn listeningTab(self: *App) *gtk.Widget {
         self,
     ));
 
-    const view = tab(self, .listening, null, &.{ listenbrainz.widget, lyrics_card.widget, artistInfoCard(self) }, &.{ radioCard(self), historyCard(self) });
+    const view = tab(self, .listening, null, &.{ listenbrainz.widget, lyrics_card.widget, artistInfoCard(self) }, &.{ radioCard(self), soundCard(self), historyCard(self) });
     _ = gtk.signalConnect(view, "map", gtk.callback(listeningMapped), self);
     return view;
 }
@@ -3423,7 +3456,8 @@ fn refreshTab(self: *App, which: app.SettingsTab) void {
             showCache(self);
         },
         .about => showAbout(self),
-        .general, .sound, .listening, .appearance => {},
+        .listening => showModel(self),
+        .general, .sound, .appearance => {},
     }
 }
 

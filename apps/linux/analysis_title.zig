@@ -7,6 +7,7 @@ const liborca = @import("liborca");
 pub fn text(buffer: *[256]u8, missing: liborca.MissingMeasurements) [:0]const u8 {
     const phrases = [_]struct { bool, []const u8, [:0]const u8 }{
         .{ missing.features, "measures tempo, key and energy", "Orca now measures tempo, key and energy. Analyze your music to use them in Radio and Daily Mixes." },
+        .{ missing.embedding, "measures how tracks sound", "Orca now measures how tracks sound. Analyze your music to use it in Radio and Daily Mixes." },
         .{ missing.loudness_and_checks, "measures loudness differently", "Orca now measures loudness differently. Analyze your music to update ReplayGain and the audio checks." },
         .{ missing.fingerprint, "fingerprints music differently", "Orca now fingerprints music differently. Analyze your music to keep finding duplicates." },
     };
@@ -44,5 +45,21 @@ test "the banner names each missing measurement in one sentence" {
     try std.testing.expectEqualStrings(
         "Orca now measures tempo, key and energy, measures loudness differently and fingerprints music differently. Analyze your music to use them.",
         text(&buffer, .{ .features = true, .loudness_and_checks = true, .fingerprint = true }),
+    );
+    try std.testing.expectEqualStrings(
+        "Orca now measures how tracks sound. Analyze your music to use it in Radio and Daily Mixes.",
+        text(&buffer, .{ .embedding = true }),
+    );
+    try std.testing.expectEqualStrings(
+        "Orca now measures tempo, key and energy and measures how tracks sound. Analyze your music to use them.",
+        text(&buffer, .{ .features = true, .embedding = true }),
+    );
+    try std.testing.expectEqualStrings(
+        "Orca now measures how tracks sound and fingerprints music differently. Analyze your music to use them.",
+        text(&buffer, .{ .embedding = true, .fingerprint = true }),
+    );
+    try std.testing.expectEqualStrings(
+        "Orca now measures tempo, key and energy, measures how tracks sound, measures loudness differently and fingerprints music differently. Analyze your music to use them.",
+        text(&buffer, .{ .features = true, .embedding = true, .loudness_and_checks = true, .fingerprint = true }),
     );
 }

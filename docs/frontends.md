@@ -530,7 +530,8 @@ signals Radio uses. Every view reads `playerRadio` and `playerRadioPicks` on
 the tick; a control change calls `playerSetRadioOptions`, which replaces only
 the pending picks. Settings › Listening holds Radio & Daily Mixes, stored with
 `setLibraryDiscoverySettings`, and Show listening stats on Home, an `orca-gtk`
-setting in `[listening]`.
+setting in `[listening]`. Its Sound Similarity card shows the state of the
+[embedding model](#embedding-model).
 
 `orca-gtk` opens on Home, the first sidebar item in its own unlabeled group;
 Settings › General › Default page can choose another start page. Home reads the
@@ -579,6 +580,36 @@ install keeps `bin` and `share` under one prefix.
 `zig build -Dgtk=false` builds neither `orca-gtk` nor these files, for systems
 whose GTK, libadwaita or Pango is older than `orca-gtk` needs.
 
+### Embedding model
+
+`orca-gtk` names the [audio-embedding model](analysis.md#audio-embedding) file,
+`clap_audio_int8.onnx`, to liborca with `Runtime.setEmbeddingModelPath` once at
+startup. It never downloads the file. The path is the first of:
+
+1. `ORCA_EMBEDDING_MODEL`, when set and not empty, whether or not a file is
+   there;
+2. `$XDG_DATA_HOME/orca/models/clap_audio_int8.onnx`, when it is a file;
+3. `share/orca/models/clap_audio_int8.onnx` under the install prefix, the
+   parent of the executable's directory, when it is a file;
+4. the second path, so that liborca reports `missing` for the place the file
+   belongs.
+
+Settings › Listening › Sound Similarity words `Runtime.embeddingModelState` in
+one row:
+
+| State | Row | Under it |
+| --- | --- | --- |
+| `ready` | Model installed | the file's path |
+| `missing` | Model not installed | the file's name and the directory to put it in |
+| `wrong_file` | That file is not Orca's model | the file's path |
+| `unusable` | The model could not be loaded | the file's path |
+| `built_without` | Not available in this build | that the build has no ONNX Runtime |
+
+For `missing`, `wrong_file` and `unusable` the row has Check again, which
+repeats the lookup, sets the path again and re-reads
+`libraryAnalysisCoverage`, so the analysis banner can ask for the embedding
+without a restart. The row is read again each time the Listening tab is shown.
+
 ### Libraries and settings
 
 `$XDG_CONFIG_HOME/orca/settings.ini` holds only the frontend's own choices.
@@ -608,6 +639,7 @@ open Library](api.md#replacing-the-open-library).
 
 Other environment variables are development aids: `ORCA_OUTPUT_DEVICE` pins an
 output device id from `orca-cli devices`, which overrides the device drop-down;
+`ORCA_EMBEDDING_MODEL` names the [embedding model](#embedding-model) file;
 `ORCA_GTK_DEBUG` takes a comma-separated list of `art`, `frames` and `reveal`;
 and `ORCA_LISTENBRAINZ_URL`, `ORCA_MUSICBRAINZ_URL`, `ORCA_ACOUSTID_URL`,
 `ORCA_COVERARTARCHIVE_URL` and `ORCA_LRCLIB_URL` point a provider at another
@@ -667,6 +699,9 @@ keep them as `XDG_CONFIG_HOME` across runs. `ORCA_HEADLESS_TMPDIR` (default
 or one too long for a Wayland socket, is refused. `ORCA_HEADLESS_MUSICBRAINZ_URL`,
 `ORCA_HEADLESS_ACOUSTID_URL` and `ORCA_HEADLESS_COVERARTARCHIVE_URL` point those
 providers at another server, such as a local mock, instead of the closed port.
+The app's `ORCA_EMBEDDING_MODEL` is `ORCA_HEADLESS_EMBEDDING_MODEL`, or empty,
+so without it the [embedding model](#embedding-model) is looked up only in the
+scratch `XDG_DATA_HOME` and beside the executable.
 
 ## Listening from a host
 

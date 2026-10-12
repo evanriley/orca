@@ -73,7 +73,21 @@
   `ORCA_STATUS_INVALID_STATE` for a Track without an embedding or
   `ORCA_STATUS_INVALID_ARGUMENT` for a capacity above 1,000.
 
+- **`orca-gtk` gives liborca the audio-embedding model and shows its state.**
+  At startup it names `clap_audio_int8.onnx` from `ORCA_EMBEDDING_MODEL`,
+  else from `$XDG_DATA_HOME/orca/models`, else from `share/orca/models` under
+  the install prefix. Settings › Listening › Sound Similarity says whether the
+  model is installed, where a missing file goes, and offers Check again, which
+  looks the file up again without a restart; the command palette lists it as
+  Sound similarity. The analysis banner asks for an analysis when the model is
+  ready and files lack the embedding. `scripts/headless-gui.sh` passes
+  `ORCA_HEADLESS_EMBEDDING_MODEL` to the app as `ORCA_EMBEDDING_MODEL`.
+
 ### Changed
+
+- **`orca-gtk` describes Radio's sound signal as how tracks sound.** The Radio
+  panel's note, the Daily Mix signal line and the descriptions of Analyze no
+  longer name only tempo, key and energy.
 
 - **Radio's Stay close to Explore dial changes which tracks are picked.**
   `RadioOptions.explore` sets how far down the closeness ranking Radio may

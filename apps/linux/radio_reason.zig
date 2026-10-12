@@ -222,6 +222,7 @@ test "format_added_saysHowLongAgo" {
 test "format_similarSound_listsEveryFlag" {
     try expectReason("Similar tempo, key and energy", .{ .first = .{ .kind = .similar_sound, .a = 7 } }, .{ "", "" });
     try expectReason("Similar sound", .{ .first = .{ .kind = .similar_sound, .a = 0 } }, .{ "", "" });
+    try expectReason("Similar sound", .{ .first = .{ .kind = .similar_sound, .a = liborca.radio_sound_overall } }, .{ "", "" });
 }
 
 test "format_noReason_isEmpty" {

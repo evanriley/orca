@@ -176,7 +176,7 @@ pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
     begin(self, .{ .task = .scan, .job = job });
 }
 
-pub const analysis_summary: [:0]const u8 = "Measures loudness for ReplayGain, checks for clipping and damage, fingerprints files to find duplicates, and finds tempo, key and energy for Radio and Daily Mixes.";
+pub const analysis_summary: [:0]const u8 = "Measures loudness for ReplayGain, checks for clipping and damage, fingerprints files to find duplicates, and finds tempo, key, energy and sound for Radio and Daily Mixes.";
 
 /// Hours on a large library, and stopping it keeps what is done.
 pub fn startAnalysis(self: *App) void {

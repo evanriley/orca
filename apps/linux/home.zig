@@ -2055,7 +2055,7 @@ const Signal = struct { kind: liborca.ReasonKind, text: [*:0]const u8 };
 
 const signal_lines = [_]Signal{
     .{ .kind = .related_artist, .text = "Related artists from MusicBrainz" },
-    .{ .kind = .similar_sound, .text = "Tracks with a similar tempo and energy (audio analysis)" },
+    .{ .kind = .similar_sound, .text = "Tracks that sound similar (audio analysis)" },
     .{ .kind = .often_after, .text = "Tracks you often play in the same session" },
     .{ .kind = .shared_genre, .text = "Tracks that share its genre tags" },
     .{ .kind = .same_artist, .text = "More from the same artists" },

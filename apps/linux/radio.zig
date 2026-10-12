@@ -1036,7 +1036,7 @@ fn buildInfo() *gtk.Widget {
     const icon = gtk.gtk_image_new_from_icon_name("orca-info-symbolic");
     gtk.gtk_widget_set_valign(icon, gtk.ALIGN_START);
     const text = wrapped(
-        "Radio picks from your library using genre tags, ListenBrainz related artists, audio analysis (tempo, key, energy) and what you tend to play together. It runs on this computer.",
+        "Radio picks from your library using genre tags, ListenBrainz related artists, how tracks sound (audio analysis) and what you tend to play together. It runs on this computer.",
         "radio-info-text",
     );
     gtk.gtk_widget_set_hexpand(text, gtk.true_);

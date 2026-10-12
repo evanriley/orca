@@ -35,7 +35,10 @@
 # MusicBrainz, AcoustID and the Cover Art Archive point at
 # ORCA_HEADLESS_MUSICBRAINZ_URL, ORCA_HEADLESS_ACOUSTID_URL and
 # ORCA_HEADLESS_COVERARTARCHIVE_URL when they are set, such as at a local
-# mock. The output is 1440x900 unless ORCA_HEADLESS_SIZE names another
+# mock. The app gets ORCA_HEADLESS_EMBEDDING_MODEL as its ORCA_EMBEDDING_MODEL;
+# without it the app looks for the model in the scratch XDG_DATA_HOME and
+# beside its executable, never where the caller's ORCA_EMBEDDING_MODEL
+# points. The output is 1440x900 unless ORCA_HEADLESS_SIZE names another
 # WIDTHxHEIGHT. Nothing reaches the user's desktop:
 # sway, D-Bus, the pointer and orca-gtk run with a private
 # XDG_RUNTIME_DIR, and on exit the script stops only the processes it
@@ -395,6 +398,7 @@ ORCA_OUTPUT_DEVICE=$device PIPEWIRE_REMOTE=$pipewire_remote \
     ORCA_LRCLIB_URL=http://127.0.0.1:9 ORCA_WIKIDATA_URL=http://127.0.0.1:9 \
     ORCA_WIKIMEDIA_URL=http://127.0.0.1:9 ORCA_WIKIPEDIA_URL=http://127.0.0.1:9 \
     ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:9 \
+    ORCA_EMBEDDING_MODEL=${ORCA_HEADLESS_EMBEDDING_MODEL:-} \
     ORCA_GTK_DEBUG=${ORCA_GTK_DEBUG:-} GSK_RENDERER=cairo GDK_BACKEND=wayland GDK_DEBUG=no-portals GTK_A11Y=none NO_AT_BRIDGE=1 \
     launch orca-gtk env "${app_library[@]}" "$orca_gtk"
 orca_pid=${started_pids[-1]}
