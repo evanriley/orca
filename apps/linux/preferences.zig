@@ -2140,6 +2140,7 @@ fn historyCard(self: *App) *gtk.Widget {
 
 const avoid_choices = [_]liborca.DiscoveryAvoidDays{ .three_days, .one_day, .seven_days, .none };
 const mix_choices = [_]liborca.DailyMixCount{ .six, .four, .off };
+const variety_choices = [_]liborca.ArtistVariety{ .relaxed, .balanced, .strict };
 
 fn discoverySettings(self: *App) liborca.DiscoverySettings {
     const library = self.library orelse return .{};
@@ -2192,6 +2193,17 @@ fn mixesPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     var discovery = discoverySettings(self);
     if (discovery.mix_count == mix_choices[selected]) return;
     discovery.mix_count = mix_choices[selected];
+    saveDiscoverySettings(self, discovery);
+    home_page.startMixes(self, true);
+}
+
+fn varietyPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (selected >= variety_choices.len) return;
+    var discovery = discoverySettings(self);
+    if (discovery.artist_variety == variety_choices[selected]) return;
+    discovery.artist_variety = variety_choices[selected];
     saveDiscoverySettings(self, discovery);
     home_page.startMixes(self, true);
 }
@@ -2249,6 +2261,14 @@ fn radioCard(self: *App) *gtk.Widget {
             &.{ "3 days", "1 day", "7 days", "Don't avoid", null },
             @intCast(std.mem.indexOfScalar(liborca.DiscoveryAvoidDays, &avoid_choices, discovery.avoid_days) orelse 0),
             gtk.callback(avoidPicked),
+            self,
+        ),
+        selectRow(
+            "Artist variety",
+            "How often one artist repeats in Radio and Daily Mixes",
+            &.{ "Relaxed", "Balanced", "Strict", null },
+            @intCast(std.mem.indexOfScalar(liborca.ArtistVariety, &variety_choices, discovery.artist_variety) orelse 1),
+            gtk.callback(varietyPicked),
             self,
         ),
         selectRow(
