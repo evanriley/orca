@@ -75,6 +75,9 @@ pub const RadioOptions = struct {
     /// How much play history steers the picks, 0 to 100. Null reads
     /// `radio.familiarity`.
     familiarity: ?u8 = null,
+    /// How often one Artist may repeat. Null reads
+    /// `discovery.artist_variety`.
+    artist_variety: ?ArtistVariety = null,
 };
 
 /// A score change for one Artist or genre for the rest of a session.
@@ -215,6 +218,43 @@ pub const Picks = struct {
 pub const AvoidDays = enum(u8) { none = 0, one_day = 1, three_days = 3, seven_days = 7 };
 pub const MixCount = enum(u8) { off = 0, four = 4, six = 6 };
 
+/// The entries one Artist holds in a Daily Mix: the count every pick tries
+/// first and the most it holds while the mix is 60 minutes or longer.
+pub const MixCap = struct { preferred: usize, limit: usize };
+
+/// How often Radio and Daily Mixes let one Artist repeat.
+pub const ArtistVariety = enum(u8) {
+    /// At most 2 consecutive picks by one Artist.
+    relaxed = 1,
+    /// At most 2 Radio picks by one Artist in any 10. A mix prefers 1 entry
+    /// by one Artist and holds at most 2, never back to back.
+    balanced = 2,
+    /// At most 1 Radio pick by one Artist in any 10 and 1 entry in a mix,
+    /// never back to back.
+    strict = 3,
+
+    /// The most Radio picks one Artist has in any `diversity_window`; null
+    /// for no limit.
+    pub fn radioCap(self: ArtistVariety) ?usize {
+        return switch (self) {
+            .relaxed => null,
+            .balanced => 2,
+            .strict => 1,
+        };
+    }
+
+    /// The entries one Artist holds in a Daily Mix before a pick nothing else
+    /// qualifies for may take another, and the most it holds; null for no
+    /// limit.
+    pub fn mixCap(self: ArtistVariety) ?MixCap {
+        return switch (self) {
+            .relaxed => null,
+            .balanced => .{ .preferred = 1, .limit = 2 },
+            .strict => .{ .preferred = 1, .limit = 1 },
+        };
+    }
+};
+
 /// The Library's Radio and Daily Mix settings.
 pub const Settings = struct {
     radio_continue: bool = true,
@@ -223,6 +263,7 @@ pub const Settings = struct {
     mix_count: MixCount = .six,
     /// How much play history steers Radio and Daily Mixes, 0 to 100.
     familiarity: u8 = 0,
+    artist_variety: ArtistVariety = .balanced,
 };
 
 pub fn readSettings(settings: *const database.LibrarySettingsRepository) !Settings {
@@ -230,12 +271,14 @@ pub fn readSettings(settings: *const database.LibrarySettingsRepository) !Settin
     const avoid = try settings.integer(database.setting_discovery_avoid_days, @backingInt(defaults.avoid_days));
     const mixes = try settings.integer(database.setting_mixes_count, @backingInt(defaults.mix_count));
     const familiarity = try settings.integer(database.setting_radio_familiarity, defaults.familiarity);
+    const variety = try settings.integer(database.setting_discovery_artist_variety, @backingInt(defaults.artist_variety));
     return .{
         .radio_continue = try settings.flag(database.setting_radio_continue, defaults.radio_continue),
         .include_unplayed = try settings.flag(database.setting_radio_include_unplayed, defaults.include_unplayed),
         .avoid_days = enumOr(AvoidDays, avoid, defaults.avoid_days),
         .mix_count = enumOr(MixCount, mixes, defaults.mix_count),
         .familiarity = if (familiarity >= 0 and familiarity <= 100) @intCast(familiarity) else defaults.familiarity,
+        .artist_variety = enumOr(ArtistVariety, variety, defaults.artist_variety),
     };
 }
 
@@ -245,6 +288,7 @@ pub fn writeSettings(settings: *database.LibrarySettingsRepository, value: Setti
     try settings.setInteger(database.setting_discovery_avoid_days, @backingInt(value.avoid_days));
     try settings.setInteger(database.setting_mixes_count, @backingInt(value.mix_count));
     try settings.setInteger(database.setting_radio_familiarity, @as(i64, value.familiarity));
+    try settings.setInteger(database.setting_discovery_artist_variety, @backingInt(value.artist_variety));
 }
 
 /// The window the never-played cap looks back on: null at 0 (no cap), then
@@ -442,6 +486,7 @@ pub fn pickRadio(
     const include_unplayed = options.include_unplayed orelse settings.include_unplayed;
     const familiarity = options.familiarity orelse settings.familiarity;
     const window = unplayedWindow(familiarity);
+    const artist_variety = options.artist_variety orelse settings.artist_variety;
     const avoid_days: i64 = if (options.avoid_recent) |avoid|
         (if (!avoid) 0 else if (settings.avoid_days == .none) @backingInt(AvoidDays.three_days) else @backingInt(settings.avoid_days))
     else
@@ -488,6 +533,7 @@ pub fn pickRadio(
         .reach = reachFor(candidates.len, options.explore),
         .seed_artists = if (profile.own_artists) &profile.artists else null,
         .artist_cap = seedArtistCap(options.explore),
+        .variety_cap = artist_variety.radioCap(),
     };
 
     var picks: std.ArrayList(Pick) = .empty;
@@ -1717,6 +1763,7 @@ const Spacing = struct {
     reach: usize,
     seed_artists: ?*const std.AutoHashMapUnmanaged(i64, f64),
     artist_cap: usize,
+    variety_cap: ?usize = null,
 };
 
 fn reachFor(candidate_count: usize, explore: u8) usize {
@@ -1760,6 +1807,16 @@ fn allowed(candidate: Candidate, history: []const RecentPick, relaxation: usize,
         }
         if (same >= spacing.artist_cap) return false;
     }
+    if (spacing.variety_cap) |cap| if (candidate.artist_id) |artist| {
+        if (relaxation < 3 and history.len >= 1 and history[history.len - 1].artist_id == artist) return false;
+        if (relaxation < 2) {
+            var same: usize = 0;
+            for (history[history.len -| (diversity_window - 1)..]) |recent| {
+                if (recent.artist_id == artist) same += 1;
+            }
+            if (same >= cap) return false;
+        }
+    };
     const release_limit = if (from_seed_artist) @max(release_limit_per_window, spacing.artist_cap) else release_limit_per_window;
     return diverseAt(history, candidate.artist_id, candidate.release_id, relaxation, release_limit);
 }
@@ -2167,7 +2224,7 @@ test "Recordings played within the avoid window are left out unless nothing else
 test "picks space out Artists and Releases, and relax only when nothing else fits" {
     var library = try openFixture("diversity");
     defer library.close();
-    var picks = try radioFor(&library, .{ .artist = 1 }, .{ .explore = 0 }, 30);
+    var picks = try radioFor(&library, .{ .artist = 1 }, .{ .explore = 0, .artist_variety = .relaxed }, 30);
     defer picks.deinit();
     try testing.expectEqual(@as(usize, 30), picks.items.len);
     for (picks.items[2..], 2..) |pick, index| {
@@ -2593,14 +2650,14 @@ test "the seed Artist is capped at 6, 4, 2 and 1 in any 10 picks across the expl
     };
     for (bands) |band_case| {
         try testing.expectEqual(band_case.cap, seedArtistCap(band_case.explore));
-        var picks = try radioFor(&library, .{ .track = 1 }, .{ .explore = band_case.explore }, 40);
+        var picks = try radioFor(&library, .{ .track = 1 }, .{ .explore = band_case.explore, .artist_variety = .relaxed }, 40);
         defer picks.deinit();
         try testing.expect(maxInAnyTen(picks, 1) <= band_case.cap);
     }
-    var close = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 10);
+    var close = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0, .artist_variety = .relaxed }, 10);
     defer close.deinit();
     try testing.expectEqual(@as(usize, 6), maxInAnyTen(close, 1));
-    var far = try radioFor(&library, .{ .track = 1 }, .{ .explore = 100 }, 10);
+    var far = try radioFor(&library, .{ .track = 1 }, .{ .explore = 100, .artist_variety = .relaxed }, 10);
     defer far.deinit();
     try testing.expect(maxInAnyTen(far, 1) <= 1);
 
@@ -2971,4 +3028,202 @@ test "the genre bucket orders profile genres by weight times rarity, the rarer f
     try testing.expectEqual(@as(usize, 2), profile.genre_order.len);
     try testing.expectEqual(@as(i64, 3), profile.genre_order[0].id);
     try testing.expectEqual(@as(i64, 1), profile.genre_order[1].id);
+}
+
+fn recentByArtists(comptime artists: []const ?i64) [artists.len]RecentPick {
+    var history: [artists.len]RecentPick = undefined;
+    for (&history, artists, 0..) |*pick, artist, index| pick.* = .{
+        .recording_id = 1000 + @as(i64, @intCast(index)),
+        .artist_id = artist,
+        .release_id = null,
+        .never_played = false,
+    };
+    return history;
+}
+
+fn candidateBy(artist_id: ?i64, release_id: ?i64) Candidate {
+    var candidate = testCandidate(1, 1, 1);
+    candidate.artist_id = artist_id;
+    candidate.release_id = release_id;
+    return candidate;
+}
+
+const SeedArtists = std.AutoHashMapUnmanaged(i64, f64);
+
+fn spacingFor(variety: ArtistVariety, seed_artists: ?*const SeedArtists, seed_cap: usize) Spacing {
+    return .{ .window = null, .reach = 12, .seed_artists = seed_artists, .artist_cap = seed_cap, .variety_cap = variety.radioCap() };
+}
+
+fn expectArtistVariety(artists: []const ?i64, cap: usize) !void {
+    for (artists, 0..) |maybe_artist, index| {
+        const artist = maybe_artist orelse continue;
+        if (index > 0) try testing.expect(artists[index - 1] != artist);
+        var same: usize = 0;
+        for (artists[index -| (diversity_window - 1)..index]) |earlier| same += @intFromBool(earlier == artist);
+        try testing.expect(same < cap);
+    }
+}
+
+test "the Artist variety setting defaults to balanced, keeps what is written and reads an unknown stored value as balanced" {
+    var library = try openFixture("variety-setting");
+    defer library.close();
+    try testing.expectEqual(ArtistVariety.balanced, (try readSettings(&library.settings)).artist_variety);
+    for ([_]ArtistVariety{ .relaxed, .strict, .balanced }) |variety| {
+        try writeSettings(&library.settings, .{ .artist_variety = variety });
+        try testing.expectEqual(variety, (try readSettings(&library.settings)).artist_variety);
+        try testing.expectEqual(@as(i64, @backingInt(variety)), try library.settings.integer(database.setting_discovery_artist_variety, -1));
+    }
+    try writeSettings(&library.settings, .{ .artist_variety = .strict });
+    inline for (.{ "0", "4", "-1", "300", "often" }) |stored| {
+        try library.database.exec("UPDATE library_settings SET value = '" ++ stored ++ "' WHERE key = 'discovery.artist_variety';");
+        try testing.expectEqual(ArtistVariety.balanced, (try readSettings(&library.settings)).artist_variety);
+    }
+}
+
+test "balanced refuses an Artist's third pick in any 10 and strict its second, for a seed Artist and any other" {
+    var seed_artists: SeedArtists = .empty;
+    defer seed_artists.deinit(testing.allocator);
+    try seed_artists.put(testing.allocator, 7, 1);
+    const none = recentByArtists(&.{ 7, 2, 3, 4, 5, 6, 8, 9, 10, 11 });
+    const one = recentByArtists(&.{ 7, 2, 3, 4, 5, 6, 8, 9, 10 });
+    const two = recentByArtists(&.{ 7, 7, 2, 7, 4, 5, 6, 8, 9, 10 });
+    const three = recentByArtists(&.{ 7, 2, 7, 4, 7, 5, 6, 8, 9 });
+    const candidate = candidateBy(7, null);
+    for ([_]?*const SeedArtists{ null, &seed_artists }) |seeds| {
+        const relaxed = spacingFor(.relaxed, seeds, 6);
+        const balanced = spacingFor(.balanced, seeds, 6);
+        const strict = spacingFor(.strict, seeds, 6);
+        for ([_][]const RecentPick{ &none, &one, &two, &three }) |history| try testing.expect(allowed(candidate, history, 0, false, relaxed));
+        try testing.expect(allowed(candidate, &none, 0, false, balanced));
+        try testing.expect(allowed(candidate, &one, 0, false, balanced));
+        try testing.expect(!allowed(candidate, &two, 0, false, balanced));
+        try testing.expect(!allowed(candidate, &three, 0, false, balanced));
+        try testing.expect(allowed(candidate, &none, 0, false, strict));
+        try testing.expect(!allowed(candidate, &one, 0, false, strict));
+        try testing.expect(!allowed(candidate, &two, 0, false, strict));
+    }
+}
+
+test "balanced and strict never pick one Artist back to back, and relaxed allows two in a row" {
+    const after_other = recentByArtists(&.{ 7, 2 });
+    const after_same = recentByArtists(&.{ 2, 7 });
+    const after_two = recentByArtists(&.{ 2, 7, 7 });
+    const candidate = candidateBy(7, null);
+    try testing.expect(allowed(candidate, &after_same, 0, false, spacingFor(.relaxed, null, 6)));
+    try testing.expect(!allowed(candidate, &after_two, 0, false, spacingFor(.relaxed, null, 6)));
+    try testing.expect(allowed(candidate, &after_other, 0, false, spacingFor(.balanced, null, 6)));
+    try testing.expect(!allowed(candidate, &after_same, 0, false, spacingFor(.balanced, null, 6)));
+    try testing.expect(!allowed(candidate, &after_same, 0, false, spacingFor(.strict, null, 6)));
+}
+
+test "a pick without an Artist is never limited by Artist variety" {
+    const history = recentByArtists(&.{ null, null, null, null, null, null, null, null, null });
+    for ([_]ArtistVariety{ .relaxed, .balanced, .strict }) |variety|
+        try testing.expect(allowed(candidateBy(null, null), &history, 0, false, spacingFor(variety, null, 6)));
+    const mixed = recentByArtists(&.{ 7, null, 7, null });
+    try testing.expect(allowed(candidateBy(null, null), &mixed, 0, false, spacingFor(.strict, null, 6)));
+}
+
+test "the lower of the seed Artist cap and the Artist variety cap binds" {
+    var seed_artists: SeedArtists = .empty;
+    defer seed_artists.deinit(testing.allocator);
+    try seed_artists.put(testing.allocator, 7, 1);
+    try seed_artists.put(testing.allocator, 8, 1);
+    const one_other_seed = recentByArtists(&.{ 8, 2, 3 });
+    try testing.expect(!allowed(candidateBy(7, null), &one_other_seed, 0, false, spacingFor(.balanced, &seed_artists, 1)));
+    try testing.expect(allowed(candidateBy(7, null), &one_other_seed, 0, false, spacingFor(.balanced, &seed_artists, 6)));
+    const two_by_one = recentByArtists(&.{ 7, 2, 7, 3 });
+    try testing.expect(!allowed(candidateBy(7, null), &two_by_one, 0, false, spacingFor(.balanced, &seed_artists, 6)));
+    try testing.expect(allowed(candidateBy(8, null), &two_by_one, 0, false, spacingFor(.balanced, &seed_artists, 6)));
+    try testing.expect(!allowed(candidateBy(8, null), &two_by_one, 0, false, spacingFor(.balanced, &seed_artists, 2)));
+    try testing.expect(!allowed(candidateBy(7, null), &one_other_seed ++ recentByArtists(&.{7}) ++ recentByArtists(&.{2}), 0, false, spacingFor(.strict, &seed_artists, 6)));
+    try testing.expect(allowed(candidateBy(8, null), &recentByArtists(&.{ 7, 2 }), 0, false, spacingFor(.strict, &seed_artists, 6)));
+}
+
+test "relaxation drops the Release rule, then both Artist caps, then the back-to-back rule, and a pick is always made" {
+    var seed_artists: SeedArtists = .empty;
+    defer seed_artists.deinit(testing.allocator);
+    try seed_artists.put(testing.allocator, 7, 1);
+    try seed_artists.put(testing.allocator, 8, 1);
+    const balanced = spacingFor(.balanced, null, 6);
+
+    var same_release = recentByArtists(&.{ 2, 3, 4 });
+    same_release[0].release_id = 5;
+    same_release[1].release_id = 5;
+    try testing.expect(!allowed(candidateBy(9, 5), &same_release, 0, false, balanced));
+    try testing.expect(allowed(candidateBy(9, 5), &same_release, 1, false, balanced));
+
+    const two_by_one = recentByArtists(&.{ 7, 2, 7, 3 });
+    try testing.expect(!allowed(candidateBy(7, null), &two_by_one, 1, false, balanced));
+    try testing.expect(allowed(candidateBy(7, null), &two_by_one, 2, false, balanced));
+    const seed_group_full = recentByArtists(&.{ 8, 2, 3 });
+    try testing.expect(!allowed(candidateBy(7, null), &seed_group_full, 1, false, spacingFor(.relaxed, &seed_artists, 1)));
+    try testing.expect(allowed(candidateBy(7, null), &seed_group_full, 2, false, spacingFor(.relaxed, &seed_artists, 1)));
+
+    const back_to_back = recentByArtists(&.{ 2, 7 });
+    try testing.expect(!allowed(candidateBy(7, null), &back_to_back, 2, false, balanced));
+    try testing.expect(allowed(candidateBy(7, null), &back_to_back, 3, false, balanced));
+
+    var candidates: [4]Candidate = undefined;
+    for (&candidates, 0..) |*candidate, index| {
+        candidate.* = testCandidate(@intCast(index + 1), @floatFromInt(4 - index), @floatFromInt(4 - index));
+        candidate.artist_id = 7;
+        candidate.release_id = 5;
+    }
+    const order = [_]u32{ 0, 1, 2, 3 };
+    var used: [4]bool = @splat(false);
+    var history: [4]RecentPick = undefined;
+    for ([_]ArtistVariety{ .balanced, .strict }) |variety| {
+        used = @splat(false);
+        for (0..4) |made| {
+            const chosen = choose(&candidates, &order, &used, history[0..made], spacingFor(variety, null, 6)) orelse return error.TestExpectedPick;
+            try testing.expectEqual(@as(u32, @intCast(made)), chosen);
+            used[chosen] = true;
+            history[made] = .{ .recording_id = candidates[chosen].recording_id, .artist_id = 7, .release_id = 5, .never_played = false };
+        }
+        try testing.expectEqual(@as(?u32, null), choose(&candidates, &order, &used, &history, spacingFor(variety, null, 6)));
+    }
+}
+
+test "Radio keeps every Artist to 2 picks in any 10 at balanced and 1 at strict, reads the setting, and continues the window across a top-up" {
+    var library = try openWideFixture("variety");
+    defer library.close();
+    const source: Source = .of(&library, .clap_htsat_unfused);
+    var artists: [40]?i64 = undefined;
+
+    var relaxed = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0, .artist_variety = .relaxed }, 40);
+    defer relaxed.deinit();
+    try testing.expectEqual(@as(usize, 6), maxInAnyTen(relaxed, 1));
+
+    inline for (.{ .{ ArtistVariety.balanced, 2 }, .{ ArtistVariety.strict, 1 } }) |case| {
+        for ([_]Seed{ .{ .track = 1 }, .{ .genre = 1 }, .loved }) |seed| {
+            var picks = try radioFor(&library, seed, .{ .explore = 0, .artist_variety = case[0] }, 40);
+            defer picks.deinit();
+            try testing.expectEqual(@as(usize, 40), picks.items.len);
+            for (picks.items, &artists) |pick, *artist| artist.* = pick.artist_id;
+            try expectArtistVariety(&artists, case[1]);
+        }
+
+        try writeSettings(&library.settings, .{ .artist_variety = case[0] });
+        var whole = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0 }, 20);
+        defer whole.deinit();
+        var named = try radioFor(&library, .{ .track = 1 }, .{ .explore = 0, .artist_variety = case[0] }, 20);
+        defer named.deinit();
+        for (whole.items, named.items) |a, b| try testing.expectEqual(a.recording_id, b.recording_id);
+        try testing.expectEqual(@as(usize, case[1]), maxInAnyTen(whole, 1));
+
+        var first = try pickRadio(testing.allocator, &source, .{ .track = 1 }, .{ .explore = 0 }, .{ .now_s = test_now, .seed = 42 }, 10);
+        defer first.deinit();
+        var recent: [10]RecentPick = undefined;
+        for (first.items, &recent, artists[0..10]) |pick, *slot, *artist| {
+            slot.* = .{ .recording_id = pick.recording_id, .artist_id = pick.artist_id, .release_id = pick.release_id, .never_played = pick.never_played };
+            artist.* = pick.artist_id;
+        }
+        var second = try pickRadio(testing.allocator, &source, .{ .track = 1 }, .{ .explore = 0 }, .{ .now_s = test_now, .seed = 42, .recent = &recent }, 10);
+        defer second.deinit();
+        try testing.expectEqual(@as(usize, 10), second.items.len);
+        for (second.items, artists[10..20]) |pick, *artist| artist.* = pick.artist_id;
+        try expectArtistVariety(artists[0..20], case[1]);
+        for (whole.items, artists[0..20]) |pick, artist| try testing.expectEqual(pick.artist_id, artist);
+    }
 }

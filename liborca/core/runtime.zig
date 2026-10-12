@@ -121,6 +121,7 @@ pub const radio_sound_energy = library_pass.discovery.sound_energy;
 pub const radio_sound_overall = library_pass.discovery.sound_overall;
 pub const DiscoverySettings = library_pass.discovery.Settings;
 pub const DiscoveryAvoidDays = library_pass.discovery.AvoidDays;
+pub const ArtistVariety = library_pass.discovery.ArtistVariety;
 pub const DailyMixCount = library_pass.discovery.MixCount;
 pub const DailyMixesRequest = job_worker.DailyMixesRequest;
 pub const DailyMixes = library_pass.daily_mixes.DailyMixes;

@@ -16,6 +16,9 @@ pub const radio_include_unplayed = "radio.include_unplayed";
 pub const radio_familiarity = "radio.familiarity";
 /// How many days a played Recording is left out of Radio and Daily Mixes.
 pub const discovery_avoid_days = "discovery.avoid_days";
+/// How often Radio and Daily Mixes let one Artist repeat, an `ArtistVariety`
+/// value.
+pub const discovery_artist_variety = "discovery.artist_variety";
 /// How many Daily Mixes are made each day.
 pub const mixes_count = "mixes.count";
 /// The mix day the stored Daily Mixes were made for.
