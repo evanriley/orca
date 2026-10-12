@@ -951,7 +951,8 @@ pub const DiscoverySettingsView = extern struct {
     mix_count: u8,
     has_familiarity: u8 = 0,
     familiarity: u8 = 0,
-    _reserved: [2]u8 = @splat(0),
+    artist_variety: u8 = 0,
+    _reserved: [1]u8 = @splat(0),
 };
 
 pub const DailyMixesRequestView = extern struct {
@@ -3723,6 +3724,7 @@ pub export fn orca_library_discovery_settings(
         .mix_count = @backingInt(settings.mix_count),
         .has_familiarity = 1,
         .familiarity = settings.familiarity,
+        .artist_variety = @backingInt(settings.artist_variety),
     };
     return .ok;
 }
@@ -3734,24 +3736,23 @@ pub export fn orca_library_set_discovery_settings(
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const view = settings orelse return box.reject(@src(), .invalid_argument, "settings is null");
-    const invalid = "radio_continue and include_unplayed must be 0 or 1, avoid_days 0, 1, 3 or 7, mix_count 0, 4 or 6, has_familiarity 0 or 1, and familiarity 0 to 100 when set";
+    const invalid = "radio_continue and include_unplayed must be 0 or 1, avoid_days 0, 1, 3 or 7, mix_count 0, 4 or 6, has_familiarity 0 or 1, familiarity 0 to 100 when set, and artist_variety 0 (keep), 1, 2 or 3";
     if (view.radio_continue > 1 or view.include_unplayed > 1) return box.reject(@src(), .invalid_argument, invalid);
     if (view.has_familiarity > 1 or (view.has_familiarity == 1 and view.familiarity > 100)) return box.reject(@src(), .invalid_argument, invalid);
     const avoid_days = std.enums.fromInt(discovery.AvoidDays, view.avoid_days) orelse
         return box.reject(@src(), .invalid_argument, invalid);
     const mix_count = std.enums.fromInt(discovery.MixCount, view.mix_count) orelse
         return box.reject(@src(), .invalid_argument, invalid);
-    var familiarity = view.familiarity;
-    if (view.has_familiarity == 0) {
-        const current = box.runtime.libraryDiscoverySettings(importLibrary(library)) catch |err| return box.fail(@src(), err);
-        familiarity = current.familiarity;
-    }
+    const requested_variety: ?discovery.ArtistVariety = if (view.artist_variety == 0) null else std.enums.fromInt(discovery.ArtistVariety, view.artist_variety) orelse
+        return box.reject(@src(), .invalid_argument, invalid);
+    const current = box.runtime.libraryDiscoverySettings(importLibrary(library)) catch |err| return box.fail(@src(), err);
     box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{
         .radio_continue = view.radio_continue == 1,
         .include_unplayed = view.include_unplayed == 1,
         .avoid_days = avoid_days,
         .mix_count = mix_count,
-        .familiarity = familiarity,
+        .familiarity = if (view.has_familiarity == 1) view.familiarity else current.familiarity,
+        .artist_variety = requested_variety orelse current.artist_variety,
     }) catch |err| return box.fail(@src(), err);
     return .ok;
 }
@@ -13661,8 +13662,8 @@ test "the discovery settings round-trip and refuse values outside their sets, an
     try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-radio?mode=memory&cache=shared", &library));
     var settings: DiscoverySettingsView = undefined;
     try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
-    try std.testing.expectEqual(DiscoverySettingsView{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 1, .familiarity = 0 }, settings);
-    const changed: DiscoverySettingsView = .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4, .has_familiarity = 1, .familiarity = 40 };
+    try std.testing.expectEqual(DiscoverySettingsView{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 1, .familiarity = 0, .artist_variety = 2 }, settings);
+    const changed: DiscoverySettingsView = .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4, .has_familiarity = 1, .familiarity = 40, .artist_variety = 2 };
     try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &changed));
     try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
     try std.testing.expectEqual(changed, settings);
@@ -13677,6 +13678,7 @@ test "the discovery settings round-trip and refuse values outside their sets, an
         .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 5 },
         .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 2 },
         .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .has_familiarity = 1, .familiarity = 101 },
+        .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .artist_variety = 4 },
     }) |invalid| try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, &invalid));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, null));
     try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
@@ -13724,6 +13726,63 @@ test "the discovery settings round-trip and refuse values outside their sets, an
     try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, &familiarity_view, &session, 10, &visited, countRadioPicks));
     try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, &options, &session, 10, &visited, countRadioPicks));
     try std.testing.expect(visited > 2);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "a discovery settings write from C keeps the stored Artist variety" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-artist-variety?mode=memory&cache=shared", &library));
+    const box = runtimeBox(runtime).?;
+    for ([_]discovery.ArtistVariety{ .strict, .relaxed, .balanced }) |variety| {
+        try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .artist_variety = variety });
+        for ([_]DiscoverySettingsView{
+            .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4, .has_familiarity = 1, .familiarity = 40 },
+            .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6 },
+        }) |written| {
+            try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &written));
+            const stored = try box.runtime.libraryDiscoverySettings(importLibrary(library));
+            try std.testing.expectEqual(variety, stored.artist_variety);
+            try std.testing.expectEqual(written.avoid_days, @backingInt(stored.avoid_days));
+            try std.testing.expectEqual(@as(u8, 40), stored.familiarity);
+        }
+    }
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "the discovery settings report and set the Artist variety" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-artist-variety-field?mode=memory&cache=shared", &library));
+    const box = runtimeBox(runtime).?;
+    var settings: DiscoverySettingsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(@as(u8, 2), settings.artist_variety);
+    try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .artist_variety = .strict });
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(@as(u8, 3), settings.artist_variety);
+
+    for ([_]discovery.ArtistVariety{ .relaxed, .balanced, .strict }) |variety| {
+        const written: DiscoverySettingsView = .{ .radio_continue = 1, .include_unplayed = 1, .avoid_days = 3, .mix_count = 6, .artist_variety = @backingInt(variety) };
+        try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &written));
+        try std.testing.expectEqual(variety, (try box.runtime.libraryDiscoverySettings(importLibrary(library))).artist_variety);
+    }
+
+    try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .artist_variety = .relaxed });
+    for ([_]u8{ 4, 255 }) |invalid_value| {
+        const invalid: DiscoverySettingsView = .{ .radio_continue = 0, .include_unplayed = 0, .avoid_days = 7, .mix_count = 4, .artist_variety = invalid_value };
+        try std.testing.expectEqual(Status.invalid_argument, orca_library_set_discovery_settings(runtime, library, &invalid));
+        const stored = try box.runtime.libraryDiscoverySettings(importLibrary(library));
+        try std.testing.expectEqual(discovery.ArtistVariety.relaxed, stored.artist_variety);
+        try std.testing.expect(stored.radio_continue);
+    }
+
+    try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .artist_variety = .strict });
+    try std.testing.expectEqual(Status.ok, orca_library_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(Status.ok, orca_library_set_discovery_settings(runtime, library, &settings));
+    try std.testing.expectEqual(discovery.ArtistVariety.strict, (try box.runtime.libraryDiscoverySettings(importLibrary(library))).artist_variety);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
@@ -13810,6 +13869,7 @@ test "Daily Mixes are made, listed, read, marked Not for me, reset and saved thr
     const library_database = try core.runtime.libraryDatabase(&box.runtime, importLibrary(library));
     try library_database.database.exec(sql.items[0 .. sql.items.len - 1 :0]);
 
+    try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .artist_variety = .relaxed });
     var mix_job: Handle = undefined;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_start_daily_mixes(runtime, library, &.{ .now_s = now_s, .utc_offset_s = 0, .force = 2 }, &mix_job));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_start_daily_mixes(runtime, library, null, &mix_job));

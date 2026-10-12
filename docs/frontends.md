@@ -304,10 +304,12 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   NULL `options` or `session` take the defaults; `ORCA_STATUS_NOT_FOUND` for
   an unknown seed id), `orca_library_discovery_settings`,
   `orca_library_set_discovery_settings` (`ORCA_STATUS_INVALID_ARGUMENT`,
-  changing nothing, for a value outside its set), `orca_library_recording_get`
-  (a Recording's title and artist credit; `ORCA_STATUS_NOT_FOUND` when
-  unknown). Reason kinds and `ORCA_SOUND_*` flags are in
-  [discovery.md](discovery.md#reasons).
+  changing nothing, for a value outside its set; `orca_discovery_settings`
+  carries `artist_variety`, an `orca_artist_variety` of 1 relaxed, 2
+  balanced or 3 strict, where 0 on a write keeps the stored value),
+  `orca_library_recording_get` (a Recording's title and artist credit;
+  `ORCA_STATUS_NOT_FOUND` when unknown). Reason kinds and `ORCA_SOUND_*` flags
+  are in [discovery.md](discovery.md#reasons).
 - Library Radio: `orca_player_start_radio` (NULL `options` takes the defaults;
   `ORCA_STATUS_INVALID_STATE` for a Player with no Library),
   `orca_player_stop_radio`, `orca_player_set_radio_options`,

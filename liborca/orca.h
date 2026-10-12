@@ -1087,15 +1087,30 @@ typedef void (*orca_radio_queue_picks_callback)(
     const orca_radio_queue_picks_view *picks
 );
 
+typedef enum orca_artist_variety {
+    /* No limit on how often one Artist repeats. */
+    ORCA_ARTIST_VARIETY_RELAXED = 1,
+    /* One Artist at most 2 of any 10 Radio picks and at most 2 entries of a
+     * Daily Mix, preferring 1, never back to back. */
+    ORCA_ARTIST_VARIETY_BALANCED = 2,
+    /* One Artist at most 1 of any 10 Radio picks and 1 entry of a Daily Mix,
+     * never back to back. */
+    ORCA_ARTIST_VARIETY_STRICT = 3,
+} orca_artist_variety;
+
 /* The Library's Radio and Daily Mix settings. `radio_continue` 1 starts a
  * Radio from what was heard when the queue ends; `include_unplayed` 1 lets
  * Radio pick Recordings never played; `avoid_days` (0, 1, 3 or 7) leaves out
  * what was played that recently; `mix_count` (0, 4 or 6) is how many Daily
  * Mixes to make; `familiarity` (0 to 100 when `has_familiarity` is 1) is the
- * Play history dial. The defaults are 1, 1, 3, 6 and 0. `has_familiarity` 0
- * keeps the stored `radio.familiarity` and leaves `familiarity` ignored, so
- * zero-initialising the struct preserves the stored dial; set
- * `has_familiarity` to 1 to change it. */
+ * Play history dial; `artist_variety` (an orca_artist_variety) is how often
+ * one Artist repeats in Radio and Daily Mixes. The defaults are 1, 1, 3, 6, 0
+ * and 2. `has_familiarity` 0 keeps the stored `radio.familiarity` and leaves
+ * `familiarity` ignored, so zero-initialising the struct preserves the stored
+ * dial; set `has_familiarity` to 1 to change it. `artist_variety` 0 on a
+ * write keeps the stored value, so a zero-initialised struct, or one built
+ * before this field existed, preserves it; a read always reports 1, 2 or 3,
+ * and any other value on a write is ORCA_STATUS_INVALID_ARGUMENT. */
 typedef struct orca_discovery_settings {
     uint8_t radio_continue;
     uint8_t include_unplayed;
@@ -1103,7 +1118,8 @@ typedef struct orca_discovery_settings {
     uint8_t mix_count;
     uint8_t has_familiarity;
     uint8_t familiarity;
-    uint8_t reserved[2];
+    uint8_t artist_variety;
+    uint8_t reserved[1];
 } orca_discovery_settings;
 
 /* What orca_library_start_daily_mixes is asked. `now_s` is Unix seconds and
