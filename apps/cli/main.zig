@@ -52,6 +52,7 @@ fn describe(err: anyerror) []const u8 {
         error.EmbeddingModelMismatch => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not a model this build expects, by size or SHA-256; name " ++ embedding_model_files ++ ", which orca-cli download-embedding-model writes",
         error.EmbeddingsNotBuilt => "the audio-embedding model cannot be used: this orca-cli was built with -Dembeddings=false; build without it to use --embedding-model or ORCA_EMBEDDING_MODEL",
         error.UnknownEmbeddingModel => "--model names clap_htsat_unfused or discogs_maest",
+        error.UnknownArtistVariety => "--artist-variety names relaxed, balanced or strict",
         error.ModelDownloadNotBuilt => "this orca-cli was built with -Dembeddings=false and cannot use the audio-embedding model; build without it to download the model",
         error.EmbeddingModelUnusable => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names could not be read, or ONNX Runtime could not load it; check that it is a readable file and that ONNX Runtime 1.20 or newer is installed",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
@@ -363,9 +364,9 @@ const commands = [_]Command{
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
     .{ .name = "similar", .usage = "similar DATABASE TRACK_ID [--limit N] [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 6, .run = showSimilarTracks },
-    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--seed N] [--explain] [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 14, .run = previewRadio },
+    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--artist-variety relaxed|balanced|strict] [--limit N] [--seed N] [--explain] [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 16, .run = previewRadio },
     .{ .name = "home", .usage = "home DATABASE [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 3, .run = showHome },
-    .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N] [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 6, .run = showDailyMixes },
+    .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N] [--artist-variety relaxed|balanced|strict] [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 8, .run = showDailyMixes },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{
         .name = "artwork",
@@ -5387,6 +5388,9 @@ fn previewRadio(context: Context) !void {
                 options.explore = try std.fmt.parseInt(u8, value, 10);
             } else if (std.mem.eql(u8, argument, "--familiarity")) {
                 options.familiarity = try std.fmt.parseInt(u8, value, 10);
+            } else if (std.mem.eql(u8, argument, "--artist-variety")) {
+                options.artist_variety = std.meta.stringToEnum(liborca.ArtistVariety, value) orelse
+                    return error.UnknownArtistVariety;
             } else if (std.mem.eql(u8, argument, "--limit")) {
                 limit = try std.fmt.parseInt(usize, value, 10);
             } else if (std.mem.eql(u8, argument, "--seed")) {
@@ -5541,13 +5545,16 @@ fn writeHomeTracks(stdout: *std.Io.Writer, title: []const u8, tracks: []const li
     }
 }
 
-/// `orca-cli mixes DATABASE [--refresh] [--mix N]`: makes the day's Daily
-/// Mixes in UTC unless they are from this mix day, or always with
-/// `--refresh`, then lists them, or the entries of the Nth with `--mix N`.
+/// `orca-cli mixes DATABASE [--refresh] [--mix N] [--artist-variety NAME]`:
+/// makes the day's Daily Mixes in UTC unless they are from this mix day, or
+/// always with `--refresh`, then lists them, or the entries of the Nth with
+/// `--mix N`. `--artist-variety` replaces `discovery.artist_variety` for the
+/// mixes this call makes.
 fn showDailyMixes(context: Context) !void {
     const stdout = context.stdout;
     var force = false;
     var shown: ?usize = null;
+    var artist_variety: ?liborca.ArtistVariety = null;
     const model = try takeEmbeddingModelOption(context, context.arguments[1..]);
     var index: usize = 0;
     while (index < model.rest.len) : (index += 1) {
@@ -5558,6 +5565,11 @@ fn showDailyMixes(context: Context) !void {
             index += 1;
             if (index == model.rest.len) return error.MissingOptionValue;
             shown = try std.fmt.parseInt(usize, model.rest[index], 10);
+        } else if (std.mem.eql(u8, argument, "--artist-variety")) {
+            index += 1;
+            if (index == model.rest.len) return error.MissingOptionValue;
+            artist_variety = std.meta.stringToEnum(liborca.ArtistVariety, model.rest[index]) orelse
+                return error.UnknownArtistVariety;
         } else return error.UnknownOption;
     }
     var runtime = liborca.Runtime.init(context.gpa);
@@ -5566,7 +5578,7 @@ fn showDailyMixes(context: Context) !void {
     try model.requireReady(&runtime);
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const now_s = std.Io.Clock.real.now(context.io).toSeconds();
-    const job_handle = try runtime.startDailyMixes(library, .{ .now_s = now_s, .force = force });
+    const job_handle = try runtime.startDailyMixes(library, .{ .now_s = now_s, .force = force, .artist_variety = artist_variety });
     try awaitJob(&runtime, stdout, job_handle, null);
     const mixes = try runtime.libraryDailyMixes(library, now_s, 0);
 

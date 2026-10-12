@@ -551,8 +551,10 @@ section lists the entry points, errors and limits.
   relaxed avoid window. The caller frees the result with `deinit`.
   `RadioOptions` sets `explore` (0 to 100, default 35, else
   `error.InvalidExplore`), up to 4 `RadioFocus` filters, `include_unplayed`,
-  `avoid_recent`, `include_live` and `familiarity` (0 to 100, else
-  `error.InvalidFamiliarity`; null reads `radio.familiarity`).
+  `avoid_recent`, `include_live`, `familiarity` (0 to 100, else
+  `error.InvalidFamiliarity`; null reads `radio.familiarity`) and
+  `artist_variety` (`ArtistVariety`: `relaxed`, `balanced` or `strict`; null
+  reads `discovery.artist_variety`).
   `RadioPreviewSession` fixes `now_s` and
   the jitter seed; null reads the clock. An unknown Track, Release, Artist or
   genre fails with `error.UnknownRadioSeed`, a decade that is not a multiple
@@ -560,9 +562,11 @@ section lists the entry points, errors and limits.
   [discovery.md](discovery.md).
 - `libraryDiscoverySettings(library)` returns the `DiscoverySettings`:
   `radio_continue`, `include_unplayed`, `avoid_days` (`DiscoveryAvoidDays`:
-  0, 1, 3 or 7), `mix_count` (`DailyMixCount`: 0, 4 or 6) and `familiarity`
-  (0 to 100, the play-history dial for Radio and Daily Mixes).
-  `setLibraryDiscoverySettings` stores all five. See
+  0, 1, 3 or 7), `mix_count` (`DailyMixCount`: 0, 4 or 6), `familiarity`
+  (0 to 100, the play-history dial for Radio and Daily Mixes) and
+  `artist_variety` (`ArtistVariety`, default `balanced`: how often one Artist
+  repeats in Radio and in a Daily Mix).
+  `setLibraryDiscoverySettings` stores all six. See
   [discovery.md](discovery.md#settings).
 - `libraryRecordingSummary(library, recording_id)` returns a
   `RecordingSummary` with the Recording's title, artist credit and Artist, or
@@ -595,9 +599,11 @@ section lists the entry points, errors and limits.
   session; it is never saved. With `radio_continue` on, a Player that starts
   the last entry of a queue that does not repeat starts a `recent` session.
   See [discovery.md](discovery.md#library-radio).
-- `startDailyMixes(library, DailyMixesRequest{ now_s, utc_offset_s, force })`
-  starts a `daily_mixes` Job that makes the mix day's Daily Mixes unless they
-  exist and `force` is false. It takes no Library slot, is not pausable and
+- `startDailyMixes(library, DailyMixesRequest{ now_s, utc_offset_s, force,
+  artist_variety })` starts a `daily_mixes` Job that makes the mix day's Daily
+  Mixes unless they exist and `force` is false. `artist_variety` replaces
+  `discovery.artist_variety` for the mixes this Job makes; null reads the
+  setting. It takes no Library slot, is not pausable and
   keeps no history; its progress counts the mixes made, and it succeeds when
   mixes are off or history is too short.
 - `libraryDailyMixes(library, now_s, utc_offset_s)` returns `DailyMixes`: a

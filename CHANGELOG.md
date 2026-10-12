@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Radio and Daily Mixes limit how often one Artist repeats.** The new Library
+  setting `discovery.artist_variety` (`ArtistVariety`, in
+  `DiscoverySettings.artist_variety`) is `relaxed`, `balanced` (the default) or
+  `strict`. At `balanced` a Radio session picks an Artist at most twice in any
+  10 consecutive picks and never twice in a row, and a Daily Mix holds 1 entry
+  per Artist, or 2 when no Track by an Artist not yet in the mix qualifies,
+  with no two consecutive entries by the same Artist; at `strict` the limits
+  are 1 in 10 and 1 per mix; `relaxed` keeps the previous picks. Radio relaxes
+  the limit with the seed-Artist cap when nothing else fits, and a mix goes
+  above its per-Artist limit only while it is under 60 minutes.
+  `RadioOptions.artist_variety` and `DailyMixesRequest.artist_variety` replace
+  the setting for one session or one generation, as `--artist-variety` does for
+  `orca-cli radio` and `orca-cli mixes`.
 - **`liborca` measures audio embeddings with either of two models.** The
   model file a host names is recognised by its size and SHA-256 as
   `clap_htsat_unfused` (512 values) or the new `discogs_maest`

@@ -165,6 +165,12 @@ const Rig = struct {
         return output[0..count];
     }
 
+    fn setRelaxedVariety(self: *Rig) !void {
+        var settings = try self.runtime.libraryDiscoverySettings(self.library);
+        settings.artist_variety = .relaxed;
+        try self.runtime.setLibraryDiscoverySettings(self.library, settings);
+    }
+
     fn setMixCount(self: *Rig, count: runtime_module.DailyMixCount) !void {
         var settings = try self.runtime.libraryDiscoverySettings(self.library);
         settings.mix_count = count;
@@ -201,6 +207,7 @@ test "daily mixes are genre clusters most played first, a theme mix, then rarely
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-clusters?mode=memory&cache=shared");
     defer rig.deinit();
+    try rig.setRelaxedVariety();
 
     try rig.generateNow();
 
@@ -236,6 +243,7 @@ test "a genre mix holds 25 tracks within 60 to 90 minutes, 15 favorites, 6 rarel
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-shape?mode=memory&cache=shared");
     defer rig.deinit();
+    try rig.setRelaxedVariety();
 
     try rig.generateNow();
 
@@ -255,6 +263,7 @@ test "a class with no candidates is filled from the classes furthest below their
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-shortfall?mode=memory&cache=shared");
     defer rig.deinit();
+    try rig.setRelaxedVariety();
     try rig.exec(
         \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
         \\    SELECT id, 1, 1000 FROM recordings WHERE id NOT IN (SELECT recording_id FROM recording_play_stats);
@@ -303,10 +312,60 @@ test "no recording repeats across the day's mixes and every mix keeps the artist
     }
 }
 
+test "a Daily Mixes request's Artist variety replaces the stored setting for that generation" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-mixes-variety?mode=memory&cache=shared");
+    defer rig.deinit();
+    const Variety = runtime_module.ArtistVariety;
+    const Made = struct {
+        recordings: [6 * runtime_module.max_daily_mix_entries]i64 = @splat(0),
+        most_by_one_artist: usize = 0,
+        back_to_back: bool = false,
+
+        fn read(r: *Rig, stored: Variety, requested: ?Variety) !@This() {
+            var settings = try r.runtime.libraryDiscoverySettings(r.library);
+            settings.artist_variety = stored;
+            try r.runtime.setLibraryDiscoverySettings(r.library, settings);
+            try testing.expectEqual(job.State.succeeded, try r.generate(.{ .now_s = now_s, .force = true, .artist_variety = requested }));
+            try testing.expectEqual(stored, (try r.runtime.libraryDiscoverySettings(r.library)).artist_variety);
+            var made: @This() = .{};
+            var next: usize = 0;
+            const mixes = try r.mixes();
+            for (mixes.items()) |mix| {
+                var buffer: [runtime_module.max_daily_mix_entries]DailyMixEntry = undefined;
+                var previous: ?i64 = null;
+                var by_artist: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+                defer by_artist.deinit(testing.allocator);
+                for (try r.entries(mix.id, &buffer)) |entry| {
+                    made.recordings[next] = entry.recording_id;
+                    next += 1;
+                    const artist = (try r.trackOf(entry.recording_id)).artist;
+                    if (previous == artist) made.back_to_back = true;
+                    previous = artist;
+                    const slot = try by_artist.getOrPutValue(testing.allocator, artist, 0);
+                    slot.value_ptr.* += 1;
+                    made.most_by_one_artist = @max(made.most_by_one_artist, slot.value_ptr.*);
+                }
+            }
+            return made;
+        }
+    };
+
+    const relaxed = try Made.read(&rig, .relaxed, null);
+    const strict = try Made.read(&rig, .strict, null);
+    try testing.expect(relaxed.back_to_back);
+    try testing.expect(!strict.back_to_back);
+    try testing.expect(strict.most_by_one_artist < relaxed.most_by_one_artist);
+    try testing.expectEqualSlices(i64, &strict.recordings, &(try Made.read(&rig, .relaxed, .strict)).recordings);
+    try testing.expectEqualSlices(i64, &relaxed.recordings, &(try Made.read(&rig, .strict, .relaxed)).recordings);
+    try testing.expect(!(try Made.read(&rig, .relaxed, .balanced)).back_to_back);
+}
+
 test "rarely played comes last and holds only recordings played before but not in the last year" {
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-rarely?mode=memory&cache=shared");
     defer rig.deinit();
+    try rig.setRelaxedVariety();
 
     try rig.generateNow();
 
@@ -486,6 +545,7 @@ test "mixes.count makes six or four mixes, and off clears them" {
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-count?mode=memory&cache=shared");
     defer rig.deinit();
+    try rig.setRelaxedVariety();
 
     try rig.generateNow();
     try testing.expectEqual(@as(u8, 6), (try rig.mixes()).count);
@@ -511,6 +571,7 @@ test "a lone artist's cluster qualifies only with 40 candidates" {
     var rig: Rig = undefined;
     try rig.init("file:orca-mixes-lone?mode=memory&cache=shared");
     defer rig.deinit();
+    try rig.setRelaxedVariety();
     try rig.exec("DELETE FROM tracks WHERE artist_id = 14 AND recording_id IN (SELECT recording_id FROM tracks WHERE artist_id = 14 ORDER BY id DESC LIMIT 6);");
 
     try rig.generateNow();

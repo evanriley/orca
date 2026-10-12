@@ -37,6 +37,7 @@ const stale_after_s = 180 * day_s;
 const favorite_plays = 3;
 const favorite_rating = 80;
 const max_duration_ms = 90 * 60_000;
+const min_duration_ms = 60 * 60_000;
 const rarely_played_name = "Rarely played";
 const new_to_you_window_s = 90 * day_s;
 
@@ -84,6 +85,9 @@ pub const Options = struct {
     utc_offset_s: i64 = 0,
     /// Regenerates even when the stored mixes are from this mix day.
     force: bool = false,
+    /// How often one Artist may repeat in a mix. Null reads
+    /// `discovery.artist_variety`.
+    artist_variety: ?discovery.ArtistVariety = null,
 };
 
 pub const Outcome = enum {
@@ -211,7 +215,8 @@ pub fn generate(
     const reader = try library.openReader();
     defer reader.close();
     const source: discovery.Source = .onConnection(reader, library.write_lane, embedding_model);
-    const settings = try discovery.readSettings(&source.settings);
+    var settings = try discovery.readSettings(&source.settings);
+    if (options.artist_variety) |variety| settings.artist_variety = variety;
     const day = mixDay(options.now_s, options.utc_offset_s);
 
     if (settings.mix_count == .off) {
@@ -246,7 +251,7 @@ pub fn makeMixes(
 ) !?[]const Built {
     const day_seed = std.hash.Wyhash.hash(0, std.mem.asBytes(&day));
     const avoid_days: i64 = @backingInt(settings.avoid_days);
-    var builder: Builder = .{ .arena = arena, .source = source, .now_s = now_s };
+    var builder: Builder = .{ .arena = arena, .source = source, .now_s = now_s, .artist_cap = settings.artist_variety.mixCap() };
     const top = try loadTopArtists(arena, source.database, now_s);
     var themes: Themes = .{
         .arena = arena,
@@ -583,6 +588,7 @@ const Builder = struct {
     arena: std.mem.Allocator,
     source: *const discovery.Source,
     now_s: i64,
+    artist_cap: ?discovery.MixCap,
     used: std.AutoHashMapUnmanaged(i64, void) = .empty,
     mixes: std.ArrayList(Built) = .empty,
 
@@ -591,8 +597,11 @@ const Builder = struct {
     /// Picks at most `max_entries` and 90 minutes from `items`, best first.
     /// A genre, decade, Upbeat or Wind down mix takes from the class furthest
     /// below its target, and from the next class when that one has nothing
-    /// left. A pick that would run
-    /// past 90 minutes is passed over. Adds nothing when nothing qualifies.
+    /// left. A pick that would run past 90 minutes is passed over. A pick
+    /// nothing qualifies for under the preferred Artist cap is taken under a
+    /// cap that rises by one each time that too finds nothing, up to the
+    /// limit, and past it only while the mix is under 60 minutes. Adds
+    /// nothing when nothing qualifies.
     fn add(
         self: *Builder,
         kind: Kind,
@@ -616,10 +625,18 @@ const Builder = struct {
         var counts: [3]u32 = @splat(0);
         var total_ms: i64 = 0;
         var signals: u32 = 0;
-        while (picked.items.len < max_entries) {
-            const chosen = for (classOrder(kind, counts)) |wanted| {
-                if (self.next(items, classes, marks, too_long, durations, wanted, history.items, total_ms)) |index| break index;
-            } else break;
+        picking: while (picked.items.len < max_entries) {
+            const order = classOrder(kind, counts);
+            var artist_cap: ?usize = if (self.artist_cap) |cap| cap.preferred else null;
+            const chosen = choice: while (true) {
+                for (order) |wanted| {
+                    if (self.next(items, classes, marks, too_long, durations, wanted, history.items, total_ms, artist_cap)) |index| break :choice index;
+                }
+                const cap = self.artist_cap orelse break :picking;
+                const ceiling = if (total_ms < min_duration_ms) max_entries else cap.limit;
+                if (artist_cap.? >= ceiling) break :picking;
+                artist_cap = artist_cap.? + 1;
+            };
             const item = &items[chosen];
             marks[chosen] = .chosen;
             try self.used.put(self.arena, item.recording_id, {});
@@ -698,6 +715,7 @@ const Builder = struct {
         wanted: ?Class,
         history: []const discovery.RecentPick,
         total_ms: i64,
+        artist_cap: ?usize,
     ) ?usize {
         for (items, 0..) |item, index| {
             if (marks[index] == .chosen or marks[index] == .other_mix or too_long[index]) continue;
@@ -710,13 +728,24 @@ const Builder = struct {
                 too_long[index] = true;
                 continue;
             }
-            if (!discovery.diverse(history, item.artist_id, item.release_id)) {
+            if (!discovery.diverse(history, item.artist_id, item.release_id) or !varied(history, item.artist_id, artist_cap)) {
                 marks[index] = .diversity;
                 continue;
             }
             return index;
         }
         return null;
+    }
+
+    /// Whether an entry by `artist_id` after `history` keeps to `artist_cap`
+    /// entries by one Artist and none back to back.
+    fn varied(history: []const discovery.RecentPick, artist_id: ?i64, artist_cap: ?usize) bool {
+        const cap = artist_cap orelse return true;
+        const artist = artist_id orelse return true;
+        if (history.len > 0 and history[history.len - 1].artist_id == artist) return false;
+        var same: usize = 0;
+        for (history) |entry| same += @intFromBool(entry.artist_id == artist);
+        return same < cap;
     }
 
     fn trackDurations(self: *Builder, items: []const Ranked) ![]i64 {
@@ -1316,6 +1345,7 @@ test "with three genres and no Rarely played, six mixes are the genres then thre
     try fixture.open("slots-thin");
     defer fixture.close();
     try listeningHistory(&fixture, 3, false);
+    try discovery.writeSettings(&fixture.library.settings, .{ .artist_variety = .relaxed });
 
     const mixes = try fixture.mixes(6, 5 * 4000);
     try expectMixNames(mixes, &.{ "G1", "G2", "G3", "2010s", "New to you", "Deep cuts" });
@@ -1389,6 +1419,7 @@ test "Upbeat and Wind down hold only Recordings in their third of the energy, an
         .plays = if (index % 7 == 0) 1 else 0,
     });
     try fixture.finish();
+    try discovery.writeSettings(&fixture.library.settings, .{ .artist_variety = .relaxed });
 
     const mixes = try fixture.mixes(6, 5 * 4000 + 3);
     try expectMixNames(mixes, &.{ "Upbeat", "Wind down", "Deep cuts" });
@@ -1402,4 +1433,165 @@ test "Upbeat and Wind down hold only Recordings in their third of the energy, an
     try testing.expectEqual(any, Builder.classOrder(.deep_cuts, @splat(0)));
     try testing.expect(Builder.classOrder(.upbeat, @splat(0))[0] != null);
     try testing.expect(Builder.classOrder(.decade, @splat(0))[0] != null);
+}
+
+fn buildFrom(fixture: *Fixture, artists: []const i64, variety: discovery.ArtistVariety) !Built {
+    const arena = fixture.arena_state.allocator();
+    const items = try arena.alloc(Ranked, artists.len);
+    for (items, artists) |*item, artist| {
+        item.* = .{
+            .track_id = fixture.next,
+            .recording_id = fixture.next,
+            .artist_id = artist,
+            .release_id = null,
+            .score = 1,
+            .reason = .{},
+            .loved = false,
+            .rating = null,
+            .play_count = 1,
+            .last_played_at = null,
+        };
+        try fixture.recording(.{ .artist = artist });
+    }
+    try fixture.finish();
+    const src = fixture.source();
+    var builder: Builder = .{ .arena = arena, .source = &src, .now_s = test_now, .artist_cap = variety.mixCap() };
+    try builder.add(.rarely_played, null, null, "Mix", items, .{}, null);
+    try testing.expectEqual(@as(usize, 1), builder.mixes.items.len);
+    return builder.mixes.items[0];
+}
+
+fn entriesBy(fixture: *Fixture, mix: Built, artist: i64) !usize {
+    var count: usize = 0;
+    for (mix.entries) |entry| count += @intFromBool(try fixture.artistOf(entry.recording_id) == artist);
+    return count;
+}
+
+fn expectNoArtistBackToBack(fixture: *Fixture, mix: Built) !void {
+    for (mix.entries[1..], mix.entries[0 .. mix.entries.len - 1]) |entry, previous|
+        try testing.expect(try fixture.artistOf(entry.recording_id) != try fixture.artistOf(previous.recording_id));
+}
+
+test "a balanced and a strict mix hold 1 entry by a heavy Artist, never back to back, and count the rest as spacing" {
+    var artists: [51]i64 = undefined;
+    for (&artists, 0..) |*artist, index| artist.* = if (index < 12) 1 else @intCast(index - 10);
+    inline for (.{
+        .{ "cap-relaxed", discovery.ArtistVariety.relaxed, 12, 0 },
+        .{ "cap-balanced", discovery.ArtistVariety.balanced, 1, 11 },
+        .{ "cap-strict", discovery.ArtistVariety.strict, 1, 11 },
+    }) |case| {
+        var fixture: Fixture = undefined;
+        try fixture.open(case[0]);
+        defer fixture.close();
+        const mix = try buildFrom(&fixture, &artists, case[1]);
+        try testing.expectEqual(@as(usize, max_entries), mix.entries.len);
+        try testing.expectEqual(@as(usize, case[2]), try entriesBy(&fixture, mix, 1));
+        try testing.expectEqual(@as(u32, case[3]), mix.left_out.diversity);
+        if (case[1] != .relaxed) try expectNoArtistBackToBack(&fixture, mix);
+    }
+}
+
+fn expectArtists(fixture: *Fixture, mix: Built, expected: []const i64) !void {
+    try testing.expectEqual(expected.len, mix.entries.len);
+    for (mix.entries, expected) |entry, artist| try testing.expectEqual(artist, try fixture.artistOf(entry.recording_id));
+}
+
+test "a balanced mix gives an Artist a second entry only after every Artist has one" {
+    var fixture: Fixture = undefined;
+    try fixture.open("second-after-all");
+    defer fixture.close();
+    const mix = try buildFrom(&fixture, &.{ 1, 1, 1, 2, 2, 3 }, .balanced);
+    try expectArtists(&fixture, mix, &.{ 1, 2, 3, 1, 2, 1 });
+}
+
+test "a balanced mix over 60 minutes holds at most 2 entries by one Artist" {
+    var artists: [23]i64 = undefined;
+    for (artists[0..20], 1..) |*artist, id| artist.* = @intCast(id);
+    artists[20..].* = .{ 1, 1, 1 };
+    var fixture: Fixture = undefined;
+    try fixture.open("over-hour-balanced");
+    defer fixture.close();
+    const mix = try buildFrom(&fixture, &artists, .balanced);
+    try testing.expectEqual(@as(usize, 21), mix.entries.len);
+    try testing.expectEqual(@as(usize, 2), try entriesBy(&fixture, mix, 1));
+    try testing.expectEqual(@as(u32, 2), mix.left_out.diversity);
+    try expectNoArtistBackToBack(&fixture, mix);
+}
+
+test "a strict mix over 60 minutes holds 1 entry per Artist and ends there" {
+    var artists: [22]i64 = undefined;
+    for (artists[0..20], 1..) |*artist, id| artist.* = @intCast(id);
+    artists[20..].* = .{ 1, 2 };
+    var fixture: Fixture = undefined;
+    try fixture.open("over-hour-strict");
+    defer fixture.close();
+    const mix = try buildFrom(&fixture, &artists, .strict);
+    try testing.expectEqual(@as(usize, 20), mix.entries.len);
+    for (1..21) |artist| try testing.expectEqual(@as(usize, 1), try entriesBy(&fixture, mix, @intCast(artist)));
+    try testing.expectEqual(@as(u32, 2), mix.left_out.diversity);
+}
+
+test "a mix under 60 minutes raises the Artist cap only until it reaches 60 minutes" {
+    var artists: [60]i64 = undefined;
+    for (&artists, 0..) |*artist, index| artist.* = 1 + @as(i64, @intCast(index % 2));
+    inline for (.{
+        .{ "hour-relaxed", discovery.ArtistVariety.relaxed, 25 },
+        .{ "hour-balanced", discovery.ArtistVariety.balanced, 20 },
+        .{ "hour-strict", discovery.ArtistVariety.strict, 20 },
+    }) |case| {
+        var fixture: Fixture = undefined;
+        try fixture.open(case[0]);
+        defer fixture.close();
+        const mix = try buildFrom(&fixture, &artists, case[1]);
+        try testing.expectEqual(@as(usize, case[2]), mix.entries.len);
+        if (case[1] != .relaxed) {
+            try testing.expectEqual(@as(usize, 10), try entriesBy(&fixture, mix, 1));
+            try testing.expectEqual(@as(usize, 10), try entriesBy(&fixture, mix, 2));
+            try testing.expectEqual(@as(u32, 40), mix.left_out.diversity);
+            try expectNoArtistBackToBack(&fixture, mix);
+        }
+    }
+}
+
+test "a mix under 60 minutes never places one Artist back to back or passes the Release rule to grow" {
+    var lone: [35]i64 = @splat(1);
+    for (lone[30..], 2..) |*artist, other| artist.* = @intCast(other);
+    var fixture: Fixture = undefined;
+    try fixture.open("hour-lone");
+    defer fixture.close();
+    const mix = try buildFrom(&fixture, &lone, .balanced);
+    try expectArtists(&fixture, mix, &.{ 1, 2, 3, 4, 5, 6, 1 });
+    try expectNoArtistBackToBack(&fixture, mix);
+}
+
+test "a raised Artist cap applies only to a pick that nothing else qualifies for" {
+    var artists: [22]i64 = undefined;
+    for (&artists, 0..) |*artist, index| artist.* = if (index < 20) 1 + @as(i64, @intCast(index % 2)) else 3;
+    var fixture: Fixture = undefined;
+    try fixture.open("hour-base-first");
+    defer fixture.close();
+    const mix = try buildFrom(&fixture, &artists, .balanced);
+    try expectArtists(&fixture, mix, &.{ 1, 2, 3, 1, 2, 3, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2 });
+}
+
+test "the day's mixes read discovery.artist_variety" {
+    inline for (.{
+        .{ "stored-balanced", discovery.ArtistVariety.balanced },
+        .{ "stored-strict", discovery.ArtistVariety.strict },
+    }) |case| {
+        var fixture: Fixture = undefined;
+        try fixture.open(case[0]);
+        defer fixture.close();
+        try listeningHistory(&fixture, 3, false);
+        try discovery.writeSettings(&fixture.library.settings, .{ .artist_variety = .relaxed });
+        var back_to_back = false;
+        for (try fixture.mixes(6, 0)) |mix| {
+            for (mix.entries[1..], mix.entries[0 .. mix.entries.len - 1]) |entry, previous| {
+                if (try fixture.artistOf(entry.recording_id) == try fixture.artistOf(previous.recording_id)) back_to_back = true;
+            }
+        }
+        try testing.expect(back_to_back);
+        try discovery.writeSettings(&fixture.library.settings, .{ .artist_variety = case[1] });
+        for (try fixture.mixes(6, 0)) |mix| try expectNoArtistBackToBack(&fixture, mix);
+    }
 }

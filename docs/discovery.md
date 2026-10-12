@@ -97,7 +97,7 @@ Weights move linearly with `explore`; the default is 35. `explore` also sets
 the reach and the seed-Artist cap described under Picking. Daily Mixes do not
 use `explore`: they rank with fixed weights (Artist 0.2625, Genre 0.165,
 Audio 0.185, Co-listening 0.1525, Era 0.0695, Taste 0.0805, Jitter 0.085),
-and use none of the reach, the cap or the co-listening floor.
+and use none of the reach, the seed-Artist cap or the co-listening floor.
 
 The play-history tilt comes from `radio.familiarity` (0 to 100), or
 `RadioOptions.familiarity` when set. It adds
@@ -165,23 +165,31 @@ candidates for every pick, so a request for more picks than the reach is still
 filled. Picks are subject to:
 
 - no more than 2 consecutive picks by one Artist;
+- Artist variety, from `RadioOptions.artist_variety` or, when that is null,
+  `discovery.artist_variety`: at `balanced` an Artist takes at most 2 of any
+  10 consecutive picks (the candidate and the previous 9, continuing from
+  `Session.recent`) and never 2 in a row; at `strict` at most 1 of any 10; at
+  `relaxed` neither limit applies. It covers every Artist under every seed; a
+  pick without an Artist is not limited;
 - no more than 2 picks from one Release in any 10;
 - for the `track`, `release`, `artist` and `recent` seeds, picks by the
   profile's own Artists are capped in any 10 consecutive picks (the candidate
   and the previous 9, continuing from `Session.recent`): 6 at explore 0–20, 4
   at 21–45, 2 at 46–70 and 1 at 71–100; a Release by such an Artist uses the
   larger of 2 and the cap in place of the Release limit; other seeds have no
-  cap;
+  cap. This cap counts the seed Artists together and Artist variety counts
+  each Artist alone; a pick passes both, so the lower one binds;
 - when unplayed Recordings are allowed, at most 1 never-played pick in the
   window `radio.familiarity` sets: none capped at 0, one in 2 at 1–50, one in
   3 at 51–75 and one in 4 at 76–100; otherwise none.
 
 When no candidate satisfies every rule they are relaxed in order: the Release
-rule, then the seed-Artist cap, then the consecutive-Artist rule. The unplayed
-rule holds while any played candidate remains; once none does, never-played
-candidates fill the rest, under the other rules again, so a Library with
-little history still returns as many picks as asked for. When unplayed
-Recordings are not allowed they are never picked.
+rule, then the seed-Artist cap and the Artist variety cap together, then the
+consecutive-Artist and never-2-in-a-row rules. A session never ends because of
+these rules. The unplayed rule holds while any played candidate remains; once
+none does, never-played candidates fill the rest, under the other rules again,
+so a Library with little history still returns as many picks as asked for.
+When unplayed Recordings are not allowed they are never picked.
 
 ## Reasons
 
@@ -232,12 +240,22 @@ Stored in `library_settings`:
 | `radio.include_unplayed` | 0, 1 | 1 |
 | `radio.familiarity` | 0–100 | 0 |
 | `discovery.avoid_days` | 0, 1, 3, 7 | 3 |
+| `discovery.artist_variety` | 1, 2, 3 | 2 |
 | `mixes.count` | 0, 4, 6 | 6 |
 
+`discovery.artist_variety` is an `ArtistVariety`: 1 `relaxed`, 2 `balanced`,
+3 `strict`. It limits how often one Artist repeats in Radio
+([Picking](#picking)) and in a Daily Mix
+([Filling a mix](#filling-a-mix)). In the C ABI the setting is the
+`artist_variety` field of `orca_discovery_settings`: a read reports 1, 2 or 3,
+a write of 0 keeps the stored value, and any other value is
+`ORCA_STATUS_INVALID_ARGUMENT` (see the field in `orca.h`).
+
 A stored value outside its set reads as the default.
-`RadioOptions.include_unplayed`, `avoid_recent` and `familiarity` default to
-these settings; `avoid_recent = true` with `discovery.avoid_days` 0 avoids the
-last 3 days; `familiarity` above 100 is `InvalidFamiliarity`.
+`RadioOptions.include_unplayed`, `avoid_recent`, `familiarity` and
+`artist_variety` default to these settings; `avoid_recent = true` with
+`discovery.avoid_days` 0 avoids the last 3 days; `familiarity` above 100 is
+`InvalidFamiliarity`.
 
 ## Radio preview
 
@@ -246,7 +264,8 @@ Player, with each pick's Track, Recording, Artist, Release, total score,
 component values and reasons, and the weights used. A preview session fixes
 `now` and the session seed; left out, they come from the clock. A preview
 carries the same `RadioOptions` as a live session, including `explore`,
-focus, `include_unplayed`, `avoid_recent`, `include_live` and `familiarity`.
+focus, `include_unplayed`, `avoid_recent`, `include_live`, `familiarity` and
+`artist_variety`.
 The C ABI counterpart is `orca_library_radio_preview`, and `orca-cli radio`
 prints a preview ([cli.md](cli.md)).
 
@@ -479,7 +498,17 @@ Left out of every mix:
   without them, as in Radio;
 - Recordings an earlier mix of the day holds;
 - picks that would break the Picking rules: no more than 2 consecutive by one
-  Artist, no more than 2 from one Release in any 10. Mixes never relax them.
+  Artist, no more than 2 from one Release in any 10. Mixes never relax them;
+- picks that would break Artist variety, from `discovery.artist_variety` or
+  `DailyMixesRequest.artist_variety`: at `balanced` and `strict` no two
+  consecutive entries share an Artist and every pick first looks for a Track
+  by an Artist not yet in the mix, whatever its rank. When none qualifies, a
+  `balanced` mix takes a second entry by an Artist and a `strict` mix ends, so
+  the limit is 2 entries per Artist at `balanced` and 1 at `strict`. While a
+  mix is under 60 minutes, a pick that nothing qualifies for within the limit
+  is taken with the limit raised by one at a time; from 60 minutes on no pick
+  goes above it. At `relaxed` none of this applies. The consecutive-entry
+  rule is never relaxed, so a pool of few Artists can end a mix short.
 
 Each mix stores the counts left out by reason: `recent`, `not_for_me`,
 `hated` and `live` over the Recordings of its Artists (for "Rarely played"

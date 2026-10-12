@@ -97,6 +97,7 @@ pub const radio_sound_energy = runtime.radio_sound_energy;
 pub const radio_sound_overall = runtime.radio_sound_overall;
 pub const DiscoverySettings = runtime.DiscoverySettings;
 pub const DiscoveryAvoidDays = runtime.DiscoveryAvoidDays;
+pub const ArtistVariety = runtime.ArtistVariety;
 pub const DailyMixCount = runtime.DailyMixCount;
 pub const DailyMixesRequest = runtime.DailyMixesRequest;
 pub const DailyMixes = runtime.DailyMixes;
