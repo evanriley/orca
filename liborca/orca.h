@@ -2407,19 +2407,20 @@ typedef enum orca_embedding_model_state {
     ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT = 0,
     /* No model path is set, or nothing is at it. */
     ORCA_EMBEDDING_MODEL_STATE_MISSING = 1,
-    /* The file at the path is not the audio-embedding model liborca runs. */
+    /* The file at the path is none of the audio-embedding models liborca runs. */
     ORCA_EMBEDDING_MODEL_STATE_WRONG_FILE = 2,
     /* The file could not be read, or ONNX Runtime could not load it. */
     ORCA_EMBEDDING_MODEL_STATE_UNUSABLE = 3,
-    /* The file is the model; analysis computes audio embeddings with it. */
+    /* The file is one of the models; analysis computes audio embeddings with it. */
     ORCA_EMBEDDING_MODEL_STATE_READY = 4,
 } orca_embedding_model_state;
 
 /* The path of the audio-embedding model file that analysis uses to compute
  * each file's audio embedding. NUL-terminated; copied; NULL clears it. The
- * file is checked by size and SHA-256 now, and a path that does not name the
- * model is not an error: orca_runtime_embedding_model_state reports it.
- * Analysis that starts afterwards uses the new path. ORCA_STATUS_INVALID_ARGUMENT
+ * file is checked by size and SHA-256 now and is the model it matches, an
+ * orca_embedding_model, which analysis and similarity then use. A path that
+ * names none of the models is not an error: orca_runtime_embedding_model_state
+ * reports it. Analysis that starts afterwards uses the new path. ORCA_STATUS_INVALID_ARGUMENT
  * for a path longer than the platform's maximum path length. */
 orca_status orca_runtime_set_embedding_model_path(orca_runtime *runtime, const char *path);
 
@@ -2433,7 +2434,15 @@ orca_status orca_runtime_embedding_model_state(orca_runtime *runtime, uint8_t *o
 typedef enum orca_embedding_model {
     /* The CLAP HTSAT-unfused audio encoder, quantized to 8 bits. */
     ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED = 1,
+    /* The Discogs MAEST 30-second transformer, quantized to 8 bits; the file is licensed CC BY-NC-SA 4.0. */
+    ORCA_EMBEDDING_MODEL_DISCOGS_MAEST = 2,
 } orca_embedding_model;
+
+/* Writes the orca_embedding_model of the model in use, the one the file at
+ * the path of orca_runtime_set_embedding_model_path is, or 0 when
+ * orca_runtime_embedding_model_state is not ORCA_EMBEDDING_MODEL_STATE_READY.
+ * ORCA_STATUS_INVALID_ARGUMENT for a NULL `output`. */
+orca_status orca_runtime_embedding_model(orca_runtime *runtime, uint8_t *output);
 
 /* Starts an ORCA_JOB_KIND_MODEL_DOWNLOAD job that downloads the audio-
  * embedding `model`, an orca_embedding_model, to `path`, which is

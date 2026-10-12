@@ -45,9 +45,10 @@
   snapshot `detail` holds the reason. `orca-cli download-embedding-model PATH`
   runs it, and a C host calls
   `orca_runtime_start_embedding_model_download(runtime, model, path, &job)`.
-  `model` is an `EmbeddingModel` (`orca_embedding_model`); its one member is
-  `clap_htsat_unfused` (`ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`, 1), and any
-  other value is `ORCA_STATUS_INVALID_ARGUMENT`.
+  `model` is an `EmbeddingModel` (`orca_embedding_model`):
+  `clap_htsat_unfused` (`ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`, 1) or
+  `discogs_maest` (`ORCA_EMBEDDING_MODEL_DISCOGS_MAEST`, 2); any other value is
+  `ORCA_STATUS_INVALID_ARGUMENT`.
 - **`orca-gtk` downloads the audio-embedding model from Settings › Listening.**
   Download in the Sound Similarity card fetches it (32.6 MB, from `github.com`)
   to the user data directory, shows the megabytes received and can be
