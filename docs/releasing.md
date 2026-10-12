@@ -15,6 +15,22 @@ Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
 the same commit: features, fixes, refactors, removals and breaking changes
 alike.
 
+## The audio-embedding model
+
+`clap_audio_int8.onnx` is not in the repository. It is the one asset of the
+release tagged `model-clap-int8-1`, which the Nix package and the README's
+download command fetch. liborca accepts only the file with the size and
+SHA-256 in `liborca/analysis/audio_embedding.zig`.
+
+A different model is a new file under a new tag, never a replaced asset:
+
+1. Write the file with `scripts/embedding/export_model.py OUTDIR`.
+2. Set `model_size` and `model_sha256` in
+   `liborca/analysis/audio_embedding.zig`.
+3. Upload the file as the asset of a new `model-NAME-N` release.
+4. Set the URL and hash of `embeddingModel` in `nix/package.nix`, and the URL
+   and digest in the README.
+
 ## Steps
 
 1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,

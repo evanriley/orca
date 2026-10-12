@@ -83,6 +83,15 @@
   ready and files lack the embedding. `scripts/headless-gui.sh` passes
   `ORCA_HEADLESS_EMBEDDING_MODEL` to the app as `ORCA_EMBEDDING_MODEL`.
 
+- **The Nix package installs the audio-embedding model.** It fetches
+  `clap_audio_int8.onnx` by hash from the `model-clap-int8-1` release, links
+  it at `share/orca/models`, and sets `ORCA_EMBEDDING_MODEL` to it as the
+  default for `orca-gtk` and `orca-cli`. The README gives the download command
+  for other builds, [releasing.md](docs/releasing.md) the steps for a
+  different model, and the dependency table in
+  [architecture.md](docs/architecture.md#dependencies-and-licences) lists ONNX
+  Runtime and the model's licence.
+
 ### Changed
 
 - **`orca-gtk` describes Radio's sound signal as how tracks sound.** The Radio

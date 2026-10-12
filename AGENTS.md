@@ -24,7 +24,11 @@ link its platform toolkit or keyring. Frontend-only fonts may use the SIL Open
 Font License and keep their licence texts beside them.
 
 Chromaprint is built without its LGPL resampler and uses libsamplerate instead.
-Its build-time licence check must remain enabled. See
+Its build-time licence check must remain enabled. ONNX Runtime (MIT, with some
+MPL-2.0 files) is a dynamically linked system library that `-Dembeddings=false`
+removes; never vendor it or link it statically. The audio-embedding model is
+never committed, compiled in, or downloaded by the engine: a host names its
+path and the engine checks its SHA-256. See
 [the architecture dependency table](docs/architecture.md#dependencies-and-licences).
 
 ## Toolchain
