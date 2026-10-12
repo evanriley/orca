@@ -38,8 +38,10 @@
 # mock. The app gets ORCA_HEADLESS_EMBEDDING_MODEL as its ORCA_EMBEDDING_MODEL;
 # without it the app looks for the model in the scratch XDG_DATA_HOME and
 # beside its executable, never where the caller's ORCA_EMBEDDING_MODEL
-# points. The output is 1440x900 unless ORCA_HEADLESS_SIZE names another
-# WIDTHxHEIGHT. Nothing reaches the user's desktop:
+# points. ORCA_HEADLESS_DATA names a directory to keep as XDG_DATA_HOME
+# across runs, so the app finds the model files in its orca/models and
+# downloads into it. The output is 1440x900 unless ORCA_HEADLESS_SIZE names
+# another WIDTHxHEIGHT. Nothing reaches the user's desktop:
 # sway, D-Bus, the pointer and orca-gtk run with a private
 # XDG_RUNTIME_DIR, and on exit the script stops only the processes it
 # started.
@@ -230,7 +232,7 @@ for variable in DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS 
     unset "$variable"
 done
 export XDG_RUNTIME_DIR=$runtime
-export HOME=$runtime/home XDG_CONFIG_HOME=${ORCA_HEADLESS_CONFIG:-$runtime/config} XDG_DATA_HOME=$runtime/data XDG_CACHE_HOME=$runtime/cache XDG_STATE_HOME=$runtime/state
+export HOME=$runtime/home XDG_CONFIG_HOME=${ORCA_HEADLESS_CONFIG:-$runtime/config} XDG_DATA_HOME=${ORCA_HEADLESS_DATA:-$runtime/data} XDG_CACHE_HOME=$runtime/cache XDG_STATE_HOME=$runtime/state
 export PATH="$tools/bin:$PATH"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$runtime/library" "$runtime/no-services"
 

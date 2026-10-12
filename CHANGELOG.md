@@ -34,6 +34,20 @@
   with `orca_runtime_embedding_model`, 0 unless the state is ready;
   `orca-gtk` downloads the model chosen in Settings. The new build option
   `-Dmaest-embedding-model=PATH` runs the tests that need the file.
+- **`orca-gtk` chooses between the two audio-embedding models.** Settings ›
+  Listening › Sound Similarity has a Model row with "Standard · 32.6 MB"
+  (`clap_htsat_unfused`) and "Large · 80.4 MB · non-commercial licence"
+  (`discogs_maest`). The choice is kept as `embedding_model` in the
+  `[listening]` group of `settings.ini`, decides which file is looked up and
+  named to liborca, and takes effect without a restart: the status row and
+  Download then name that model's file and size, and the analysis banner asks
+  for its embeddings. A file that is the other model is reported as that
+  model, with Download for the chosen one. The row cannot be changed while a
+  download runs, in a build without ONNX Runtime, or when
+  `ORCA_EMBEDDING_MODEL` is set, when it shows the model that file is. Reset
+  all settings returns the choice to Standard. `scripts/headless-gui.sh`
+  keeps the directory in `ORCA_HEADLESS_DATA` as the session's
+  `XDG_DATA_HOME`.
 - **liborca downloads the audio-embedding model when a host asks.**
   `Runtime.startEmbeddingModelDownload(model, destination)` starts a
   `model_download` Job (`ORCA_JOB_KIND_MODEL_DOWNLOAD`, 14) that belongs to no
@@ -50,11 +64,11 @@
   `discogs_maest` (`ORCA_EMBEDDING_MODEL_DISCOGS_MAEST`, 2); any other value is
   `ORCA_STATUS_INVALID_ARGUMENT`.
 - **`orca-gtk` downloads the audio-embedding model from Settings › Listening.**
-  Download in the Sound Similarity card fetches it (32.6 MB, from `github.com`)
-  to the user data directory, shows the megabytes received and can be
-  cancelled; a failure shows the Job's reason. The row names the size and the
-  host before the button is pressed. Download is not offered when
-  `ORCA_EMBEDDING_MODEL` is set.
+  Download in the Sound Similarity card fetches the chosen model (32.6 or
+  80.4 MB, from `github.com`) to the user data directory, shows the megabytes
+  received and can be cancelled; a failure shows the Job's reason. The row
+  names the size and the host before the button is pressed. Download is not
+  offered when `ORCA_EMBEDDING_MODEL` is set.
 - **Radio and Daily Mixes rank by how alike tracks sound.** A seed whose
   tracks have a stored audio embedding scores each candidate's Audio component
   by the cosine similarity of its vector to the seed's mean: 1 from the 10th
@@ -125,14 +139,15 @@
   `ORCA_STATUS_INVALID_ARGUMENT` for a capacity above 1,000.
 
 - **`orca-gtk` gives liborca the audio-embedding model and shows its state.**
-  At startup it names `clap_audio_int8.onnx` from `ORCA_EMBEDDING_MODEL`,
-  else from `$XDG_DATA_HOME/orca/models`, else from `share/orca/models` under
-  the install prefix. Settings › Listening › Sound Similarity says whether the
-  model is installed, where a missing file goes, and offers Check again, which
-  looks the file up again without a restart; the command palette lists it as
-  Sound similarity. The analysis banner asks for an analysis when the model is
-  ready and files lack the embedding. `scripts/headless-gui.sh` passes
-  `ORCA_HEADLESS_EMBEDDING_MODEL` to the app as `ORCA_EMBEDDING_MODEL`.
+  At startup it names the file `ORCA_EMBEDDING_MODEL` holds, else the chosen
+  model's file from `$XDG_DATA_HOME/orca/models`, else from
+  `share/orca/models` under the install prefix. Settings › Listening › Sound
+  Similarity says whether the model is installed, where a missing file goes,
+  and offers Check again, which looks the file up again without a restart; the
+  command palette lists it as Sound similarity. The analysis banner asks for
+  an analysis when the model is ready and files lack the embedding.
+  `scripts/headless-gui.sh` passes `ORCA_HEADLESS_EMBEDDING_MODEL` to the app
+  as `ORCA_EMBEDDING_MODEL`.
 
 - **The Nix package installs the audio-embedding model.** It fetches
   `clap_audio_int8.onnx` by hash from the `model-clap-int8-1` release, links

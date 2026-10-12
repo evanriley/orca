@@ -7,11 +7,11 @@ const analysis_notice = @import("analysis_notice.zig");
 
 const App = app.App;
 
-pub const file_name = "clap_audio_int8.onnx";
 pub const environment_variable = "ORCA_EMBEDDING_MODEL";
+pub const models = std.enums.values(liborca.EmbeddingModel);
 
-const user_pattern = "{s}/orca/models/" ++ file_name;
-const bundled_pattern = "{s}/share/orca/models/" ++ file_name;
+const user_pattern = "{s}/orca/models/{s}";
+const bundled_pattern = "{s}/share/orca/models/{s}";
 
 pub const Places = struct {
     override: ?[]const u8,
@@ -19,23 +19,28 @@ pub const Places = struct {
     executable_dir: ?[]const u8,
 };
 
-pub fn choose(buffer: []u8, places: Places, context: anytype) error{NoSpaceLeft}![]const u8 {
+pub fn choose(buffer: []u8, model: liborca.EmbeddingModel, places: Places, context: anytype) error{NoSpaceLeft}![]const u8 {
     if (places.override) |path| if (path.len != 0) return std.fmt.bufPrint(buffer, "{s}", .{path});
-    const user = try std.fmt.bufPrint(buffer, user_pattern, .{places.user_data_dir});
+    const file_name = model.spec().file_name;
+    const user = try std.fmt.bufPrint(buffer, user_pattern, .{ places.user_data_dir, file_name });
     if (context.isFile(user)) return user;
     const prefix = std.fs.path.dirname(places.executable_dir orelse return user) orelse return user;
     var bundled_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const bundled = std.fmt.bufPrint(&bundled_buffer, bundled_pattern, .{prefix}) catch return user;
+    const bundled = std.fmt.bufPrint(&bundled_buffer, bundled_pattern, .{ prefix, file_name }) catch return user;
     if (!context.isFile(bundled)) return user;
     return std.fmt.bufPrint(buffer, "{s}", .{bundled});
 }
 
-pub const model_bytes: u64 = 32_587_451;
 const download_host = "github.com";
+
+pub const Running = struct {
+    job: liborca.JobHandle,
+    model: liborca.EmbeddingModel,
+};
 
 pub const Download = union(enum) {
     idle,
-    running: liborca.JobHandle,
+    running: Running,
     failed: liborca.JobHandle,
     refused: []const u8,
 };
@@ -62,6 +67,8 @@ pub const Status = struct {
 
 pub const Request = struct {
     state: liborca.EmbeddingModelState,
+    chosen: liborca.EmbeddingModel,
+    recognised: ?liborca.EmbeddingModel,
     path: []const u8,
     overridden: bool,
     download: Shown,
@@ -76,10 +83,60 @@ const Megabytes = struct {
     }
 };
 
+fn name(model: liborca.EmbeddingModel) []const u8 {
+    return switch (model) {
+        .clap_htsat_unfused => "Standard",
+        .discogs_maest => "Large",
+    };
+}
+
+pub fn label(buffer: []u8, model: liborca.EmbeddingModel) [:0]const u8 {
+    const size: Megabytes = .{ .bytes = model.spec().size };
+    return switch (model) {
+        .clap_htsat_unfused => print(buffer, "{s} · {f} MB", .{ name(model), size }),
+        .discogs_maest => print(buffer, "{s} · {f} MB · non-commercial licence", .{ name(model), size }),
+    };
+}
+
+pub const Choice = struct {
+    model: liborca.EmbeddingModel,
+    subtitle: [:0]const u8,
+    sensitive: bool,
+};
+
+pub const ChoiceRequest = struct {
+    saved: liborca.EmbeddingModel,
+    recognised: ?liborca.EmbeddingModel,
+    state: liborca.EmbeddingModelState,
+    overridden: bool,
+    downloading: bool,
+};
+
+pub fn choice(request: ChoiceRequest) Choice {
+    if (request.overridden) return .{
+        .model = request.recognised orelse request.saved,
+        .subtitle = environment_variable ++ " names the model file.",
+        .sensitive = false,
+    };
+    return .{
+        .model = request.saved,
+        .subtitle = "Large tells tracks apart better and takes longer to analyze.",
+        .sensitive = request.state != .built_without and !request.downloading,
+    };
+}
+
+fn otherModel(request: Request) ?liborca.EmbeddingModel {
+    if (request.state != .ready) return null;
+    const recognised = request.recognised orelse return null;
+    return if (recognised == request.chosen) null else recognised;
+}
+
 pub fn status(buffer: []u8, request: Request) Status {
     const path = request.path;
+    const other = otherModel(request);
     switch (request.state) {
-        .ready => return .{ .title = "Model installed", .subtitle = terminated(buffer, path), .can_check_again = false },
+        .ready => if (other == null)
+            return .{ .title = "Model installed", .subtitle = terminated(buffer, path), .can_check_again = false },
         .built_without => return .{
             .title = "Not available in this build",
             .subtitle = "This build of Orca was made without ONNX Runtime.",
@@ -101,10 +158,15 @@ pub fn status(buffer: []u8, request: Request) Status {
     }
     const title: [:0]const u8 = switch (request.state) {
         .missing => "Model not installed",
-        .wrong_file => "That file is not Orca's model",
+        .wrong_file => "That file is not one of Orca's models",
         .unusable => "The model could not be loaded",
-        .ready, .built_without => unreachable,
+        .ready => switch (other.?) {
+            .clap_htsat_unfused => "That file is the Standard model",
+            .discogs_maest => "That file is the Large model",
+        },
+        .built_without => unreachable,
     };
+    const size: Megabytes = .{ .bytes = request.chosen.spec().size };
     if (request.overridden) return .{
         .title = title,
         .subtitle = if (request.state == .missing)
@@ -119,15 +181,18 @@ pub fn status(buffer: []u8, request: Request) Status {
             .failed => |reason| failure(buffer, reason),
             .idle, .running => if (request.state == .missing)
                 print(buffer, "Download it ({f} MB) from " ++ download_host ++ ", or put {s} in {s} and check again.", .{
-                    Megabytes{ .bytes = model_bytes },
+                    size,
                     std.fs.path.basename(path),
                     directory(path),
                 })
-            else
-                print(buffer, "{s}. Download fetches the model ({f} MB) from " ++ download_host ++ ".", .{
+            else if (other != null)
+                print(buffer, "{s}. Download fetches the {s} model ({f} MB) from " ++ download_host ++ ".", .{
                     path,
-                    Megabytes{ .bytes = model_bytes },
-                }),
+                    name(request.chosen),
+                    size,
+                })
+            else
+                print(buffer, "{s}. Download fetches the model ({f} MB) from " ++ download_host ++ ".", .{ path, size }),
         },
         .can_check_again = true,
         .action = .download,
@@ -168,7 +233,7 @@ pub fn apply(self: *App) void {
     else |_|
         null;
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = choose(&buffer, .{
+    const path = choose(&buffer, self.embedding_model_choice, .{
         .override = self.embedding_model_override,
         .user_data_dir = std.mem.span(gtk.g_get_user_data_dir()),
         .executable_dir = executable_dir,
@@ -185,8 +250,18 @@ fn overridden(self: *const App) bool {
     return if (self.embedding_model_override) |path| path.len != 0 else false;
 }
 
-fn userPath(buffer: []u8) error{NoSpaceLeft}![]const u8 {
-    return std.fmt.bufPrint(buffer, user_pattern, .{std.mem.span(gtk.g_get_user_data_dir())});
+fn userPath(buffer: []u8, model: liborca.EmbeddingModel) error{NoSpaceLeft}![]const u8 {
+    return std.fmt.bufPrint(buffer, user_pattern, .{ std.mem.span(gtk.g_get_user_data_dir()), model.spec().file_name });
+}
+
+pub fn shownChoice(self: *const App) Choice {
+    return choice(.{
+        .saved = self.embedding_model_choice,
+        .recognised = self.runtime.embeddingModel(),
+        .state = self.runtime.embeddingModelState(),
+        .overridden = overridden(self),
+        .downloading = self.embedding_model_download == .running,
+    });
 }
 
 pub fn shownStatus(self: *App, buffer: []u8) Status {
@@ -194,18 +269,22 @@ pub fn shownStatus(self: *App, buffer: []u8) Status {
     const download: Shown = switch (self.embedding_model_download) {
         .idle => .idle,
         .refused => |reason| .{ .failed = reason },
-        .running, .failed => |job| shown: {
+        .failed => |job| shown: {
             snapshot = self.runtime.jobSnapshotSynced(job) catch break :shown .idle;
-            const read = &snapshot.?;
-            if (self.embedding_model_download == .failed) break :shown .{ .failed = read.detail.slice() };
+            break :shown .{ .failed = snapshot.?.detail.slice() };
+        },
+        .running => |running| shown: {
+            const read = self.runtime.jobSnapshotSynced(running.job) catch break :shown .idle;
             break :shown .{ .running = .{
                 .received_bytes = read.completed_units,
-                .total_bytes = read.total_units orelse model_bytes,
+                .total_bytes = read.total_units orelse running.model.spec().size,
             } };
         },
     };
     return status(buffer, .{
         .state = self.runtime.embeddingModelState(),
+        .chosen = shownChoice(self).model,
+        .recognised = self.runtime.embeddingModel(),
         .path = self.embedding_model_path.value,
         .overridden = overridden(self),
         .download = download,
@@ -222,10 +301,11 @@ fn startRefusal(err: anyerror) []const u8 {
 
 pub fn startDownload(self: *App) void {
     if (self.embedding_model_download == .running or overridden(self)) return;
+    const model = self.embedding_model_choice;
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    self.embedding_model_download = if (userPath(&buffer)) |destination|
-        if (self.runtime.startEmbeddingModelDownload(.clap_htsat_unfused, destination)) |job|
-            .{ .running = job }
+    self.embedding_model_download = if (userPath(&buffer, model)) |destination|
+        if (self.runtime.startEmbeddingModelDownload(model, destination)) |job|
+            .{ .running = .{ .job = job, .model = model } }
         else |err|
             .{ .refused = startRefusal(err) }
     else |err|
@@ -235,7 +315,7 @@ pub fn startDownload(self: *App) void {
 
 pub fn cancelDownload(self: *App) void {
     switch (self.embedding_model_download) {
-        .running => |job| self.runtime.cancelJob(job) catch |err|
+        .running => |running| self.runtime.cancelJob(running.job) catch |err|
             std.log.warn("Could not cancel the audio-embedding model download ({t})", .{err}),
         .idle, .failed, .refused => {},
     }
@@ -249,24 +329,24 @@ pub fn dismissFailure(self: *App) void {
     }
 }
 
-fn following(job: liborca.JobHandle, job_state: liborca.JobState) Download {
+fn following(running: Running, job_state: liborca.JobState) Download {
     return switch (job_state) {
         .succeeded, .cancelled => .idle,
-        .failed => .{ .failed = job },
-        .queued, .waiting, .running, .cancelling, .paused => .{ .running = job },
+        .failed => .{ .failed = running.job },
+        .queued, .waiting, .running, .cancelling, .paused => .{ .running = running },
     };
 }
 
 pub fn tick(self: *App) void {
-    const job = switch (self.embedding_model_download) {
-        .running => |job| job,
+    const running = switch (self.embedding_model_download) {
+        .running => |running| running,
         .idle, .failed, .refused => return,
     };
-    if (self.runtime.jobSnapshotSynced(job)) |snapshot| {
-        self.embedding_model_download = following(job, snapshot.state);
+    if (self.runtime.jobSnapshotSynced(running.job)) |snapshot| {
+        self.embedding_model_download = following(running, snapshot.state);
         if (snapshot.state == .succeeded) {
             var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            if (userPath(&buffer)) |destination| self.embedding_model_path.set(self.allocator, destination) else |_| {}
+            if (userPath(&buffer, running.model)) |destination| self.embedding_model_path.set(self.allocator, destination) else |_| {}
             analysis_notice.refresh(self);
         }
     } else |_| self.embedding_model_download = .idle;
@@ -285,10 +365,35 @@ const TestFiles = struct {
 const test_places: Places = .{ .override = null, .user_data_dir = "/data", .executable_dir = "/prefix/bin" };
 const test_user = "/data/orca/models/clap_audio_int8.onnx";
 const test_bundled = "/prefix/share/orca/models/clap_audio_int8.onnx";
+const test_large_user = "/data/orca/models/maest_audio_int8.onnx";
+const test_large_bundled = "/prefix/share/orca/models/maest_audio_int8.onnx";
+const standard_bytes = liborca.EmbeddingModel.clap_htsat_unfused.spec().size;
+const large_bytes = liborca.EmbeddingModel.discogs_maest.spec().size;
+
+fn expectChosenFor(model: liborca.EmbeddingModel, expected: []const u8, places: Places, present: []const []const u8) !void {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try choose(&buffer, model, places, TestFiles{ .present = present }));
+}
 
 fn expectChosen(expected: []const u8, places: Places, present: []const []const u8) !void {
-    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings(expected, try choose(&buffer, places, TestFiles{ .present = present }));
+    try expectChosenFor(.clap_htsat_unfused, expected, places, present);
+}
+
+test "choose_largeChosen_looksForItsOwnFileInEachPlace" {
+    try expectChosenFor(.discogs_maest, test_large_user, test_places, &.{ test_large_user, test_large_bundled });
+    try expectChosenFor(.discogs_maest, test_large_bundled, test_places, &.{test_large_bundled});
+    try expectChosenFor(.discogs_maest, test_large_user, test_places, &.{});
+}
+
+test "choose_largeChosenWithOnlyStandardFiles_namesTheUsersPlaceForLarge" {
+    try expectChosenFor(.discogs_maest, test_large_user, test_places, &.{ test_user, test_bundled });
+    try expectChosenFor(.clap_htsat_unfused, test_user, test_places, &.{ test_large_user, test_large_bundled });
+}
+
+test "choose_overrideSetWithLargeChosen_winsWhateverIsChosen" {
+    var places = test_places;
+    places.override = "/elsewhere/model.onnx";
+    try expectChosenFor(.discogs_maest, "/elsewhere/model.onnx", places, &.{ test_large_user, test_large_bundled });
 }
 
 test "choose_overrideSet_winsEvenWithNoFileThere" {
@@ -320,7 +425,7 @@ test "choose_nothingPresent_namesTheUsersPlace" {
 
 test "choose_pathLongerThanTheBuffer_fails" {
     var buffer: [16]u8 = undefined;
-    try std.testing.expectError(error.NoSpaceLeft, choose(&buffer, test_places, TestFiles{ .present = &.{} }));
+    try std.testing.expectError(error.NoSpaceLeft, choose(&buffer, .clap_htsat_unfused, test_places, TestFiles{ .present = &.{} }));
 }
 
 fn expectRow(expected: Status, request: Request) !void {
@@ -333,7 +438,36 @@ fn expectRow(expected: Status, request: Request) !void {
 }
 
 fn requestFor(state: liborca.EmbeddingModelState, download: Shown) Request {
-    return .{ .state = state, .path = test_user, .overridden = false, .download = download };
+    return .{
+        .state = state,
+        .chosen = .clap_htsat_unfused,
+        .recognised = if (state == .ready) .clap_htsat_unfused else null,
+        .path = test_user,
+        .overridden = false,
+        .download = download,
+    };
+}
+
+fn largeRequestFor(state: liborca.EmbeddingModelState, download: Shown) Request {
+    return .{
+        .state = state,
+        .chosen = .discogs_maest,
+        .recognised = if (state == .ready) .discogs_maest else null,
+        .path = test_large_user,
+        .overridden = false,
+        .download = download,
+    };
+}
+
+fn overriddenRequest(state: liborca.EmbeddingModelState) Request {
+    return .{
+        .state = state,
+        .chosen = .clap_htsat_unfused,
+        .recognised = null,
+        .path = "/elsewhere/model.onnx",
+        .overridden = true,
+        .download = .idle,
+    };
 }
 
 test "status_missing_offersTheDownloadAndNamesItsSizeAndHost" {
@@ -350,7 +484,7 @@ test "status_missingWithOverride_saysWhereTheFileGoesAndOffersNoDownload" {
         .title = "Model not installed",
         .subtitle = "Put model.onnx in /elsewhere, then check again.",
         .can_check_again = true,
-    }, .{ .state = .missing, .path = "/elsewhere/model.onnx", .overridden = true, .download = .idle });
+    }, overriddenRequest(.missing));
 }
 
 test "status_running_showsBytesAndOffersOnlyCancel" {
@@ -359,13 +493,13 @@ test "status_running_showsBytesAndOffersOnlyCancel" {
         .subtitle = "0.0 of 32.6 MB",
         .can_check_again = false,
         .action = .cancel,
-    }, requestFor(.missing, .{ .running = .{ .received_bytes = 0, .total_bytes = model_bytes } }));
+    }, requestFor(.missing, .{ .running = .{ .received_bytes = 0, .total_bytes = standard_bytes } }));
     try expectRow(.{
         .title = "Downloading the model",
         .subtitle = "12.4 of 32.6 MB",
         .can_check_again = false,
         .action = .cancel,
-    }, requestFor(.wrong_file, .{ .running = .{ .received_bytes = 12_449_999, .total_bytes = model_bytes } }));
+    }, requestFor(.wrong_file, .{ .running = .{ .received_bytes = 12_449_999, .total_bytes = standard_bytes } }));
 }
 
 test "status_failed_givesTheReasonAsASentenceAndOffersTheDownloadAgain" {
@@ -390,13 +524,14 @@ test "status_failed_givesTheReasonAsASentenceAndOffersTheDownloadAgain" {
 }
 
 const test_job: liborca.JobHandle = .{ .index = 3, .generation = 1 };
+const test_running: Running = .{ .job = test_job, .model = .discogs_maest };
 
 test "following_endedJob_leavesOnlyAFailureBehind" {
-    try std.testing.expectEqual(Download.idle, following(test_job, .cancelled));
-    try std.testing.expectEqual(Download.idle, following(test_job, .succeeded));
-    try std.testing.expectEqual(Download{ .failed = test_job }, following(test_job, .failed));
-    try std.testing.expectEqual(Download{ .running = test_job }, following(test_job, .running));
-    try std.testing.expectEqual(Download{ .running = test_job }, following(test_job, .cancelling));
+    try std.testing.expectEqual(Download.idle, following(test_running, .cancelled));
+    try std.testing.expectEqual(Download.idle, following(test_running, .succeeded));
+    try std.testing.expectEqual(Download{ .failed = test_job }, following(test_running, .failed));
+    try std.testing.expectEqual(Download{ .running = test_running }, following(test_running, .running));
+    try std.testing.expectEqual(Download{ .running = test_running }, following(test_running, .cancelling));
 }
 
 test "status_ready_showsThePathWhateverTheDownloadDid" {
@@ -418,7 +553,7 @@ test "status_builtWithout_offersNothing" {
 
 test "status_wrongOrUnusableFile_showsThePathAndWhatDownloadFetches" {
     try expectRow(.{
-        .title = "That file is not Orca's model",
+        .title = "That file is not one of Orca's models",
         .subtitle = test_user ++ ". Download fetches the model (32.6 MB) from github.com.",
         .can_check_again = true,
         .action = .download,
@@ -430,16 +565,136 @@ test "status_wrongOrUnusableFile_showsThePathAndWhatDownloadFetches" {
         .action = .download,
     }, requestFor(.unusable, .idle));
     try expectRow(.{
-        .title = "That file is not Orca's model",
+        .title = "That file is not one of Orca's models",
         .subtitle = "/elsewhere/model.onnx",
         .can_check_again = true,
-    }, .{ .state = .wrong_file, .path = "/elsewhere/model.onnx", .overridden = true, .download = .idle });
+    }, overriddenRequest(.wrong_file));
 }
 
 test "megabytes_roundsToOneDecimal" {
     var buffer: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("32.6", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = model_bytes }}));
+    try std.testing.expectEqualStrings("32.6", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = standard_bytes }}));
     try std.testing.expectEqualStrings("0.0", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = 49_999 }}));
     try std.testing.expectEqualStrings("0.1", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = 50_000 }}));
     try std.testing.expectEqualStrings("1.0", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = 1_000_000 }}));
+}
+
+test "status_largeMissing_offersTheDownloadOfItsSizeAndFile" {
+    try expectRow(.{
+        .title = "Model not installed",
+        .subtitle = "Download it (80.4 MB) from github.com, or put maest_audio_int8.onnx in /data/orca/models and check again.",
+        .can_check_again = true,
+        .action = .download,
+    }, largeRequestFor(.missing, .idle));
+}
+
+test "status_largeRunning_showsBytesOfItsSize" {
+    try expectRow(.{
+        .title = "Downloading the model",
+        .subtitle = "40.2 of 80.4 MB",
+        .can_check_again = false,
+        .action = .cancel,
+    }, largeRequestFor(.missing, .{ .running = .{ .received_bytes = 40_200_000, .total_bytes = large_bytes } }));
+}
+
+test "status_largeWrongOrUnusableFile_showsThePathAndItsDownloadSize" {
+    try expectRow(.{
+        .title = "That file is not one of Orca's models",
+        .subtitle = test_large_user ++ ". Download fetches the model (80.4 MB) from github.com.",
+        .can_check_again = true,
+        .action = .download,
+    }, largeRequestFor(.wrong_file, .idle));
+    try expectRow(.{
+        .title = "The model could not be loaded",
+        .subtitle = test_large_user ++ ". Download fetches the model (80.4 MB) from github.com.",
+        .can_check_again = true,
+        .action = .download,
+    }, largeRequestFor(.unusable, .idle));
+}
+
+test "status_largeReady_showsItsPath" {
+    try expectRow(
+        .{ .title = "Model installed", .subtitle = test_large_user, .can_check_again = false },
+        largeRequestFor(.ready, .idle),
+    );
+}
+
+test "status_fileOfTheOtherModel_namesWhatTheFileIsAndOffersTheChosenDownload" {
+    var request = largeRequestFor(.ready, .idle);
+    request.recognised = .clap_htsat_unfused;
+    try expectRow(.{
+        .title = "That file is the Standard model",
+        .subtitle = test_large_user ++ ". Download fetches the Large model (80.4 MB) from github.com.",
+        .can_check_again = true,
+        .action = .download,
+    }, request);
+    request = requestFor(.ready, .idle);
+    request.recognised = .discogs_maest;
+    try expectRow(.{
+        .title = "That file is the Large model",
+        .subtitle = test_user ++ ". Download fetches the Standard model (32.6 MB) from github.com.",
+        .can_check_again = true,
+        .action = .download,
+    }, request);
+}
+
+test "status_fileOfTheOtherModelWhileDownloading_showsTheDownloadThenItsFailure" {
+    var request = largeRequestFor(.ready, .{ .running = .{ .received_bytes = 0, .total_bytes = large_bytes } });
+    request.recognised = .clap_htsat_unfused;
+    try expectRow(.{
+        .title = "Downloading the model",
+        .subtitle = "0.0 of 80.4 MB",
+        .can_check_again = false,
+        .action = .cancel,
+    }, request);
+    request.download = .{ .failed = "the network is unavailable" };
+    try expectRow(.{
+        .title = "That file is the Standard model",
+        .subtitle = "The download failed. The network is unavailable.",
+        .can_check_again = true,
+        .action = .download,
+    }, request);
+}
+
+test "label_eachModel_namesItsSizeAndLicence" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Standard · 32.6 MB", label(&buffer, .clap_htsat_unfused));
+    try std.testing.expectEqualStrings("Large · 80.4 MB · non-commercial licence", label(&buffer, .discogs_maest));
+}
+
+fn choiceFor(state: liborca.EmbeddingModelState) ChoiceRequest {
+    return .{ .saved = .discogs_maest, .recognised = null, .state = state, .overridden = false, .downloading = false };
+}
+
+test "choice_savedModel_isShownAndCanBeChanged" {
+    const shown = choice(choiceFor(.missing));
+    try std.testing.expectEqual(liborca.EmbeddingModel.discogs_maest, shown.model);
+    try std.testing.expectEqualStrings("Large tells tracks apart better and takes longer to analyze.", shown.subtitle);
+    try std.testing.expect(shown.sensitive);
+    var other_file = choiceFor(.ready);
+    other_file.recognised = .clap_htsat_unfused;
+    try std.testing.expectEqual(liborca.EmbeddingModel.discogs_maest, choice(other_file).model);
+    try std.testing.expect(choice(other_file).sensitive);
+}
+
+test "choice_downloadingOrBuiltWithout_cannotBeChanged" {
+    var downloading = choiceFor(.missing);
+    downloading.downloading = true;
+    try std.testing.expect(!choice(downloading).sensitive);
+    try std.testing.expectEqual(liborca.EmbeddingModel.discogs_maest, choice(downloading).model);
+    try std.testing.expect(!choice(choiceFor(.built_without)).sensitive);
+}
+
+test "choice_overridden_showsTheRecognisedModelElseTheSavedAndCannotBeChanged" {
+    var request = choiceFor(.ready);
+    request.overridden = true;
+    request.recognised = .clap_htsat_unfused;
+    const shown = choice(request);
+    try std.testing.expectEqual(liborca.EmbeddingModel.clap_htsat_unfused, shown.model);
+    try std.testing.expectEqualStrings("ORCA_EMBEDDING_MODEL names the model file.", shown.subtitle);
+    try std.testing.expect(!shown.sensitive);
+    request.state = .missing;
+    request.recognised = null;
+    try std.testing.expectEqual(liborca.EmbeddingModel.discogs_maest, choice(request).model);
+    try std.testing.expect(!choice(request).sensitive);
 }
