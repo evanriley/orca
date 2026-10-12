@@ -10,8 +10,8 @@ const AnalysisCandidate = @import("analysis.zig").AnalysisCandidate;
 const AnalysisCandidatePage = @import("analysis.zig").AnalysisCandidatePage;
 const AnalysisSelectors = @import("analysis.zig").AnalysisSelectors;
 const bindAnalysisSelectors = @import("analysis.zig").bindAnalysisSelectors;
-const unanalyzed_predicate = @import("analysis.zig").unanalyzed_predicate;
-const analysis_coverage_sql = @import("analysis.zig").analysis_coverage_sql;
+const unanalyzedPredicate = @import("analysis.zig").unanalyzedPredicate;
+const analysisCoverageSql = @import("analysis.zig").analysisCoverageSql;
 const AnalysisCoverageCounts = @import("analysis.zig").AnalysisCoverageCounts;
 const DuplicateCandidate = @import("duplicates.zig").DuplicateCandidate;
 const DuplicateCandidatePage = @import("duplicates.zig").DuplicateCandidatePage;
@@ -505,10 +505,12 @@ pub const FileRepository = struct {
         selectors: AnalysisSelectors,
     ) !AnalysisCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        var statement = try self.db.prepare(
-            analysis_candidate_select ++ " WHERE files.id > ?1 AND (" ++ unanalyzed_predicate ++
-                ") ORDER BY files.id LIMIT ?2;",
-        );
+        var statement = switch (selectors.form()) {
+            inline else => |form| try self.db.prepare(
+                comptime analysis_candidate_select ++ " WHERE files.id > ?1 AND (" ++ unanalyzedPredicate(form) ++
+                    ") ORDER BY files.id LIMIT ?2;",
+            ),
+        };
         defer statement.deinit();
         try statement.bindInt64(1, after_id);
         try statement.bindInt64(2, limit);
@@ -553,9 +555,11 @@ pub const FileRepository = struct {
         self: *const FileRepository,
         selectors: AnalysisSelectors,
     ) !u64 {
-        var statement = try self.db.prepare(
-            "SELECT count(*) FROM files WHERE " ++ unanalyzed_predicate ++ ";",
-        );
+        var statement = switch (selectors.form()) {
+            inline else => |form| try self.db.prepare(
+                comptime "SELECT count(*) FROM files WHERE " ++ unanalyzedPredicate(form) ++ ";",
+            ),
+        };
         defer statement.deinit();
         // The count asks the same question with no cursor and no limit, so ?1
         // and ?2 are simply unbound; SQLite reads an unbound parameter as
@@ -571,7 +575,9 @@ pub const FileRepository = struct {
         self: *const FileRepository,
         selectors: AnalysisSelectors,
     ) !AnalysisCoverageCounts {
-        var statement = try self.db.prepare(analysis_coverage_sql);
+        var statement = switch (selectors.form()) {
+            inline else => |form| try self.db.prepare(analysisCoverageSql(form)),
+        };
         defer statement.deinit();
         try bindAnalysisSelectors(statement, &selectors);
         if (try statement.step() != .row) return error.SqlFailed;
@@ -582,6 +588,7 @@ pub const FileRepository = struct {
                 statement.columnInt64(2) != 0,
                 statement.columnInt64(3) != 0,
                 statement.columnInt64(4) != 0,
+                selectors.embedding != null and statement.columnInt64(5) != 0,
             },
         };
     }

@@ -922,13 +922,13 @@ pub const OrcaRuntime = struct {
     /// Files that still owe the default loudness and fingerprint measurement.
     pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
-            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins()),
+            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), .three_measurements),
         );
     }
 
     /// Splits `libraryUnanalyzedCount` into never-analyzed and outdated files.
     pub fn libraryAnalysisCoverage(self: *OrcaRuntime, library: LibraryHandle) !AnalysisCoverage {
-        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins());
+        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), .three_measurements);
         const counts = try (try libraryDatabase(self, library)).files.analysisCoverage(selectors);
         return .{
             .never_analyzed = counts.never_analyzed,
