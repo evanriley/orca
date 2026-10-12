@@ -4,6 +4,16 @@
 
 ### Added
 
+- **liborca downloads the audio-embedding model when a host asks.**
+  `Runtime.startEmbeddingModelDownload(destination)` starts a `model_download`
+  Job (`ORCA_JOB_KIND_MODEL_DOWNLOAD`, 14) that belongs to no Library, reports
+  bytes, can be cancelled and cannot be paused. It writes
+  `destination.part`, renames it onto `destination` only when the size and
+  SHA-256 are the compiled-in ones, and then names the file to the runtime, so
+  `embeddingModelState` reads `ready`. A redirect is followed only to `https`
+  on `githubusercontent.com`; nothing is retried or resumed; a failed Job's
+  snapshot `detail` holds the reason. `orca-cli download-embedding-model PATH`
+  runs it. The C ABI and `orca-gtk` cannot start it yet.
 - **Radio and Daily Mixes rank by how alike tracks sound.** A seed whose
   tracks have a stored audio embedding scores each candidate's Audio component
   by the cosine similarity of its vector to the seed's mean: 1 from the 10th

@@ -9842,6 +9842,7 @@ pub fn exportJobKind(kind: job.Kind) u8 {
         .release_info => 11,
         .consistency => 12,
         .daily_mixes => 13,
+        .model_download => 14,
         .artwork, .conversion, .ripping, .dummy => 255,
     };
 }

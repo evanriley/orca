@@ -139,10 +139,13 @@ analysis with and without the features.
 `analysis/audio_embedding.zig` turns a file into one 512-value vector that
 places it among other files by how it sounds. The vector is the output of the
 pinned CLAP audio model, run through ONNX Runtime; builds with
-`-Dembeddings=false` have no such measurement. The engine never downloads the
-model: the host names its file with `Runtime.setEmbeddingModelPath`, and the
-file is checked by size and SHA-256. Without a usable model an analysis
-measures and stores exactly what it does in a build without embeddings.
+`-Dembeddings=false` have no such measurement. The host names the model's
+file with `Runtime.setEmbeddingModelPath`, and the file is checked by size and
+SHA-256. The engine downloads the model only when the host calls
+`Runtime.startEmbeddingModelDownload`
+([control-plane.md](control-plane.md#model-download)). Without a usable model
+an analysis measures and stores exactly what it does in a build without
+embeddings.
 
 `Runtime.embeddingModelState` reports what the last
 `setEmbeddingModelPath` found, as an `EmbeddingModelState`; the C ABI calls are

@@ -11,6 +11,7 @@ const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
+const runtime_model_download = @import("runtime_model_download.zig");
 const runtime_watch = @import("runtime_watch.zig");
 
 const AcoustIdSubmittablePage = runtime.AcoustIdSubmittablePage;
@@ -980,6 +981,7 @@ pub fn cancelJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
         worker.token.cancel();
         worker.registration.requestCancellation();
     }
+    runtime_model_download.cancel(self, job_handle);
 }
 
 pub fn jobSnapshotSynced(self: *OrcaRuntime, job_handle: JobHandle) !job.Snapshot {
@@ -1071,6 +1073,7 @@ fn syncJobProgress(self: *OrcaRuntime) void {
         self.jobs.observeProgress(worker.job, completed) catch {};
         self.jobs.sampleProgress(worker.job, now_ms) catch {};
     }
+    runtime_model_download.syncProgress(self, now_ms);
 }
 
 fn publishJobProgress(self: *OrcaRuntime) void {
@@ -1090,13 +1093,15 @@ fn publishJobProgress(self: *OrcaRuntime) void {
         } }) catch continue;
         worker.published = current;
     }
+    runtime_model_download.publishProgress(self);
 }
 
 /// Zero while a finished worker waits to be reaped, which a full event
 /// channel can defer past the wake its finish raised;
 /// `job_progress_interval_ms` while one runs; null when none is live.
 pub fn jobPumpDueMs(self: *const OrcaRuntime) ?u64 {
-    var due: ?u64 = null;
+    var due: ?u64 = runtime_model_download.pumpDueMs(self, job_progress_interval_ms);
+    if (due == 0) return 0;
     for (self.job_workers.items) |worker| {
         if (worker.retired) continue;
         if (worker.registration.isFinished()) return 0;
@@ -1108,6 +1113,7 @@ pub fn jobPumpDueMs(self: *const OrcaRuntime) ?u64 {
 pub fn reapFinishedJobs(self: *OrcaRuntime) void {
     syncJobProgress(self);
     publishJobProgress(self);
+    runtime_model_download.reap(self);
     for (self.job_workers.items) |worker| {
         if (worker.retired or !worker.registration.isFinished()) continue;
         // The completion event is lossless: a full channel means the host

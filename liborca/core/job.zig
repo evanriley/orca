@@ -36,6 +36,9 @@ pub const Kind = enum {
     consistency,
     /// Making the day's Daily Mixes.
     daily_mixes,
+    /// Downloading the audio-embedding model. Belongs to no Library; its
+    /// units are bytes.
+    model_download,
     dummy,
 };
 
@@ -286,6 +289,10 @@ pub const Manager = struct {
             },
             else => return error.JobAlreadyFinished,
         }
+    }
+
+    pub fn setDetail(self: *Manager, job_handle: object.JobHandle, detail: []const u8) !void {
+        (try self.jobs.get(job_handle)).snapshot.detail.set(detail);
     }
 
     pub fn requestCancellation(self: *Manager, job_handle: object.JobHandle) !void {

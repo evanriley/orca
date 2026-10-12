@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) void {
             stderr.flush() catch {};
             std.process.exit(usage_exit_status);
         }
+        if (err == error.ModelDownloadFailed) std.process.exit(1);
         stderr.print("orca-cli: {s}\n", .{describe(err)}) catch {};
         stderr.flush() catch {};
         std.process.exit(1);
@@ -47,6 +48,7 @@ fn describe(err: anyerror) []const u8 {
         error.EmbeddingModelMissing => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names does not exist; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
         error.EmbeddingModelMismatch => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not the model this build expects, by size or SHA-256; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
         error.EmbeddingsNotBuilt => "the audio-embedding model cannot be used: this orca-cli was built with -Dembeddings=false; build without it to use --embedding-model or ORCA_EMBEDDING_MODEL",
+        error.ModelDownloadNotBuilt => "this orca-cli was built with -Dembeddings=false and cannot use the audio-embedding model; build without it to download the model",
         error.EmbeddingModelUnusable => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names could not be read, or ONNX Runtime could not load it; check that it is a readable file and that ONNX Runtime 1.20 or newer is installed",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
         error.UnknownArtist => "no artist with that id",
@@ -274,6 +276,7 @@ const commands = [_]Command{
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND [--albums]] [OFFSET]", .min_arguments = 1, .max_arguments = 4, .run = listHealthIssues },
     .{ .name = "stats", .usage = "stats DATABASE [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 3, .run = printLibraryStats },
+    .{ .name = "download-embedding-model", .usage = "download-embedding-model PATH", .min_arguments = 1, .max_arguments = 1, .run = downloadEmbeddingModel },
     .{ .name = "listens", .usage = "listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]", .min_arguments = 1, .max_arguments = 4, .run = listenSettings },
     .{ .name = "cache", .usage = "cache DATABASE [--clear]", .min_arguments = 1, .max_arguments = 2, .run = providerCache },
     .{ .name = "sources", .usage = "sources", .min_arguments = 0, .max_arguments = 0, .run = listProviderSources, .shares_usage_line = true },
@@ -958,6 +961,15 @@ const help_details =
     \\whether any measurement is stored for their bytes, missing, the
     \\measurements outdated files lack (loudness_and_checks, fingerprint,
     \\features, or -), and measurement_set, which changes with them.
+    \\
+    \\download-embedding-model fetches the audio-embedding model from Orca's
+    \\GitHub releases and writes it to PATH, creating its directory. It needs
+    \\no database. It prints `progress bytes= total=` lines to standard error
+    \\every half second and PATH, made absolute, to standard output once the
+    \\file is in place. A file is installed only when its size and SHA-256
+    \\are the ones this build expects; a PATH that already holds the model is
+    \\left alone and nothing is requested. On a failure PATH is unchanged, the
+    \\reason goes to standard error and the exit status is 1.
     \\
     \\listens prints policy=, record= and listens=. --policy=half keeps a play
     \\heard for half the track or four minutes, ListenBrainz's rule; 30s keeps
@@ -2134,6 +2146,55 @@ fn listProviderSources(context: Context) !void {
         if (source.licence_url) |licence_url| try context.stdout.print("\t{s}", .{licence_url});
         try context.stdout.writeAll("\n");
     }
+}
+
+const download_progress_interval_ms = 500;
+
+fn downloadEmbeddingModel(context: Context) !void {
+    if (context.arguments[0].len == 0) return error.Usage;
+    const destination = try absolutePath(context, context.arguments[0]);
+    var stderr_buffer: [256]u8 = undefined;
+    var stderr_file_writer: std.Io.File.Writer = .initStreaming(.stderr(), context.io, &stderr_buffer);
+    const stderr = &stderr_file_writer.interface;
+
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    const job_handle = runtime.startEmbeddingModelDownload(destination) catch |err| return switch (@as(anyerror, err)) {
+        error.EmbeddingsNotBuilt => error.ModelDownloadNotBuilt,
+        else => err,
+    };
+    var since_printed_ms: u64 = download_progress_interval_ms;
+    while (true) {
+        runtime.pump();
+        while (runtime.pollEvent()) |_| {}
+        while (runtime.pollTelemetry()) |_| {}
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        const finished = switch (snapshot.state) {
+            .succeeded, .failed, .cancelled => true,
+            else => false,
+        };
+        if (finished or since_printed_ms >= download_progress_interval_ms) {
+            try stderr.print("progress bytes={d} total={d}\n", .{ snapshot.completed_units, snapshot.total_units orelse 0 });
+            try stderr.flush();
+            since_printed_ms = 0;
+        }
+        switch (snapshot.state) {
+            .succeeded => break,
+            .failed, .cancelled => {
+                const reason = snapshot.detail.slice();
+                try stderr.print("orca-cli: the audio-embedding model was not downloaded: {s}\n", .{
+                    if (reason.len == 0) "the download was cancelled" else reason,
+                });
+                try stderr.flush();
+                return error.ModelDownloadFailed;
+            },
+            else => {},
+        }
+        sleepMilliseconds(20);
+        since_printed_ms += 20;
+    }
+    try context.stdout.print("{s}\n", .{destination});
 }
 
 fn listSupportedFormats(context: Context) !void {

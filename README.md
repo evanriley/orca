@@ -249,11 +249,19 @@ The tests that run the embedding model are skipped unless
 
 Radio and Daily Mixes rank by how tracks sound when Orca has its
 audio-embedding model, `clap_audio_int8.onnx` (32.6 MB). Without the file they
-rank by tempo, key and energy instead, and nothing else changes. Orca never
-downloads the file itself.
+rank by tempo, key and energy instead, and nothing else changes. Orca
+downloads the file only when asked to.
 
-The Nix package includes the model. For any other build, download it to
-`orca-gtk`'s data directory and check it:
+The Nix package includes the model. For any other build, `orca-cli` downloads
+it to `orca-gtk`'s data directory and installs it only when its size and
+SHA-256 are the ones the build expects:
+
+```sh
+orca-cli download-embedding-model \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/orca/models/clap_audio_int8.onnx"
+```
+
+`curl` does the same without a build of Orca:
 
 ```sh
 models="${XDG_DATA_HOME:-$HOME/.local/share}/orca/models"

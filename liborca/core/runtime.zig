@@ -15,6 +15,7 @@ const handle = @import("handle.zig");
 const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
 const job_worker = @import("job_worker.zig");
+const model_download = @import("model_download.zig");
 const listen_worker = @import("listen_worker.zig");
 const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
@@ -32,6 +33,7 @@ const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_radio = @import("runtime_radio.zig");
 const runtime_home = @import("runtime_home.zig");
 const runtime_mixes = @import("runtime_mixes.zig");
+const runtime_model_download = @import("runtime_model_download.zig");
 const runtime_resume = @import("runtime_resume.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const storage = @import("../storage/root.zig");
@@ -561,6 +563,7 @@ pub const ScanStats = job_worker.ScanStats;
 pub const ScanStage = job_worker.ScanStage;
 pub const MatchStats = job_worker.MatchStats;
 pub const MatchingHooks = job_worker.MatchingHooks;
+pub const ModelDownloadHooks = model_download.Hooks;
 const PendingTagWrite = job_worker.PendingTagWrite;
 const JobWorker = job_worker.JobWorker;
 
@@ -733,6 +736,9 @@ pub const OrcaRuntime = struct {
     /// Replaced by tests that must not reach a network or wait in real time.
     listen_hooks: listen_worker.Hooks = .{},
     matching_hooks: MatchingHooks = .{},
+    /// The audio-embedding model download in flight. Control lane only.
+    model_download: ?*model_download.Download = null,
+    model_download_hooks: ModelDownloadHooks = .{},
     /// Caps the watches each watcher adds, as `fs.inotify.max_user_watches`
     /// would, so tests can reach the limit.
     watch_limit: ?u32 = null,
@@ -795,6 +801,7 @@ pub const OrcaRuntime = struct {
         runtime_listens.wakeListenWorkers(self);
         self.work_registry.drain();
         runtime_jobs.finalizeDrainedJobWorkers(self);
+        runtime_model_download.finalizeDrained(self);
         self.releaseDrainedArtworkLoaders();
         self.releaseDrainedBrowseLoaders();
         runtime_radio.releaseDrainedRadio(self);
@@ -1517,6 +1524,21 @@ pub const OrcaRuntime = struct {
 
     pub fn embeddingModelState(self: *const OrcaRuntime) EmbeddingModelState {
         return self.embedding_model.state();
+    }
+
+    /// Starts downloading the audio-embedding model to `destination`, as a
+    /// `model_download` Job that belongs to no Library, is never queued and
+    /// cannot be paused; its units are bytes. Nothing is written to
+    /// `destination` but a file of the expected size and SHA-256, which the
+    /// runtime then uses as `setEmbeddingModelPath` would. A file that is
+    /// already the model is kept and nothing is requested. A failed Job's
+    /// snapshot keeps the reason as its `detail`.
+    /// `error.EmbeddingsNotBuilt` without embeddings,
+    /// `error.ClientIdentityRequired` before `setClientIdentity`,
+    /// `error.InvalidArgument` for an empty `destination`, and
+    /// `error.ModelDownloadAlreadyRunning` while one runs.
+    pub fn startEmbeddingModelDownload(self: *OrcaRuntime, destination: []const u8) !JobHandle {
+        return runtime_model_download.start(self, destination);
     }
 
     /// Points AcoustID lookups and submissions started afterwards at another
@@ -4180,6 +4202,7 @@ pub const OrcaRuntime = struct {
         self.work_registry.requestCancellation();
         runtime_listens.wakeListenWorkers(self);
         self.work_registry.drain();
+        runtime_model_download.markDrained(self);
         self.releaseDrainedArtworkLoaders();
         self.releaseDrainedBrowseLoaders();
         runtime_radio.releaseDrainedRadio(self);
