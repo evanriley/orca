@@ -10,7 +10,9 @@ wants: integrated loudness (a gated ITU-R BS.1770 mean summing every channel's
 K-weighted energy with weight 1.0), a ReplayGain figure derived from it, sample
 peak, RMS, clipped samples, leading, trailing and total silence, a bucketed
 waveform, a temporal fingerprint with a decoded-audio hash, the AcoustID
-fingerprint and [audio features](#audio-features). `library/analysis_pass.zig` measures every file in a Library, so
+fingerprint, [audio features](#audio-features) and, for a caller that supplies
+the model, an [audio embedding](#audio-embedding).
+`library/analysis_pass.zig` measures every file in a Library, so
 ReplayGain on playback and duplicate detection always have a measurement.
 Only mono and stereo are measured: a file with more than two channels fails
 with `UnsupportedChannelCount`, because equal channel weights would misstate a
@@ -131,6 +133,66 @@ exact.
 
 `zig build -Doptimize=ReleaseFast analysis-bench -- FILE` times one file's
 analysis with and without the features.
+
+## Audio embedding
+
+`analysis/audio_embedding.zig` turns a file into one 512-value vector that
+places it among other files by how it sounds. The vector is the output of the
+pinned CLAP audio model, run through ONNX Runtime; builds with
+`-Dembeddings=false` have no such measurement. The engine never opens or
+downloads the model: the host opens one `EmbeddingModel` from a file, which is
+checked by size and SHA-256, and passes it in. Without a model an analysis
+measures and stores exactly what it does in a build without embeddings.
+
+The measurement shares the decode with the others. It keeps at most three
+windows of 10 s as mono (the mean of the channels) at the file's own rate, so
+its memory is bounded by 30 s of audio. The windows depend on the file's
+length, taken from the decoder's frame count:
+
+| Length | Windows |
+| --- | --- |
+| 30 s or more | three, centred at 25 %, 50 % and 75 % of the file |
+| 10 s to 30 s | one or two whole 10 s windows from the start |
+| under 10 s | the whole file, repeated to fill 10 s |
+| unknown | the first 10 s |
+
+When the decode ends, each window is resampled to 48 kHz by libsamplerate
+(`resampler.SampleRate`, `sinc_fastest`), converted to the model's log-mel
+input and embedded. Each window's output is scaled to unit length, the
+outputs are averaged, and the mean is scaled to unit length again. A window
+the decode never reached, because the file is shorter than its frame count
+says, is left out.
+
+The result is stored in `analysis_results` as kind 7, `orca.audio-embedding`
+version 1, under a parameter hash of the model's SHA-256, the sample rate, the
+window rule, the silence threshold and the converter, and the content hash of
+the bytes. A different model is therefore a different key. The stored result
+is 524 bytes:
+
+| Offset | Size | Content |
+| --- | --- | --- |
+| 0 | 4 | `OREM` |
+| 4 | 2 | encoding version, 1, little-endian |
+| 6 | 1 | flags; bit 0 is set when a vector follows |
+| 7 | 1 | number of windows embedded |
+| 8 | 4 | scale, a little-endian IEEE 754 single |
+| 12 | 512 | the vector as signed bytes |
+
+A component is its byte times the scale; the scale maps the largest component
+to 127. `audio_embedding.Result.encode` and `decode` are the two directions.
+A file under 1 s, or one whose windows all peak below −80 dBFS, is stored with
+no vector, so it is not measured again until its bytes change. A failure of
+the model, the resampler or an allocation costs only this result: the file's
+other measurements are stored, and the embedding is tried again by the next
+analysis that has a model.
+
+`Runtime.libraryAnalyzeFile` measures the embedding of one file when its
+options carry a model, and `orca-cli analyze` takes the model's path from
+`--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass does not
+measure it.
+
+`zig build -Doptimize=ReleaseFast analysis-bench -- FILE 3 MODEL` also times
+the capture, the resampling, the log-mel front-end and the model for one file.
 
 ## The pass
 

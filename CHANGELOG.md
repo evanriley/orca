@@ -9,8 +9,17 @@
   and links `libonnxruntime`, 1.20 or newer, found through pkg-config;
   `-Dembeddings=false` builds without it. The model is one file checked by
   size and SHA-256 before it is loaded, and `scripts/embedding/` holds the
-  scripts that export it and its test references. Nothing computes
-  embeddings yet.
+  scripts that export it and its test references.
+- **One file's analysis can measure an audio embedding.** Given the model,
+  the analysis decode also keeps up to three 10 s windows, embeds each with
+  the CLAP audio model and stores their unit-length mean as 512 signed bytes
+  and a scale, as `analysis_results` kind 7 (`orca.audio-embedding`). A file
+  under 1 s or silent is stored as having none. `Runtime.libraryAnalyzeFile`
+  takes a `FileAnalysisOptions` whose `embedding_model` is an
+  `EmbeddingModel` the caller opened, and `orca-cli analyze` takes
+  `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL`. Without a model an
+  analysis stores what it did before, and the library-wide pass does not
+  measure embeddings. `analysis-bench` takes a model to time the stages.
 
 ### Changed
 

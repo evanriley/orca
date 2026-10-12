@@ -4,6 +4,7 @@ const database = @import("../database/root.zig");
 const scanner = @import("../library/scanner.zig");
 const content_hash = @import("../storage/content_hash.zig");
 const storage = @import("../storage/root.zig");
+const audio_embedding = @import("audio_embedding.zig");
 const audio_features = @import("audio_features.zig");
 const chromaprint = @import("chromaprint.zig");
 const diagnostics = @import("diagnostics.zig");
@@ -131,6 +132,30 @@ pub fn featuresKey(
     };
 }
 
+pub fn embeddingSelector() database.repository.AnalysisSelector {
+    return .{
+        .kind = audio_embedding.cache_kind,
+        .algorithm_id = audio_embedding.algorithm_id,
+        .algorithm_version = audio_embedding.algorithm_version,
+        .parameter_hash = audio_embedding.parameterHash(),
+    };
+}
+
+pub fn embeddingKey(
+    file_id: i64,
+    source_identity: content_hash.Digest,
+) database.AnalysisCacheKey {
+    const selector = embeddingSelector();
+    return .{
+        .file_id = file_id,
+        .kind = selector.kind,
+        .algorithm_id = selector.algorithm_id,
+        .algorithm_version = selector.algorithm_version,
+        .parameter_hash = selector.parameter_hash,
+        .source_identity = source_identity,
+    };
+}
+
 pub const undecodable_cache_kind: u8 = 4;
 pub const undecodable_algorithm_id = "orca.decoder-set";
 /// Bump whenever a decoder starts accepting content it used to refuse without
@@ -226,6 +251,7 @@ pub const Analysis = struct {
     /// Tempo, key, onset rate and centroid under the default
     /// `audio_features.Parameters`. Null only when the analyzer failed.
     features: ?audio_features.Features,
+    embedding: ?audio_embedding.Result,
     /// Which results this call measured rather than took from storage.
     measured: Measured,
     cache_hit: bool,
@@ -246,6 +272,7 @@ pub const Analysis = struct {
         fingerprint: bool = false,
         chromaprint: bool = false,
         features: bool = false,
+        embedding: bool = false,
     };
 
     pub fn deinit(self: Analysis) void {
@@ -264,6 +291,7 @@ pub const StoredResults = struct {
     fingerprint: ?[]const u8 = null,
     chromaprint: ?[]const u8 = null,
     features: ?[]const u8 = null,
+    embedding: ?[]const u8 = null,
 
     /// Whether these hold every result a decode would otherwise be needed
     /// for. A missing AcoustID fingerprint never forces a decode: audio too
@@ -279,6 +307,7 @@ const Reused = struct {
     fingerprint: ?fingerprint.Result = null,
     chromaprint: ?chromaprint.Fingerprint = null,
     features: ?audio_features.Features = null,
+    embedding: ?audio_embedding.Result = null,
 
     fn complete(self: Reused) bool {
         return self.diagnostics != null and self.fingerprint != null and self.features != null;
@@ -358,6 +387,9 @@ pub const Service = struct {
     cache: ?*database.AnalysisCacheRepository = null,
     cancellation: ?*const scanner.CancellationToken = null,
     progress: ?ProgressCallback = null,
+    /// The front-end is not shareable: a Service with an embedder analyzes
+    /// on one thread at a time.
+    embedding: ?audio_embedding.Embedder = null,
     /// Analysis is background work: yield after each bounded I/O/decode chunk
     /// so transport and render threads remain schedulable on constrained hosts.
     yield_between_chunks: bool = true,
@@ -448,6 +480,8 @@ pub const Service = struct {
         const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
         const chromaprint_key = chromaprint.cacheKey(file_id orelse 0, source_identity, .{});
         const features_key = featuresKey(file_id orelse 0, source_identity);
+        const embedding_key = embeddingKey(file_id orelse 0, source_identity);
+        const embedder: ?audio_embedding.Embedder = if (audio_embedding.enabled) self.embedding else null;
         const cache = if (file_id == null) null else self.cache;
 
         var from_cache: StoredResults = .{ .source_identity = source_identity };
@@ -457,6 +491,7 @@ pub const Service = struct {
             from_cache.fingerprint = try value.get(self.allocator, fingerprint_key);
             from_cache.chromaprint = try value.get(self.allocator, chromaprint_key);
             from_cache.features = try value.get(self.allocator, features_key);
+            if (embedder != null) from_cache.embedding = try value.get(self.allocator, embedding_key);
         }
         var reused: Reused = .{};
         errdefer reused.deinit();
@@ -464,7 +499,7 @@ pub const Service = struct {
             if (std.mem.eql(u8, &results.source_identity, &source_identity))
                 reused = self.decodeStored(results);
         }
-        if (reused.complete()) {
+        if (reused.complete() and (embedder == null or reused.embedding != null)) {
             if (self.cancelled()) return error.Cancelled;
             try self.verifyIdentity(path, initial_identity);
             return .{
@@ -472,6 +507,7 @@ pub const Service = struct {
                 .fingerprint = reused.fingerprint.?,
                 .chromaprint = reused.chromaprint,
                 .features = reused.features,
+                .embedding = reused.embedding,
                 .measured = .{},
                 .cache_hit = true,
                 .decoded_frames = null,
@@ -486,6 +522,7 @@ pub const Service = struct {
             .fingerprint = reused.fingerprint == null,
             .chromaprint = reused.chromaprint == null,
             .features = reused.features == null,
+            .embedding = embedder != null and reused.embedding == null,
         };
         var analyzer: ?diagnostics.Analyzer = if (measured.diagnostics) try diagnostics.Analyzer.init(
             self.allocator,
@@ -525,6 +562,13 @@ pub const Service = struct {
             else => null,
         };
         defer if (features) |*value| value.deinit();
+        var embedding: ?audio_embedding.Analyzer = if (!measured.embedding) null else audio_embedding.Analyzer.init(
+            self.allocator,
+            decoder.format.sample_rate,
+            decoder.format.channels,
+            decoder.frame_count,
+        ) catch null;
+        defer if (embedding) |*value| value.deinit();
         const chunk_samples = 4096 * @as(usize, decoder.format.channels);
         const samples = try self.allocator.alloc(f32, chunk_samples);
         defer self.allocator.free(samples);
@@ -556,6 +600,10 @@ pub const Service = struct {
                 value.deinit();
                 features = null;
             };
+            if (embedding) |*value| value.process(chunk) catch {
+                value.deinit();
+                embedding = null;
+            };
             completed_frames += frames;
             if (self.progress) |callback| callback.update(callback.context, .{
                 .completed_frames = completed_frames,
@@ -572,6 +620,7 @@ pub const Service = struct {
             else => null,
         };
         if (features) |*value| reused.features = value.finish() catch null;
+        if (embedding) |*value| reused.embedding = value.finish(embedder.?) catch null;
 
         try self.verifyIdentity(path, initial_identity);
         if (cache) |value| {
@@ -591,12 +640,14 @@ pub const Service = struct {
                 try value.put(chromaprint_key, bytes);
             };
             if (measured.features) if (reused.features) |result| try value.put(features_key, &result.encode());
+            if (measured.embedding) if (reused.embedding) |result| try value.put(embedding_key, &result.encode());
         }
         return .{
             .diagnostics = reused.diagnostics.?,
             .fingerprint = reused.fingerprint.?,
             .chromaprint = reused.chromaprint,
             .features = reused.features,
+            .embedding = reused.embedding,
             .measured = measured,
             .cache_hit = false,
             .decoded_frames = completed_frames,
@@ -618,7 +669,13 @@ pub const Service = struct {
     }
 
     fn freeStored(self: Service, results: StoredResults) void {
-        inline for (.{ results.diagnostics, results.fingerprint, results.chromaprint, results.features }) |bytes| {
+        inline for (.{
+            results.diagnostics,
+            results.fingerprint,
+            results.chromaprint,
+            results.features,
+            results.embedding,
+        }) |bytes| {
             if (bytes) |value| self.allocator.free(value);
         }
     }
@@ -629,6 +686,7 @@ pub const Service = struct {
         if (results.fingerprint) |bytes| reused.fingerprint = fingerprint.decode(self.allocator, bytes) catch null;
         if (results.chromaprint) |bytes| reused.chromaprint = chromaprint.Fingerprint.decode(self.allocator, bytes) catch null;
         if (results.features) |bytes| reused.features = audio_features.Features.decode(bytes) catch null;
+        if (results.embedding) |bytes| reused.embedding = audio_embedding.Result.decode(bytes) catch null;
         return reused;
     }
 };
@@ -764,6 +822,95 @@ test "the library keeps the audio features a default analysis stores, under the 
     try std.testing.expectEqual(@as(i64, 0), statement.columnInt64(2));
     try std.testing.expectEqual(@as(f64, 1.5), statement.columnDouble(3));
     try std.testing.expectEqual(@as(f64, 900.25), statement.columnDouble(4));
+}
+
+fn storedEmbeddings(library: *database.LibraryDatabase, file_id: i64) !i64 {
+    var statement = try library.database.prepare(
+        "SELECT count(*) FROM analysis_results WHERE file_id = ?1 AND kind = 7;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+test "a service without an embedder measures and stores no audio embedding" {
+    const allocator = std.testing.allocator;
+    var library = try database.LibraryDatabase.open(
+        allocator,
+        std.testing.io,
+        "file:orca-analysis-no-embedder?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const codecs = codec.CodecRegistry.builtins();
+    const service: Service = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .codecs = &codecs,
+        .cache = &library.analysis_cache,
+    };
+    const path = "fixtures/audio/fingerprint-reference.mp3";
+    const binding = try library.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:no-embedder" });
+    const first = try service.analyzeFile(binding.file_id, path, .{});
+    defer first.deinit();
+    try std.testing.expect(first.embedding == null);
+    try std.testing.expect(!first.measured.embedding);
+    try std.testing.expectEqual(@as(i64, 0), try storedEmbeddings(&library, binding.file_id));
+    const second = try service.analyzeFile(binding.file_id, path, .{});
+    defer second.deinit();
+    try std.testing.expect(second.cache_hit);
+}
+
+test "an embedder adds the audio embedding to a file whose other results are stored, once" {
+    const allocator = std.testing.allocator;
+    var model = try audio_embedding.Model.open(allocator, std.testing.io, try audio_embedding.testModelPath());
+    defer model.deinit();
+    var front_end = try audio_embedding.FrontEnd.init(allocator);
+    defer front_end.deinit();
+    var library = try database.LibraryDatabase.open(
+        allocator,
+        std.testing.io,
+        "file:orca-analysis-embedder?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const codecs = codec.CodecRegistry.builtins();
+    const without: Service = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .codecs = &codecs,
+        .cache = &library.analysis_cache,
+    };
+    var with = without;
+    with.embedding = .{ .model = model, .front_end = &front_end };
+
+    const path = "fixtures/audio/fingerprint-reference.mp3";
+    const binding = try library.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:embedder" });
+    const plain = try without.analyzeFile(binding.file_id, path, .{});
+    defer plain.deinit();
+
+    const first = try with.analyzeFile(binding.file_id, path, .{});
+    defer first.deinit();
+    try std.testing.expectEqual(Analysis.Measured{ .embedding = true }, first.measured);
+    try std.testing.expectEqual(@as(u8, 1), first.embedding.?.embedding.windows);
+    try std.testing.expectEqual(plain.diagnostics.sample_peak, first.diagnostics.sample_peak);
+    try std.testing.expectEqual(@as(i64, 1), try storedEmbeddings(&library, binding.file_id));
+
+    const second = try with.analyzeFile(binding.file_id, path, .{});
+    defer second.deinit();
+    try std.testing.expect(second.cache_hit);
+    try std.testing.expectEqualSlices(i8, &first.embedding.?.embedding.values, &second.embedding.?.embedding.values);
+    try std.testing.expectEqual(first.embedding.?.embedding.scale, second.embedding.?.embedding.scale);
+
+    const short_path = "fixtures/audio/generated-reference.qoa";
+    const short = try library.resolveOrCreateFile(std.testing.io, short_path, .{ .stable_key = "test:embedder-short" });
+    const none = try with.analyzeFile(short.file_id, short_path, .{});
+    defer none.deinit();
+    try std.testing.expectEqual(audio_embedding.Result.none, none.embedding.?);
+    try std.testing.expectEqual(@as(i64, 1), try storedEmbeddings(&library, short.file_id));
+    const none_again = try with.analyzeFile(short.file_id, short_path, .{});
+    defer none_again.deinit();
+    try std.testing.expect(none_again.cache_hit);
+    try std.testing.expectEqual(audio_embedding.Result.none, none_again.embedding.?);
 }
 
 test "the AcoustID fingerprint taken in the analysis decode is the one a standalone fingerprint takes" {
