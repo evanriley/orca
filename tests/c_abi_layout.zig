@@ -874,6 +874,13 @@ const import_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_ARTIST_VARIETY_";
+        pub const Tag = liborca.ArtistVariety;
+        pub fn consume(value: u8) ?Tag {
+            return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_PROVIDER_SERVICE_";
         pub const Tag = c_api.ProviderService;
         pub fn consume(value: u8) ?Tag {
