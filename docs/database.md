@@ -416,9 +416,10 @@ The tables by purpose; keys are those that carry identity or a contract.
   leaves the file without a row, as does a valid result that holds no vector.
   The scale is not copied; similarity between vectors is a cosine, which does
   not depend on it. `AudioEmbeddingRepository` reads a file's vector, or a
-  page of vectors in file id order, only while the row's `source_identity`
-  equals the file's content hash
-  ([analysis.md](analysis.md#audio-embedding)).
+  page of vectors in file id order with each file's Recording id, only while
+  the row's `source_identity` equals the file's content hash
+  ([analysis.md](analysis.md#audio-embedding)). The page is what
+  [the similarity search](analysis.md#similar-tracks) reads.
 - `library_health_issues`: issues keyed by file and kind. `related_file_id` is
   the other file of a duplicate and `similarity` the fingerprint score behind a
   `likely_duplicate`. `health_dismissals` `(file_id, kind)` stores the

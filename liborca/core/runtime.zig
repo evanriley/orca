@@ -106,6 +106,9 @@ pub const max_radio_pending = runtime_radio.max_pending;
 pub const max_radio_reported_picks = runtime_radio.max_reported_picks;
 pub const RadioPick = library_pass.discovery.Pick;
 pub const RadioPicks = library_pass.discovery.Picks;
+pub const SimilarTrack = library_pass.audio_similarity.SimilarTrack;
+pub const SimilarTracks = library_pass.audio_similarity.SimilarTracks;
+pub const max_similar_tracks = library_pass.audio_similarity.max_neighbours;
 pub const RadioComponents = library_pass.discovery.Components;
 pub const PickReason = library_pass.discovery.PickReason;
 pub const ReasonPart = library_pass.discovery.ReasonPart;
@@ -2234,6 +2237,17 @@ pub const OrcaRuntime = struct {
     /// measured. Read from the database alone.
     pub fn libraryTrackAudioFeatures(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !?AudioFeatures {
         return (try libraryDatabase(self, library)).audio_features.trackFeatures(track_id);
+    }
+
+    pub fn librarySimilarTracks(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+        limit: usize,
+    ) !SimilarTracks {
+        const library_database = try libraryDatabase(self, library);
+        return library_pass.audio_similarity.similarTracks(allocator, library_database.queryDatabase(), track_id, limit);
     }
 
     /// Up to `limit` (at most 512) Recordings a Radio from `seed` would

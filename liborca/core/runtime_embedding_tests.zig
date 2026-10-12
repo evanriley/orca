@@ -193,3 +193,43 @@ test "libraryAnalyzeFile_withModel_storesTheEmbedding" {
     try testing.expect(with.embedding.? == .embedding);
     try testing.expectEqual(@as(i64, 1), try storedEmbeddings(&runtime, library));
 }
+
+test "librarySimilarTracks_seedUnknownTrackAndTrackWithoutEmbedding_returnsTheNearestAndNamesTheErrors" {
+    var runtime = OrcaRuntime.init(testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(testing.io, "file:orca-runtime-similar-tracks?mode=memory&cache=shared");
+    const library_database = try runtime_module.libraryDatabase(&runtime, library);
+    try library_database.database.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'r'), (2, 'r'), (3, 'r'), (4, 'r');
+        \\INSERT INTO files(id, recording_id, size_bytes, quick_hash, content_hash, content_hash_algorithm) VALUES
+        \\    (1, 1, 1, x'01', x'01', 1), (2, 2, 1, x'01', x'01', 1), (3, 3, 1, x'01', x'01', 1), (4, 4, 1, x'01', x'01', 1);
+        \\INSERT INTO tracks(id, recording_id, title) VALUES (11, 1, 'seed'), (12, 2, 'far'), (13, 3, 'near'), (14, 4, 'unmeasured');
+    );
+    var embedding = try library_database.database.prepare(
+        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (?1, x'01', ?2);",
+    );
+    defer embedding.deinit();
+    for ([_][2]i8{ .{ 100, 0 }, .{ 0, 100 }, .{ 80, 60 } }, 1..) |head, file_id| {
+        var vector: [512]i8 = @splat(0);
+        vector[0..2].* = head;
+        try embedding.reset();
+        try embedding.bindInt64(1, @intCast(file_id));
+        try embedding.bindBlob(2, std.mem.asBytes(&vector));
+        _ = try embedding.step();
+    }
+
+    var similar = try runtime.librarySimilarTracks(library, testing.allocator, 11, 10);
+    defer similar.deinit();
+    try testing.expectEqual(@as(usize, 2), similar.items.len);
+    try testing.expectEqual(@as(i64, 13), similar.items[0].track_id);
+    try testing.expectApproxEqAbs(@as(f32, 0.8), similar.items[0].similarity, 1e-6);
+    try testing.expectEqual(@as(i64, 12), similar.items[1].track_id);
+    try testing.expectApproxEqAbs(@as(f32, 0.0), similar.items[1].similarity, 1e-6);
+
+    try testing.expectError(error.TrackNotFound, runtime.librarySimilarTracks(library, testing.allocator, 99, 10));
+    try testing.expectError(error.NoAudioEmbedding, runtime.librarySimilarTracks(library, testing.allocator, 14, 10));
+    try testing.expectError(
+        error.SimilarLimitTooLarge,
+        runtime.librarySimilarTracks(library, testing.allocator, 11, runtime_module.max_similar_tracks + 1),
+    );
+}

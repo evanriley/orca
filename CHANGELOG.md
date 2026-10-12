@@ -48,6 +48,15 @@
   results already stored for unchanged files. `AudioEmbeddingRepository`
   reads a file's vector or a page of them, only for the bytes the file holds
   now. A Library at version 5 cannot be opened by Orca 0.4.0 or earlier.
+- **Orca finds the tracks that sound most like one.**
+  `Runtime.librarySimilarTracks` returns up to 1,000 Tracks whose stored audio
+  embeddings are nearest a Track's by cosine similarity, one per Recording and
+  never the Track's own, nearest first. `orca-cli similar DATABASE TRACK_ID
+  [--limit N]` prints them, 15 by default, and needs no model file. A Track
+  whose file has no current embedding is `error.NoAudioEmbedding`. The search
+  reads the vectors a page at a time and builds no index;
+  `AudioEmbeddingRow` carries the file's Recording id. The C ABI has no call
+  for it.
 
 ### Changed
 
