@@ -41,6 +41,7 @@ declare -A reasons=(
     [libraryReanalyzeFile]="later: one-file re-analysis on the caller's thread (docs/roadmap.md, Later)"
     [setEmbeddingModelPath]="later: the audio-embedding model path and state for C hosts; the Zig runtime API comes first"
     [embeddingModelState]="later: the audio-embedding model path and state for C hosts; the Zig runtime API comes first"
+    [librarySimilarTracks]="later: the Tracks that sound most like one, for C hosts; the Zig runtime API comes first"
     [libraryTrackFingerprint]="later: a Track's fingerprint (docs/roadmap.md, Later)"
     [libraryReleaseLetterIndex]="later: the Albums letter index (docs/roadmap.md, Later)"
     [libraryReleaseQueryTotals]="later: filtered Release totals (docs/roadmap.md, Later)"

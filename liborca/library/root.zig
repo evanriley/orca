@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 pub const acoustid_submission = @import("acoustid_submission.zig");
 pub const analysis_pass = @import("analysis_pass.zig");
 pub const artwork_backfill = @import("artwork_backfill.zig");
+pub const audio_similarity = @import("audio_similarity.zig");
 pub const duplicate_pass = @import("duplicate_pass.zig");
 pub const folder_estimate = @import("folder_estimate.zig");
 pub const lyrics_lookup = @import("lyrics_lookup.zig");
@@ -47,6 +48,7 @@ test {
     _ = @import("acoustid_submission.zig");
     _ = @import("analysis_pass.zig");
     _ = @import("artwork_backfill.zig");
+    _ = @import("audio_similarity.zig");
     _ = @import("duplicate_pass.zig");
     _ = @import("folder_estimate.zig");
     _ = @import("lyrics_lookup.zig");

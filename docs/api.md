@@ -406,6 +406,13 @@ section lists the entry points, errors and limits.
   `libraryUnpairReleaseTrack` restores the replaced values
   (`error.TrackNotPaired`); `libraryReleaseTrackPairings` returns at most 512.
   See [metadata.md](metadata.md#pairing-a-track).
+- `librarySimilarTracks(library, allocator, track_id, limit)` returns the
+  `SimilarTracks` whose audio embeddings are nearest the Track's, each with
+  its `track_id` and `similarity`, nearest first. The caller calls `deinit`.
+  `limit` is at most `max_similar_tracks`, 1,000
+  (`error.SimilarLimitTooLarge`). `error.TrackNotFound` names an unknown
+  Track and `error.NoAudioEmbedding` one whose file has no embedding for the
+  bytes it holds now. See [analysis.md](analysis.md#similar-tracks).
 - `libraryTrackAudioFeatures(library, track_id)` returns the `AudioFeatures`
   of the file a Track plays: optional `tempo` (`bpm`, `confidence`), `key`
   (`pitch` 0–11 with C as 0, `mode` `major` or `minor`, `confidence`),

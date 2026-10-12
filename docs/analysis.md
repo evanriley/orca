@@ -212,10 +212,41 @@ analysis that has a model.
 described in [The embedding in the pass](#the-embedding-in-the-pass).
 
 The `file_audio_embeddings` table holds each file's current vector
-([database.md](database.md)).
+([database.md](database.md)). [Similar tracks](#similar-tracks) describes how
+the vectors are searched.
 
 `zig build -Doptimize=ReleaseFast analysis-bench -- FILE 3 MODEL` also times
 the capture, the resampling, the log-mel front-end and the model for one file.
+
+### Similar tracks
+
+`library/audio_similarity.zig` finds the Recordings that sound most like a
+vector. `nearestRecordings(allocator, embeddings, query, excluded_recordings,
+out)` takes a unit-length `[512]f32` query and fills `out` with `Neighbour`
+values (`recording_id`, `file_id`, `similarity`), returning how many it wrote:
+
+- The similarity is the cosine between the query and a stored vector: their
+  dot product divided by the stored vector's length.
+- The order is similarity descending, then Recording id ascending.
+- A Recording appears once, with the file of its nearest vector. Among files
+  of equal similarity the lowest file id is kept.
+- A file with no Recording, a vector of zero length and a vector measured from
+  bytes the file no longer holds are left out.
+- `excluded_recordings` never appear; the rest fill `out`.
+- `out` holds at most `max_neighbours`, 1,000; a longer one is
+  `error.SimilarLimitTooLarge`.
+
+The search compares every stored vector. It reads them through
+`AudioEmbeddingRepository.embeddingsAfter` in pages of 4,096 rows, about
+2 MiB, and holds one page and `out` at a time. It builds no index.
+
+`unitVector` turns a stored vector into a query.
+`similarTracks(allocator, connection, track_id, limit)` searches with the
+vector of the file the Track plays, excludes the Track's own Recording, and
+names each remaining Recording by its lowest Track id.
+`Runtime.librarySimilarTracks` and `orca-cli similar` call it
+([api.md](api.md#matching-and-release-review), [cli.md](cli.md)). The C ABI
+has no call for it.
 
 ## The pass
 

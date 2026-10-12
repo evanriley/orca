@@ -21,6 +21,8 @@ pub fn main(init: std.process.Init) void {
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.TrackNotFound => "no track with that id",
+        error.NoAudioEmbedding => "the track's file has no audio embedding for the bytes it holds now; run analyze-library with --embedding-model PATH or ORCA_EMBEDDING_MODEL",
+        error.SimilarLimitTooLarge => "--limit must be at most 1000",
         error.UnknownRoot => "no folder with that id",
         error.RootPathOverlaps => "PATH is inside or holds another root, files of another root, or the root's old folder while that still exists",
         error.RootVolumeChanged => "the folder is not on the drive it was added from, so nothing was scanned; mount that drive, or run add-root to accept the drive it is on now",
@@ -353,6 +355,7 @@ const commands = [_]Command{
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
+    .{ .name = "similar", .usage = "similar DATABASE TRACK_ID [--limit N]", .min_arguments = 2, .max_arguments = 4, .run = showSimilarTracks },
     .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--seed N] [--explain]", .min_arguments = 2, .max_arguments = 12, .run = previewRadio },
     .{ .name = "home", .usage = "home DATABASE", .min_arguments = 1, .max_arguments = 1, .run = showHome },
     .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N]", .min_arguments = 1, .max_arguments = 4, .run = showDailyMixes },
@@ -5250,6 +5253,35 @@ fn showAudioFeatures(context: Context) !void {
     try printOptionalDetail(stdout, "onset rate", "{d:.2} /s", features.onset_rate);
     try printOptionalDetail(stdout, "centroid", "{d:.0} Hz", features.centroid_hz);
     try printOptionalDetail(stdout, "energy", "{d:.2}", features.energy);
+}
+
+fn showSimilarTracks(context: Context) !void {
+    const stdout = context.stdout;
+    const track_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var limit: usize = 15;
+    var index: usize = 2;
+    while (index < context.arguments.len) : (index += 1) {
+        if (!std.mem.eql(u8, context.arguments[index], "--limit")) return error.UnknownOption;
+        index += 1;
+        if (index == context.arguments.len) return error.MissingOptionValue;
+        limit = try std.fmt.parseInt(usize, context.arguments[index], 10);
+    }
+    var runtime = liborca.Runtime.init(context.gpa);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var similar = try runtime.librarySimilarTracks(library, context.allocator, track_id, limit);
+    defer similar.deinit();
+    for (similar.items, 1..) |track, rank| {
+        const summary = try runtime.libraryTrackSummary(library, track.track_id);
+        defer if (summary) |found| found.deinit(runtime.allocator);
+        try stdout.print("{d}\t{d}\t{s} - {s}\t{d:.3}\n", .{
+            rank,
+            track.track_id,
+            if (summary) |found| found.artist else "",
+            if (summary) |found| found.title else "",
+            track.similarity,
+        });
+    }
 }
 
 fn previewRadio(context: Context) !void {
