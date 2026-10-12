@@ -548,9 +548,11 @@ switches, the session's feedback counts with Undo feedback, and a note on the
 signals Radio uses. Every view reads `playerRadio` and `playerRadioPicks` on
 the tick; a control change calls `playerSetRadioOptions`, which replaces only
 the pending picks. Settings › Listening holds Radio & Daily Mixes, stored with
-`setLibraryDiscoverySettings`, and Show listening stats on Home, an `orca-gtk`
-setting in `[listening]`. Its Sound Similarity card chooses the
-[embedding model](#embedding-model) and shows its state.
+`setLibraryDiscoverySettings`; its Artist variety row sets
+`discovery.artist_variety`, and a change remakes the day's Daily Mixes. It also
+holds Show listening stats on Home, an `orca-gtk` setting in `[listening]`. Its
+Sound Similarity card chooses the [embedding model](#embedding-model) and
+shows its state.
 
 `orca-gtk` opens on Home, the first sidebar item in its own unlabeled group;
 Settings › General › Default page can choose another start page. Home reads the

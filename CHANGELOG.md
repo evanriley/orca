@@ -13,14 +13,15 @@
   with no two consecutive entries by the same Artist; at `strict` the limits
   are 1 in 10 and 1 per mix; `relaxed` keeps the previous picks. Radio relaxes
   the limit with the seed-Artist cap when nothing else fits, and a mix goes
-  above its per-Artist limit only while it is under 60 minutes.
-  `RadioOptions.artist_variety` and `DailyMixesRequest.artist_variety` replace
-  the setting for one session or one generation, as `--artist-variety` does for
-  `orca-cli radio` and `orca-cli mixes`. In the C ABI the field
-  `artist_variety` of `orca_discovery_settings` (the first of its former
-  reserved bytes; the struct keeps its size and `ORCA_ABI_VERSION`) reads the
-  setting as an `orca_artist_variety` (1, 2 or 3), and a write of 0 keeps the
-  stored value.
+  above its per-Artist limit only while it is under 60 minutes. `orca-gtk` has
+  an Artist variety row in Settings › Listening that remakes the day's Daily
+  Mixes on a change. `RadioOptions.artist_variety` and
+  `DailyMixesRequest.artist_variety` replace the setting for one session or one
+  generation, as `--artist-variety` does for `orca-cli radio` and `orca-cli
+  mixes`. In the C ABI the field `artist_variety` of `orca_discovery_settings`
+  (the first of its former reserved bytes; the struct keeps its size and
+  `ORCA_ABI_VERSION`) reads the setting as an `orca_artist_variety` (1, 2 or
+  3), and a write of 0 keeps the stored value.
 - **`liborca` measures audio embeddings with either of two models.** The
   model file a host names is recognised by its size and SHA-256 as
   `clap_htsat_unfused` (512 values) or the new `discogs_maest`
