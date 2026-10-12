@@ -67,14 +67,14 @@ of the Library's energy. Filters of one kind admit a Recording that matches
 any of them; filters of different kinds must all match.
 
 An SQL prefilter caps the pool at 2,000 Recordings, drawn in turn from: the
-profile and related Artists (600), the 8 strongest profile genres (600), the
-300 most co-listened Recordings (300), the 20 most co-listened Artists (200),
-the 300 Recordings nearest the seed's embedding (300), Release years within 5
-of the seed range (200), and then any eligible Recording. A seed without an
-embedding draws tempo within 10% of the seed's or of its half or double (300)
-in place of the nearest Recordings. Each draw is ordered by a hash of the
-Recording and the session seed, so the pool varies between sessions without
-favouring low ids.
+profile and related Artists (600), the 8 profile genres with the highest
+weight times rarity (600), the 300 most co-listened Recordings (300), the 20
+most co-listened Artists (200), the 300 Recordings nearest the seed's
+embedding (300), Release years within 5 of the seed range (200), and then any
+eligible Recording. A seed without an embedding draws tempo within 10% of the
+seed's or of its half or double (300) in place of the nearest Recordings. Each
+draw is ordered by a hash of the Recording and the session seed, so the pool
+varies between sessions without favouring low ids.
 
 ## Scoring
 
@@ -107,8 +107,18 @@ tilt from the setting.
 
 - Artist: 1.0 for a profile Artist at its profile weight, or its related
   weight.
-- Genre: the mean of the profile weights of the candidate's genres, its first
-  genre counting 1.0 and the others 0.5; a genre not in the profile counts 0.
+- Genre: a shared genre counts for how rare it is in the Library. The
+  rarity of a genre is `clamp(ln(N / n) / ln(100), 0.5, 1)`, where `N` is
+  the number of Tracks with at least one genre and `n` the number carrying the
+  genre; a genre on at most `N / 100` Tracks has rarity 1, one on `N / 10` or
+  more has 0.5, and a genre outside the 4,096 most common, or an empty
+  Library, counts 1. A `genre` seed's own genre, which is also a Daily Mix
+  cluster's genre, has rarity 1 whatever its count. With `p` a genre's profile
+  weight (0 when absent) and `c` 1.0 for the candidate's first genre and 0.5
+  for its others, the score is the cosine similarity of the vectors
+  `p × rarity` over the profile's genres and `c × rarity` over the candidate's
+  genres, multiplied by the highest rarity among the genres they share. A
+  candidate with no genre in common, or none at all, scores 0.
 - Audio, for a seed with an embedding:
   `clamp(1 − 0.5 × (high − s) / max(high − low, 0.01), 0, 1)`, where `s` is
   the cosine similarity between the seed's embedding and the nearest of the
@@ -196,7 +206,7 @@ value, and each is true of the pick:
 - `same_artist` only for the seed's own Artists; `related_artist` names the
   seed Artist ListenBrainz related it to.
 - `shared_genre` names the genre the pick and the profile share with the
-  highest profile weight.
+  highest profile weight times rarity, the rarer of two that tie.
 - `often_after` needs at least two distinct seed listens followed by the
   pick: an Artist for an `artist` seed, otherwise the seed Recording it
   followed most.

@@ -263,8 +263,6 @@ release itself is the maintainer's call.
 
 - A larger or music-specific embedding model, and mixing the embedding with a
   timbre descriptor.
-- Genre rarity weighting in Radio: a shared rare genre counts for more than a
-  shared common one.
 - Exact album loudness from block energies instead of a weighted mean.
 - True-peak measurement, 4x oversampled, and spectral transcode detection.
 
