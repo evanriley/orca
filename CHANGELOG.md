@@ -21,6 +21,13 @@
   analysis stores what it did before, and the library-wide pass does not
   measure embeddings. `analysis-bench` takes a model to time the stages.
 
+- **The Library keeps each file's audio embedding in a table.** Library schema
+  version 5 adds `file_audio_embeddings`, kept by triggers on
+  `analysis_results` as `file_audio_features` is, and fills it from the kind 7
+  results already stored for unchanged files. `AudioEmbeddingRepository`
+  reads a file's vector or a page of them, only for the bytes the file holds
+  now. A Library at version 5 cannot be opened by Orca 0.4.0 or earlier.
+
 ### Changed
 
 - **Radio's Stay close to Explore dial changes which tracks are picked.**

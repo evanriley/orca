@@ -24,18 +24,20 @@ state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
 [metadata.md](metadata.md#tag-write-files)). A Library with no file (in-memory)
 has none of them.
 
-`PRAGMA user_version` selects the schema. The current version is 4. Each
+`PRAGMA user_version` selects the schema. The current version is 5. Each
 version has one step in `migrations.steps`: `baseline` creates version 1, `v2`
 adds to it without rebuilding any table, `v3` drops and recreates the Daily
 Mix tables, whose rows are made again on the next run, and `v4` rebuilds
 `player_queue_entries` to add its foreign keys, nulling a dangling side while
-keeping the row and its position. `migrations.apply` runs
-every step after the database's version, and sets the new version, in one
-transaction, so a failed step leaves the database at its old version. A
-database at version 0 gets the whole schema, versions 1, 2 and 3 are upgraded
-in place, version 4 opens unchanged, and any other `user_version`, negative or
-newer, is refused with `error.SchemaVersionTooNew` and left untouched. A
-Library at version 4 cannot be opened by Orca 0.3.0 or earlier.
+keeping the row and its position, and `v5` adds `file_audio_embeddings` and
+fills it from the kind 7 results already stored for unchanged files.
+`migrations.apply` runs every step after the database's version, and sets the
+new version, in one transaction, so a failed step leaves the database at its
+old version. A database at version 0 gets the whole schema, versions 1 to 4
+are upgraded in place, version 5 opens unchanged, and any other
+`user_version`, negative or newer, is refused with `error.SchemaVersionTooNew`
+and left untouched. A Library at version 5 cannot be opened by Orca 0.4.0 or
+earlier.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
 
@@ -402,6 +404,21 @@ The tables by purpose; keys are those that carry identity or a contract.
   from it at read time ([analysis.md](analysis.md#audio-features));
   `file_audio_features_by_onset_rate`, `file_audio_features_by_centroid` and
   `file_loudness_by_lufs` count the ranks it needs.
+- `file_audio_embeddings`: one row per file with the 512 signed bytes of its
+  audio embedding in `vector` and the `source_identity` of the bytes embedded.
+  Triggers on `analysis_results` keep it: a kind 7 `orca.audio-embedding`
+  version 1 result under the parameter hash of
+  `audio_embedding.parameterHash()`, inserted or with its result updated,
+  deletes the file's row and then inserts one from bytes 13 to 524 of the
+  result, and deleting the result deletes the row with the same
+  `source_identity`. A result that is not 524 bytes, lacks the `OREM` version 1
+  header, has a flags byte other than 1 or a window count outside 1 to 3
+  leaves the file without a row, as does a valid result that holds no vector.
+  The scale is not copied; similarity between vectors is a cosine, which does
+  not depend on it. `AudioEmbeddingRepository` reads a file's vector, or a
+  page of vectors in file id order, only while the row's `source_identity`
+  equals the file's content hash
+  ([analysis.md](analysis.md#audio-embedding)).
 - `library_health_issues`: issues keyed by file and kind. `related_file_id` is
   the other file of a duplicate and `similarity` the fingerprint score behind a
   `likely_duplicate`. `health_dismissals` `(file_id, kind)` stores the
