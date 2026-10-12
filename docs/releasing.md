@@ -19,8 +19,8 @@ alike.
 
 `clap_audio_int8.onnx` is not in the repository. It is the one asset of the
 release tagged `model-clap-int8-1`, which the Nix package, the README's
-download commands and `Runtime.startEmbeddingModelDownload` fetch. liborca
-accepts only the file with the size and SHA-256 in
+download commands and `Runtime.startEmbeddingModelDownload(model, destination)`
+fetch. liborca accepts only the file with the size and SHA-256 in
 `liborca/analysis/audio_embedding.zig`.
 
 A different model is a new file under a new tag, never a replaced asset:

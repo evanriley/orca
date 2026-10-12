@@ -282,15 +282,18 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   wrote. `ORCA_STATUS_NOT_FOUND` is an unknown Track,
   `ORCA_STATUS_INVALID_STATE` a Track whose file has no current embedding and
   `ORCA_STATUS_INVALID_ARGUMENT` a capacity above 1,000.
-  `orca_runtime_start_embedding_model_download(runtime, path, &job)` starts a
-  Job of kind `ORCA_JOB_KIND_MODEL_DOWNLOAD` that belongs to no Library and
-  counts bytes. It installs a file at `path` only when it has the compiled-in
+  `orca_runtime_start_embedding_model_download(runtime, model, path, &job)`
+  starts, for an `orca_embedding_model` (the one value is
+  `ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`, 1), a Job of kind
+  `ORCA_JOB_KIND_MODEL_DOWNLOAD` that belongs to no Library and counts bytes.
+  It installs a file at `path` only when it has the compiled-in
   size and SHA-256, succeeds without a request when `path` already holds the
   model, and then sets the model path as `orca_runtime_set_embedding_model_path`
   does. Progress, cancel and the `job_finished` event use the ordinary Job
   calls; a failed Job's reason is the `detail` of `orca_job_details_get`.
-  `ORCA_STATUS_INVALID_ARGUMENT` is a NULL or empty `path`, one beyond the
-  maximum path length, or a NULL `job`; `ORCA_STATUS_INVALID_STATE` is no
+  `ORCA_STATUS_INVALID_ARGUMENT` is a `model` that is not an
+  `orca_embedding_model`, a NULL or empty `path`, one beyond the maximum path
+  length, or a NULL `job`; `ORCA_STATUS_INVALID_STATE` is no
   client identity; `ORCA_STATUS_BUSY` is a download already running;
   `ORCA_STATUS_UNSUPPORTED` is a build with `-Dembeddings=false`.
 - Radio and discovery: `orca_library_radio_preview` (up to 512 ranked picks
@@ -623,7 +626,7 @@ repeats the lookup, sets the path again and re-reads
 without a restart. The row is read again each time the Listening tab is shown.
 
 For the same three states the row has Download, which calls
-`Runtime.startEmbeddingModelDownload` with
+`Runtime.startEmbeddingModelDownload` for `.clap_htsat_unfused` with
 `$XDG_DATA_HOME/orca/models/clap_audio_int8.onnx`, whichever path the lookup
 chose. Download is not offered when `ORCA_EMBEDDING_MODEL` is set and not
 empty, when the state is `ready`, or in a build without ONNX Runtime. With the

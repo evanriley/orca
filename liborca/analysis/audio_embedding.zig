@@ -43,6 +43,10 @@ pub const model_sha256 = digest: {
 pub const model_file_name = "clap_audio_int8.onnx";
 pub const model_url = "https://github.com/evanriley/orca/releases/download/model-clap-int8-1/" ++ model_file_name;
 
+pub const ModelId = enum(u8) {
+    clap_htsat_unfused = 1,
+};
+
 pub const window_seconds = 10;
 pub const max_windows = 3;
 const window_centres = [max_windows]f64{ 0.25, 0.5, 0.75 };

@@ -21,11 +21,15 @@ pub const Descriptor = struct {
     size: usize,
     sha256: [Sha256.digest_length]u8,
 
-    pub const published: Descriptor = .{
-        .url = audio_embedding.model_url,
-        .size = audio_embedding.model_size,
-        .sha256 = audio_embedding.model_sha256,
-    };
+    pub fn of(model: audio_embedding.ModelId) Descriptor {
+        return switch (model) {
+            .clap_htsat_unfused => .{
+                .url = audio_embedding.model_url,
+                .size = audio_embedding.model_size,
+                .sha256 = audio_embedding.model_sha256,
+            },
+        };
+    }
 };
 
 pub const Hooks = struct {
@@ -33,7 +37,7 @@ pub const Hooks = struct {
     clock: ?network.client.Clock = null,
     wall_clock: ?network.client.Clock = null,
     random: ?std.Random = null,
-    descriptor: Descriptor = .published,
+    descriptor: ?Descriptor = null,
 };
 
 pub const Failure = union(enum) {
@@ -88,6 +92,7 @@ pub const Download = struct {
     job: object.JobHandle,
     destination: embedding_model.OwnedPath,
     identity: network.client.OwnedIdentity,
+    descriptor: Descriptor,
     hooks: Hooks,
     host_signal: *control.HostSignal,
     received: std.atomic.Value(u64) = .init(0),
@@ -111,7 +116,7 @@ pub const Download = struct {
     }
 
     fn transfer(self: *Download) Outcome {
-        const descriptor = self.hooks.descriptor;
+        const descriptor = self.descriptor;
         const destination = self.destination.view();
         if (holds(self.io, destination, descriptor)) {
             self.received.store(descriptor.size, .release);
@@ -145,7 +150,7 @@ pub const Download = struct {
     }
 
     fn receive(self: *Download, file: std.Io.File) Outcome {
-        const descriptor = self.hooks.descriptor;
+        const descriptor = self.descriptor;
         var standard: network.StandardTransport = .init(self.allocator, self.io);
         defer standard.deinit();
         var system_clock: network.SystemClock = .{ .io = self.io };

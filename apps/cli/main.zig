@@ -2160,7 +2160,7 @@ fn downloadEmbeddingModel(context: Context) !void {
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
-    const job_handle = runtime.startEmbeddingModelDownload(destination) catch |err| return switch (@as(anyerror, err)) {
+    const job_handle = runtime.startEmbeddingModelDownload(.clap_htsat_unfused, destination) catch |err| return switch (@as(anyerror, err)) {
         error.EmbeddingsNotBuilt => error.ModelDownloadNotBuilt,
         else => err,
     };

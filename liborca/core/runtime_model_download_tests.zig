@@ -81,7 +81,7 @@ const Rig = struct {
     }
 
     fn start(self: *Rig) !JobHandle {
-        return self.runtime.startEmbeddingModelDownload(self.destination);
+        return self.runtime.startEmbeddingModelDownload(.clap_htsat_unfused, self.destination);
     }
 
     fn keepPrevious(self: *Rig) !void {
@@ -201,7 +201,7 @@ test "startEmbeddingModelDownload_theRealModel_leavesTheRuntimeReady" {
     defer rig.deinit();
     const model = try std.Io.Dir.cwd().readFileAlloc(testing.io, model_path, testing.allocator, .limited(audio_embedding.model_size + 1));
     defer testing.allocator.free(model);
-    rig.runtime.model_download_hooks.descriptor = .published;
+    rig.runtime.model_download_hooks.descriptor = null;
     rig.transport.chunk_bytes = network.client.Sink.max_chunk_bytes;
     try rig.transport.script(redirect(asset_url));
     try rig.transport.script(.{ .respond = .{ .body = model } });
@@ -423,7 +423,7 @@ test "startEmbeddingModelDownload_withoutAClientIdentity_isRefusedAndNothingIsSe
     defer runtime.deinit();
     runtime.model_download_hooks.transport = transport.transport();
 
-    try testing.expectError(error.ClientIdentityRequired, runtime.startEmbeddingModelDownload("model.onnx"));
+    try testing.expectError(error.ClientIdentityRequired, runtime.startEmbeddingModelDownload(.clap_htsat_unfused, "model.onnx"));
     try testing.expectEqual(@as(u32, 0), transport.requestCount());
     try expectAbsent("model.onnx" ++ model_download.part_suffix);
 }
@@ -434,7 +434,7 @@ test "startEmbeddingModelDownload_builtWithoutEmbeddings_isRefused" {
     defer runtime.deinit();
     try runtime.setClientIdentity(network.testing.test_identity);
 
-    try testing.expectError(error.EmbeddingsNotBuilt, runtime.startEmbeddingModelDownload("model.onnx"));
+    try testing.expectError(error.EmbeddingsNotBuilt, runtime.startEmbeddingModelDownload(.clap_htsat_unfused, "model.onnx"));
 }
 
 test "startEmbeddingModelDownload_pathLongerThanAPathMayBe_isRefused" {
@@ -443,7 +443,7 @@ test "startEmbeddingModelDownload_pathLongerThanAPathMayBe_isRefused" {
     defer rig.deinit();
     const long: [std.Io.Dir.max_path_bytes + 1]u8 = @splat('a');
 
-    try testing.expectError(error.NameTooLong, rig.runtime.startEmbeddingModelDownload(&long));
+    try testing.expectError(error.NameTooLong, rig.runtime.startEmbeddingModelDownload(.clap_htsat_unfused, &long));
     try testing.expectEqual(@as(?u64, null), rig.runtime.nextPumpTimeoutMs());
 }
 
@@ -452,7 +452,7 @@ test "startEmbeddingModelDownload_emptyPath_isRefused" {
     try rig.init("model.onnx");
     defer rig.deinit();
 
-    try testing.expectError(error.InvalidArgument, rig.runtime.startEmbeddingModelDownload(""));
+    try testing.expectError(error.InvalidArgument, rig.runtime.startEmbeddingModelDownload(.clap_htsat_unfused, ""));
     try testing.expectEqual(@as(?u64, null), rig.runtime.nextPumpTimeoutMs());
 }
 

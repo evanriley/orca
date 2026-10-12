@@ -452,8 +452,9 @@ section lists the entry points, errors and limits.
   the embedding only when it is `ready`. An analysis takes the path as it was
   when its worker started; see
   [analysis.md](analysis.md#audio-embedding).
-- `startEmbeddingModelDownload(destination)` starts a `model_download` Job
-  that fetches the audio-embedding model from `model_url` in
+- `startEmbeddingModelDownload(model, destination)` starts a `model_download`
+  Job that fetches the audio-embedding `model`, an `EmbeddingModel` (the one
+  member is `clap_htsat_unfused`), from `model_url` in
   `liborca/analysis/audio_embedding.zig` and installs it at `destination`,
   creating the directory. It needs no Library, takes no Library's slot and
   never waits. Its units are bytes and its total is the model's size. A file

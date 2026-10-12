@@ -11,7 +11,7 @@ const Download = model_download.Download;
 const JobHandle = runtime.JobHandle;
 const OrcaRuntime = runtime.OrcaRuntime;
 
-pub fn start(self: *OrcaRuntime, destination: []const u8) !JobHandle {
+pub fn start(self: *OrcaRuntime, model: audio_embedding.ModelId, destination: []const u8) !JobHandle {
     try runtime.requireRunning(self);
     if (!audio_embedding.enabled) return error.EmbeddingsNotBuilt;
     const identity = self.client_identity orelse return error.ClientIdentityRequired;
@@ -19,10 +19,11 @@ pub fn start(self: *OrcaRuntime, destination: []const u8) !JobHandle {
     if (self.model_download != null) return error.ModelDownloadAlreadyRunning;
     const owned_destination: embedding_model.OwnedPath = try .init(destination);
     const io = try runtime_listens.networkIo(self);
+    const descriptor = self.model_download_hooks.descriptor orelse model_download.Descriptor.of(model);
 
     const download = try self.allocator.create(Download);
     errdefer self.allocator.destroy(download);
-    const job_handle = try self.jobs.create(.model_download, self.model_download_hooks.descriptor.size);
+    const job_handle = try self.jobs.create(.model_download, descriptor.size);
     errdefer self.jobs.finish(job_handle, .failed) catch {};
     try self.jobs.start(job_handle, runtime_listens.sampleTime(self).wall_s);
 
@@ -40,6 +41,7 @@ pub fn start(self: *OrcaRuntime, destination: []const u8) !JobHandle {
         .job = job_handle,
         .destination = owned_destination,
         .identity = identity,
+        .descriptor = descriptor,
         .hooks = self.model_download_hooks,
         .host_signal = &self.host_signal,
     };
