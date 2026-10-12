@@ -122,6 +122,15 @@
 
 ### Changed
 
+- **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
+  on few Tracks in the Library now weighs more than one on many: a rarity from
+  1 for a genre on at most a hundredth of the Tracks down to 0.5 for one on a
+  tenth or more scales both the Genre component, now a cosine over the
+  profile's and the candidate's genres, and the choice of the 8 genres that
+  draw candidates and of the genre a pick's `shared_genre` reason names; of
+  two genres that weigh the same, the rarer is chosen. A `genre` seed's own
+  genre and a Daily Mix cluster's genre always have rarity 1.
+
 - **`orca-gtk` describes Radio's sound signal as how tracks sound.** The Radio
   panel's note, the Daily Mix signal line and the descriptions of Analyze no
   longer name only tempo, key and energy.

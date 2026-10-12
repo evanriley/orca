@@ -21,6 +21,9 @@ const max_seed_artists = 64;
 const max_related_sources = 16;
 const max_profile_genres = 32;
 const max_bucket_genres = 8;
+const max_rarity_genres = 4096;
+const rarity_floor_ratio = 100.0;
+const min_genre_rarity = 0.5;
 const max_seed_listens = 2000;
 const max_colisten_rows = 40_000;
 const colisten_window_s = 30 * 60;
@@ -967,11 +970,18 @@ const Profile = struct {
     related: std.AutoHashMapUnmanaged(i64, Related) = .empty,
     genres: std.AutoHashMapUnmanaged(i64, f64) = .empty,
     genre_order: []const ProfileGenre = &.{},
+    genre_rarity: std.AutoHashMapUnmanaged(i64, f64) = .empty,
+    genre_norm: f64 = 0,
     year_low: ?i64 = null,
     year_high: ?i64 = null,
     sound: Sound = .{},
     neighbours: ?SoundNeighbours = null,
     colisten: CoListening = .{},
+
+    fn rarity(self: *const Profile, genre_id: i64) f64 {
+        if (self.seed == .genre and self.seed.genre == genre_id) return 1;
+        return self.genre_rarity.get(genre_id) orelse 1;
+    }
 
     fn hasSound(self: *const Profile) bool {
         return self.neighbours != null or !self.sound.isEmpty();
@@ -1114,6 +1124,34 @@ fn genreWeight(ordinal: i64) f64 {
     return if (ordinal == 0) 1 else 0.5;
 }
 
+fn rarerFirst(profile: *const Profile, a: ProfileGenre, b: ProfileGenre) bool {
+    const rarity_a = profile.rarity(a.id);
+    const rarity_b = profile.rarity(b.id);
+    const x = a.weight * rarity_a;
+    const y = b.weight * rarity_b;
+    if (x != y) return x > y;
+    if (rarity_a != rarity_b) return rarity_a > rarity_b;
+    return heavierFirst({}, a, b);
+}
+
+fn genreRarity(total: f64, carrying: f64) f64 {
+    if (total == 0 or carrying == 0) return 1;
+    return std.math.clamp(@log(total / carrying) / @log(rarity_floor_ratio), min_genre_rarity, 1);
+}
+
+fn loadGenreRarity(arena: std.mem.Allocator, db: sqlite.Database, profile: *Profile) !void {
+    var statement = try db.prepare(
+        "SELECT genre_id, COUNT(DISTINCT track_id), (SELECT COUNT(DISTINCT track_id) FROM track_genres)\n" ++
+            "FROM track_genres GROUP BY genre_id ORDER BY 2 DESC, genre_id LIMIT " ++ std.fmt.comptimePrint("{d}", .{max_rarity_genres}) ++ ";",
+    );
+    defer statement.deinit();
+    while (try statement.step() == .row) {
+        const total: f64 = @floatFromInt(statement.columnInt64(2));
+        const carrying: f64 = @floatFromInt(statement.columnInt64(1));
+        try profile.genre_rarity.put(arena, statement.columnInt64(0), genreRarity(total, carrying));
+    }
+}
+
 fn profileGenres(arena: std.mem.Allocator, db: sqlite.Database, profile: *Profile) !void {
     var ids: std.ArrayList(i64) = .empty;
     for (profile.seed_tracks) |track| try ids.append(arena, track.track_id);
@@ -1144,6 +1182,14 @@ fn profileGenres(arena: std.mem.Allocator, db: sqlite.Database, profile: *Profil
         item.weight = if (!std.math.isFinite(item.weight) or most == 0) 1 else item.weight / most;
         try profile.genres.put(arena, item.id, item.weight);
     }
+    try loadGenreRarity(arena, db, profile);
+    std.mem.sort(ProfileGenre, kept, @as(*const Profile, profile), rarerFirst);
+    var norm: f64 = 0;
+    for (kept) |item| {
+        const a = item.weight * profile.rarity(item.id);
+        norm += a * a;
+    }
+    profile.genre_norm = @sqrt(norm);
     profile.genre_order = kept;
 }
 
@@ -1579,21 +1625,28 @@ fn score(candidate: *Candidate, profile: *const Profile, weights: Components, se
         components.artist = @max(direct, related);
     }
 
-    var genre_sum: f64 = 0;
-    var genre_weight: f64 = 0;
+    var genre_dot: f64 = 0;
+    var genre_norm: f64 = 0;
+    var strength: f64 = 0;
     var best_shared: f64 = 0;
+    var best_rarity: f64 = 0;
     for (candidate.genres) |genre| {
-        const w = genreWeight(genre.ordinal);
-        genre_weight += w;
+        const rarity = profile.rarity(genre.id);
+        const b = genreWeight(genre.ordinal) * rarity;
+        genre_norm += b * b;
         if (profile.genres.get(genre.id)) |p| {
-            genre_sum += w * p;
-            if (p > best_shared or (p == best_shared and candidate.shared_genre != null and genre.id < candidate.shared_genre.?)) {
-                best_shared = p;
+            const a = p * rarity;
+            genre_dot += a * b;
+            strength = @max(strength, rarity);
+            const tied = a == best_shared and candidate.shared_genre != null;
+            if (a > best_shared or (tied and rarity > best_rarity) or (tied and rarity == best_rarity and genre.id < candidate.shared_genre.?)) {
+                best_shared = a;
+                best_rarity = rarity;
                 candidate.shared_genre = genre.id;
             }
         }
     }
-    if (genre_weight > 0) components.genre = genre_sum / genre_weight;
+    if (genre_dot > 0) components.genre = @min(1, genre_dot / (profile.genre_norm * @sqrt(genre_norm))) * strength;
 
     if (profile.neighbours) |*neighbours| {
         const audio = embeddingScore(neighbours.anchors, neighbours.similarities.get(candidate.recording_id));
@@ -2782,4 +2835,96 @@ test "the nearest Recordings are candidates when no other bucket holds them" {
         far = far or candidate.recording_id == outside[1];
     }
     try testing.expect(near and far);
+}
+
+fn openGenreFixture(comptime name: []const u8) !database.LibraryDatabase {
+    var library = try openWideFixture("genre-" ++ name);
+    errdefer library.close();
+    try library.database.exec(
+        \\DELETE FROM track_genres;
+        \\INSERT INTO genres(id, name, key) VALUES (3, 'Rare A', 'rare a'), (4, 'Rare B', 'rare b');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
+        \\    SELECT id, CASE WHEN id <= 1430 THEN 1 WHEN id <= 1490 THEN 2 WHEN id <= 1495 THEN 3 ELSE 4 END, 0, 0 FROM tracks;
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (700, 3, 1, 0);
+    );
+    return library;
+}
+
+fn genreComponent(library: *database.LibraryDatabase, seed: Seed, genres: []const GenreOnTrack) !Candidate {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const source: Source = .of(library);
+    const profile = try buildProfile(arena_state.allocator(), &source, seed, test_now);
+    var candidate = testCandidate(1, 0, 0);
+    candidate.genres = genres;
+    score(&candidate, &profile, Components.mix, .{ .now_s = test_now, .seed = 42 }, 0, 0);
+    return candidate;
+}
+
+test "a shared genre counts for how rare it is in the Library" {
+    var library = try openGenreFixture("rarity");
+    defer library.close();
+    const common = genreRarity(1500, 60);
+    try testing.expect(common > min_genre_rarity and common < 1);
+
+    const shared_common = try genreComponent(&library, .{ .track = 1450 }, &.{.{ .id = 2, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(common, shared_common.components.genre, 1e-12);
+
+    const shared_floor = try genreComponent(&library, .{ .track = 1 }, &.{.{ .id = 1, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(@as(f64, 0.5), shared_floor.components.genre, 1e-12);
+
+    const shared_rare = try genreComponent(&library, .{ .track = 1496 }, &.{.{ .id = 4, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(@as(f64, 1), shared_rare.components.genre, 1e-12);
+
+    const nothing_shared = try genreComponent(&library, .{ .track = 1496 }, &.{.{ .id = 1, .ordinal = 0 }});
+    try testing.expectEqual(@as(f64, 0), nothing_shared.components.genre);
+    try testing.expectEqual(@as(?i64, null), nothing_shared.shared_genre);
+
+    const no_genres = try genreComponent(&library, .{ .track = 1496 }, &.{});
+    try testing.expectEqual(@as(f64, 0), no_genres.components.genre);
+}
+
+test "a Library whose tracks all carry one genre scores that genre at the floor" {
+    var library = try openGenreFixture("single");
+    defer library.close();
+    try library.database.exec(
+        \\DELETE FROM track_genres;
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) SELECT id, 1, 0, 0 FROM tracks;
+    );
+    const shared = try genreComponent(&library, .{ .track = 5 }, &.{.{ .id = 1, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(@as(f64, 0.5), shared.components.genre, 1e-12);
+}
+
+test "a genre seed's own genre counts in full whatever its count" {
+    var library = try openGenreFixture("pinned");
+    defer library.close();
+    const shared = try genreComponent(&library, .{ .genre = 1 }, &.{.{ .id = 1, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(@as(f64, 1), shared.components.genre, 1e-12);
+    try testing.expectEqual(@as(?i64, 1), shared.shared_genre);
+}
+
+test "a rare second genre outranks a common first genre and is the genre a pick shares" {
+    var library = try openGenreFixture("order");
+    defer library.close();
+    const norm = @sqrt(@as(f64, 0.5));
+
+    const rare = try genreComponent(&library, .{ .track = 700 }, &.{.{ .id = 3, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(0.5 / norm, rare.components.genre, 1e-12);
+    const plain = try genreComponent(&library, .{ .track = 700 }, &.{.{ .id = 1, .ordinal = 0 }});
+    try testing.expectApproxEqAbs(0.25 / norm, plain.components.genre, 1e-12);
+
+    const both = try genreComponent(&library, .{ .track = 700 }, &.{ .{ .id = 1, .ordinal = 0 }, .{ .id = 3, .ordinal = 1 } });
+    try testing.expectEqual(@as(?i64, 3), both.shared_genre);
+}
+
+test "the genre bucket orders profile genres by weight times rarity, the rarer first when equal" {
+    var library = try openGenreFixture("bucket");
+    defer library.close();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const source: Source = .of(&library);
+    const profile = try buildProfile(arena_state.allocator(), &source, .{ .track = 700 }, test_now);
+    try testing.expectEqual(@as(usize, 2), profile.genre_order.len);
+    try testing.expectEqual(@as(i64, 3), profile.genre_order[0].id);
+    try testing.expectEqual(@as(i64, 1), profile.genre_order[1].id);
 }
