@@ -33,7 +33,7 @@ scripts/headless-audio.sh zig build test   # tests against a private PipeWire an
 zig build run -- --version    # orca-cli
 zig build bench               # 500k-track persistence benchmark
 zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
-zig build -Doptimize=ReleaseFast analysis-bench -- FILE [ITERATIONS]   # one file's analysis with and without audio features
+zig build -Doptimize=ReleaseFast analysis-bench -- FILE [ITERATIONS [EMBEDDING_MODEL]]   # one file's analysis with and without audio features; with a model, the audio embedding's stages
 ```
 
 ## CLI commands
@@ -65,7 +65,7 @@ zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=
 zig build run -- cache DATABASE [--clear]   # artwork_bytes= photo_bytes= lyrics_bytes= info_bytes= of fetched provider data; --clear deletes it and prints what it held; embedded and folder art and local lyrics stay
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
 zig build run -- health-restore DATABASE FILE_ID KIND
-zig build run -- analyze DATABASE AUDIO
+zig build run -- analyze DATABASE AUDIO [--embedding-model PATH]   # cache=, peak=, rms=, clipped=, silent=, fingerprint_blocks=, chromaprint=, then loudness= and replay_gain= when measured; with a model, also `embedding=stored windows=N`, `embedding=none` (under 1 s or silent) or `embedding=failed`; the model is PATH, else ORCA_EMBEDDING_MODEL; a model that cannot be opened is named on stderr and exits 1 after the other measurements are stored and printed
 zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-after=MS]
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]   # examined= exact= (same bytes) identical= (same lossless audio, other bytes) likely= (fingerprints match) unique= unreadable= batches=, then uncomparable= comparisons= truncated_buckets=; one finding per file, the strongest
 zig build run -- duplicates DATABASE --groups [--limit N] [--offset N]   # id, title, artist, copies= same_recording=yes|no similarity=0.99|- bytes_redundant= verdict=exact_duplicate|identical_audio|likely_duplicate, then `groups= bytes=`; a group's id is its lowest file id
@@ -224,6 +224,7 @@ on any other value; `orca-gtk` ignores it.
 | `ORCA_LISTENBRAINZ_LABS_URL` | ListenBrainz Labs server | CLI |
 | `ORCA_LISTENBRAINZ_TOKEN` | ListenBrainz user token for `scrobble` | CLI |
 | `ORCA_ACOUSTID_USER_KEY` | AcoustID user key for `submit-acoustid` | CLI |
+| `ORCA_EMBEDDING_MODEL` | Audio-embedding model file for `analyze` | CLI |
 | `ORCA_LIBRARY` | Library `orca-gtk` opens | GTK |
 | `ORCA_OUTPUT_DEVICE` | Orca device id that overrides the output menu | GTK |
 | `ORCA_GTK_DEBUG` | Debug topics `art`, `frames` and `reveal`, separated by commas or spaces | GTK |

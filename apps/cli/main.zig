@@ -42,6 +42,12 @@ fn describe(err: anyerror) []const u8 {
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
+        error.EmbeddingModelMissing => "no audio embedding was measured: the file --embedding-model or ORCA_EMBEDDING_MODEL names does not exist; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
+        error.EmbeddingModelMismatch => "no audio embedding was measured: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not the model this build expects, by size or SHA-256; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
+        error.EmbeddingsNotBuilt => "no audio embedding was measured: this orca-cli was built with -Dembeddings=false; build without it to use --embedding-model or ORCA_EMBEDDING_MODEL",
+        error.EmbeddingRuntimeTooOld => "no audio embedding was measured: the installed ONNX Runtime is older than 1.20; install 1.20 or newer",
+        error.EmbeddingSessionFailed => "no audio embedding was measured: ONNX Runtime could not load the embedding model",
+        error.EmbeddingModelUnreadable => "no audio embedding was measured: the file --embedding-model or ORCA_EMBEDDING_MODEL names could not be read; check that it is a readable file",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
         error.UnknownArtist => "no artist with that id",
         error.UnknownDailyMix => "no Daily Mix with that number; run mixes to list them",
@@ -221,7 +227,7 @@ const commands = [_]Command{
     },
     .{ .name = "project", .usage = "project DATABASE", .min_arguments = 1, .max_arguments = 1, .run = projectLibrary, .shares_usage_line = true },
     .{ .name = "backfill", .usage = "backfill DATABASE [--force] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = backfillProperties },
-    .{ .name = "analyze", .usage = "analyze DATABASE AUDIO", .min_arguments = 2, .max_arguments = 2, .run = analyzeFile },
+    .{ .name = "analyze", .usage = "analyze DATABASE AUDIO [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 4, .run = analyzeFile },
     .{
         .name = "analyze-library",
         .usage = "analyze-library DATABASE [--batch=N] [--threads=N]\n" ++ usage_indent ++ "  [--cancel-after=MS]",
@@ -1885,10 +1891,43 @@ fn ignoreDuplicateGroup(context: Context) !void {
 }
 
 fn analyzeFile(context: Context) !void {
+    var model_path: ?[]const u8 = context.environ.get("ORCA_EMBEDDING_MODEL");
+    if (model_path) |path| if (path.len == 0) {
+        model_path = null;
+    };
+    if (context.arguments.len > 2) {
+        if (!std.mem.eql(u8, context.arguments[2], "--embedding-model")) return error.UnknownOption;
+        if (context.arguments.len == 3) return error.MissingOptionValue;
+        model_path = context.arguments[3];
+    }
+    var model_error: ?anyerror = null;
+    var model: ?liborca.EmbeddingModel = if (model_path) |path|
+        liborca.EmbeddingModel.open(context.gpa, context.io, path) catch |err| unopened: {
+            model_error = switch (@as(anyerror, err)) {
+                error.EmbeddingModelMissing,
+                error.EmbeddingModelMismatch,
+                error.EmbeddingsNotBuilt,
+                error.EmbeddingRuntimeTooOld,
+                error.EmbeddingSessionFailed,
+                error.OutOfMemory,
+                => err,
+                else => error.EmbeddingModelUnreadable,
+            };
+            break :unopened null;
+        }
+    else
+        null;
+    defer if (model) |*opened| opened.deinit();
+
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    const result = try runtime.libraryAnalyzeFile(library_handle, context.io, try absolutePath(context, context.arguments[1]));
+    const result = try runtime.libraryAnalyzeFile(
+        library_handle,
+        context.io,
+        try absolutePath(context, context.arguments[1]),
+        .{ .embedding_model = model },
+    );
     defer result.deinit();
     try context.stdout.print(
         "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d} chromaprint={s}\n",
@@ -1906,6 +1945,16 @@ fn analyzeFile(context: Context) !void {
         "loudness={d:.2} LUFS replay_gain={d:.2} dB\n",
         .{ loudness, result.diagnostics.replay_gain_db.? },
     );
+    if (model != null) {
+        if (result.embedding) |embedding| switch (embedding) {
+            .none => try context.stdout.writeAll("embedding=none\n"),
+            .embedding => |vector| try context.stdout.print("embedding=stored windows={d}\n", .{vector.windows}),
+        } else try context.stdout.writeAll("embedding=failed\n");
+    }
+    if (model_error) |err| {
+        try context.stdout.flush();
+        return err;
+    }
 }
 
 fn listHealthIssues(context: Context) !void {

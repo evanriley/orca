@@ -3,12 +3,13 @@ const liborca = @import("liborca");
 
 const service_module = liborca.internal.analysis.service;
 const audio_features = liborca.internal.analysis.audio_features;
+const audio_embedding = liborca.internal.analysis.audio_embedding;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) {
-        std.debug.print("usage: orca-analysis-bench FILE [ITERATIONS]\n", .{});
+        std.debug.print("usage: orca-analysis-bench FILE [ITERATIONS [EMBEDDING_MODEL]]\n", .{});
         return error.MissingArgument;
     }
     const path = args[1];
@@ -84,4 +85,60 @@ pub fn main(init: std.process.Init) !void {
             @divTrunc(alone_ns, std.time.ns_per_ms),
         },
     );
+
+    if (args.len < 4) return;
+    var model = try audio_embedding.Model.open(allocator, init.io, args[3]);
+    defer model.deinit();
+    var front_end = try audio_embedding.FrontEnd.init(allocator);
+    defer front_end.deinit();
+    const resampled = try allocator.create([audio_embedding.window_samples]f32);
+    defer allocator.destroy(resampled);
+    const mel = try allocator.create([audio_embedding.feature_count]f32);
+    defer allocator.destroy(mel);
+    const Stage = enum { capture, resample, front_end, model, finish };
+    var best: std.EnumArray(Stage, i96) = .initFill(std.math.maxInt(i96));
+    var windows: usize = 0;
+    for (0..iterations) |_| {
+        var spent: std.EnumArray(Stage, i96) = .initFill(0);
+        var mark = std.Io.Clock.awake.now(init.io);
+        var analyzer = try audio_embedding.Analyzer.init(allocator, sample_rate, @intCast(channels), frames);
+        defer analyzer.deinit();
+        var offset: usize = 0;
+        while (offset < filled) : (offset += 4096 * channels)
+            try analyzer.process(pcm[offset..@min(filled, offset + 4096 * channels)]);
+        spent.set(.capture, mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds);
+        windows = analyzer.plan.count;
+        for (0..windows) |index| {
+            mark = std.Io.Clock.awake.now(init.io);
+            const samples = try analyzer.windowSamples(index, resampled);
+            spent.getPtr(.resample).* += mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+            if (samples.len == 0) continue;
+            mark = std.Io.Clock.awake.now(init.io);
+            try front_end.melSpectrogram(samples, mel);
+            spent.getPtr(.front_end).* += mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+            mark = std.Io.Clock.awake.now(init.io);
+            var output: [audio_embedding.embedding_size]f32 = undefined;
+            try model.embed(mel, &output);
+            spent.getPtr(.model).* += mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        }
+        mark = std.Io.Clock.awake.now(init.io);
+        std.mem.doNotOptimizeAway(try analyzer.finish(.{ .model = model, .front_end = &front_end }));
+        spent.set(.finish, mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds);
+        for (std.enums.values(Stage)) |stage| best.set(stage, @min(best.get(stage), spent.get(stage)));
+    }
+    std.debug.print(
+        "embedding of {d} windows: capture {d:.1} ms, resample {d:.1} ms, mel front-end {d:.1} ms, model {d:.1} ms, whole finish {d:.1} ms\n",
+        .{
+            windows,
+            milliseconds(best.get(.capture)),
+            milliseconds(best.get(.resample)),
+            milliseconds(best.get(.front_end)),
+            milliseconds(best.get(.model)),
+            milliseconds(best.get(.finish)),
+        },
+    );
+}
+
+fn milliseconds(nanoseconds: i96) f64 {
+    return @as(f64, @floatFromInt(nanoseconds)) / std.time.ns_per_ms;
 }

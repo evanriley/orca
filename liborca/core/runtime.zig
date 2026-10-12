@@ -1,5 +1,6 @@
 const std = @import("std");
 const analysis_chromaprint = @import("../analysis/chromaprint.zig");
+const analysis_embedding = @import("../analysis/audio_embedding.zig");
 const analysis_service = @import("../analysis/service.zig");
 const artist_info = @import("artist_info.zig");
 const release_info = @import("release_info.zig");
@@ -325,6 +326,11 @@ pub const EditedTracks = struct {
 
 /// One file's measurement from `libraryAnalyzeFile`.
 pub const FileAnalysis = analysis_service.Analysis;
+pub const EmbeddingModel = analysis_embedding.Model;
+pub const AudioEmbedding = analysis_embedding.Result;
+pub const FileAnalysisOptions = struct {
+    embedding_model: ?EmbeddingModel = null,
+};
 pub const TrackFingerprint = analysis_chromaprint.Fingerprinter.Outcome;
 
 /// The Library's database, for liborca's own C ABI and tests. Clients use the
@@ -946,14 +952,24 @@ pub const OrcaRuntime = struct {
         library: LibraryHandle,
         io: std.Io,
         path: []const u8,
+        options: FileAnalysisOptions,
     ) !FileAnalysis {
         const library_database = try libraryDatabase(self, library);
         const codecs = codec.CodecRegistry.builtins();
+        var front_end: ?analysis_embedding.FrontEnd = if (options.embedding_model == null)
+            null
+        else
+            analysis_embedding.FrontEnd.init(self.allocator) catch null;
+        defer if (front_end) |*value| value.deinit();
         const service: analysis_service.Service = .{
             .allocator = self.allocator,
             .io = io,
             .codecs = &codecs,
             .cache = &library_database.analysis_cache,
+            .embedding = if (front_end) |*value|
+                .{ .model = options.embedding_model.?, .front_end = value }
+            else
+                null,
         };
         const binding = try library_database.resolveOrCreateFile(io, path, .{});
         const measured = try service.analyzeFile(binding.file_id, path, .{});
