@@ -270,8 +270,18 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   (`ORCA_STATUS_NOT_FOUND` for an unknown or unmeasured Track; `has_*` flags
   mark the known values), `orca_library_listens_recorded`,
   `orca_library_unanalyzed_count`, `orca_library_analysis_coverage` (an
-  `orca_analysis_coverage` whose `missing` holds `ORCA_MEASUREMENT_*` bits),
-  `orca_library_backfill_pending`.
+  `orca_analysis_coverage` whose `missing` holds `ORCA_MEASUREMENT_*` bits,
+  `ORCA_MEASUREMENT_EMBEDDING` among them while the audio-embedding model is
+  ready), `orca_library_backfill_pending`.
+- Audio embeddings: `orca_runtime_set_embedding_model_path` (the model file's
+  path; NULL clears it; a path that is not the model is not an error) and
+  `orca_runtime_embedding_model_state` (an `orca_embedding_model_state`, see
+  [analysis.md](analysis.md#audio-embedding)), and
+  `orca_library_similar_tracks`, which fills a caller array of at most 1,000
+  `orca_similar_track_view` values, nearest first, and reports how many it
+  wrote. `ORCA_STATUS_NOT_FOUND` is an unknown Track,
+  `ORCA_STATUS_INVALID_STATE` a Track whose file has no current embedding and
+  `ORCA_STATUS_INVALID_ARGUMENT` a capacity above 1,000.
 - Radio and discovery: `orca_library_radio_preview` (up to 512 ranked picks
   for an `orca_radio_seed` in one callback-scoped `orca_radio_preview_view`;
   NULL `options` or `session` take the defaults; `ORCA_STATUS_NOT_FOUND` for

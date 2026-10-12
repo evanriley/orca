@@ -150,6 +150,7 @@ const struct_pairs = .{
     .{ c_api.BackfillOptions, c.orca_backfill_options },
     .{ c_api.BackfillPendingView, c.orca_backfill_pending },
     .{ c_api.AnalysisCoverageView, c.orca_analysis_coverage },
+    .{ c_api.SimilarTrackView, c.orca_similar_track_view },
     .{ c_api.CommandCompletedEvent, c.orca_command_completed_event },
     .{ c_api.JobProgressEvent, c.orca_job_progress_event },
     .{ c_api.JobFinishedEvent, c.orca_job_finished_event },
@@ -251,6 +252,13 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_RADIO_STATE_";
         pub const Tag = core.runtime.RadioState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @backingInt(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_EMBEDDING_MODEL_STATE_";
+        pub const Tag = core.embedding_model.State;
         pub fn produce(tag: Tag) ?i64 {
             return @backingInt(tag);
         }
@@ -923,6 +931,7 @@ const non_enum_constants = [_][]const u8{
     "ORCA_MEASUREMENT_LOUDNESS_AND_CHECKS",
     "ORCA_MEASUREMENT_FINGERPRINT",
     "ORCA_MEASUREMENT_FEATURES",
+    "ORCA_MEASUREMENT_EMBEDDING",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -1225,6 +1234,7 @@ test "the missing-measurement flags orca.h declares are liborca's" {
     try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_LOUDNESS_AND_CHECKS), c_api.measurement_loudness_and_checks);
     try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_FINGERPRINT), c_api.measurement_fingerprint);
     try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_FEATURES), c_api.measurement_features);
+    try std.testing.expectEqual(@as(u32, c.ORCA_MEASUREMENT_EMBEDDING), c_api.measurement_embedding);
 }
 
 test "the lyrics fetch flag orca.h declares is liborca's" {

@@ -2398,6 +2398,34 @@ orca_status orca_runtime_set_provider_server(
  */
 orca_status orca_runtime_set_acoustid_client_key(orca_runtime *runtime, const char *key);
 
+typedef enum orca_embedding_model_state {
+    /* This liborca was built without audio embeddings. */
+    ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT = 0,
+    /* No model path is set, or nothing is at it. */
+    ORCA_EMBEDDING_MODEL_STATE_MISSING = 1,
+    /* The file at the path is not the audio-embedding model liborca runs. */
+    ORCA_EMBEDDING_MODEL_STATE_WRONG_FILE = 2,
+    /* The file could not be read, or ONNX Runtime could not load it. */
+    ORCA_EMBEDDING_MODEL_STATE_UNUSABLE = 3,
+    /* The file is the model; analysis computes audio embeddings with it. */
+    ORCA_EMBEDDING_MODEL_STATE_READY = 4,
+} orca_embedding_model_state;
+
+/* The path of the audio-embedding model file that analysis uses to compute
+ * each file's audio embedding. NUL-terminated; copied; NULL clears it. The
+ * file is checked by size and SHA-256 now, and a path that does not name the
+ * model is not an error: orca_runtime_embedding_model_state reports it.
+ * Analysis that starts afterwards uses the new path. ORCA_STATUS_INVALID_ARGUMENT
+ * for a path longer than the platform's maximum path length. */
+orca_status orca_runtime_set_embedding_model_path(orca_runtime *runtime, const char *path);
+
+/* Writes the orca_embedding_model_state of the model the last
+ * orca_runtime_set_embedding_model_path named, or of no model before any.
+ * An analysis that cannot open the model changes it to the reason.
+ * ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT, whatever the path, when this
+ * liborca was built without audio embeddings. */
+orca_status orca_runtime_embedding_model_state(orca_runtime *runtime, uint8_t *output);
+
 /* The largest secret liborca reads through the credential callback. */
 #define ORCA_CREDENTIAL_MAX_BYTES 1024
 
@@ -3130,6 +3158,30 @@ orca_status orca_library_track_audio_features(
     int64_t track_id,
     orca_audio_features *output
 );
+/* One result of orca_library_similar_tracks. `similarity` is the cosine
+ * similarity of the two Tracks' audio embeddings, at most 1. */
+typedef struct orca_similar_track_view {
+    int64_t track_id;
+    float similarity;
+    uint8_t reserved[4];
+} orca_similar_track_view;
+
+/* Writes into `buffer` up to `capacity` (at most 1000) Tracks that sound most
+ * like `track_id`, nearest first, and the number written into `count`. The
+ * Track itself is not among them. Compares audio embeddings, so the Track and
+ * the Tracks it is compared with need one; see
+ * ORCA_MEASUREMENT_EMBEDDING. Reads the database alone. `buffer` may be NULL
+ * only when `capacity` is 0. NOT_FOUND when no such Track exists;
+ * INVALID_STATE when the Track has no audio embedding; INVALID_ARGUMENT for a
+ * `capacity` above 1000. `buffer` and `count` are untouched on failure. */
+orca_status orca_library_similar_tracks(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    orca_similar_track_view *buffer,
+    size_t capacity,
+    size_t *count
+);
 /* Invokes the callback once with up to `limit` (at most 512) Recordings a
  * Radio from `seed` would play, best first, without a Player. `options` and
  * `session` may be NULL for the defaults. Reads the database alone.
@@ -3455,6 +3507,7 @@ orca_status orca_library_unanalyzed_count(
 #define ORCA_MEASUREMENT_LOUDNESS_AND_CHECKS 1
 #define ORCA_MEASUREMENT_FINGERPRINT 2
 #define ORCA_MEASUREMENT_FEATURES 4
+#define ORCA_MEASUREMENT_EMBEDDING 8
 
 /* How the files orca_library_unanalyzed_count counts split; `never_analyzed`
  * + `outdated` equals it. `never_analyzed` counts files with no measurement
