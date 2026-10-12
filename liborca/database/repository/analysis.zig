@@ -36,16 +36,25 @@ pub const AnalysisSelector = struct {
 /// bytes.
 pub const AnalysisSelectors = struct {
     measurements: [3]AnalysisSelector,
+    embedding: ?AnalysisSelector = null,
     undecodable: AnalysisSelector,
+
+    pub fn form(self: *const AnalysisSelectors) SelectionForm {
+        return if (self.embedding == null) .three_measurements else .with_embedding;
+    }
 };
+
+pub const SelectionForm = enum { three_measurements, with_embedding };
 
 /// The `files` rows that still owe a library-wide analysis.
 ///
-/// One string, shared by `FileRepository.unanalyzedPage`, `unanalyzedCount`
-/// and the plan test that proves neither is a table scan. Parameters ?3 to ?6,
-/// ?7 to ?10 and ?11 to ?14 are the three measurements and ?15 to ?18 the
-/// undecodable verdict; ?1 and ?2 stay the caller's cursor and limit, as they are for
-/// every other page in this file.
+/// One string per `SelectionForm`, shared by `FileRepository.unanalyzedPage`,
+/// `unanalyzedCount` and the plan test that proves neither is a table scan.
+/// Parameters ?3 to ?6, ?7 to ?10 and ?11 to ?14 are the three measurements
+/// and ?15 to ?18 the undecodable verdict; `.with_embedding` adds the
+/// embedding as ?19 to ?22, and `.three_measurements` has no such parameters.
+/// ?1 and ?2 stay the caller's cursor and limit, as they are for every other
+/// page in this file.
 ///
 /// This is an anti-join against `analysis_results`' own primary key rather
 /// than a flag on `files`, because that key *is* the answer. It already
@@ -79,11 +88,20 @@ pub const AnalysisSelectors = struct {
 /// the identity of the bytes it just opened, because adopting a correction for
 /// audio a file no longer contains is a wrong answer, while re-selecting a
 /// file for measurement is only wasted work.
-pub const unanalyzed_predicate =
-    "(" ++ lacksMeasurementAt(3) ++ "\nOR " ++ lacksMeasurementAt(7) ++ "\nOR " ++ lacksMeasurementAt(11) ++
+pub fn unanalyzedPredicate(comptime form: SelectionForm) [:0]const u8 {
+    return comptime "(" ++ lacksMeasurementAt(3) ++ "\nOR " ++ lacksMeasurementAt(7) ++ "\nOR " ++ lacksMeasurementAt(11) ++
+        switch (form) {
+            .three_measurements => "",
+            .with_embedding => "\nOR " ++ lacksMeasurementAt(embedding_first_parameter),
+        } ++ unanalyzed_predicate_tail;
+}
+
+const embedding_first_parameter = 19;
+
+const unanalyzed_predicate_tail =
     \\
     \\OR ((files.channels IS NULL OR files.channels >
-    ++ max_supported_channels_sql ++
+++ max_supported_channels_sql ++
     \\) AND EXISTS (SELECT 1 FROM analysis_results WHERE analysis_results.file_id = files.id)))
     \\AND NOT EXISTS (SELECT 1 FROM analysis_results
     \\    WHERE analysis_results.file_id = files.id
@@ -93,7 +111,7 @@ pub const unanalyzed_predicate =
     \\      AND analysis_results.parameter_hash = ?18
     \\      AND analysis_results.source_identity = files.content_hash
     \\      AND files.content_hash_algorithm = 1)
-    ;
+;
 
 fn lacksMeasurementAt(comptime first: comptime_int) []const u8 {
     return std.fmt.comptimePrint(
@@ -108,39 +126,49 @@ fn lacksMeasurementAt(comptime first: comptime_int) []const u8 {
     , .{ first, first + 1, first + 2, first + 3 });
 }
 
-/// How the files `unanalyzed_predicate` selects split, with the same
+/// How the files `unanalyzedPredicate` selects split, with the same
 /// parameters bound. A selected file is `outdated` when it is recorded with a
 /// measurable channel count and holds at least one of the three measurements'
 /// kinds, any version, for its recorded content hash; every other selected
 /// file is `never_analyzed`, including one whose bytes changed since it was
 /// measured. Column 2 to 4 are 1 when some outdated file lacks the first,
-/// second or third measurement.
-pub const analysis_coverage_sql =
+/// second or third measurement, and `.with_embedding` adds column 5 for the
+/// embedding.
+pub fn analysisCoverageSql(comptime form: SelectionForm) [:0]const u8 {
+    const with_embedding = form == .with_embedding;
+    return comptime
     \\SELECT coalesce(sum(1 - measured), 0), coalesce(sum(measured), 0),
     \\    coalesce(max(measured * lacks_first), 0),
     \\    coalesce(max(measured * lacks_second), 0),
     \\    coalesce(max(measured * lacks_third), 0)
-    \\FROM (SELECT
-    \\    CASE WHEN
-++ " " ++ measurableChannels("files") ++
-    \\ AND files.content_hash_algorithm = 1
-    \\        AND EXISTS (SELECT 1 FROM analysis_results
-    \\            WHERE analysis_results.file_id = files.id
-    \\              AND analysis_results.kind IN (?3, ?7, ?11)
-    \\              AND analysis_results.source_identity = files.content_hash)
-    \\    THEN 1 ELSE 0 END AS measured,
-    \\
-++ "    " ++ lacksMeasurementAt(3) ++ " AS lacks_first,\n    " ++
-    lacksMeasurementAt(7) ++ " AS lacks_second,\n    " ++
-    lacksMeasurementAt(11) ++ " AS lacks_third\n" ++
-    \\FROM files WHERE
-++ " " ++ unanalyzed_predicate ++ ");";
+    ++ (if (with_embedding) ",\n    coalesce(max(measured * lacks_fourth), 0)" else "") ++
+        \\
+        \\FROM (SELECT
+        \\    CASE WHEN
+    ++ " " ++ measurableChannels("files") ++
+        \\ AND files.content_hash_algorithm = 1
+        \\        AND EXISTS (SELECT 1 FROM analysis_results
+        \\            WHERE analysis_results.file_id = files.id
+        \\              AND analysis_results.kind IN (?3, ?7, ?11)
+        \\              AND analysis_results.source_identity = files.content_hash)
+        \\    THEN 1 ELSE 0 END AS measured,
+        \\
+    ++ "    " ++ lacksMeasurementAt(3) ++ " AS lacks_first,\n    " ++
+        lacksMeasurementAt(7) ++ " AS lacks_second,\n    " ++
+        lacksMeasurementAt(11) ++ " AS lacks_third" ++
+        (if (with_embedding) ",\n    " ++ lacksMeasurementAt(embedding_first_parameter) ++ " AS lacks_fourth" else "") ++
+        \\
+        \\FROM files WHERE
+    ++ " " ++ unanalyzedPredicate(form) ++ ");";
+}
 
-/// `missing` is aligned with `AnalysisSelectors.measurements`.
+/// `missing` is aligned with `AnalysisSelectors.measurements`, then the
+/// embedding, which is never missing from a selection that does not ask for
+/// it.
 pub const AnalysisCoverageCounts = struct {
     never_analyzed: u64,
     outdated: u64,
-    missing: [3]bool,
+    missing: [4]bool,
 };
 
 /// One file that still owes an analysis, where to read it, and what the
@@ -293,7 +321,7 @@ pub const AnalysisCacheRepository = struct {
     }
 
     /// A member's result is keyed on `files.content_hash`, the identity the
-    /// Library recorded, as `unanalyzed_predicate` keys it. A member recorded
+    /// Library recorded, as `unanalyzedPredicate` keys it. A member recorded
     /// with more than two channels, or with no channel count, reads as
     /// unmeasured whatever is stored for it, because playback and analysis
     /// refuse more than two channels. One statement over
@@ -424,12 +452,14 @@ pub fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const Analys
     try bindAnalysisSelectorAt(statement, 3, selector);
 }
 
-/// Binds ?3 to ?18 of `unanalyzed_predicate`.
+/// Binds ?3 to ?18 of `unanalyzedPredicate`, and ?19 to ?22 of the form
+/// `selectors.form()` names.
 pub fn bindAnalysisSelectors(statement: sqlite.Statement, selectors: *const AnalysisSelectors) !void {
     try bindAnalysisSelectorAt(statement, 3, &selectors.measurements[0]);
     try bindAnalysisSelectorAt(statement, 7, &selectors.measurements[1]);
     try bindAnalysisSelectorAt(statement, 11, &selectors.measurements[2]);
     try bindAnalysisSelectorAt(statement, 15, &selectors.undecodable);
+    if (selectors.embedding) |*embedding| try bindAnalysisSelectorAt(statement, embedding_first_parameter, embedding);
 }
 
 pub fn bindAnalysisSelectorAt(statement: sqlite.Statement, first: c_int, selector: *const AnalysisSelector) !void {

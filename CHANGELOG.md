@@ -18,8 +18,18 @@
   takes a `FileAnalysisOptions` whose `embedding_model` is an
   `EmbeddingModel` the caller opened, and `orca-cli analyze` takes
   `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL`. Without a model an
-  analysis stores what it did before, and the library-wide pass does not
-  measure embeddings. `analysis-bench` takes a model to time the stages.
+  analysis stores what it did before. `analysis-bench` takes a model to time
+  the stages.
+- **The library-wide analysis pass can measure audio embeddings.**
+  `LibraryAnalysis.embedding_model` is null by default; with a model the pass
+  selects files on four measurements, gives each measuring thread its own
+  front end and stores the embedding beside the other results. A file that
+  lacks only the embedding is decoded once and only that row is written.
+  `AnalysisSelectors` carries the embedding as an optional fourth selector,
+  `analysisSelectors` takes a `SelectionForm`, and
+  `AnalysisCoverageCounts.missing` has a fourth entry. Without a model the
+  selection, the coverage counts and the measurement set identifier are
+  unchanged. The runtime, the CLI and the C ABI do not pass a model.
 
 - **The Library keeps each file's audio embedding in a table.** Library schema
   version 5 adds `file_audio_embeddings`, kept by triggers on

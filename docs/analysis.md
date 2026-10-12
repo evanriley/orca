@@ -188,8 +188,9 @@ analysis that has a model.
 
 `Runtime.libraryAnalyzeFile` measures the embedding of one file when its
 options carry a model, and `orca-cli analyze` takes the model's path from
-`--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass does not
-measure it.
+`--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass measures
+it only when it is given a model
+(see [The embedding in the pass](#the-embedding-in-the-pass)).
 
 The `file_audio_embeddings` table holds each file's current vector
 ([database.md](database.md)).
@@ -225,7 +226,7 @@ owes work. A changed byte stream (a scan that sees a changed inode, size or
 mtime forgets the content hash), algorithm version or parameter hash therefore
 re-selects the file, and there is no force mode. `analysis_results` is
 `WITHOUT ROWID` keyed on those six columns, so no further index is needed.
-`repository.unanalyzed_predicate` is the one definition shared by the page
+`repository.unanalyzedPredicate` is the one definition shared by the page
 query and the count that gives the job its denominator.
 
 A file the decoders refused is excused. When every byte of a file was read and
@@ -319,6 +320,37 @@ bytes it opens is the one the results were stored under, decodes the file
 once, and measures and stores only what is missing; issues and the audio hash
 come from the reused and measured results alike. A file selected with all
 three stored, and a file analysed on request, is measured whole.
+
+### The embedding in the pass
+
+`LibraryAnalysis.embedding_model` is null by default. A pass with a model, in
+a build with `-Dembeddings`, treats the
+[audio embedding](#audio-embedding) as a fourth measurement:
+
+- `LibraryAnalysis.selectors` returns the selectors with
+  `AnalysisSelectors.embedding` set, so a file owes work while it lacks any of
+  the four. `analysisSelectors` takes a `repository.SelectionForm` that says
+  which set to build.
+- `FileRepository.analysisCoverage` reports the embedding as the fourth entry
+  of `missing`, after the diagnostics, the fingerprint and the features, and
+  `measurementSetId` hashes it after the other three.
+- A stored result with no vector counts as measured. A failed embedding stores
+  no row: the file's other results are committed and the file is selected
+  again by the next pass that has a model.
+- A file whose other three results are stored for its current bytes is decoded
+  once and only the embedding is stored. That run leaves the stored results,
+  `files.audio_hash` and the file's health issues as they are.
+- A file analysed on request has its embedding measured again and replaced.
+
+Each measuring thread has its own `audio_embedding.FrontEnd`, created when the
+run starts and used by no other thread; the `Model` is shared. When any front
+end cannot be created, the whole run proceeds without the embedding and
+selects on three measurements.
+
+A pass without a model selects on three measurements and stores no kind 7
+row. The two forms are separate SQL texts, so the selection, the coverage
+counts and `measurementSetId` of a pass without a model do not depend on the
+embedding. The runtime, the CLI and the C ABI start the pass without a model.
 
 ### Threads
 

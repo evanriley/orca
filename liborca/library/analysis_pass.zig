@@ -30,6 +30,7 @@ const storage = @import("../storage/root.zig");
 const scanner = @import("scanner.zig");
 
 pub const CancellationToken = scanner.CancellationToken;
+const FrontEnd = analysis.audio_embedding.FrontEnd;
 const CurrentItem = scanner.CurrentItem;
 
 pub const Result = struct {
@@ -87,6 +88,11 @@ const Measurement = struct {
         chromaprint_bytes: ?[]u8,
         /// Also null when the features analyzer failed.
         features_bytes: ?[]u8,
+        embedding_bytes: ?[]u8,
+        /// False when the diagnostics, fingerprint and features were all
+        /// reused, so the file was decoded for the embedding alone and its
+        /// audio hash and health issues stand as they are.
+        settles_health: bool,
         /// ORAH over the decoded samples: tier 4 of the identity cascade,
         /// and the only tier that survives Orca writing a tag into the file.
         audio_hash: analysis.fingerprint.AudioHash,
@@ -145,6 +151,7 @@ const Measurement = struct {
                     value.fingerprint_bytes,
                     value.chromaprint_bytes,
                     value.features_bytes,
+                    value.embedding_bytes,
                 }) |encoded| {
                     if (encoded) |bytes| allocator.free(bytes);
                 },
@@ -186,13 +193,13 @@ const Batch = struct {
     next: std.atomic.Value(usize) = .init(0),
     failed: std.atomic.Value(bool) = .init(false),
 
-    fn work(self: *Batch, io: std.Io) void {
+    fn work(self: *Batch, io: std.Io, front_end: ?*FrontEnd) void {
         while (!self.failed.load(.acquire) and !self.pass.isCancelled()) {
             const index = self.next.fetchAdd(1, .monotonic);
             if (index >= self.items.len) return;
             if (self.pass.current_item) |current| current.set(self.items[index].uri);
             const stored = if (self.stored[index]) |*results| results else null;
-            const outcome = self.pass.measure(io, self.codecs, self.items[index], stored);
+            const outcome = self.pass.measure(io, self.codecs, self.items[index], stored, front_end);
             self.slots[index] = outcome;
             if (outcome) |_| {
                 if (self.pass.progress) |counter| _ = counter.fetchAdd(1, .release);
@@ -206,10 +213,10 @@ const Batch = struct {
         }
     }
 
-    fn helper(self: *Batch) void {
+    fn helper(self: *Batch, front_end: ?*FrontEnd) void {
         var threaded: std.Io.Threaded = .init_single_threaded;
         defer threaded.deinit();
-        self.work(threaded.io());
+        self.work(threaded.io(), front_end);
     }
 
     fn deinitSlots(self: *Batch, allocator: std.mem.Allocator) void {
@@ -258,6 +265,8 @@ pub const LibraryAnalysis = struct {
     /// Measures this one file again, whether or not it still owes a
     /// measurement, and settles its health; nothing else is selected.
     only_file_id: ?i64 = null,
+    /// The caller keeps the model open for the run.
+    embedding_model: ?analysis.audio_embedding.Model = null,
 
     pub fn run(self: *LibraryAnalysis) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
@@ -274,7 +283,11 @@ pub const LibraryAnalysis = struct {
             self.batch_size,
             @as(usize, database.repository.max_page),
         ));
-        const measurement_selectors = self.selectors();
+        const helper_count = @min(threads, page_limit) - 1;
+        const front_ends = self.createFrontEnds(helper_count + 1);
+        defer self.destroyFrontEnds(front_ends);
+        const with_embedding = front_ends.len != 0;
+        const measurement_selectors = self.selectorsFor(if (with_embedding) .with_embedding else .three_measurements);
 
         const slots = try self.allocator.alloc(?(anyerror!Measurement.Outcome), page_limit);
         defer self.allocator.free(slots);
@@ -282,7 +295,7 @@ pub const LibraryAnalysis = struct {
         const stored = try self.allocator.alloc(?analysis.service.StoredResults, page_limit);
         defer self.allocator.free(stored);
         @memset(stored, null);
-        const helpers = try self.allocator.alloc(std.Thread, @min(threads, page_limit) - 1);
+        const helpers = try self.allocator.alloc(std.Thread, helper_count);
         defer self.allocator.free(helpers);
         var measurements: std.ArrayList(Measurement) = .empty;
         defer {
@@ -312,7 +325,7 @@ pub const LibraryAnalysis = struct {
                 results.* = null;
             };
             for (page.items, stored[0..page.items.len]) |item, *results|
-                results.* = try self.loadStored(item);
+                results.* = try self.loadStored(item, with_embedding);
             var batch: Batch = .{
                 .pass = self,
                 .codecs = codecs,
@@ -321,7 +334,7 @@ pub const LibraryAnalysis = struct {
                 .slots = slots[0..page.items.len],
             };
             defer batch.deinitSlots(self.allocator);
-            self.measureBatch(&batch, helpers[0..@min(helpers.len, page.items.len - 1)]);
+            self.measureBatch(&batch, helpers[0..@min(helpers.len, page.items.len - 1)], front_ends);
             try measurements.ensureUnusedCapacity(self.allocator, batch.slots.len);
             for (batch.slots, page.items) |*slot, item| {
                 const outcome = (slot.* orelse error.Cancelled) catch |err| switch (err) {
@@ -356,8 +369,38 @@ pub const LibraryAnalysis = struct {
     /// The measurements this pass selects on and stores under. One function, so
     /// "which files still owe work" and "what was written" cannot drift.
     pub fn selectors(self: *const LibraryAnalysis) database.repository.AnalysisSelectors {
+        return self.selectorsFor(if (self.measuresEmbedding()) .with_embedding else .three_measurements);
+    }
+
+    fn selectorsFor(
+        self: *const LibraryAnalysis,
+        form: database.repository.SelectionForm,
+    ) database.repository.AnalysisSelectors {
         const builtin_codecs = codec.CodecRegistry.builtins();
-        return analysis.service.analysisSelectors(self.parameters, self.codecs orelse &builtin_codecs);
+        return analysis.service.analysisSelectors(self.parameters, self.codecs orelse &builtin_codecs, form);
+    }
+
+    fn measuresEmbedding(self: *const LibraryAnalysis) bool {
+        return analysis.audio_embedding.enabled and self.embedding_model != null;
+    }
+
+    fn createFrontEnds(self: *const LibraryAnalysis, count: usize) []FrontEnd {
+        if (!self.measuresEmbedding()) return &.{};
+        const front_ends = self.allocator.alloc(FrontEnd, count) catch return &.{};
+        for (front_ends, 0..) |*front_end, created| {
+            front_end.* = FrontEnd.init(self.allocator) catch {
+                for (front_ends[0..created]) |*earlier| earlier.deinit();
+                self.allocator.free(front_ends);
+                return &.{};
+            };
+        }
+        return front_ends;
+    }
+
+    fn destroyFrontEnds(self: *const LibraryAnalysis, front_ends: []FrontEnd) void {
+        if (front_ends.len == 0) return;
+        for (front_ends) |*front_end| front_end.deinit();
+        self.allocator.free(front_ends);
     }
 
     /// The results already stored for the bytes the Library records for
@@ -366,6 +409,7 @@ pub const LibraryAnalysis = struct {
     fn loadStored(
         self: *const LibraryAnalysis,
         candidate: database.repository.AnalysisCandidate,
+        with_embedding: bool,
     ) !?analysis.service.StoredResults {
         if (self.only_file_id != null) return null;
         const source_identity = candidate.content_hash orelse return null;
@@ -387,7 +431,11 @@ pub const LibraryAnalysis = struct {
             self.allocator,
             analysis.service.featuresKey(candidate.id, source_identity),
         );
-        if (results.complete()) {
+        if (with_embedding) results.embedding = try self.analysis_cache.get(
+            self.allocator,
+            analysis.service.embeddingKey(candidate.id, source_identity),
+        );
+        if (results.complete() and (!with_embedding or results.embedding != null)) {
             self.freeStored(results);
             return null;
         }
@@ -395,7 +443,13 @@ pub const LibraryAnalysis = struct {
     }
 
     fn freeStored(self: *const LibraryAnalysis, results: analysis.service.StoredResults) void {
-        inline for (.{ results.diagnostics, results.fingerprint, results.chromaprint, results.features }) |encoded| {
+        inline for (.{
+            results.diagnostics,
+            results.fingerprint,
+            results.chromaprint,
+            results.features,
+            results.embedding,
+        }) |encoded| {
             if (encoded) |bytes| self.allocator.free(bytes);
         }
     }
@@ -407,15 +461,23 @@ pub const LibraryAnalysis = struct {
 
     /// Measures a batch on this thread and `helpers.len` more, and returns once
     /// every thread that started has been joined. A thread that fails to
-    /// start leaves its share to the others.
-    fn measureBatch(self: *const LibraryAnalysis, batch: *Batch, helpers: []std.Thread) void {
+    /// start leaves its share to the others. `front_ends` is empty or holds
+    /// one more than `helpers`.
+    fn measureBatch(
+        self: *const LibraryAnalysis,
+        batch: *Batch,
+        helpers: []std.Thread,
+        front_ends: []FrontEnd,
+    ) void {
         var started: usize = 0;
         defer for (helpers[0..started]) |thread| thread.join();
-        for (helpers) |*thread| {
-            thread.* = std.Thread.spawn(.{}, Batch.helper, .{batch}) catch break;
+        for (helpers, 1..) |*thread, index| {
+            // A front end holds one thread's FFT state: shared, both threads store wrong vectors.
+            const front_end = if (front_ends.len == 0) null else &front_ends[index];
+            thread.* = std.Thread.spawn(.{}, Batch.helper, .{ batch, front_end }) catch break;
             started += 1;
         }
-        batch.work(self.io);
+        batch.work(self.io, if (front_ends.len == 0) null else &front_ends[0]);
     }
 
     /// Decodes one file end to end, on whichever thread claimed it, so it
@@ -428,6 +490,7 @@ pub const LibraryAnalysis = struct {
         codecs: *const codec.CodecRegistry,
         candidate: database.repository.AnalysisCandidate,
         stored: ?*const analysis.service.StoredResults,
+        front_end: ?*FrontEnd,
     ) !Measurement.Outcome {
         if (candidate.uri.len == 0) return .skipped;
         const recorded = candidate.quick_hash orelse return .skipped;
@@ -454,6 +517,7 @@ pub const LibraryAnalysis = struct {
             // each file land in a transaction of its own.
             .cache = null,
             .cancellation = self.cancellation,
+            .embedding = if (front_end) |own| .{ .model = self.embedding_model.?, .front_end = own } else null,
         };
         const examined = service.examineFile(null, candidate.uri, self.parameters, stored) catch |err|
             switch (err) {
@@ -524,6 +588,13 @@ pub const LibraryAnalysis = struct {
         else
             null;
         errdefer if (features_bytes) |bytes| self.allocator.free(bytes);
+        const embedding_bytes = if (!fresh.embedding)
+            null
+        else if (measured.embedding) |value|
+            try self.allocator.dupe(u8, &value.encode())
+        else
+            null;
+        errdefer if (embedding_bytes) |bytes| self.allocator.free(bytes);
         return .{ .measured = .{
             .source_identity = measured.source_identity,
             .quick_hash = recorded,
@@ -533,6 +604,8 @@ pub const LibraryAnalysis = struct {
             .fingerprint_bytes = fingerprint_bytes,
             .chromaprint_bytes = chromaprint_bytes,
             .features_bytes = features_bytes,
+            .embedding_bytes = embedding_bytes,
+            .settles_health = fresh.diagnostics or fresh.fingerprint or fresh.features,
             .audio_hash = measured.fingerprint.audio_hash,
             .has_loudness = measured.diagnostics.replay_gain_db != null,
             .integrated_lufs = measured.diagnostics.integrated_lufs,
@@ -574,35 +647,38 @@ pub const LibraryAnalysis = struct {
                     .{ value.fingerprint_bytes, analysis.service.fingerprintKey(measurement.file_id, value.source_identity) },
                     .{ value.chromaprint_bytes, analysis.chromaprint.cacheKey(measurement.file_id, value.source_identity, .{}) },
                     .{ value.features_bytes, analysis.service.featuresKey(measurement.file_id, value.source_identity) },
+                    .{ value.embedding_bytes, analysis.service.embeddingKey(measurement.file_id, value.source_identity) },
                 };
                 for (results) |entry| if (entry[0]) |bytes| {
                     try self.analysis_cache.putLocked(entry[1], bytes);
                     result.bytes_stored += bytes.len;
                 };
-                try self.files.setAudioHashLocked(
-                    measurement.file_id,
-                    &value.audio_hash.digest,
-                    @backingInt(value.audio_hash.tier),
-                );
-                // Safe to retire: only a pass that decoded the whole stream
-                // may raise or clear this kind, and this is that pass.
-                try self.health_issues.clearLocked(measurement.file_id, .corrupt_audio);
-                var details: analysis.health.DetailsBuffer = undefined;
-                try self.health_issues.settleLocked(
-                    measurement.file_id,
-                    .clipping,
-                    analysis.health.clipping(&details, value.clipped_runs, value.clipped_samples),
-                );
-                try self.health_issues.settleLocked(
-                    measurement.file_id,
-                    .excessive_silence,
-                    analysis.health.excessiveSilence(&details, value.silent_frames, value.decoded_frames),
-                );
-                try self.health_issues.settleLocked(
-                    measurement.file_id,
-                    .missing_analysis,
-                    analysis.health.missingAnalysis(value.integrated_lufs),
-                );
+                if (value.settles_health) {
+                    try self.files.setAudioHashLocked(
+                        measurement.file_id,
+                        &value.audio_hash.digest,
+                        @backingInt(value.audio_hash.tier),
+                    );
+                    // Safe to retire: only a pass that decoded the whole stream
+                    // may raise or clear this kind, and this is that pass.
+                    try self.health_issues.clearLocked(measurement.file_id, .corrupt_audio);
+                    var details: analysis.health.DetailsBuffer = undefined;
+                    try self.health_issues.settleLocked(
+                        measurement.file_id,
+                        .clipping,
+                        analysis.health.clipping(&details, value.clipped_runs, value.clipped_samples),
+                    );
+                    try self.health_issues.settleLocked(
+                        measurement.file_id,
+                        .excessive_silence,
+                        analysis.health.excessiveSilence(&details, value.silent_frames, value.decoded_frames),
+                    );
+                    try self.health_issues.settleLocked(
+                        measurement.file_id,
+                        .missing_analysis,
+                        analysis.health.missingAnalysis(value.integrated_lufs),
+                    );
+                }
                 if (value.has_loudness) {
                     result.changed += 1;
                 } else {
@@ -882,21 +958,27 @@ test "selecting the files that still owe an analysis is an index search, not a t
     // would still return the right rows, silently, by reading everything twice.
     var fixture = try Fixture.init("file:orca-analysis-plan?mode=memory&cache=shared");
     defer fixture.deinit();
-    var statement = try fixture.library.database.prepare(
-        "EXPLAIN QUERY PLAN SELECT files.id FROM files WHERE files.id > 0 AND (" ++
-            database.repository.unanalyzed_predicate ++
-            ") ORDER BY files.id LIMIT 32;",
-    );
+    inline for (comptime std.enums.values(database.repository.SelectionForm)) |form| {
+        const plan = try queryPlan(&fixture, "SELECT files.id FROM files WHERE files.id > 0 AND (" ++
+            database.repository.unanalyzedPredicate(form) ++
+            ") ORDER BY files.id LIMIT 32;");
+        defer testing.allocator.free(plan);
+        try testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+        try testing.expect(std.mem.indexOf(u8, plan, "analysis_results") != null);
+        try testing.expect(std.mem.indexOf(u8, plan, "SCAN analysis_results") == null);
+    }
+}
+
+fn queryPlan(fixture: *Fixture, comptime sql: [:0]const u8) ![]u8 {
+    var statement = try fixture.library.database.prepare("EXPLAIN QUERY PLAN " ++ sql);
     defer statement.deinit();
     var plan: std.ArrayList(u8) = .empty;
-    defer plan.deinit(testing.allocator);
+    errdefer plan.deinit(testing.allocator);
     while (try statement.step() == .row) {
         try plan.appendSlice(testing.allocator, statement.columnText(3));
         try plan.append(testing.allocator, '\n');
     }
-    try testing.expect(std.mem.indexOf(u8, plan.items, "SCAN files") == null);
-    try testing.expect(std.mem.indexOf(u8, plan.items, "analysis_results") != null);
-    try testing.expect(std.mem.indexOf(u8, plan.items, "SCAN analysis_results") == null);
+    return plan.toOwnedSlice(testing.allocator);
 }
 
 test "an analysis measures every file once and a second pass has nothing left to do" {
@@ -1571,7 +1653,7 @@ test "coverage splits the files an analysis owes into never analyzed and outdate
     var pass = fixture.pass();
     try testing.expectEqual(@as(u64, 0), (try pass.run()).errors);
     try testing.expectEqual(
-        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = .{ false, false, false } },
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = .{ false, false, false, false } },
         try fixture.library.files.analysisCoverage(pass.selectors()),
     );
 
@@ -1589,7 +1671,7 @@ test "coverage splits the files an analysis owes into never analyzed and outdate
 
     const coverage = try fixture.library.files.analysisCoverage(pass.selectors());
     try testing.expectEqual(
-        database.AnalysisCoverageCounts{ .never_analyzed = 2, .outdated = 1, .missing = .{ false, false, true } },
+        database.AnalysisCoverageCounts{ .never_analyzed = 2, .outdated = 1, .missing = .{ false, false, true, false } },
         coverage,
     );
     try testing.expectEqual(
@@ -1608,7 +1690,7 @@ test "coverage names a changed measurement parameter as missing loudness and che
     _ = try pass.run();
     pass.parameters.replay_gain_target_lufs = -14;
     try testing.expectEqual(
-        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 1, .missing = .{ true, false, false } },
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 1, .missing = .{ true, false, false, false } },
         try fixture.library.files.analysisCoverage(pass.selectors()),
     );
 }
@@ -1618,7 +1700,7 @@ test "coverage counts an empty Library as owing nothing" {
     defer fixture.deinit();
     var pass = fixture.pass();
     try testing.expectEqual(
-        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = .{ false, false, false } },
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = .{ false, false, false, false } },
         try fixture.library.files.analysisCoverage(pass.selectors()),
     );
 }
@@ -1626,18 +1708,12 @@ test "coverage counts an empty Library as owing nothing" {
 test "coverage probes the analysis cache by key and never scans it" {
     var fixture = try Fixture.init("file:orca-analysis-coverage-plan?mode=memory&cache=shared");
     defer fixture.deinit();
-    var statement = try fixture.library.database.prepare(
-        "EXPLAIN QUERY PLAN " ++ database.repository.analysis_coverage_sql,
-    );
-    defer statement.deinit();
-    var plan: std.ArrayList(u8) = .empty;
-    defer plan.deinit(testing.allocator);
-    while (try statement.step() == .row) {
-        try plan.appendSlice(testing.allocator, statement.columnText(3));
-        try plan.append(testing.allocator, '\n');
+    inline for (comptime std.enums.values(database.repository.SelectionForm)) |form| {
+        const plan = try queryPlan(&fixture, database.repository.analysisCoverageSql(form));
+        defer testing.allocator.free(plan);
+        try testing.expect(std.mem.indexOf(u8, plan, "analysis_results") != null);
+        try testing.expect(std.mem.indexOf(u8, plan, "SCAN analysis_results") == null);
     }
-    try testing.expect(std.mem.indexOf(u8, plan.items, "analysis_results") != null);
-    try testing.expect(std.mem.indexOf(u8, plan.items, "SCAN analysis_results") == null);
 }
 
 fn columnTextOwned(fixture: *Fixture, sql: [:0]const u8) ![]u8 {
@@ -2288,6 +2364,270 @@ test "analysing one file measures it again even when it owes nothing and settles
     var missing = fixture.pass();
     missing.only_file_id = loud + 100;
     try testing.expectEqual(@as(u64, 0), (try missing.run()).files_seen);
+}
+
+const embedding_kind = analysis.audio_embedding.cache_kind;
+const embedding_count_sql = std.fmt.comptimePrint(
+    "SELECT count(*) FROM analysis_results WHERE kind = {d};",
+    .{embedding_kind},
+);
+
+fn openTestModel() !analysis.audio_embedding.Model {
+    return analysis.audio_embedding.Model.open(
+        testing.allocator,
+        testing.io,
+        try analysis.audio_embedding.testModelPath(),
+    );
+}
+
+fn storedEmbedding(fixture: *Fixture, file_id: i64) !analysis.audio_embedding.Result {
+    var statement = try fixture.library.database.prepare(
+        "SELECT result FROM analysis_results WHERE file_id = ?1 AND kind = ?2;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try statement.bindInt64(2, embedding_kind);
+    if (try statement.step() != .row) return error.TestUnexpectedResult;
+    return analysis.audio_embedding.Result.decode(statement.columnBlob(0));
+}
+
+test "run_withModel_storesAnEmbeddingOrNoneForEveryFileAndSelectsNoneAgain" {
+    var model = try openTestModel();
+    defer model.deinit();
+    var fixture = try Fixture.init("file:orca-analysis-embedding?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("fingerprint-reference.mp3", "song.mp3");
+    try fixture.copyFixture("generated-reference.qoa", "blip.qoa");
+    const silent = try sineWav(0);
+    defer testing.allocator.free(silent);
+    try fixture.writeBytes("silence.wav", silent);
+    const song = try fixture.record("song.mp3");
+    const blip = try fixture.record("blip.qoa");
+    const silence = try fixture.record("silence.wav");
+
+    var pass = fixture.pass();
+    pass.embedding_model = model;
+    try testing.expectEqual(@as(u64, 3), try fixture.library.files.unanalyzedCount(pass.selectors()));
+    const first = try pass.run();
+    try testing.expectEqual(@as(u64, 3), first.files_seen);
+    try testing.expectEqual(@as(u64, 3), first.changed + first.unchanged);
+    try testing.expectEqual(@as(i64, 3), try scalar(fixture.library.database, embedding_count_sql));
+    try testing.expect(try storedEmbedding(&fixture, song) == .embedding);
+    try testing.expectEqual(analysis.audio_embedding.Result.none, try storedEmbedding(&fixture, blip));
+    try testing.expectEqual(analysis.audio_embedding.Result.none, try storedEmbedding(&fixture, silence));
+    try testing.expectEqual(@as(i64, 1), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM file_audio_embeddings;",
+    ));
+
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = @splat(false) },
+        try fixture.library.files.analysisCoverage(pass.selectors()),
+    );
+    try testing.expectEqual(@as(u64, 0), (try pass.run()).files_seen);
+}
+
+test "run_withModelOnALibraryAnalysedWithoutOne_storesOnlyTheEmbedding" {
+    var model = try openTestModel();
+    defer model.deinit();
+    var fixture = try Fixture.init("file:orca-analysis-embedding-backfill?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("fingerprint-reference.mp3", "song.mp3");
+    try fixture.copyFixture("generated-reference.qoa", "blip.qoa");
+    const clipped = try sineWav(2);
+    defer testing.allocator.free(clipped);
+    try fixture.writeBytes("clipped.wav", clipped);
+    _ = try fixture.record("song.mp3");
+    _ = try fixture.record("blip.qoa");
+    const clipped_id = try fixture.record("clipped.wav");
+
+    var without = fixture.pass();
+    _ = try without.run();
+    try fixture.library.database.exec("UPDATE analysis_results SET created_at = 1;");
+    try fixture.library.database.exec("UPDATE library_health_issues SET updated_at = 1;");
+    const others_sql = std.fmt.comptimePrint(
+        "SELECT group_concat(file_id || ':' || kind || ':' || created_at || ':' || hex(source_identity) || ':' || hex(result), ',') " ++
+            "FROM (SELECT * FROM analysis_results WHERE kind <> {d} ORDER BY file_id, kind);",
+        .{embedding_kind},
+    );
+    const issues_sql =
+        "SELECT group_concat(file_id || ':' || kind || ':' || severity || ':' || details || ':' || updated_at, ',') " ++
+        "FROM (SELECT * FROM library_health_issues ORDER BY file_id, kind);";
+    const hashes_sql =
+        "SELECT group_concat(id || ':' || hex(audio_hash) || ':' || audio_hash_tier || ':' || hex(content_hash), ',') " ++
+        "FROM (SELECT * FROM files ORDER BY id);";
+    const others_before = try columnTextOwned(&fixture, others_sql);
+    defer testing.allocator.free(others_before);
+    const issues_before = try columnTextOwned(&fixture, issues_sql);
+    defer testing.allocator.free(issues_before);
+    const hashes_before = try columnTextOwned(&fixture, hashes_sql);
+    defer testing.allocator.free(hashes_before);
+    const clipped_kinds = try issueKinds(&fixture.library, clipped_id);
+    defer testing.allocator.free(clipped_kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{.clipping}, clipped_kinds);
+    for ([_][]const u8{ others_before, issues_before, hashes_before }) |recorded| try testing.expect(recorded.len > 0);
+
+    var with = fixture.pass();
+    with.embedding_model = model;
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(without.selectors()));
+    try testing.expectEqual(@as(u64, 3), try fixture.library.files.unanalyzedCount(with.selectors()));
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 3, .missing = .{ false, false, false, true } },
+        try fixture.library.files.analysisCoverage(with.selectors()),
+    );
+
+    const second = try with.run();
+    try testing.expectEqual(@as(u64, 3), second.files_seen);
+    try testing.expectEqual(@as(u64, 3), second.changed + second.unchanged);
+    try testing.expectEqual(@as(u64, 0), second.errors);
+    try testing.expectEqual(@as(u64, 3 * analysis.audio_embedding.Result.encoded_size), second.bytes_stored);
+    try testing.expectEqual(@as(i64, 3), try scalar(fixture.library.database, embedding_count_sql));
+    const others_after = try columnTextOwned(&fixture, others_sql);
+    defer testing.allocator.free(others_after);
+    try testing.expectEqualStrings(others_before, others_after);
+    const issues_after = try columnTextOwned(&fixture, issues_sql);
+    defer testing.allocator.free(issues_after);
+    try testing.expectEqualStrings(issues_before, issues_after);
+    const hashes_after = try columnTextOwned(&fixture, hashes_sql);
+    defer testing.allocator.free(hashes_after);
+    try testing.expectEqualStrings(hashes_before, hashes_after);
+
+    try testing.expectEqual(@as(u64, 0), (try with.run()).files_seen);
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(with.selectors()));
+    try testing.expectEqual(@as(u64, 0), (try without.run()).files_seen);
+}
+
+test "run_withoutModel_storesNoEmbeddingAndSelectsOnThreeMeasurements" {
+    var fixture = try Fixture.init("file:orca-analysis-no-embedding?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("fingerprint-reference.mp3", "song.mp3");
+    try fixture.copyFixture("generated-reference.flac", "one.flac");
+    _ = try fixture.record("song.mp3");
+    _ = try fixture.record("one.flac");
+
+    var pass = fixture.pass();
+    const three = pass.selectors();
+    try testing.expect(three.embedding == null);
+    const builtin_codecs = codec.CodecRegistry.builtins();
+    try testing.expectEqual(
+        analysis.service.analysisSelectors(pass.parameters, &builtin_codecs, .three_measurements),
+        three,
+    );
+    try testing.expectEqual(@as(u64, 2), (try pass.run()).files_seen);
+    try testing.expectEqual(@as(i64, 0), try scalar(fixture.library.database, embedding_count_sql));
+    try testing.expectEqual(@as(i64, 0), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM file_audio_embeddings;",
+    ));
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(three));
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 0, .missing = @splat(false) },
+        try fixture.library.files.analysisCoverage(three),
+    );
+    try testing.expectEqual(@as(u64, 0), (try pass.run()).files_seen);
+
+    const four = analysis.service.analysisSelectors(pass.parameters, &builtin_codecs, .with_embedding);
+    try testing.expect(analysis.service.measurementSetId(&four) != analysis.service.measurementSetId(&three));
+    try testing.expectEqual(@as(u64, 2), try fixture.library.files.unanalyzedCount(four));
+    try testing.expectEqual(
+        database.AnalysisCoverageCounts{ .never_analyzed = 0, .outdated = 2, .missing = .{ false, false, false, true } },
+        try fixture.library.files.analysisCoverage(four),
+    );
+    var page = try fixture.library.files.unanalyzedPage(testing.allocator, 0, 8, four);
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 2), page.items.len);
+}
+
+test "run_withModelOnFourThreads_storesWhatOneThreadStores" {
+    var model = try openTestModel();
+    defer model.deinit();
+    var sequential = try Fixture.init("file:orca-analysis-embedding-sequential?mode=memory&cache=shared");
+    defer sequential.deinit();
+    var parallel = try Fixture.init("file:orca-analysis-embedding-parallel?mode=memory&cache=shared");
+    defer parallel.deinit();
+    const tones = [_]struct { seconds: u32, edge: f32, middle: f32 }{
+        .{ .seconds = 1, .edge = 0.5, .middle = 0.5 },
+        .{ .seconds = 2, .edge = 0.25, .middle = 0.75 },
+        .{ .seconds = 3, .edge = 0.75, .middle = 0.125 },
+        .{ .seconds = 4, .edge = 0.5, .middle = 0 },
+        .{ .seconds = 5, .edge = 0, .middle = 0.5 },
+        .{ .seconds = 12, .edge = 0.5, .middle = 0.25 },
+    };
+    for ([_]*Fixture{ &sequential, &parallel }) |fixture| {
+        for (tones, 0..) |tone, index| {
+            const bytes = try toneWav(tone.seconds, tone.edge, tone.middle);
+            defer testing.allocator.free(bytes);
+            const name = try std.fmt.allocPrint(testing.allocator, "tone-{d}.wav", .{index});
+            defer testing.allocator.free(name);
+            try fixture.writeBytes(name, bytes);
+            _ = try fixture.record(name);
+        }
+        for ([_][]const u8{ "fingerprint-reference.mp3", "generated-reference.qoa" }) |name| {
+            try fixture.copyFixture(name, name);
+            _ = try fixture.record(name);
+        }
+    }
+
+    var one = sequential.pass();
+    one.threads = 1;
+    one.embedding_model = model;
+    var four = parallel.pass();
+    four.threads = 4;
+    four.embedding_model = model;
+    try testing.expectEqual(try one.run(), try four.run());
+
+    const stored = try expectSameRows(
+        sequential.library.database,
+        parallel.library.database,
+        std.fmt.comptimePrint(
+            "SELECT file_id, source_identity, result FROM analysis_results WHERE kind = {d} ORDER BY file_id;",
+            .{embedding_kind},
+        ),
+        3,
+    );
+    try testing.expectEqual(tones.len + 2, stored);
+    const vectors = try expectSameRows(
+        sequential.library.database,
+        parallel.library.database,
+        "SELECT file_id, vector FROM file_audio_embeddings ORDER BY file_id;",
+        2,
+    );
+    try testing.expectEqual(tones.len + 1, vectors);
+}
+
+test "run_onlyFileWithModel_replacesTheStoredEmbedding" {
+    var model = try openTestModel();
+    defer model.deinit();
+    var fixture = try Fixture.init("file:orca-analysis-embedding-one-file?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("fingerprint-reference.mp3", "song.mp3");
+    const song = try fixture.record("song.mp3");
+
+    var pass = fixture.pass();
+    pass.embedding_model = model;
+    _ = try pass.run();
+    const measured = try storedEmbedding(&fixture, song);
+    try testing.expect(measured == .embedding);
+
+    var overwrite = try fixture.library.database.prepare(
+        "UPDATE analysis_results SET result = ?1 WHERE file_id = ?2 AND kind = ?3;",
+    );
+    defer overwrite.deinit();
+    try overwrite.bindBlob(1, &(analysis.audio_embedding.Result{ .none = {} }).encode());
+    try overwrite.bindInt64(2, song);
+    try overwrite.bindInt64(3, embedding_kind);
+    try testing.expectEqual(database.sqlite.Step.done, try overwrite.step());
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(pass.selectors()));
+
+    var one = fixture.pass();
+    one.embedding_model = model;
+    one.only_file_id = song;
+    try testing.expectEqual(@as(u64, 1), (try one.run()).files_seen);
+    try testing.expectEqual(@as(i64, 1), try scalar(fixture.library.database, embedding_count_sql));
+    const again = try storedEmbedding(&fixture, song);
+    try testing.expectEqualSlices(i8, &measured.embedding.values, &again.embedding.values);
+    try testing.expectEqual(measured.embedding.scale, again.embedding.scale);
 }
 
 fn absoluteTestPath(comptime format: []const u8, args: anytype) ![]u8 {

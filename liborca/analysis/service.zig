@@ -77,13 +77,19 @@ pub fn fingerprintSelector() database.repository.AnalysisSelector {
 
 /// Every measurement `Service.analyzeFile` stores, for selecting the files
 /// that still owe any of them, and the verdict that excuses a file `codecs`
-/// cannot decode.
+/// cannot decode. `.with_embedding` is for a caller whose analysis has a
+/// model: without one no file can ever stop owing the embedding.
 pub fn analysisSelectors(
     parameters: diagnostics.Parameters,
     codecs: *const codec.CodecRegistry,
+    form: database.repository.SelectionForm,
 ) database.repository.AnalysisSelectors {
     return .{
         .measurements = .{ diagnosticsSelector(parameters), fingerprintSelector(), featuresSelector() },
+        .embedding = switch (form) {
+            .three_measurements => null,
+            .with_embedding => embeddingSelector(),
+        },
         .undecodable = undecodableSelector(codecs),
     };
 }
@@ -93,16 +99,19 @@ pub fn analysisSelectors(
 /// algorithm, version or parameters change.
 pub fn measurementSetId(selectors: *const database.repository.AnalysisSelectors) u64 {
     var hasher = std.crypto.hash.Blake3.init(.{});
-    for (selectors.measurements) |selector| {
-        hasher.update(&.{selector.kind});
-        hasher.update(std.mem.asBytes(&std.mem.nativeToLittle(u64, selector.algorithm_id.len)));
-        hasher.update(selector.algorithm_id);
-        hasher.update(std.mem.asBytes(&std.mem.nativeToLittle(u32, selector.algorithm_version)));
-        hasher.update(&selector.parameter_hash);
-    }
+    for (selectors.measurements) |selector| hashSelector(&hasher, &selector);
+    if (selectors.embedding) |*selector| hashSelector(&hasher, selector);
     var digest: [8]u8 = undefined;
     hasher.final(&digest);
     return std.mem.readInt(u64, &digest, .little);
+}
+
+fn hashSelector(hasher: *std.crypto.hash.Blake3, selector: *const database.repository.AnalysisSelector) void {
+    hasher.update(&.{selector.kind});
+    hasher.update(std.mem.asBytes(&std.mem.nativeToLittle(u64, selector.algorithm_id.len)));
+    hasher.update(selector.algorithm_id);
+    hasher.update(std.mem.asBytes(&std.mem.nativeToLittle(u32, selector.algorithm_version)));
+    hasher.update(&selector.parameter_hash);
 }
 
 /// The audio features measurement under the default
@@ -699,15 +708,30 @@ fn sameIdentity(first: storage.StorageIdentity, second: storage.StorageIdentity)
 
 test "the measurement set changes with a measurement's version and ignores the decoder set" {
     const codecs = codec.CodecRegistry.builtins();
-    var selectors = analysisSelectors(.{}, &codecs);
+    var selectors = analysisSelectors(.{}, &codecs, .three_measurements);
     const current = measurementSetId(&selectors);
-    try std.testing.expectEqual(current, measurementSetId(&analysisSelectors(.{}, &codecs)));
+    try std.testing.expectEqual(current, measurementSetId(&analysisSelectors(.{}, &codecs, .three_measurements)));
 
     selectors.undecodable.algorithm_version += 1;
     try std.testing.expectEqual(current, measurementSetId(&selectors));
 
     selectors.measurements[2].algorithm_version += 1;
     try std.testing.expect(measurementSetId(&selectors) != current);
+}
+
+test "measurementSetId_withEmbedding_differsFromTheThreeMeasurementsAlone" {
+    const codecs = codec.CodecRegistry.builtins();
+    const three = analysisSelectors(.{}, &codecs, .three_measurements);
+    var four = analysisSelectors(.{}, &codecs, .with_embedding);
+    try std.testing.expect(three.embedding == null);
+    try std.testing.expectEqual(embeddingSelector().kind, four.embedding.?.kind);
+    try std.testing.expect(measurementSetId(&four) != measurementSetId(&three));
+
+    const with_embedding = measurementSetId(&four);
+    four.embedding.?.algorithm_version += 1;
+    try std.testing.expect(measurementSetId(&four) != with_embedding);
+    four.embedding = null;
+    try std.testing.expectEqual(measurementSetId(&three), measurementSetId(&four));
 }
 
 test "service streams codecs into cache and cancellation publishes nothing" {
