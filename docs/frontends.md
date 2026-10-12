@@ -282,6 +282,17 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   wrote. `ORCA_STATUS_NOT_FOUND` is an unknown Track,
   `ORCA_STATUS_INVALID_STATE` a Track whose file has no current embedding and
   `ORCA_STATUS_INVALID_ARGUMENT` a capacity above 1,000.
+  `orca_runtime_start_embedding_model_download(runtime, path, &job)` starts a
+  Job of kind `ORCA_JOB_KIND_MODEL_DOWNLOAD` that belongs to no Library and
+  counts bytes. It installs a file at `path` only when it has the compiled-in
+  size and SHA-256, succeeds without a request when `path` already holds the
+  model, and then sets the model path as `orca_runtime_set_embedding_model_path`
+  does. Progress, cancel and the `job_finished` event use the ordinary Job
+  calls; a failed Job's reason is the `detail` of `orca_job_details_get`.
+  `ORCA_STATUS_INVALID_ARGUMENT` is a NULL or empty `path`, one beyond the
+  maximum path length, or a NULL `job`; `ORCA_STATUS_INVALID_STATE` is no
+  client identity; `ORCA_STATUS_BUSY` is a download already running;
+  `ORCA_STATUS_UNSUPPORTED` is a build with `-Dembeddings=false`.
 - Radio and discovery: `orca_library_radio_preview` (up to 512 ranked picks
   for an `orca_radio_seed` in one callback-scoped `orca_radio_preview_view`;
   NULL `options` or `session` take the defaults; `ORCA_STATUS_NOT_FOUND` for

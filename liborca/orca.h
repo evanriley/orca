@@ -70,7 +70,8 @@ typedef enum orca_status {
     /* A bounded queue is full, a job holds the Library, or another process
      * holds its mutation journal or is walking it. Backpressure, not failure. */
     ORCA_STATUS_BUSY = 7,
-    /* No codec can read those bytes, or no backend can open that device. */
+    /* No codec can read those bytes, no backend can open that device, or
+     * this liborca was built without the feature. */
     ORCA_STATUS_UNSUPPORTED = 8,
     /* Debug builds only: called from a thread other than the owning one. */
     ORCA_STATUS_WRONG_THREAD = 9,
@@ -171,7 +172,7 @@ typedef enum orca_job_kind {
     /* Making the day's Daily Mixes: orca_library_start_daily_mixes. */
     ORCA_JOB_KIND_DAILY_MIXES = 13,
     /* Downloading the audio-embedding model. It belongs to no Library and
-     * its units are bytes. The ABI cannot start this Job yet. */
+     * its units are bytes: orca_runtime_start_embedding_model_download. */
     ORCA_JOB_KIND_MODEL_DOWNLOAD = 14,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
@@ -2428,6 +2429,32 @@ orca_status orca_runtime_set_embedding_model_path(orca_runtime *runtime, const c
  * ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT, whatever the path, when this
  * liborca was built without audio embeddings. */
 orca_status orca_runtime_embedding_model_state(orca_runtime *runtime, uint8_t *output);
+
+/* Starts an ORCA_JOB_KIND_MODEL_DOWNLOAD job that downloads the audio-
+ * embedding model to `path`, which is NUL-terminated and copied. The job
+ * belongs to no Library and its units are bytes, the total being the model's
+ * size. Only a file with the compiled-in size and SHA-256 is installed at
+ * `path`; anything else leaves the file there as it was. A `path` that
+ * already holds the model succeeds with no request. When the job succeeds the
+ * runtime uses the file as orca_runtime_set_embedding_model_path would, so
+ * orca_runtime_embedding_model_state then reports it. Needs the client
+ * identity of orca_runtime_set_client_identity. One download runs at a time.
+ *
+ * Read progress and state with orca_job_snapshot_get and the events of
+ * orca_runtime_poll_event, and cancel with orca_job_cancel; a cancelled job
+ * leaves `path` as it was. A failed job's reason, such as "the network is
+ * unavailable", is the `detail` text of orca_job_details_get.
+ *
+ * ORCA_STATUS_INVALID_ARGUMENT for a NULL or empty `path`, a `path` longer
+ * than the platform's maximum path length, or a NULL `job`; nothing starts.
+ * ORCA_STATUS_INVALID_STATE before the client identity is set.
+ * ORCA_STATUS_BUSY while a download is running. ORCA_STATUS_UNSUPPORTED when
+ * this liborca was built without audio embeddings. */
+orca_status orca_runtime_start_embedding_model_download(
+    orca_runtime *runtime,
+    const char *path,
+    orca_handle *job
+);
 
 /* The largest secret liborca reads through the credential callback. */
 #define ORCA_CREDENTIAL_MAX_BYTES 1024

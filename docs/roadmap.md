@@ -260,9 +260,8 @@ release itself is the maintainer's call.
 
 ### Analysis
 
-- A Download button in `orca-gtk` and a C ABI call for the audio-embedding
-  model download. The engine job and `orca-cli download-embedding-model`
-  exist; only the Zig API starts it.
+- A Download button in `orca-gtk` for the audio-embedding model. The engine
+  job, `orca-cli download-embedding-model` and the C ABI call exist.
 - A larger or music-specific embedding model, and mixing the embedding with a
   timbre descriptor.
 - Genre rarity weighting in Radio: a shared rare genre counts for more than a
