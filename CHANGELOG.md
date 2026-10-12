@@ -151,9 +151,10 @@
 
 - **The Nix package installs the audio-embedding model.** It fetches
   `clap_audio_int8.onnx` by hash from the `model-clap-int8-1` release, links
-  it at `share/orca/models`, and sets `ORCA_EMBEDDING_MODEL` to it as the
-  default for `orca-gtk` and `orca-cli`. The README gives the download command
-  for other builds, [releasing.md](docs/releasing.md) the steps for a
+  it at `share/orca/models` and does not set `ORCA_EMBEDDING_MODEL`:
+  `orca-gtk` finds the file under its install prefix, and `orca-cli` takes
+  `--embedding-model PATH` or the variable. The README gives the download
+  command for other builds, [releasing.md](docs/releasing.md) the steps for a
   different model, and the dependency table in
   [architecture.md](docs/architecture.md#dependencies-and-licences) lists ONNX
   Runtime and the model's licence.
