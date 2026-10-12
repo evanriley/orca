@@ -11,6 +11,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const analysis_pass = @import("library/analysis_pass.zig");
+const audio_embedding = @import("analysis/audio_embedding.zig");
 const discovery = @import("library/discovery.zig");
 const daily_mixes = @import("library/daily_mixes.zig");
 const folder_estimate = @import("library/folder_estimate.zig");
@@ -6008,6 +6009,22 @@ pub export fn orca_runtime_set_embedding_model_path(runtime: ?*Runtime, path: ?[
     return .ok;
 }
 
+pub export fn orca_runtime_start_embedding_model_download(
+    runtime: ?*Runtime,
+    path: ?[*:0]const u8,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const text = std.mem.span(path orelse return box.reject(@src(), .invalid_argument, "path is null"));
+    if (text.len == 0) return box.reject(@src(), .invalid_argument, "path is empty");
+    if (text.len > std.Io.Dir.max_path_bytes)
+        return box.reject(@src(), .invalid_argument, "path is longer than the maximum path length");
+    const started = box.runtime.startEmbeddingModelDownload(text) catch |err| return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
 pub export fn orca_runtime_embedding_model_state(runtime: ?*Runtime, output: ?*u8) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
@@ -9951,7 +9968,7 @@ fn mapError(err: anyerror) Status {
         error.TrackNotFound, error.UnknownTagWritePlan, error.MutationGroupNotFound, error.UnknownDailyMix => .not_found,
         error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.TooManyPendingTagWrites, error.TagWriteInProgress => .busy,
-        error.MatchingAlreadyRunning, error.AcoustIdBusy, error.JobQueueFull => .busy,
+        error.MatchingAlreadyRunning, error.AcoustIdBusy, error.JobQueueFull, error.ModelDownloadAlreadyRunning => .busy,
         error.JobNotPausable, error.JobNotRetryable => .invalid_state,
         error.UnknownJobHistory => .not_found,
         error.UnknownTagWriteGroup => .not_found,
@@ -9962,7 +9979,7 @@ fn mapError(err: anyerror) Status {
         error.RadioNotActive, error.NoAudioEmbedding => .invalid_state,
         error.TrackNotOnRelease, error.UnknownReleaseTrack => .not_found,
         error.NoReleaseTracklist, error.ReleaseTrackAlreadyPaired, error.ReleaseNotPlaced => .invalid_state,
-        error.ReleaseTooLarge => .unsupported,
+        error.ReleaseTooLarge, error.EmbeddingsNotBuilt => .unsupported,
         error.MutationGroupAlreadyUndone, error.TrackNotPaired, error.ReleaseNotReviewed => .already_done,
         error.MutationNeedsReconciliation => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
@@ -12147,6 +12164,152 @@ test "the embedding model path and state are reachable and a similar-tracks sear
     try std.testing.expectEqual(Status.invalid_state, orca_library_similar_tracks(runtime, library, 14, &found, found.len, &count));
     try std.testing.expectEqual(@as(usize, 99), count);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+const model_download_body = bytes: {
+    var bytes: [300]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+    break :bytes bytes;
+};
+
+const ModelDownloadRig = struct {
+    temporary: std.testing.TmpDir,
+    transport: network.testing.ScriptedTransport = .{},
+    clock: network.testing.TestClock = .{},
+    prng: std.Random.DefaultPrng = .init(0x5eed),
+    destination: [:0]u8,
+
+    fn init(self: *ModelDownloadRig, box: *RuntimeBox) !void {
+        self.* = .{
+            .temporary = std.testing.tmpDir(.{}),
+            .destination = undefined,
+        };
+        errdefer self.temporary.cleanup();
+        self.destination = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/model.onnx", .{self.temporary.sub_path}, 0);
+        self.transport.clock = &self.clock;
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&model_download_body, &digest, .{});
+        box.runtime.model_download_hooks = .{
+            .transport = self.transport.transport(),
+            .clock = self.clock.clock(),
+            .wall_clock = self.clock.wallClock(),
+            .random = self.prng.random(),
+            .descriptor = .{ .url = audio_embedding.model_url, .size = model_download_body.len, .sha256 = digest },
+        };
+    }
+
+    fn deinit(self: *ModelDownloadRig) void {
+        self.transport.deinit();
+        std.testing.allocator.free(self.destination);
+        self.temporary.cleanup();
+    }
+};
+
+fn finishedState(runtime: *Runtime, job_handle: Handle) !?u8 {
+    var state: ?u8 = null;
+    var event: Event = undefined;
+    while (true) {
+        try std.testing.expectEqual(Status.ok, orca_runtime_poll_event(runtime, &event, null));
+        if (event.kind == @backingInt(EventKind.none)) return state;
+        if (event.kind == @backingInt(EventKind.job_finished) and
+            std.meta.eql(event.payload.job_finished.job, job_handle)) state = event.payload.job_finished.state;
+    }
+}
+
+test "orca_runtime_start_embedding_model_download refuses a missing, empty, too long or unreceivable argument and starts nothing" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var transport: network.testing.ScriptedTransport = .{};
+    defer transport.deinit();
+    box.runtime.model_download_hooks.transport = transport.transport();
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
+    var started = std.mem.zeroes(Handle);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, null, &started));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_start_embedding_model_download: path is null",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, "", &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, "model.onnx", null));
+    var long: [std.Io.Dir.max_path_bytes + 1:0]u8 = @splat('a');
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, &long, &started));
+    try std.testing.expectEqual(std.mem.zeroes(Handle), started);
+    try std.testing.expectEqual(@as(u32, 0), transport.requestCount());
+    try std.testing.expect(box.runtime.model_download == null);
+}
+
+test "orca_runtime_start_embedding_model_download needs a client identity" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var transport: network.testing.ScriptedTransport = .{};
+    defer transport.deinit();
+    box.runtime.model_download_hooks.transport = transport.transport();
+    var started = std.mem.zeroes(Handle);
+
+    try std.testing.expectEqual(Status.invalid_state, orca_runtime_start_embedding_model_download(runtime, "model.onnx", &started));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_start_embedding_model_download: ClientIdentityRequired",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+    try std.testing.expectEqual(@as(u32, 0), transport.requestCount());
+}
+
+test "orca_runtime_start_embedding_model_download is unsupported without embeddings" {
+    if (audio_embedding.enabled) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
+    var started = std.mem.zeroes(Handle);
+
+    try std.testing.expectEqual(Status.unsupported, orca_runtime_start_embedding_model_download(runtime, "model.onnx", &started));
+    try std.testing.expectEqual(std.mem.zeroes(Handle), started);
+}
+
+test "orca_runtime_start_embedding_model_download installs the model, reports the job and refuses a second download while one runs" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var rig: ModelDownloadRig = undefined;
+    try rig.init(box);
+    defer rig.deinit();
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
+    try rig.transport.script(.{ .respond = .{ .body = &model_download_body } });
+
+    var started = std.mem.zeroes(Handle);
+    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(runtime, rig.destination.ptr, &started));
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJobPumping(&box.runtime, importJob(started)));
+    var snapshot: JobSnapshot = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(runtime, started, &snapshot));
+    try std.testing.expectEqual(@as(u8, 14), snapshot.kind);
+    try std.testing.expectEqual(@backingInt(job.State.succeeded), snapshot.state);
+    try std.testing.expectEqual(@as(u64, model_download_body.len), snapshot.completed_units);
+    try std.testing.expectEqual(@as(u64, model_download_body.len), snapshot.total_units);
+    try std.testing.expectEqual(@as(?u8, @backingInt(job.State.succeeded)), try finishedState(runtime, started));
+    const installed = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, rig.destination, std.testing.allocator, .limited(1 << 20));
+    defer std.testing.allocator.free(installed);
+    try std.testing.expectEqualSlices(u8, &model_download_body, installed);
+    try std.testing.expectEqual(@as(u32, 1), rig.transport.requestCount());
+
+    try rig.transport.script(.hang);
+    var hanging = std.mem.zeroes(Handle);
+    const second_destination = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}.second", .{rig.destination}, 0);
+    defer std.testing.allocator.free(second_destination);
+    var refused = std.mem.zeroes(Handle);
+    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(runtime, second_destination.ptr, &hanging));
+    var deadline: core.runtime_tests.TestDeadline = .init(5_000);
+    while (rig.transport.requestCount() < 2 and deadline.tick()) {}
+    try std.testing.expectEqual(@as(u32, 2), rig.transport.requestCount());
+    try std.testing.expectEqual(Status.busy, orca_runtime_start_embedding_model_download(runtime, rig.destination.ptr, &refused));
+    try std.testing.expectEqual(std.mem.zeroes(Handle), refused);
+
+    try std.testing.expectEqual(Status.ok, orca_job_cancel(runtime, hanging));
+    try std.testing.expectEqual(job.State.cancelled, try core.runtime_tests.awaitJobPumping(&box.runtime, importJob(hanging)));
 }
 
 test "the client identity and AcoustID key are copied, and invalid ones are refused" {

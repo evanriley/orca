@@ -4938,6 +4938,16 @@ static int provider_settings_steps(orca_runtime *runtime) {
     SMOKE_CHECK(orca_runtime_embedding_model_state(runtime, &model_state) == ORCA_STATUS_OK);
     SMOKE_CHECK(model_state == unset_state);
     SMOKE_CHECK(orca_runtime_set_embedding_model_path(runtime, 0) == ORCA_STATUS_OK);
+
+    orca_handle model_job;
+    memset(&model_job, 0, sizeof model_job);
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(runtime, 0, &model_job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(runtime, "", &model_job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(runtime, "/nonexistent/orca-smoke-model.onnx", 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(model_job.index == 0 && model_job.generation == 0);
     return 0;
 }
 
