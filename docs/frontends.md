@@ -595,7 +595,8 @@ whose GTK, libadwaita or Pango is older than `orca-gtk` needs.
 
 `orca-gtk` names the [audio-embedding model](analysis.md#audio-embedding) file,
 `clap_audio_int8.onnx`, to liborca with `Runtime.setEmbeddingModelPath` once at
-startup. It does not download the file. The path is the first of:
+startup. It downloads the file only when Download is pressed in Settings. The
+path is the first of:
 
 1. `ORCA_EMBEDDING_MODEL`, when set and not empty, whether or not a file is
    there;
@@ -611,15 +612,40 @@ one row:
 | State | Row | Under it |
 | --- | --- | --- |
 | `ready` | Model installed | the file's path |
-| `missing` | Model not installed | the file's name and the directory to put it in |
-| `wrong_file` | That file is not Orca's model | the file's path |
-| `unusable` | The model could not be loaded | the file's path |
+| `missing` | Model not installed | the download's size and host, the file's name and its directory |
+| `wrong_file` | That file is not Orca's model | the file's path, the download's size and host |
+| `unusable` | The model could not be loaded | the file's path, the download's size and host |
 | `built_without` | Not available in this build | that the build has no ONNX Runtime |
 
 For `missing`, `wrong_file` and `unusable` the row has Check again, which
 repeats the lookup, sets the path again and re-reads
 `libraryAnalysisCoverage`, so the analysis banner can ask for the embedding
 without a restart. The row is read again each time the Listening tab is shown.
+
+For the same three states the row has Download, which calls
+`Runtime.startEmbeddingModelDownload` with
+`$XDG_DATA_HOME/orca/models/clap_audio_int8.onnx`, whichever path the lookup
+chose. Download is not offered when `ORCA_EMBEDDING_MODEL` is set and not
+empty, when the state is `ready`, or in a build without ONNX Runtime. With the
+variable set, the `missing` row names only the file and the directory to put it
+in.
+
+While the [download job](control-plane.md#model-download) runs, the row reads
+Downloading the model over the megabytes received and expected, and its only
+button is Cancel, which calls `Runtime.cancelJob`. `orca-gtk` reads the job's
+snapshot on each pass of its main loop and keeps the handle on the application,
+so the row shows the running download again after Settings is left and
+reopened. The job is not listed in the activity panel.
+
+| Job ends | Row |
+| --- | --- |
+| `succeeded` | Model installed, with the downloaded file's path |
+| `failed` | the state's row, with "The download failed." and the job's reason |
+| `cancelled` | the state's row |
+
+A download that could not be started shows as a failure. Success re-reads
+`libraryAnalysisCoverage`, as Check again does. A failure line stays until
+Check again or Download is pressed.
 
 ### Libraries and settings
 

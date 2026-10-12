@@ -93,7 +93,8 @@ runtime path, per the rule in [architecture.md](architecture.md).
   measures an embedding for each track, Radio and Daily Mixes rank by how
   close a track sounds to the seed, and `orca-cli similar` lists the nearest
   tracks ([analysis.md](analysis.md#audio-embedding)). `orca-cli
-  download-embedding-model` fetches the model and checks it.
+  download-embedding-model` and Download in `orca-gtk`'s Settings fetch the
+  model and check it.
 
 ### Identification
 
@@ -260,8 +261,6 @@ release itself is the maintainer's call.
 
 ### Analysis
 
-- A Download button in `orca-gtk` for the audio-embedding model. The engine
-  job, `orca-cli download-embedding-model` and the C ABI call exist.
 - A larger or music-specific embedding model, and mixing the embedding with a
   timbre descriptor.
 - Genre rarity weighting in Radio: a shared rare genre counts for more than a

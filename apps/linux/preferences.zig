@@ -2272,20 +2272,37 @@ fn radioCard(self: *App) *gtk.Widget {
     return radio_card.widget;
 }
 
-fn showModel(self: *App) void {
+pub fn showModel(self: *App) void {
     const row = self.listening_controls.model_row orelse return;
-    var buffer: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    const status = embedding_model.status(&buffer, self.runtime.embeddingModelState(), self.embedding_model_path.value);
+    var buffer: [std.Io.Dir.max_path_bytes + 128]u8 = undefined;
+    const status = embedding_model.shownStatus(self, &buffer);
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), status.title.ptr);
     setSubtitle(row, status.subtitle);
     if (self.listening_controls.model_check) |button| gtk.gtk_widget_set_visible(button, @intFromBool(status.can_check_again));
+    const button = self.listening_controls.model_action orelse return;
+    gtk.gtk_widget_set_visible(button, @intFromBool(status.action != .none));
+    switch (status.action) {
+        .none => {},
+        .download => gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), "Download"),
+        .cancel => gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), "Cancel"),
+    }
 }
 
 fn checkModelClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
+    embedding_model.dismissFailure(self);
     embedding_model.apply(self);
     showModel(self);
     analysis_notice.refresh(self);
+}
+
+fn modelActionClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    switch (self.embedding_model_download) {
+        .running => embedding_model.cancelDownload(self),
+        .idle, .failed, .refused => embedding_model.startDownload(self),
+    }
+    showModel(self);
 }
 
 fn soundCard(self: *App) *gtk.Widget {
@@ -2298,6 +2315,7 @@ fn soundCard(self: *App) *gtk.Widget {
     adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
     self.listening_controls.model_row = row;
     self.listening_controls.model_check = suffixButton(row, "Check again", null, gtk.callback(checkModelClicked), self);
+    self.listening_controls.model_action = suffixButton(row, "Download", null, gtk.callback(modelActionClicked), self);
     showModel(self);
     sound.add(row);
     return sound.widget;

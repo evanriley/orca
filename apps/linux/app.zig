@@ -29,6 +29,7 @@ const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const offline = @import("offline.zig");
 const analysis_notice = @import("analysis_notice.zig");
+const embedding_model = @import("embedding_model.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
 const changes = @import("changes.zig");
@@ -287,6 +288,7 @@ pub const ListeningControls = struct {
     pending_value: ?*gtk.Label = null,
     model_row: ?*gtk.Widget = null,
     model_check: ?*gtk.Widget = null,
+    model_action: ?*gtk.Widget = null,
     token: CredentialControls = .{},
 };
 
@@ -346,6 +348,7 @@ pub const App = struct {
     libraries: libraries.State = .{},
     embedding_model_override: ?[]const u8 = null,
     embedding_model_path: OwnedText = .{},
+    embedding_model_download: embedding_model.Download = .idle,
     /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
     /// Development affordance only: it exists so an automated run can be held to a
     /// silent sink instead of device 0, which is the system default and therefore

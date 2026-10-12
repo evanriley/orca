@@ -252,9 +252,10 @@ audio-embedding model, `clap_audio_int8.onnx` (32.6 MB). Without the file they
 rank by tempo, key and energy instead, and nothing else changes. Orca
 downloads the file only when asked to.
 
-The Nix package includes the model. For any other build, `orca-cli` downloads
-it to `orca-gtk`'s data directory and installs it only when its size and
-SHA-256 are the ones the build expects:
+The Nix package includes the model. For any other build, Download in
+`orca-gtk`'s Settings › Listening fetches it from `github.com` to `orca-gtk`'s
+data directory. `orca-cli` does the same. Either installs the file only when
+its size and SHA-256 are the ones the build expects:
 
 ```sh
 orca-cli download-embedding-model \
