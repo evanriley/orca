@@ -26,9 +26,14 @@ Font License and keep their licence texts beside them.
 Chromaprint is built without its LGPL resampler and uses libsamplerate instead.
 Its build-time licence check must remain enabled. ONNX Runtime (MIT, with some
 MPL-2.0 files) is a dynamically linked system library that `-Dembeddings=false`
-removes; never vendor it or link it statically. The audio-embedding model is
-never committed or compiled in. The engine downloads it only when a host asks,
-to a path the host names, and checks it against the compiled-in SHA-256. See
+removes; never vendor it or link it statically.
+
+An audio-embedding model is a data file, never committed or compiled in. The
+engine downloads one only when a host asks, to a path the host names, and
+checks it against the compiled-in SHA-256. A model the engine can download may
+carry a non-commercial licence when its release states the licence, the
+attribution and the source, as `discogs_maest` (CC BY-NC-SA 4.0) does. A
+package bundles only permissively licensed models. See
 [the architecture dependency table](docs/architecture.md#dependencies-and-licences).
 
 ## Toolchain
