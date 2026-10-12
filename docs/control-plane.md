@@ -230,11 +230,12 @@ that take no slot have no history row.
 
 ### Model download
 
-`startEmbeddingModelDownload(destination)` starts the one Job that belongs to
-no Library: kind `model_download`, units in bytes, total the model's size. It
-takes no slot, is never `waiting`, has no history row and cannot be paused
-(`error.JobNotPausable`). One runs at a time; a second start before the pump
-has reaped the first fails with `error.ModelDownloadAlreadyRunning`.
+`startEmbeddingModelDownload(model, destination)` starts the one Job that
+belongs to no Library: kind `model_download`, units in bytes, total the
+chosen `EmbeddingModel`'s size. It takes no slot, is never `waiting`, has no
+history row and cannot be paused (`error.JobNotPausable`). One runs at a time;
+a second start before the pump has reaped the first fails with
+`error.ModelDownloadAlreadyRunning`.
 
 Its worker is a thread of its own, registered with `work.Registry` like every
 other. It makes one request through a `network.Gateway` that holds its state

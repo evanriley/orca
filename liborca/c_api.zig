@@ -5898,6 +5898,13 @@ pub fn importProviderService(value: u8) ?ProviderService {
     };
 }
 
+pub fn importEmbeddingModel(value: u8) ?core.runtime.EmbeddingModel {
+    return switch (value) {
+        1 => .clap_htsat_unfused,
+        else => null,
+    };
+}
+
 pub const CredentialResult = enum { found, not_found, unavailable, too_large };
 
 pub fn importCredentialResult(value: c_int) ?CredentialResult {
@@ -6011,16 +6018,19 @@ pub export fn orca_runtime_set_embedding_model_path(runtime: ?*Runtime, path: ?[
 
 pub export fn orca_runtime_start_embedding_model_download(
     runtime: ?*Runtime,
+    model: u8,
     path: ?[*:0]const u8,
     job_output: ?*Handle,
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const selected = importEmbeddingModel(model) orelse
+        return box.reject(@src(), .invalid_argument, "unknown embedding model");
     const text = std.mem.span(path orelse return box.reject(@src(), .invalid_argument, "path is null"));
     if (text.len == 0) return box.reject(@src(), .invalid_argument, "path is empty");
     if (text.len > std.Io.Dir.max_path_bytes)
         return box.reject(@src(), .invalid_argument, "path is longer than the maximum path length");
-    const started = box.runtime.startEmbeddingModelDownload(text) catch |err| return box.fail(@src(), err);
+    const started = box.runtime.startEmbeddingModelDownload(selected, text) catch |err| return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -12216,6 +12226,31 @@ fn finishedState(runtime: *Runtime, job_handle: Handle) !?u8 {
     }
 }
 
+const model_id: u8 = @backingInt(core.runtime.EmbeddingModel.clap_htsat_unfused);
+
+test "orca_runtime_start_embedding_model_download refuses an unknown model and starts nothing" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var transport: network.testing.ScriptedTransport = .{};
+    defer transport.deinit();
+    box.runtime.model_download_hooks.transport = transport.transport();
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
+    var started = std.mem.zeroes(Handle);
+
+    for ([_]u8{ 0, 2, 255 }) |unknown| {
+        try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, unknown, "model.onnx", &started));
+        try std.testing.expectEqualStrings(
+            "orca_runtime_start_embedding_model_download: unknown embedding model",
+            std.mem.span(orca_runtime_last_error(runtime)),
+        );
+    }
+    try std.testing.expectEqual(std.mem.zeroes(Handle), started);
+    try std.testing.expectEqual(@as(u32, 0), transport.requestCount());
+    try std.testing.expect(box.runtime.model_download == null);
+}
+
 test "orca_runtime_start_embedding_model_download refuses a missing, empty, too long or unreceivable argument and starts nothing" {
     if (!audio_embedding.enabled) return error.SkipZigTest;
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
@@ -12227,15 +12262,15 @@ test "orca_runtime_start_embedding_model_download refuses a missing, empty, too 
     try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
     var started = std.mem.zeroes(Handle);
 
-    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, null, &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, model_id, null, &started));
     try std.testing.expectEqualStrings(
         "orca_runtime_start_embedding_model_download: path is null",
         std.mem.span(orca_runtime_last_error(runtime)),
     );
-    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, "", &started));
-    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, "model.onnx", null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, model_id, "", &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, model_id, "model.onnx", null));
     var long: [std.Io.Dir.max_path_bytes + 1:0]u8 = @splat('a');
-    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, &long, &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, model_id, &long, &started));
     try std.testing.expectEqual(std.mem.zeroes(Handle), started);
     try std.testing.expectEqual(@as(u32, 0), transport.requestCount());
     try std.testing.expect(box.runtime.model_download == null);
@@ -12251,7 +12286,7 @@ test "orca_runtime_start_embedding_model_download needs a client identity" {
     box.runtime.model_download_hooks.transport = transport.transport();
     var started = std.mem.zeroes(Handle);
 
-    try std.testing.expectEqual(Status.invalid_state, orca_runtime_start_embedding_model_download(runtime, "model.onnx", &started));
+    try std.testing.expectEqual(Status.invalid_state, orca_runtime_start_embedding_model_download(runtime, model_id, "model.onnx", &started));
     try std.testing.expectEqualStrings(
         "orca_runtime_start_embedding_model_download: ClientIdentityRequired",
         std.mem.span(orca_runtime_last_error(runtime)),
@@ -12266,7 +12301,7 @@ test "orca_runtime_start_embedding_model_download is unsupported without embeddi
     try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
     var started = std.mem.zeroes(Handle);
 
-    try std.testing.expectEqual(Status.unsupported, orca_runtime_start_embedding_model_download(runtime, "model.onnx", &started));
+    try std.testing.expectEqual(Status.unsupported, orca_runtime_start_embedding_model_download(runtime, model_id, "model.onnx", &started));
     try std.testing.expectEqual(std.mem.zeroes(Handle), started);
 }
 
@@ -12282,7 +12317,7 @@ test "orca_runtime_start_embedding_model_download installs the model, reports th
     try rig.transport.script(.{ .respond = .{ .body = &model_download_body } });
 
     var started = std.mem.zeroes(Handle);
-    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(runtime, rig.destination.ptr, &started));
+    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(runtime, model_id, rig.destination.ptr, &started));
     try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJobPumping(&box.runtime, importJob(started)));
     var snapshot: JobSnapshot = undefined;
     try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(runtime, started, &snapshot));
@@ -12301,11 +12336,11 @@ test "orca_runtime_start_embedding_model_download installs the model, reports th
     const second_destination = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}.second", .{rig.destination}, 0);
     defer std.testing.allocator.free(second_destination);
     var refused = std.mem.zeroes(Handle);
-    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(runtime, second_destination.ptr, &hanging));
+    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(runtime, model_id, second_destination.ptr, &hanging));
     var deadline: core.runtime_tests.TestDeadline = .init(5_000);
     while (rig.transport.requestCount() < 2 and deadline.tick()) {}
     try std.testing.expectEqual(@as(u32, 2), rig.transport.requestCount());
-    try std.testing.expectEqual(Status.busy, orca_runtime_start_embedding_model_download(runtime, rig.destination.ptr, &refused));
+    try std.testing.expectEqual(Status.busy, orca_runtime_start_embedding_model_download(runtime, model_id, rig.destination.ptr, &refused));
     try std.testing.expectEqual(std.mem.zeroes(Handle), refused);
 
     try std.testing.expectEqual(Status.ok, orca_job_cancel(runtime, hanging));

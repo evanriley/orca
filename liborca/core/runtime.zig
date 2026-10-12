@@ -335,6 +335,7 @@ pub const EditedTracks = struct {
 pub const FileAnalysis = analysis_service.Analysis;
 pub const AudioEmbedding = analysis_embedding.Result;
 pub const EmbeddingModelState = embedding_model.State;
+pub const EmbeddingModel = analysis_embedding.ModelId;
 pub const TrackFingerprint = analysis_chromaprint.Fingerprinter.Outcome;
 
 /// The Library's database, for liborca's own C ABI and tests. Clients use the
@@ -1532,13 +1533,14 @@ pub const OrcaRuntime = struct {
     /// `destination` but a file of the expected size and SHA-256, which the
     /// runtime then uses as `setEmbeddingModelPath` would. A file that is
     /// already the model is kept and nothing is requested. A failed Job's
-    /// snapshot keeps the reason as its `detail`.
+    /// snapshot keeps the reason as its `detail`. `model` names which model is
+    /// fetched.
     /// `error.EmbeddingsNotBuilt` without embeddings,
     /// `error.ClientIdentityRequired` before `setClientIdentity`,
     /// `error.InvalidArgument` for an empty `destination`, and
     /// `error.ModelDownloadAlreadyRunning` while one runs.
-    pub fn startEmbeddingModelDownload(self: *OrcaRuntime, destination: []const u8) !JobHandle {
-        return runtime_model_download.start(self, destination);
+    pub fn startEmbeddingModelDownload(self: *OrcaRuntime, model: EmbeddingModel, destination: []const u8) !JobHandle {
+        return runtime_model_download.start(self, model, destination);
     }
 
     /// Points AcoustID lookups and submissions started afterwards at another

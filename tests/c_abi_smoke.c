@@ -4941,11 +4941,20 @@ static int provider_settings_steps(orca_runtime *runtime) {
 
     orca_handle model_job;
     memset(&model_job, 0, sizeof model_job);
-    SMOKE_CHECK(orca_runtime_start_embedding_model_download(runtime, 0, &model_job) ==
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(
+                    runtime, ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED, 0, &model_job) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
-    SMOKE_CHECK(orca_runtime_start_embedding_model_download(runtime, "", &model_job) ==
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(
+                    runtime, ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED, "", &model_job) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
-    SMOKE_CHECK(orca_runtime_start_embedding_model_download(runtime, "/nonexistent/orca-smoke-model.onnx", 0) ==
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(
+                    runtime, ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED,
+                    "/nonexistent/orca-smoke-model.onnx", 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(
+                    runtime, 0, "/nonexistent/orca-smoke-model.onnx", &model_job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(
+                    runtime, 200, "/nonexistent/orca-smoke-model.onnx", &model_job) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(model_job.index == 0 && model_job.generation == 0);
     return 0;

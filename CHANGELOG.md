@@ -5,15 +5,19 @@
 ### Added
 
 - **liborca downloads the audio-embedding model when a host asks.**
-  `Runtime.startEmbeddingModelDownload(destination)` starts a `model_download`
-  Job (`ORCA_JOB_KIND_MODEL_DOWNLOAD`, 14) that belongs to no Library, reports
-  bytes, can be cancelled and cannot be paused. It writes
+  `Runtime.startEmbeddingModelDownload(model, destination)` starts a
+  `model_download` Job (`ORCA_JOB_KIND_MODEL_DOWNLOAD`, 14) that belongs to no
+  Library, reports bytes, can be cancelled and cannot be paused. It writes
   `destination.part`, renames it onto `destination` only when the size and
   SHA-256 are the compiled-in ones, and then names the file to the runtime, so
   `embeddingModelState` reads `ready`. A redirect is followed only to `https`
   on `githubusercontent.com`; nothing is retried or resumed; a failed Job's
   snapshot `detail` holds the reason. `orca-cli download-embedding-model PATH`
-  runs it, and a C host calls `orca_runtime_start_embedding_model_download`.
+  runs it, and a C host calls
+  `orca_runtime_start_embedding_model_download(runtime, model, path, &job)`.
+  `model` is an `EmbeddingModel` (`orca_embedding_model`); its one member is
+  `clap_htsat_unfused` (`ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`, 1), and any
+  other value is `ORCA_STATUS_INVALID_ARGUMENT`.
 - **`orca-gtk` downloads the audio-embedding model from Settings › Listening.**
   Download in the Sound Similarity card fetches it (32.6 MB, from `github.com`)
   to the user data directory, shows the megabytes received and can be

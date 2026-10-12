@@ -224,7 +224,7 @@ pub fn startDownload(self: *App) void {
     if (self.embedding_model_download == .running or overridden(self)) return;
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     self.embedding_model_download = if (userPath(&buffer)) |destination|
-        if (self.runtime.startEmbeddingModelDownload(destination)) |job|
+        if (self.runtime.startEmbeddingModelDownload(.clap_htsat_unfused, destination)) |job|
             .{ .running = job }
         else |err|
             .{ .refused = startRefusal(err) }

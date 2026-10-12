@@ -2430,11 +2430,17 @@ orca_status orca_runtime_set_embedding_model_path(orca_runtime *runtime, const c
  * liborca was built without audio embeddings. */
 orca_status orca_runtime_embedding_model_state(orca_runtime *runtime, uint8_t *output);
 
+typedef enum orca_embedding_model {
+    /* The CLAP HTSAT-unfused audio encoder, quantized to 8 bits. */
+    ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED = 1,
+} orca_embedding_model;
+
 /* Starts an ORCA_JOB_KIND_MODEL_DOWNLOAD job that downloads the audio-
- * embedding model to `path`, which is NUL-terminated and copied. The job
- * belongs to no Library and its units are bytes, the total being the model's
- * size. Only a file with the compiled-in size and SHA-256 is installed at
- * `path`; anything else leaves the file there as it was. A `path` that
+ * embedding `model`, an orca_embedding_model, to `path`, which is
+ * NUL-terminated and copied. The job belongs to no Library and its units are
+ * bytes, the total being the model's size. Only a file with the model's
+ * compiled-in size and SHA-256 is installed at `path`; anything else leaves
+ * the file there as it was. A `path` that
  * already holds the model succeeds with no request. When the job succeeds the
  * runtime uses the file as orca_runtime_set_embedding_model_path would, so
  * orca_runtime_embedding_model_state then reports it. Needs the client
@@ -2445,13 +2451,15 @@ orca_status orca_runtime_embedding_model_state(orca_runtime *runtime, uint8_t *o
  * leaves `path` as it was. A failed job's reason, such as "the network is
  * unavailable", is the `detail` text of orca_job_details_get.
  *
- * ORCA_STATUS_INVALID_ARGUMENT for a NULL or empty `path`, a `path` longer
- * than the platform's maximum path length, or a NULL `job`; nothing starts.
+ * ORCA_STATUS_INVALID_ARGUMENT for a `model` that is not an
+ * orca_embedding_model, a NULL or empty `path`, a `path` longer than the
+ * platform's maximum path length, or a NULL `job`; nothing starts.
  * ORCA_STATUS_INVALID_STATE before the client identity is set.
  * ORCA_STATUS_BUSY while a download is running. ORCA_STATUS_UNSUPPORTED when
  * this liborca was built without audio embeddings. */
 orca_status orca_runtime_start_embedding_model_download(
     orca_runtime *runtime,
+    uint8_t model,
     const char *path,
     orca_handle *job
 );

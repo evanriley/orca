@@ -142,7 +142,7 @@ pinned CLAP audio model, run through ONNX Runtime; builds with
 `-Dembeddings=false` have no such measurement. The host names the model's
 file with `Runtime.setEmbeddingModelPath`, and the file is checked by size and
 SHA-256. The engine downloads the model only when the host calls
-`Runtime.startEmbeddingModelDownload`
+`Runtime.startEmbeddingModelDownload(model, destination)`
 ([control-plane.md](control-plane.md#model-download)). Without a usable model
 an analysis measures and stores exactly what it does in a build without
 embeddings.

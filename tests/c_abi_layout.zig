@@ -866,6 +866,14 @@ const import_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_EMBEDDING_MODEL_";
+        pub const excluded_prefix = "ORCA_EMBEDDING_MODEL_STATE_";
+        pub const Tag = core.runtime.EmbeddingModel;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importEmbeddingModel(value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_PROVIDER_SERVICE_";
         pub const Tag = c_api.ProviderService;
         pub fn consume(value: u8) ?Tag {
@@ -1139,6 +1147,7 @@ test "every orca.h constant the C API accepts imports as the Zig value of the sa
     inline for (import_mappings) |mapping| {
         inline for (@typeInfo(c).@"struct".decl_names) |decl_name| {
             if (comptime !std.mem.startsWith(u8, decl_name, mapping.prefix)) continue;
+            if (comptime @hasDecl(mapping, "excluded_prefix") and std.mem.startsWith(u8, decl_name, mapping.excluded_prefix)) continue;
             const tag_name = comptime blk: {
                 var lower: [decl_name.len - mapping.prefix.len]u8 = undefined;
                 for (decl_name[mapping.prefix.len..], 0..) |character, index| lower[index] = std.ascii.toLower(character);
