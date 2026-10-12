@@ -85,7 +85,8 @@ holds anything. Otherwise it is the soonest of:
 - While a job worker runs, `job_progress_interval_ms` (100 ms). Each pump
   publishes `job_progress` for every host Job whose units or state moved. A
   finished worker not yet reaped, or commands left queued by event
-  backpressure, make it 0.
+  backpressure, make it 0. A [model download](#model-download) counts as a
+  job worker here.
 - 0 for a waiting Job that could start now or that the host cancelled. A Job
   behind a running worker waits on that worker's timeout; one held by
   `pauseAll` waits for `resumeAll`.
@@ -116,8 +117,8 @@ not running.
 Jobs share one state, progress and cancellation representation across the
 scanner, the projection, the property backfill, the library-wide analysis,
 duplicate detection, consistency checks, metadata lookup, AcoustID submission,
-tag write-back, the lyrics, artist-info and release-info fetches, and making
-Daily Mixes. The C ABI
+tag write-back, the lyrics, artist-info and release-info fetches, making
+Daily Mixes, and the [model download](#model-download). The C ABI
 names the kinds `ORCA_JOB_KIND_*` (`orca.h`). The serialized control lane owns
 job state; the worker publishes counters through atomics and is joined through
 `work.Registry` before its terminal state is recorded and its lossless
@@ -226,6 +227,48 @@ not succeed through the same start function, which may queue it. It fails with
 `error.JobNotRetryable` for a succeeded Job and for a request that is not
 stored: a tag write is an approved plan, undone through its undo group. Jobs
 that take no slot have no history row.
+
+### Model download
+
+`startEmbeddingModelDownload(destination)` starts the one Job that belongs to
+no Library: kind `model_download`, units in bytes, total the model's size. It
+takes no slot, is never `waiting`, has no history row and cannot be paused
+(`error.JobNotPausable`). One runs at a time; a second start before the pump
+has reaped the first fails with `error.ModelDownloadAlreadyRunning`.
+
+Its worker is a thread of its own, registered with `work.Registry` like every
+other. It makes one request through a `network.Gateway` that holds its state
+in memory, with `Gateway.fetchInto`
+([providers.md](providers.md#streamed-responses)): no retry, no resume, 30 s
+without a byte or 60 minutes in all end it, and a redirect is followed only to
+`https` on `githubusercontent.com` or a subdomain. The body goes to
+`destination` with `.part` appended, which is deleted on every end but
+success. Only a `200` whose body has the model's size and SHA-256 is synced
+and renamed onto `destination`.
+
+`jobSnapshotSynced`, `job_progress`, `cancelJob` and the lossless
+`job_finished` behave as for a Library's Job. When the pump reaps a succeeded
+download it names `destination` to the runtime as `setEmbeddingModelPath`
+does, before it publishes `job_finished`. `shutdown` cancels the download,
+joins it and finishes it without an event and without naming the file.
+`destroyLibrary` drains every worker, so it cancels a running download too;
+the next pump publishes its `job_finished`.
+
+A failed download's reason is its snapshot's `detail`, set when the Job
+finishes and kept while the runtime lives:
+
+| `detail` | Cause |
+| --- | --- |
+| `the network is unavailable` | No connection, or it was lost |
+| `the download timed out` | 30 s without a byte, or 60 minutes in all |
+| `the server answered N` | The final status was N, not 200 |
+| `the server is refusing requests for now` | A 429, or a 503 naming a wait |
+| `the server redirected somewhere unexpected` | A redirect to another host |
+| `the downloaded file is not the expected model` | Wrong size or SHA-256 |
+| `the file could not be written` | The directory or file refused a write |
+| `the download could not be run` | Memory ran out, or a setup error |
+
+A cancelled download has an empty `detail`.
 
 ## Idle maintenance
 

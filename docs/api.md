@@ -452,6 +452,25 @@ section lists the entry points, errors and limits.
   the embedding only when it is `ready`. An analysis takes the path as it was
   when its worker started; see
   [analysis.md](analysis.md#audio-embedding).
+- `startEmbeddingModelDownload(destination)` starts a `model_download` Job
+  that fetches the audio-embedding model from `model_url` in
+  `liborca/analysis/audio_embedding.zig` and installs it at `destination`,
+  creating the directory. It needs no Library, takes no Library's slot and
+  never waits. Its units are bytes and its total is the model's size. A file
+  is renamed onto `destination` only when its size and SHA-256 are the
+  compiled-in ones; a `destination` that already holds the model succeeds
+  with no request. Any other end leaves `destination` as it was. When the
+  pump reaps a succeeded download, the runtime names `destination` as
+  `setEmbeddingModelPath` does, so `embeddingModelState` reads `ready` once
+  the host sees `job_finished`; it stays unchanged only when memory runs out,
+  so a host reads the state and does not infer it. A failed Job's snapshot
+  holds the reason as its `detail`. Errors: `error.EmbeddingsNotBuilt` in a
+  build with `-Dembeddings=false`, `error.ClientIdentityRequired` before
+  `setClientIdentity`, `error.ModelDownloadAlreadyRunning` while a download
+  has not been reaped, `error.InvalidArgument` for an empty path, and
+  `error.NameTooLong` for one longer than a path can be. `pauseJob` refuses
+  the Job with `error.JobNotPausable`. See
+  [control-plane.md](control-plane.md#model-download).
 - `startArtistInfoFetch(library, artist_id, ArtistInfoOptions)` starts an
   `artist_info` Job that gathers an Artist's photo, biography, years active and
   links, listeners and related artists, and fills genres. Options: `language`

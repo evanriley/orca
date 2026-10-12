@@ -141,6 +141,22 @@ for another language.
   name, a Wikipedia article title, and the language. No tag text, path or
   Library content.
 
+### GitHub
+
+Servers: `github.com`, which redirects to
+`release-assets.githubusercontent.com`. The audio-embedding model, a file
+published with Orca's releases.
+
+- Contacted only when a host starts the download: `orca-cli
+  download-embedding-model`. `orca-gtk` never starts it. Nothing is requested
+  when the file is already in place.
+- Sent: one GET of the model's address, with the `User-Agent`. No token, tag
+  text, path or Library content.
+- Received: the model file. It is installed only when its size and SHA-256 are
+  the ones compiled into Orca; anything else is deleted.
+- A redirect is followed only to `https` on `githubusercontent.com` or a
+  subdomain, and the redirected request carries only the `User-Agent`.
+
 ### Artist and release info
 
 A job that gathers an artist's photo, biography, years active, links, related
@@ -187,15 +203,16 @@ token goes to whichever ListenBrainz server is set.
   not start matching, cover or AcoustID actions.
 - `orca-cli` makes requests only for the commands that name a service: `match`,
   `scrobble`, `lyrics --fetch`, `artist-info --fetch`, `release-info --fetch`,
-  `cover-art`, `genres --fill-from-musicbrainz`, `submit-acoustid` and `watch
-  --maintenance`.
+  `cover-art`, `genres --fill-from-musicbrainz`, `submit-acoustid`, `watch
+  --maintenance` and `download-embedding-model`.
 
 ## How this is checked
 
 - The only HTTP client in the tree is `std.http.Client`, held by the gateway's
   standard transport in `liborca/network/client.zig` and called only from the
-  gateway's request and redirect methods. The listen worker and the job worker
-  build it, each wrapping it in a gateway; no provider holds a transport.
+  gateway's request and redirect methods. The listen worker, the job worker
+  and the model download build it, each wrapping it in a gateway; no provider
+  holds a transport.
 - Searches of `liborca`, `apps`, `build`, `build.zig` and `examples` find no
   other use of `std.http`, no `std.Io.net` connection outside tests, and no C
   socket, `getaddrinfo` or `curl` call. The C sources' only connections are

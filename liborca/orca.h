@@ -170,6 +170,9 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_CONSISTENCY = 12,
     /* Making the day's Daily Mixes: orca_library_start_daily_mixes. */
     ORCA_JOB_KIND_DAILY_MIXES = 13,
+    /* Downloading the audio-embedding model. It belongs to no Library and
+     * its units are bytes. The ABI cannot start this Job yet. */
+    ORCA_JOB_KIND_MODEL_DOWNLOAD = 14,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 

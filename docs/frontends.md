@@ -584,7 +584,7 @@ whose GTK, libadwaita or Pango is older than `orca-gtk` needs.
 
 `orca-gtk` names the [audio-embedding model](analysis.md#audio-embedding) file,
 `clap_audio_int8.onnx`, to liborca with `Runtime.setEmbeddingModelPath` once at
-startup. It never downloads the file. The path is the first of:
+startup. It does not download the file. The path is the first of:
 
 1. `ORCA_EMBEDDING_MODEL`, when set and not empty, whether or not a file is
    there;

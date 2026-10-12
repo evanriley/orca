@@ -160,6 +160,7 @@ fn kindIcon(kind: liborca.JobKind) [*:0]const u8 {
         .lyrics => "orca-tracks-symbolic",
         .artist_info => "orca-artists-symbolic",
         .daily_mixes => "orca-radio-symbolic",
+        .model_download => "orca-arrow-down-symbolic",
         .scan, .reconcile, .projection, .property_backfill, .conversion, .ripping, .dummy => "orca-folders-symbolic",
     };
 }
@@ -187,6 +188,7 @@ fn taskTitle(buffer: []u8, kind: liborca.JobKind, total: ?u64, waiting: bool) [:
         .conversion => if (waiting) "Convert" else "Converting",
         .ripping => if (waiting) "Rip a CD" else "Ripping a CD",
         .daily_mixes => if (waiting) "Make Daily Mixes" else "Making Daily Mixes",
+        .model_download => if (waiting) "Download the sound model" else "Downloading the sound model",
         .dummy => if (waiting) "Work" else "Working",
     };
 }
@@ -210,6 +212,7 @@ fn kindNoun(kind: liborca.JobKind) []const u8 {
         .conversion => "the conversion",
         .ripping => "the CD rip",
         .daily_mixes => "making Daily Mixes",
+        .model_download => "the sound model download",
         .dummy => "the current task",
     };
 }
@@ -233,6 +236,7 @@ fn historyName(kind: liborca.JobKind) []const u8 {
         .conversion => "Conversion",
         .ripping => "CD rip",
         .daily_mixes => "Daily Mixes",
+        .model_download => "Sound model download",
         .dummy => "Task",
     };
 }
@@ -244,6 +248,7 @@ fn unitName(kind: liborca.JobKind, count: u64) []const u8 {
         .artist_info => "artists",
         .artwork => "covers",
         .daily_mixes => "mixes",
+        .model_download => "bytes",
         .dummy => "items",
         .scan, .reconcile, .property_backfill, .analysis, .duplicate_scan, .acoustid_submission, .mutation, .conversion => "files",
     };
