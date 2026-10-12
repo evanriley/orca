@@ -186,12 +186,22 @@ ONNX Runtime runs the audio-embedding model. It is MIT and carries some
 MPL-2.0 files; liborca links it dynamically and compiles none of its source.
 `-Dembeddings=false` builds liborca without it.
 
-The model, `clap_audio_int8.onnx`, is a data file, not part of liborca. It is
-Orca's int8 export of the audio part of `laion/clap-htsat-unfused`, whose
-weights are published as Apache-2.0, written by
-`scripts/embedding/export_model.py`. It is not in the repository. A host names
-its path, and liborca accepts only the file whose SHA-256 it was built with
+The models are data files, not part of liborca, and neither is in the
+repository or compiled in. A host names the path of one, and liborca accepts
+only a file whose size and SHA-256 it was built with
 ([analysis.md](analysis.md#audio-embedding)).
+
+- `clap_audio_int8.onnx` is Orca's int8 export of the audio part of
+  `laion/clap-htsat-unfused`, whose weights are published as Apache-2.0,
+  written by `scripts/embedding/export_model.py`.
+- `maest_audio_int8.onnx` is Orca's int8 export of
+  `mtg-upf/discogs-maest-30s-pw-129e` by the Music Technology Group,
+  Universitat Pompeu Fabra, written by `scripts/embedding/export_maest.py`.
+  The weights are licensed CC BY-NC-SA 4.0: non-commercial use, with
+  attribution, and derivatives under the same licence. The file is such a
+  derivative, and its release states the licence, the attribution and the
+  source. The engine downloads it only when a host asks, and packages bundle
+  only the permissively licensed file.
 
 Chromaprint's repository also carries FFmpeg's LGPL resampler
 (`src/avresample`). It is not compiled: `config.h` leaves

@@ -89,12 +89,14 @@ runtime path, per the rule in [architecture.md](architecture.md).
   each pick and feedback.
 - Tempo, key and energy measured from the audio
   ([analysis.md](analysis.md#audio-features)).
-- Sound similarity: with the audio-embedding model file installed, analysis
+- Sound similarity: with an audio-embedding model file installed, analysis
   measures an embedding for each track, Radio and Daily Mixes rank by how
   close a track sounds to the seed, and `orca-cli similar` lists the nearest
-  tracks ([analysis.md](analysis.md#audio-embedding)). `orca-cli
-  download-embedding-model` and Download in `orca-gtk`'s Settings fetch the
-  model and check it.
+  tracks ([analysis.md](analysis.md#audio-embedding)). A second, larger model
+  can be chosen in `orca-gtk`'s Settings and fetched with `orca-cli
+  download-embedding-model --model discogs_maest`; each model's embeddings are
+  kept. `orca-cli download-embedding-model` and Download in `orca-gtk`'s
+  Settings fetch a model and check it.
 
 ### Identification
 
@@ -261,8 +263,7 @@ release itself is the maintainer's call.
 
 ### Analysis
 
-- A larger or music-specific embedding model, and mixing the embedding with a
-  timbre descriptor.
+- Mixing the embedding with a timbre descriptor.
 - Exact album loudness from block energies instead of a weighted mean.
 - True-peak measurement, 4x oversampled, and spectral transcode detection.
 
