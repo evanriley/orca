@@ -276,15 +276,18 @@ header; the Zig counterparts are in [api.md](api.md#surface).
 - Audio embeddings: `orca_runtime_set_embedding_model_path` (the model file's
   path; NULL clears it; a path that is not the model is not an error) and
   `orca_runtime_embedding_model_state` (an `orca_embedding_model_state`, see
-  [analysis.md](analysis.md#audio-embedding)), and
+  [analysis.md](analysis.md#audio-embedding)), `orca_runtime_embedding_model`
+  (the `orca_embedding_model` the file is, 0 unless the state is
+  `ORCA_EMBEDDING_MODEL_STATE_READY`), and
   `orca_library_similar_tracks`, which fills a caller array of at most 1,000
   `orca_similar_track_view` values, nearest first, and reports how many it
   wrote. `ORCA_STATUS_NOT_FOUND` is an unknown Track,
   `ORCA_STATUS_INVALID_STATE` a Track whose file has no current embedding and
   `ORCA_STATUS_INVALID_ARGUMENT` a capacity above 1,000.
   `orca_runtime_start_embedding_model_download(runtime, model, path, &job)`
-  starts, for an `orca_embedding_model` (the one value is
-  `ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`, 1), a Job of kind
+  starts, for an `orca_embedding_model` (`ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`,
+  1, or `ORCA_EMBEDDING_MODEL_DISCOGS_MAEST`, 2, whose file is licensed
+  CC BY-NC-SA 4.0), a Job of kind
   `ORCA_JOB_KIND_MODEL_DOWNLOAD` that belongs to no Library and counts bytes.
   It installs a file at `path` only when it has the compiled-in
   size and SHA-256, succeeds without a request when `path` already holds the
@@ -544,8 +547,8 @@ signals Radio uses. Every view reads `playerRadio` and `playerRadioPicks` on
 the tick; a control change calls `playerSetRadioOptions`, which replaces only
 the pending picks. Settings › Listening holds Radio & Daily Mixes, stored with
 `setLibraryDiscoverySettings`, and Show listening stats on Home, an `orca-gtk`
-setting in `[listening]`. Its Sound Similarity card shows the state of the
-[embedding model](#embedding-model).
+setting in `[listening]`. Its Sound Similarity card chooses the
+[embedding model](#embedding-model) and shows its state.
 
 `orca-gtk` opens on Home, the first sidebar item in its own unlabeled group;
 Settings › General › Default page can choose another start page. Home reads the
@@ -596,49 +599,78 @@ whose GTK, libadwaita or Pango is older than `orca-gtk` needs.
 
 ### Embedding model
 
-`orca-gtk` names the [audio-embedding model](analysis.md#audio-embedding) file,
-`clap_audio_int8.onnx`, to liborca with `Runtime.setEmbeddingModelPath` once at
-startup. It downloads the file only when Download is pressed in Settings. The
-path is the first of:
+`orca-gtk` names one [audio-embedding model](analysis.md#audio-embedding) file
+to liborca with `Runtime.setEmbeddingModelPath`: at startup, and again when
+the model is chosen, looked up again or downloaded. The chosen model is an
+`EmbeddingModel` kept by tag name as `embedding_model` in the `[listening]`
+group of [the settings file](#libraries-and-settings): `clap_htsat_unfused`,
+which an absent or unknown value also means, or `discogs_maest`. FILE below is
+its `spec().file_name`: `clap_audio_int8.onnx` or `maest_audio_int8.onnx`.
+The file is downloaded only when Download is pressed in Settings. The path is
+the first of:
 
 1. `ORCA_EMBEDDING_MODEL`, when set and not empty, whether or not a file is
-   there;
-2. `$XDG_DATA_HOME/orca/models/clap_audio_int8.onnx`, when it is a file;
-3. `share/orca/models/clap_audio_int8.onnx` under the install prefix, the
-   parent of the executable's directory, when it is a file;
+   there and whichever model is chosen;
+2. `$XDG_DATA_HOME/orca/models/FILE`, when it is a file;
+3. `share/orca/models/FILE` under the install prefix, the parent of the
+   executable's directory, when it is a file;
 4. the second path, so that liborca reports `missing` for the place the file
    belongs.
 
-Settings › Listening › Sound Similarity words `Runtime.embeddingModelState` in
-one row:
+A file of one model is never looked up for the other, so a package that
+installs only `clap_audio_int8.onnx` leaves `discogs_maest` `missing` until it
+is downloaded.
+
+Settings › Listening › Sound Similarity has two rows. The Model row carries
+the same boxed drop-down as the other choices on the page, with one entry for
+each model, labelled with its size from `spec().size`:
+"Standard · 32.6 MB" for `clap_htsat_unfused` and "Large · 80.4 MB ·
+non-commercial licence" for `discogs_maest`. Picking an entry stores the
+choice, saves the settings, clears a shown download failure, repeats the
+lookup, sets the path and re-reads `libraryAnalysisCoverage`, so the analysis
+banner asks for the chosen model's embeddings without a restart. Daily Mixes
+already stored are kept. The Model row is insensitive:
+
+- while a download runs;
+- in a build without ONNX Runtime;
+- when `ORCA_EMBEDDING_MODEL` is set and not empty. It then shows
+  `Runtime.embeddingModel`, or the saved choice when that is null, under
+  "ORCA_EMBEDDING_MODEL names the model file.", and the saved choice is
+  not changed.
+
+The second row words `Runtime.embeddingModelState` for the chosen model:
 
 | State | Row | Under it |
 | --- | --- | --- |
 | `ready` | Model installed | the file's path |
+| `ready`, the other model | That file is the Standard model, or the Large model | the file's path, the chosen model's download size and host |
 | `missing` | Model not installed | the download's size and host, the file's name and its directory |
-| `wrong_file` | That file is not Orca's model | the file's path, the download's size and host |
+| `wrong_file` | That file is not one of Orca's models | the file's path, the download's size and host |
 | `unusable` | The model could not be loaded | the file's path, the download's size and host |
 | `built_without` | Not available in this build | that the build has no ONNX Runtime |
 
-For `missing`, `wrong_file` and `unusable` the row has Check again, which
-repeats the lookup, sets the path again and re-reads
-`libraryAnalysisCoverage`, so the analysis banner can ask for the embedding
-without a restart. The row is read again each time the Listening tab is shown.
+The second line is a file that `Runtime.embeddingModel` recognises as the
+model that is not chosen, such as one model's file under the other's name.
+liborca uses the model the file is until the path names another.
 
-For the same three states the row has Download, which calls
-`Runtime.startEmbeddingModelDownload` for `.clap_htsat_unfused` with
-`$XDG_DATA_HOME/orca/models/clap_audio_int8.onnx`, whichever path the lookup
-chose. Download is not offered when `ORCA_EMBEDDING_MODEL` is set and not
-empty, when the state is `ready`, or in a build without ONNX Runtime. With the
-variable set, the `missing` row names only the file and the directory to put it
-in.
+For every state but `ready` with the chosen model and `built_without`, the row
+has Check again, which repeats the lookup, sets the path again and re-reads
+`libraryAnalysisCoverage`. The row is read again each time the Listening tab
+is shown.
+
+For the same states the row has Download, which calls
+`Runtime.startEmbeddingModelDownload` for the chosen model with
+`$XDG_DATA_HOME/orca/models/FILE`, whichever path the lookup chose. Download
+is not offered when `ORCA_EMBEDDING_MODEL` is set and not empty, when the
+chosen model is `ready`, or in a build without ONNX Runtime. With the variable
+set, the `missing` row names only the file and the directory to put it in.
 
 While the [download job](control-plane.md#model-download) runs, the row reads
 Downloading the model over the megabytes received and expected, and its only
 button is Cancel, which calls `Runtime.cancelJob`. `orca-gtk` reads the job's
-snapshot on each pass of its main loop and keeps the handle on the application,
-so the row shows the running download again after Settings is left and
-reopened. The job is not listed in the activity panel.
+snapshot on each pass of its main loop and keeps the handle and the model it
+is for on the application, so the row shows the running download again after
+Settings is left and reopened. The job is not listed in the activity panel.
 
 | Job ends | Row |
 | --- | --- |
@@ -648,7 +680,7 @@ reopened. The job is not listed in the activity panel.
 
 A download that could not be started shows as a failure. Success re-reads
 `libraryAnalysisCoverage`, as Check again does. A failure line stays until
-Check again or Download is pressed.
+Check again or Download is pressed or another model is picked.
 
 ### Libraries and settings
 
@@ -741,7 +773,9 @@ or one too long for a Wayland socket, is refused. `ORCA_HEADLESS_MUSICBRAINZ_URL
 providers at another server, such as a local mock, instead of the closed port.
 The app's `ORCA_EMBEDDING_MODEL` is `ORCA_HEADLESS_EMBEDDING_MODEL`, or empty,
 so without it the [embedding model](#embedding-model) is looked up only in the
-scratch `XDG_DATA_HOME` and beside the executable.
+scratch `XDG_DATA_HOME` and beside the executable. Set
+`ORCA_HEADLESS_DATA` to a directory to keep it as `XDG_DATA_HOME` across runs,
+so the model files in its `orca/models` are found and a download lands there.
 
 ## Listening from a host
 

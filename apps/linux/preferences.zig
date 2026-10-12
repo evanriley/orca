@@ -2272,7 +2272,18 @@ fn radioCard(self: *App) *gtk.Widget {
     return radio_card.widget;
 }
 
+fn showModelChoice(self: *App) void {
+    const row = self.listening_controls.model_choice_row orelse return;
+    const choice = embedding_model.shownChoice(self);
+    const index = std.mem.indexOfScalar(liborca.EmbeddingModel, embedding_model.models, choice.model) orelse return;
+    const drop_down = adw.adw_action_row_get_activatable_widget(gtk.cast(adw.ActionRow, row)) orelse return;
+    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, drop_down), @intCast(index));
+    setSubtitle(row, choice.subtitle);
+    gtk.gtk_widget_set_sensitive(row, @intFromBool(choice.sensitive));
+}
+
 pub fn showModel(self: *App) void {
+    showModelChoice(self);
     const row = self.listening_controls.model_row orelse return;
     var buffer: [std.Io.Dir.max_path_bytes + 128]u8 = undefined;
     const status = embedding_model.shownStatus(self, &buffer);
@@ -2305,12 +2316,34 @@ fn modelActionClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     showModel(self);
 }
 
+fn modelPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (selected >= embedding_model.models.len) return;
+    const picked = embedding_model.models[selected];
+    const shown = embedding_model.shownChoice(self);
+    if (!shown.sensitive or picked == shown.model) return;
+    self.embedding_model_choice = picked;
+    settings.save(self);
+    embedding_model.dismissFailure(self);
+    embedding_model.apply(self);
+    showModel(self);
+    analysis_notice.refresh(self);
+}
+
 fn soundCard(self: *App) *gtk.Widget {
     const sound = flatCard(
         "orca-wave-symbolic",
         "Sound Similarity",
         "Radio and Daily Mixes compare how tracks sound, using a model file that runs on this computer.",
     );
+    var label_buffers: [embedding_model.models.len][64]u8 = undefined;
+    var labels: [embedding_model.models.len + 1]?[*:0]const u8 = @splat(null);
+    for (embedding_model.models, &label_buffers, labels[0..embedding_model.models.len]) |model, *buffer, *label|
+        label.* = embedding_model.label(buffer, model).ptr;
+    const choice = selectRow("Model", "", &labels, 0, gtk.callback(modelPicked), self);
+    self.listening_controls.model_choice_row = choice;
+    sound.add(choice);
     const row = actionRow("", "");
     adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
     self.listening_controls.model_row = row;
@@ -2684,6 +2717,10 @@ fn resetSettings(self: *App) void {
     self.scrobbling = false;
     self.announce_now_playing = false;
     self.home_stats = true;
+    self.embedding_model_choice = .clap_htsat_unfused;
+    embedding_model.dismissFailure(self);
+    embedding_model.apply(self);
+    analysis_notice.refresh(self);
     self.fetch_artist_info = true;
     self.match_threshold_percent = app.default_match_threshold_percent;
     self.match_fingerprints = true;

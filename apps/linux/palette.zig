@@ -265,7 +265,7 @@ const commands = [_]Command{
     setting("Audio information", .sound, "Sound", "signal path", "orca-signal-symbolic"),
     setting("Scrobbling", .listening, "Listening", "listenbrainz", "audio-headphones-symbolic"),
     setting("Lyrics", .listening, "Listening", "lrclib", "media-view-subtitles-symbolic"),
-    setting("Sound similarity", .listening, "Listening", "radio daily mixes model embedding", "orca-wave-symbolic"),
+    setting("Sound similarity", .listening, "Listening", "radio daily mixes model embedding standard large", "orca-wave-symbolic"),
     setting("Artist info", .listening, "Listening", "wikipedia biography photos", "avatar-default-symbolic"),
     setting("Color", .appearance, "Appearance", "artwork influence", "orca-image-symbolic"),
     setting("Type", .appearance, "Appearance", "typeface font numerals", "orca-type-symbolic"),

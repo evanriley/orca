@@ -628,7 +628,6 @@ pub fn main(init: std.process.Init) !u8 {
     if (resolveServer(allocator, init.environ_map, "ORCA_LRCLIB_URL")) |server|
         runtime.setLrclibServer(server) catch {};
     self.embedding_model_override = init.environ_map.get(embedding_model.environment_variable);
-    embedding_model.apply(&self);
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
@@ -636,6 +635,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else |err| libraries.openFailed(&self, err);
     }
     settings.load(&self);
+    embedding_model.apply(&self);
     transport.applyLongTrackMemory(&self);
     _ = watching.apply(&self);
     maintenance.apply(&self) catch {};

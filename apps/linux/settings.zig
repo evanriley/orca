@@ -377,6 +377,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.home_stats = !std.mem.eql(u8, std.mem.span(value), "false");
     }
+    if (getString(keys, "listening", "embedding_model")) |value| {
+        defer gtk.g_free(value);
+        self.embedding_model_choice = std.meta.stringToEnum(liborca.EmbeddingModel, std.mem.span(value)) orelse .clap_htsat_unfused;
+    }
     if (getString(keys, "listening", "scrobble")) |value| {
         defer gtk.g_free(value);
         if (std.mem.eql(u8, std.mem.span(value), "true")) enableScrobbling(self);
@@ -607,6 +611,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "listening", "scrobble", if (self.scrobbling) "true" else "false");
     gtk.g_key_file_set_string(keys, "listening", "now_playing", if (self.announce_now_playing) "true" else "false");
     gtk.g_key_file_set_string(keys, "listening", "home_stats", if (self.home_stats) "true" else "false");
+    gtk.g_key_file_set_string(keys, "listening", "embedding_model", @tagName(self.embedding_model_choice));
     var threshold_buffer: [8]u8 = undefined;
     gtk.g_key_file_set_string(keys, "matching", "accept_confidence", strings.format(&threshold_buffer, "{d}", .{self.match_threshold_percent}).ptr);
     gtk.g_key_file_set_string(keys, "matching", "fingerprints", if (self.match_fingerprints) "true" else "false");

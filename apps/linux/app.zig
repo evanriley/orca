@@ -286,6 +286,7 @@ pub const ListeningControls = struct {
     now_playing_row: ?*gtk.Widget = null,
     pending_row: ?*gtk.Widget = null,
     pending_value: ?*gtk.Label = null,
+    model_choice_row: ?*gtk.Widget = null,
     model_row: ?*gtk.Widget = null,
     model_check: ?*gtk.Widget = null,
     model_action: ?*gtk.Widget = null,
@@ -347,6 +348,7 @@ pub const App = struct {
     library_path: ?[:0]u8 = null,
     libraries: libraries.State = .{},
     embedding_model_override: ?[]const u8 = null,
+    embedding_model_choice: liborca.EmbeddingModel = .clap_htsat_unfused,
     embedding_model_path: OwnedText = .{},
     embedding_model_download: embedding_model.Download = .idle,
     /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
