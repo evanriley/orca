@@ -384,6 +384,8 @@ pub fn jitter(recording_id: i64, seed: u64) f64 {
     return @as(f64, @floatFromInt(hash >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
 }
 
+pub const EmbeddingModel = audio_similarity.Model;
+
 /// The connection and repositories scoring reads, which may be a read-only
 /// connection of its own.
 pub const Source = struct {
@@ -392,13 +394,19 @@ pub const Source = struct {
     artist_info: database.ArtistInfoRepository,
     audio_features: database.AudioFeatureRepository,
     audio_embeddings: database.AudioEmbeddingRepository,
+    embedding_model: EmbeddingModel,
 
-    pub fn of(library: *const database.LibraryDatabase) Source {
-        return onConnection(library.queryDatabase(), library.write_lane);
+    pub fn of(library: *const database.LibraryDatabase, embedding_model: EmbeddingModel) Source {
+        return onConnection(library.queryDatabase(), library.write_lane, embedding_model);
     }
 
-    pub fn onConnection(connection: sqlite.Database, write_lane: *database.repository.WriteLane) Source {
+    pub fn onConnection(
+        connection: sqlite.Database,
+        write_lane: *database.repository.WriteLane,
+        embedding_model: EmbeddingModel,
+    ) Source {
         return .{
+            .embedding_model = embedding_model,
             .database = connection,
             .settings = .{ .db = connection, .write_lane = write_lane },
             .artist_info = .{ .db = connection, .write_lane = write_lane },
@@ -1254,26 +1262,28 @@ fn profileNeighbours(arena: std.mem.Allocator, library: *const Source, profile: 
     profile.neighbours = .{ .anchors = anchors, .nearest = recordings, .similarities = similarities };
 }
 
-fn seedEmbedding(library: *const Source, seed_tracks: []const SeedTrack) !?[audio_similarity.embedding_size]f32 {
+fn seedEmbedding(library: *const Source, seed_tracks: []const SeedTrack) !?audio_similarity.Query {
+    const model = library.embedding_model;
     var play_file = try library.database.prepare("SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1;");
     defer play_file.deinit();
-    var sum: [audio_similarity.embedding_size]f64 = @splat(0);
+    var sum_buffer: [audio_similarity.max_embedding_size]f64 = @splat(0);
+    const sum = sum_buffer[0..model.spec().embedding_size];
     for (seed_tracks) |track| {
         try play_file.reset();
         try play_file.bindInt64(1, track.track_id);
         if (try play_file.step() != .row) continue;
         const file_id = optionalInt64(play_file, 0) orelse continue;
-        const stored = try library.audio_embeddings.fileEmbedding(file_id) orelse continue;
-        const unit = audio_similarity.unitVector(&stored) orelse continue;
-        for (&sum, unit) |*total, value| total.* += value;
+        const stored = try audio_similarity.Query.ofFile(&library.audio_embeddings, model, file_id) orelse continue;
+        for (sum, stored.unit()) |*total, value| total.* += value;
     }
     var squared: f64 = 0;
     for (sum) |total| squared += total * total;
     if (squared == 0) return null;
     const length = @sqrt(squared);
-    var mean: [audio_similarity.embedding_size]f32 = undefined;
-    for (&mean, sum) |*value, total| value.* = @floatCast(total / length);
-    return mean;
+    var mean_buffer: [audio_similarity.max_embedding_size]f32 = undefined;
+    const mean = mean_buffer[0..sum.len];
+    for (mean, sum) |*value, total| value.* = @floatCast(total / length);
+    return .ofUnit(model, mean);
 }
 
 const Follow = struct {
@@ -1942,7 +1952,7 @@ fn openFixture(comptime name: []const u8) !database.LibraryDatabase {
 }
 
 fn radioFor(library: *database.LibraryDatabase, seed: Seed, options: RadioOptions, limit: usize) !Picks {
-    const source: Source = .of(library);
+    const source: Source = .of(library, .clap_htsat_unfused);
     return pickRadio(testing.allocator, &source, seed, options, .{ .now_s = test_now, .seed = 42 }, limit);
 }
 
@@ -2118,7 +2128,7 @@ test "session exclusions and adjustments change what is picked" {
     defer plain.deinit();
     const first = plain.items[0];
     try testing.expectEqual(@as(?i64, 1), first.artist_id);
-    var adjusted = try pickRadio(testing.allocator, &Source.of(&library), .{ .artist = 1 }, .{ .explore = 0 }, .{
+    var adjusted = try pickRadio(testing.allocator, &Source.of(&library, .clap_htsat_unfused), .{ .artist = 1 }, .{ .explore = 0 }, .{
         .now_s = test_now,
         .seed = 42,
         .excluded_recordings = &.{first.recording_id},
@@ -2404,22 +2414,22 @@ test "every reason is true of its pick" {
     try testing.expect(saw_overall);
 }
 
-fn planeVector(x: i8, y: i8) [audio_similarity.embedding_size]i8 {
-    var vector: [audio_similarity.embedding_size]i8 = @splat(0);
+fn embedAs(library: *database.LibraryDatabase, comptime model: EmbeddingModel, file_id: i64, x: i8, y: i8) !void {
+    var statement = try library.database.prepare(
+        "INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) SELECT ?1, id, content_hash, ?3 FROM files WHERE id = ?2;",
+    );
+    defer statement.deinit();
+    var vector: [model.spec().embedding_size]i8 = @splat(0);
     vector[0] = x;
     vector[1] = y;
-    return vector;
+    try statement.bindInt64(1, @backingInt(model));
+    try statement.bindInt64(2, file_id);
+    try statement.bindBlob(3, std.mem.asBytes(&vector));
+    try testing.expectEqual(sqlite.Step.done, try statement.step());
 }
 
 fn embed(library: *database.LibraryDatabase, file_id: i64, x: i8, y: i8) !void {
-    var statement = try library.database.prepare(
-        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) SELECT id, content_hash, ?2 FROM files WHERE id = ?1;",
-    );
-    defer statement.deinit();
-    const vector = planeVector(x, y);
-    try statement.bindInt64(1, file_id);
-    try statement.bindBlob(2, std.mem.asBytes(&vector));
-    try testing.expectEqual(sqlite.Step.done, try statement.step());
+    return embedAs(library, .clap_htsat_unfused, file_id, x, y);
 }
 
 fn embedFan(library: *database.LibraryDatabase) !void {
@@ -2618,7 +2628,7 @@ test "a candidate followed by fewer than 2 seed listens has no co-listening in R
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const source: Source = .of(&library);
+    const source: Source = .of(&library, .clap_htsat_unfused);
     const profile = try buildProfile(arena, &source, .{ .track = 1 }, test_now);
     var once = testCandidate(30, 0, 0);
     once.artist_id = 5;
@@ -2690,10 +2700,13 @@ test "a seed's embedding is the unit mean of its Tracks' current vectors, and a 
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const source: Source = .of(&library);
+    const source: Source = .of(&library, .clap_htsat_unfused);
 
     const release = try buildProfile(arena, &source, .{ .release = 1 }, test_now);
-    const mean = (try seedEmbedding(&source, release.seed_tracks)).?;
+    const seed_query = (try seedEmbedding(&source, release.seed_tracks)).?;
+    try testing.expectEqual(EmbeddingModel.clap_htsat_unfused, seed_query.model);
+    const mean = seed_query.unit();
+    try testing.expectEqual(@as(usize, 512), mean.len);
     try testing.expectApproxEqAbs(@as(f32, @sqrt(0.5)), mean[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, @sqrt(0.5)), mean[1], 1e-6);
     for (mean[2..]) |value| try testing.expectEqual(@as(f32, 0), value);
@@ -2704,13 +2717,44 @@ test "a seed's embedding is the unit mean of its Tracks' current vectors, and a 
     try testing.expectEqual(@as(u32, 2), neighbours.similarities.count());
 
     const single = try buildProfile(arena, &source, .{ .track = 2 }, test_now);
-    try testing.expectEqual(@as(f32, 1), (try seedEmbedding(&source, single.seed_tracks)).?[1]);
+    try testing.expectEqual(@as(f32, 1), (try seedEmbedding(&source, single.seed_tracks)).?.unit()[1]);
 
     const stale = try buildProfile(arena, &source, .{ .track = 3 }, test_now);
     try testing.expectEqual(@as(?SoundNeighbours, null), stale.neighbours);
     const bare = try buildProfile(arena, &source, .{ .release = 2 }, test_now);
     try testing.expectEqual(@as(?SoundNeighbours, null), bare.neighbours);
     try testing.expect(!bare.sound.isEmpty());
+}
+
+test "a seed's neighbours come from the vectors of the Source's model alone, and a seed without one of that model has none" {
+    var library = try openFixture("seed-embedding-models");
+    defer library.close();
+    try embed(&library, 1, 100, 0);
+    try embed(&library, 2, 100, 10);
+    try embed(&library, 3, 0, 100);
+    try embed(&library, 4, 100, 0);
+    try embedAs(&library, .discogs_maest, 1, 100, 0);
+    try embedAs(&library, .discogs_maest, 2, 0, 100);
+    try embedAs(&library, .discogs_maest, 3, 100, 10);
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const standard: Source = .of(&library, .clap_htsat_unfused);
+    const large: Source = .of(&library, .discogs_maest);
+
+    const by_standard = (try buildProfile(arena, &standard, .{ .track = 1 }, test_now)).neighbours.?;
+    try testing.expectEqualSlices(i64, &.{ 1, 4, 2, 3 }, by_standard.nearest);
+    const by_large_profile = try buildProfile(arena, &large, .{ .track = 1 }, test_now);
+    const by_large = by_large_profile.neighbours.?;
+    try testing.expectEqualSlices(i64, &.{ 1, 3, 2 }, by_large.nearest);
+    try testing.expectEqual(@as(usize, 768), (try seedEmbedding(&large, by_large_profile.seed_tracks)).?.unit().len);
+    try testing.expectEqual(@as(?f32, null), by_large.similarities.get(4));
+
+    const without_large = try buildProfile(arena, &large, .{ .track = 4 }, test_now);
+    try testing.expectEqual(@as(?SoundNeighbours, null), without_large.neighbours);
+    try testing.expect(!without_large.sound.isEmpty());
+    try testing.expect((try buildProfile(arena, &standard, .{ .track = 4 }, test_now)).neighbours != null);
 }
 
 test "a seed with an embedding scores candidates by similarity alone, 0.3 for one without a vector" {
@@ -2726,7 +2770,7 @@ test "a seed with an embedding scores candidates by similarity alone, 0.3 for on
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const source: Source = .of(&library);
+    const source: Source = .of(&library, .clap_htsat_unfused);
     const profile = try buildProfile(arena, &source, .{ .track = 1 }, test_now);
     try testing.expect(profile.sound.isEmpty());
     try testing.expectEqual(@as(usize, 47), profile.neighbours.?.nearest.len);
@@ -2794,7 +2838,7 @@ test "the nearest Recordings are candidates when no other bucket holds them" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const source: Source = .of(&library);
+    const source: Source = .of(&library, .clap_htsat_unfused);
     const filter: Filter = .{
         .now_s = test_now,
         .include_live = false,
@@ -2853,7 +2897,7 @@ fn openGenreFixture(comptime name: []const u8) !database.LibraryDatabase {
 fn genreComponent(library: *database.LibraryDatabase, seed: Seed, genres: []const GenreOnTrack) !Candidate {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
-    const source: Source = .of(library);
+    const source: Source = .of(library, .clap_htsat_unfused);
     const profile = try buildProfile(arena_state.allocator(), &source, seed, test_now);
     var candidate = testCandidate(1, 0, 0);
     candidate.genres = genres;
@@ -2922,7 +2966,7 @@ test "the genre bucket orders profile genres by weight times rarity, the rarer f
     defer library.close();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
-    const source: Source = .of(&library);
+    const source: Source = .of(&library, .clap_htsat_unfused);
     const profile = try buildProfile(arena_state.allocator(), &source, .{ .track = 700 }, test_now);
     try testing.expectEqual(@as(usize, 2), profile.genre_order.len);
     try testing.expectEqual(@as(i64, 3), profile.genre_order[0].id);

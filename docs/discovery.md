@@ -38,8 +38,9 @@ them holds:
 - Sound: the median tempo, most common key and mean energy of the seed Tracks
   that have [audio features](analysis.md#audio-features).
 - Embedding: the unit-length mean of the unit vectors of the seed Tracks' play
-  files that have a current [audio embedding](analysis.md#audio-embedding). A
-  seed with none has no embedding. For a seed with one, a single
+  files that have a current [audio embedding](analysis.md#audio-embedding) of
+  the [model the runtime reads](analysis.md#similar-tracks). A seed with none
+  has no embedding. For a seed with one, a single
   [nearest search](analysis.md#similar-tracks) that excludes nothing finds the
   300 nearest Recordings and the similarity of every Recording with a vector.
   The similarity of the 10th nearest is the `high` anchor and that of the
@@ -382,7 +383,9 @@ order:
    run checks again.
 4. Otherwise the day's mixes replace the stored ones.
 
-Another `mixes.count` takes effect at the next forced run or mix day.
+Another `mixes.count` takes effect at the next forced run or mix day, and so
+does another audio-embedding model: the stored mixes do not record the model
+whose vectors ranked them.
 
 Each outcome finishes the Job as succeeded; `libraryDailyMixes` reports the
 resulting state. Every write replaces all stored rows in one transaction, so

@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 
-pub const current_version = 5;
+pub const current_version = 6;
 
 const baseline =
     \\CREATE TABLE volumes (
@@ -1395,7 +1395,116 @@ const v5 =
     \\  AND substr(results.result, 8, 1) IN (X'01', X'02', X'03');
 ;
 
-const steps = [_][:0]const u8{ baseline, v2, v3, v4, v5 };
+const EmbeddingModelRows = struct {
+    model: u8,
+    name: []const u8,
+    parameter_hash: []const u8,
+    vector_size: u16,
+};
+
+const v6_clap: EmbeddingModelRows = .{
+    .model = 1,
+    .name = "clap",
+    .parameter_hash = "D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905",
+    .vector_size = 512,
+};
+
+const v6_maest: EmbeddingModelRows = .{
+    .model = 2,
+    .name = "maest",
+    .parameter_hash = "6A89F6A7C38041025E72DD12DD1A8E325E07D94291F2FBCED4020ACC261AC5E7",
+    .vector_size = 768,
+};
+
+fn embeddingResultOf(comptime rows: EmbeddingModelRows, comptime results: []const u8) []const u8 {
+    return std.fmt.comptimePrint(
+        \\{[results]s}.kind = 7 AND {[results]s}.algorithm_id = 'orca.audio-embedding'
+        \\  AND {[results]s}.algorithm_version = 1
+        \\  AND {[results]s}.parameter_hash = X'{[parameter_hash]s}'
+    , .{ .results = results, .parameter_hash = rows.parameter_hash });
+}
+
+fn embeddingVectorOf(comptime rows: EmbeddingModelRows, comptime results: []const u8) []const u8 {
+    return std.fmt.comptimePrint(
+        \\typeof({[results]s}.result) = 'blob' AND length({[results]s}.result) = {[result_size]d}
+        \\  AND substr({[results]s}.result, 1, 6) = X'4F52454D0100'
+        \\  AND substr({[results]s}.result, 7, 1) = X'01'
+        \\  AND substr({[results]s}.result, 8, 1) IN (X'01', X'02', X'03')
+    , .{ .results = results, .result_size = 12 + @as(u32, rows.vector_size) });
+}
+
+fn embeddingTriggers(comptime rows: EmbeddingModelRows) []const u8 {
+    const row_from_result = std.fmt.comptimePrint(
+        \\    DELETE FROM file_audio_embeddings WHERE model = {[model]d} AND file_id = new.file_id;
+        \\    INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector)
+        \\    SELECT {[model]d}, new.file_id, new.source_identity, substr(new.result, 13, {[vector_size]d})
+        \\    WHERE {[has_vector]s};
+        \\
+    , .{ .model = rows.model, .vector_size = rows.vector_size, .has_vector = embeddingVectorOf(rows, "new") });
+    return std.fmt.comptimePrint(
+        \\CREATE TRIGGER analysis_results_embedding_{[name]s}_ai AFTER INSERT ON analysis_results
+        \\WHEN {[is_new]s}
+        \\BEGIN
+        \\{[row_from_result]s}END;
+        \\CREATE TRIGGER analysis_results_embedding_{[name]s}_au AFTER UPDATE OF result ON analysis_results
+        \\WHEN {[is_new]s}
+        \\BEGIN
+        \\{[row_from_result]s}END;
+        \\CREATE TRIGGER analysis_results_embedding_{[name]s}_ad AFTER DELETE ON analysis_results
+        \\WHEN {[is_old]s}
+        \\BEGIN
+        \\    DELETE FROM file_audio_embeddings
+        \\    WHERE model = {[model]d} AND file_id = old.file_id AND source_identity = old.source_identity;
+        \\END;
+        \\
+    , .{
+        .name = rows.name,
+        .model = rows.model,
+        .is_new = embeddingResultOf(rows, "new"),
+        .is_old = embeddingResultOf(rows, "old"),
+        .row_from_result = row_from_result,
+    });
+}
+
+fn embeddingBackfill(comptime rows: EmbeddingModelRows) []const u8 {
+    return std.fmt.comptimePrint(
+        \\INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector)
+        \\SELECT {[model]d}, results.file_id, results.source_identity, substr(results.result, 13, {[vector_size]d})
+        \\FROM analysis_results AS results
+        \\JOIN files ON files.id = results.file_id
+        \\    AND files.content_hash_algorithm = 1 AND files.content_hash = results.source_identity
+        \\WHERE {[is_result]s}
+        \\  AND {[has_vector]s};
+        \\
+    , .{
+        .model = rows.model,
+        .vector_size = rows.vector_size,
+        .is_result = embeddingResultOf(rows, "results"),
+        .has_vector = embeddingVectorOf(rows, "results"),
+    });
+}
+
+const v6: [:0]const u8 =
+    \\DROP TRIGGER analysis_results_embedding_ai;
+    \\DROP TRIGGER analysis_results_embedding_au;
+    \\DROP TRIGGER analysis_results_embedding_ad;
+    \\CREATE TABLE file_audio_embeddings_next (
+    \\    model INTEGER NOT NULL CHECK (model IN (1, 2)),
+    \\    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    \\    source_identity BLOB NOT NULL,
+    \\    vector BLOB NOT NULL,
+    \\    CHECK (length(vector) = CASE model WHEN 1 THEN 512 WHEN 2 THEN 768 END),
+    \\    PRIMARY KEY(model, file_id)
+    \\) WITHOUT ROWID;
+    \\INSERT INTO file_audio_embeddings_next(model, file_id, source_identity, vector)
+    \\SELECT 1, file_id, source_identity, vector FROM file_audio_embeddings;
+    \\DROP TABLE file_audio_embeddings;
+    \\ALTER TABLE file_audio_embeddings_next RENAME TO file_audio_embeddings;
+    \\CREATE INDEX file_audio_embeddings_by_file ON file_audio_embeddings(file_id);
+    \\
+++ embeddingTriggers(v6_clap) ++ embeddingTriggers(v6_maest) ++ embeddingBackfill(v6_maest);
+
+const steps = [_][:0]const u8{ baseline, v2, v3, v4, v5, v6 };
 
 comptime {
     std.debug.assert(steps.len == current_version);
@@ -2370,13 +2479,29 @@ const embedding_parameter_hash = [32]u8{
     0xB5, 0x38, 0x32, 0x7B, 0x1F, 0xC5, 0xF1, 0xD6, 0x54, 0xB6, 0x26, 0x27, 0x2D, 0x38, 0xD9, 0x05,
 };
 
-fn embeddingPayload(flags: u8, windows: u8, seed: u8) [524]u8 {
-    var payload: [524]u8 = @splat(0);
+const maest_parameter_hash = [32]u8{
+    0x6A, 0x89, 0xF6, 0xA7, 0xC3, 0x80, 0x41, 0x02, 0x5E, 0x72, 0xDD, 0x12, 0xDD, 0x1A, 0x8E, 0x32,
+    0x5E, 0x07, 0xD9, 0x42, 0x91, 0xF2, 0xFB, 0xCE, 0xD4, 0x02, 0x0A, 0xCC, 0x26, 0x1A, 0xC5, 0xE7,
+};
+
+const clap_model = 1;
+const maest_model = 2;
+
+fn embeddingPayloadOf(comptime vector_size: usize, flags: u8, windows: u8, seed: u8) [12 + vector_size]u8 {
+    var payload: [12 + vector_size]u8 = @splat(0);
     @memcpy(payload[0..6], "OREM\x01\x00");
     payload[6] = flags;
     payload[7] = windows;
     for (payload[12..], 0..) |*byte, index| byte.* = @truncate(index *% 5 +% seed);
     return payload;
+}
+
+fn embeddingPayload(flags: u8, windows: u8, seed: u8) [524]u8 {
+    return embeddingPayloadOf(512, flags, windows, seed);
+}
+
+fn maestPayload(flags: u8, windows: u8, seed: u8) [780]u8 {
+    return embeddingPayloadOf(768, flags, windows, seed);
 }
 
 fn putEmbeddingResult(db: sqlite.Database, file_id: i64, hash: []const u8, identity: u8, result: []const u8) !void {
@@ -2393,10 +2518,11 @@ fn putEmbeddingResult(db: sqlite.Database, file_id: i64, hash: []const u8, ident
     try std.testing.expectEqual(sqlite.Step.done, try statement.step());
 }
 
-fn embeddingMatches(db: sqlite.Database, file_id: i64, payload: []const u8) !bool {
-    var statement = try db.prepare("SELECT vector FROM file_audio_embeddings WHERE file_id = ?1;");
+fn embeddingMatches(db: sqlite.Database, model: i64, file_id: i64, payload: []const u8) !bool {
+    var statement = try db.prepare("SELECT vector FROM file_audio_embeddings WHERE model = ?1 AND file_id = ?2;");
     defer statement.deinit();
-    try statement.bindInt64(1, file_id);
+    try statement.bindInt64(1, model);
+    try statement.bindInt64(2, file_id);
     if (try statement.step() != .row) return false;
     return std.mem.eql(u8, statement.columnBlob(0), payload[12..]);
 }
@@ -2409,7 +2535,7 @@ test "an audio embedding result written, rewritten or removed keeps the file's e
 
     const first = embeddingPayload(1, 3, 1);
     try putEmbeddingResult(db, 1, hash, 0x01, &first);
-    try std.testing.expect(try embeddingMatches(db, 1, &first));
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &first));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
 
     const none = embeddingPayload(0, 0, 0);
@@ -2436,7 +2562,7 @@ test "an audio embedding result written, rewritten or removed keeps the file's e
 
     const second = embeddingPayload(1, 2, 11);
     try putEmbeddingResult(db, 1, hash, 0x01, &second);
-    try std.testing.expect(try embeddingMatches(db, 1, &second));
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &second));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
 
     try db.exec("DELETE FROM analysis_results WHERE file_id = 1 AND source_identity = x'ff';");
@@ -2452,8 +2578,86 @@ test "an audio embedding is a 512 byte vector" {
     const db = try fresh();
     defer db.close();
     try db.exec("INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 1, x'01');");
-    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (1, x'01', zeroblob(511));"));
-    try db.exec("INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (1, x'01', zeroblob(512));");
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) VALUES (1, 1, x'01', zeroblob(511));"));
+    try db.exec("INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) VALUES (1, 1, x'01', zeroblob(512));");
+}
+
+test "an audio embedding row holds one vector per file and model, of that model's length, and refuses an unknown model" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec("INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 1, x'01'), (2, 1, x'02');");
+    const insert = "INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) VALUES ";
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(1, 1, x'01', zeroblob(768));"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(2, 1, x'01', zeroblob(512));"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(2, 1, x'01', zeroblob(767));"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(0, 1, x'01', zeroblob(512));"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(3, 1, x'01', zeroblob(768));"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(NULL, 1, x'01', zeroblob(512));"));
+    try db.exec(insert ++ "(1, 1, x'01', zeroblob(512)), (2, 1, x'01', zeroblob(768));");
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(1, 1, x'02', zeroblob(512));"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(2, 1, x'02', zeroblob(768));"));
+    try std.testing.expectError(error.SqlFailed, db.exec("UPDATE file_audio_embeddings SET model = 2 WHERE model = 1 AND file_id = 1;"));
+    try std.testing.expectError(error.SqlFailed, db.exec(insert ++ "(1, 9, x'01', zeroblob(512));"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+    try db.exec("DELETE FROM files WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+}
+
+test "each model's embedding result written, rewritten or removed keeps that model's row and leaves the other model's alone" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec("INSERT INTO files(id, size_bytes, quick_hash) VALUES (1, 1, x'01'), (2, 1, x'02'), (3, 1, x'03');");
+    const clap = &embedding_parameter_hash;
+    const maest = &maest_parameter_hash;
+    const rows = "SELECT count(*) FROM file_audio_embeddings";
+
+    const clap_first = embeddingPayload(1, 3, 1);
+    const maest_first = maestPayload(1, 3, 2);
+    try putEmbeddingResult(db, 1, clap, 0x01, &clap_first);
+    try putEmbeddingResult(db, 1, maest, 0x01, &maest_first);
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &clap_first));
+    try std.testing.expect(try embeddingMatches(db, maest_model, 1, &maest_first));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, rows ++ ";"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, rows ++ " WHERE model = 2 AND length(vector) = 768;"));
+
+    const maest_second = maestPayload(1, 1, 3);
+    try putEmbeddingResult(db, 1, maest, 0x01, &maest_second);
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &clap_first));
+    try std.testing.expect(try embeddingMatches(db, maest_model, 1, &maest_second));
+    const clap_second = embeddingPayload(1, 2, 4);
+    try putEmbeddingResult(db, 1, clap, 0x01, &clap_second);
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &clap_second));
+    try std.testing.expect(try embeddingMatches(db, maest_model, 1, &maest_second));
+
+    try putEmbeddingResult(db, 2, maest, 0x02, &embeddingPayload(1, 1, 5));
+    try putEmbeddingResult(db, 2, clap, 0x02, &maestPayload(1, 1, 6));
+    try putEmbeddingResult(db, 3, maest, 0x03, maestPayload(1, 1, 7)[0..779]);
+    var bad_magic = maestPayload(1, 1, 8);
+    bad_magic[0] = 'X';
+    try putEmbeddingResult(db, 3, maest, 0x04, &bad_magic);
+    try putEmbeddingResult(db, 3, maest, 0x05, &maestPayload(1, 4, 9));
+    var foreign = maest_parameter_hash;
+    foreign[0] ^= 1;
+    try putEmbeddingResult(db, 3, &foreign, 0x06, &maestPayload(1, 1, 10));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, rows ++ ";"));
+
+    try putEmbeddingResult(db, 1, maest, 0x01, &maestPayload(0, 0, 0));
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &clap_second));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, rows ++ " WHERE model = 2;"));
+    try putEmbeddingResult(db, 1, maest, 0x01, &maest_first);
+    try putEmbeddingResult(db, 1, clap, 0x01, &embeddingPayload(0, 0, 0));
+    try std.testing.expect(try embeddingMatches(db, maest_model, 1, &maest_first));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, rows ++ " WHERE model = 1;"));
+    try putEmbeddingResult(db, 1, clap, 0x01, &clap_first);
+
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 1 AND parameter_hash = x'6A89F6A7C38041025E72DD12DD1A8E325E07D94291F2FBCED4020ACC261AC5E7';");
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &clap_first));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, rows ++ ";"));
+    try putEmbeddingResult(db, 1, maest, 0x01, &maest_first);
+    try db.exec("DELETE FROM analysis_results WHERE file_id = 1 AND parameter_hash = x'D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905';");
+    try std.testing.expect(try embeddingMatches(db, maest_model, 1, &maest_first));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, rows ++ ";"));
+    try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT count(*) FROM analysis_results;"));
 }
 
 fn atVersion4() !sqlite.Database {
@@ -2464,7 +2668,7 @@ fn atVersion4() !sqlite.Database {
     return db;
 }
 
-test "a version 4 library upgrades to version 5 keeping its rows, filling embeddings of unchanged files and matching the fresh schema" {
+test "a version 4 library upgrades to the current version keeping its rows, filling embeddings of unchanged files and matching the fresh schema" {
     const db = try atVersion4();
     defer db.close();
     try db.exec(
@@ -2493,7 +2697,7 @@ test "a version 4 library upgrades to version 5 keeping its rows, filling embedd
     try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM player_queue_entries;"));
     try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
-    try std.testing.expect(try embeddingMatches(db, 1, &current));
+    try std.testing.expect(try embeddingMatches(db, clap_model, 1, &current));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
     const upgraded = try schemaObjects(std.testing.allocator, db);
     defer std.testing.allocator.free(upgraded);
@@ -2504,15 +2708,133 @@ test "a version 4 library upgrades to version 5 keeping its rows, filling embedd
     try std.testing.expectEqualStrings(fresh_schema, upgraded);
 }
 
+fn atVersion5() !sqlite.Database {
+    const db = try atVersion4();
+    errdefer db.close();
+    try db.exec(v5);
+    try db.exec("PRAGMA user_version=5;");
+    return db;
+}
+
+fn embeddingRows(allocator: std.mem.Allocator, db: sqlite.Database, sql: [:0]const u8) ![]u8 {
+    var statement = try db.prepare(sql);
+    defer statement.deinit();
+    var rows: std.ArrayList(u8) = .empty;
+    errdefer rows.deinit(allocator);
+    while (try statement.step() == .row) {
+        try rows.print(allocator, "{d}:", .{statement.columnInt64(0)});
+        try rows.appendSlice(allocator, statement.columnBlob(1));
+        try rows.append(allocator, ':');
+        try rows.appendSlice(allocator, statement.columnBlob(2));
+        try rows.append(allocator, ';');
+    }
+    return rows.toOwnedSlice(allocator);
+}
+
+fn fillVersion5Embeddings(db: sqlite.Database) !void {
+    try db.exec(
+        \\UPDATE files SET content_hash = x'01', content_hash_algorithm = 1 WHERE id = 1;
+        \\UPDATE files SET content_hash = x'02', content_hash_algorithm = 1 WHERE id = 2;
+        \\INSERT INTO files(id, recording_id, audio_format, size_bytes, content_hash, content_hash_algorithm) VALUES
+        \\    (3, 1, 1, 10, x'03', 1), (4, 1, 1, 10, x'04', 1), (5, 1, 1, 10, x'05', 2),
+        \\    (6, 1, 1, 10, x'06', 1), (7, 1, 1, 10, x'07', 1), (8, 1, 1, 10, x'08', 1);
+    );
+    const clap = &embedding_parameter_hash;
+    const maest = &maest_parameter_hash;
+    try putEmbeddingResult(db, 1, clap, 0x01, &embeddingPayload(1, 2, 1));
+    try putEmbeddingResult(db, 2, clap, 0x02, &embeddingPayload(1, 3, 2));
+    try putEmbeddingResult(db, 3, clap, 0x99, &embeddingPayload(1, 1, 3));
+    try putEmbeddingResult(db, 1, maest, 0x01, &maestPayload(1, 3, 11));
+    try putEmbeddingResult(db, 3, maest, 0x03, &maestPayload(1, 1, 13));
+    try putEmbeddingResult(db, 4, maest, 0x99, &maestPayload(1, 1, 14));
+    try putEmbeddingResult(db, 5, maest, 0x05, &maestPayload(1, 1, 15));
+    try putEmbeddingResult(db, 6, maest, 0x06, &maestPayload(0, 0, 0));
+    try putEmbeddingResult(db, 7, maest, 0x07, &maestPayload(1, 4, 17));
+    try putEmbeddingResult(db, 8, maest, 0x08, &embeddingPayload(1, 1, 18));
+    var bad_magic = maestPayload(1, 1, 19);
+    bad_magic[0] = 'X';
+    try putEmbeddingResult(db, 2, maest, 0x02, &bad_magic);
+}
+
+const version5_embedding_rows = "SELECT file_id, source_identity, vector FROM file_audio_embeddings ORDER BY file_id;";
+
+test "a version 5 library upgrades to version 6 keeping its embeddings byte for byte as model 1, filling model 2 from stored results and matching the fresh schema" {
+    const db = try atVersion5();
+    defer db.close();
+    try fillVersion5Embeddings(db);
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM file_audio_embeddings;"));
+    try std.testing.expectEqual(@as(i64, 11), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+    const before = try embeddingRows(std.testing.allocator, db, version5_embedding_rows);
+    defer std.testing.allocator.free(before);
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 6), try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 11), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+    const kept = try embeddingRows(
+        std.testing.allocator,
+        db,
+        "SELECT file_id, source_identity, vector FROM file_audio_embeddings WHERE model = 1 ORDER BY file_id;",
+    );
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualSlices(u8, before, kept);
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM file_audio_embeddings WHERE model = 1;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM file_audio_embeddings WHERE model = 2;"));
+    try std.testing.expect(try embeddingMatches(db, maest_model, 1, &maestPayload(1, 3, 11)));
+    try std.testing.expect(try embeddingMatches(db, maest_model, 3, &maestPayload(1, 1, 13)));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM file_audio_embeddings WHERE model = 2 AND source_identity IN (x'01', x'03');"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
+
+    const upgraded = try schemaObjects(std.testing.allocator, db);
+    defer std.testing.allocator.free(upgraded);
+    const created = try fresh();
+    defer created.close();
+    const fresh_schema = try schemaObjects(std.testing.allocator, created);
+    defer std.testing.allocator.free(fresh_schema);
+    try std.testing.expectEqualStrings(fresh_schema, upgraded);
+
+    const maest_later = maestPayload(1, 2, 21);
+    try putEmbeddingResult(db, 2, &maest_parameter_hash, 0x02, &maest_later);
+    try std.testing.expect(try embeddingMatches(db, maest_model, 2, &maest_later));
+    try std.testing.expect(try embeddingMatches(db, clap_model, 2, &embeddingPayload(1, 3, 2)));
+}
+
+test "a version 5 library whose upgrade fails stays at version 5 with its embeddings and triggers" {
+    const db = try atVersion5();
+    defer db.close();
+    try fillVersion5Embeddings(db);
+    const before = try embeddingRows(std.testing.allocator, db, version5_embedding_rows);
+    defer std.testing.allocator.free(before);
+    try db.exec("CREATE TABLE file_audio_embeddings_next (blocking INTEGER);");
+
+    try std.testing.expectError(error.SqlFailed, apply(db));
+
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "PRAGMA user_version;"));
+    const after = try embeddingRows(std.testing.allocator, db, version5_embedding_rows);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db,
+        \\SELECT count(*) FROM sqlite_master WHERE name IN (
+        \\    'analysis_results_embedding_ai', 'analysis_results_embedding_au', 'analysis_results_embedding_ad');
+    ));
+    try std.testing.expectEqual(@as(i64, 11), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+}
+
 test "a fresh library has the audio embedding table and its triggers at the current version" {
     const db = try fresh();
     defer db.close();
-    try std.testing.expectEqual(@as(i64, 5), current_version);
+    try std.testing.expectEqual(@as(i64, 6), current_version);
     try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
-    try std.testing.expectEqual(@as(i64, 4), try scalar(db,
+    try std.testing.expectEqual(@as(i64, 8), try scalar(db,
         \\SELECT count(*) FROM sqlite_master WHERE name IN (
-        \\    'file_audio_embeddings', 'analysis_results_embedding_ai',
-        \\    'analysis_results_embedding_au', 'analysis_results_embedding_ad');
+        \\    'file_audio_embeddings', 'file_audio_embeddings_by_file',
+        \\    'analysis_results_embedding_clap_ai', 'analysis_results_embedding_clap_au', 'analysis_results_embedding_clap_ad',
+        \\    'analysis_results_embedding_maest_ai', 'analysis_results_embedding_maest_au', 'analysis_results_embedding_maest_ad');
+    ));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db,
+        \\SELECT count(*) FROM sqlite_master WHERE name IN (
+        \\    'analysis_results_embedding_ai', 'analysis_results_embedding_au', 'analysis_results_embedding_ad');
     ));
 }
 

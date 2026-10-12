@@ -34,7 +34,7 @@ pub fn libraryRadioPreview(
 ) !discovery.Picks {
     const library_database = try runtime.libraryDatabase(self, library);
     const now_s = session.now_s orelse std.Io.Clock.real.now(self.control_threaded.io()).toSeconds();
-    const source: discovery.Source = .of(library_database);
+    const source: discovery.Source = .of(library_database, runtime.similarityModel(self));
     return discovery.pickRadio(allocator, &source, seed, options, .{
         .now_s = now_s,
         .seed = session.seed orelse @bitCast(now_s),
@@ -185,6 +185,7 @@ const TopUp = struct {
     allocator: std.mem.Allocator,
     reader: sqlite.Database,
     write_lane: *database.repository.WriteLane,
+    embedding_model: discovery.EmbeddingModel,
     registration: *work.Registration,
     work_handle: runtime.WorkHandle,
     host_signal: *control.HostSignal,
@@ -213,7 +214,7 @@ const TopUp = struct {
     }
 
     fn compute(self: *TopUp) !void {
-        const source: discovery.Source = .onConnection(self.reader, self.write_lane);
+        const source: discovery.Source = .onConnection(self.reader, self.write_lane, self.embedding_model);
         var picks = try discovery.pickRadio(self.allocator, &source, self.seed, self.options, .{
             .now_s = self.now_s,
             .seed = self.jitter_seed,
@@ -656,6 +657,7 @@ fn spawnTopUp(self: *OrcaRuntime, session: *Session) !void {
         .allocator = allocator,
         .reader = reader,
         .write_lane = library_database.write_lane,
+        .embedding_model = runtime.similarityModel(self),
         .registration = registration,
         .work_handle = work_handle,
         .host_signal = &self.host_signal,

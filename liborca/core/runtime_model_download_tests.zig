@@ -28,7 +28,7 @@ const body = bytes: {
 fn descriptorOf(bytes: []const u8) model_download.Descriptor {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return .{ .url = audio_embedding.model_url, .size = bytes.len, .sha256 = digest };
+    return .{ .url = audio_embedding.ModelId.clap_htsat_unfused.spec().url, .size = bytes.len, .sha256 = digest };
 }
 
 const Rig = struct {
@@ -194,24 +194,57 @@ test "startEmbeddingModelDownload_succeeded_namesTheFileToTheRuntimeWhenReaped" 
     try testing.expectEqual(EmbeddingModelState.wrong_file, rig.runtime.embeddingModelState());
 }
 
-test "startEmbeddingModelDownload_theRealModel_leavesTheRuntimeReady" {
-    const model_path = try audio_embedding.testModelPath();
+fn expectRealModelDownload(id: audio_embedding.ModelId) !void {
+    const model_path = try audio_embedding.testModelPath(id);
+    const spec = id.spec();
     var rig: Rig = undefined;
-    try rig.init(audio_embedding.model_file_name);
+    try rig.init(spec.file_name);
     defer rig.deinit();
-    const model = try std.Io.Dir.cwd().readFileAlloc(testing.io, model_path, testing.allocator, .limited(audio_embedding.model_size + 1));
+    const model = try std.Io.Dir.cwd().readFileAlloc(testing.io, model_path, testing.allocator, .limited(spec.size + 1));
     defer testing.allocator.free(model);
     rig.runtime.model_download_hooks.descriptor = null;
     rig.transport.chunk_bytes = network.client.Sink.max_chunk_bytes;
     try rig.transport.script(redirect(asset_url));
     try rig.transport.script(.{ .respond = .{ .body = model } });
 
-    const job_handle = try rig.start();
+    const job_handle = try rig.runtime.startEmbeddingModelDownload(id, rig.destination);
     try testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, job_handle));
 
-    try testing.expectEqual(@as(u64, audio_embedding.model_size), (try rig.runtime.jobSnapshotSynced(job_handle)).completed_units);
+    try testing.expectEqual(@as(u64, spec.size), (try rig.runtime.jobSnapshotSynced(job_handle)).completed_units);
     try testing.expectEqual(EmbeddingModelState.ready, rig.runtime.embeddingModelState());
+    try testing.expectEqual(@as(?audio_embedding.ModelId, id), rig.runtime.embeddingModel());
     try rig.expectNoPart();
+}
+
+test "startEmbeddingModelDownload_theRealModel_leavesTheRuntimeReady" {
+    try expectRealModelDownload(.clap_htsat_unfused);
+}
+
+test "startEmbeddingModelDownload_theRealMaestModel_leavesTheRuntimeReadyWithMaest" {
+    try expectRealModelDownload(.discogs_maest);
+}
+
+test "descriptorOf_eachModel_namesItsOwnReleaseAsset" {
+    const clap = model_download.Descriptor.of(.clap_htsat_unfused);
+    try testing.expectEqualStrings(
+        "https://github.com/evanriley/orca/releases/download/model-clap-int8-1/clap_audio_int8.onnx",
+        clap.url,
+    );
+    try testing.expectEqual(@as(usize, 32_587_451), clap.size);
+    try testing.expectEqualStrings(
+        "12d3e2c1593ba111df6103feac2f3ce4f4e85e5efc2ad927ac16a8402e7b3c36",
+        &std.fmt.bytesToHex(clap.sha256, .lower),
+    );
+    const maest = model_download.Descriptor.of(.discogs_maest);
+    try testing.expectEqualStrings(
+        "https://github.com/evanriley/orca/releases/download/model-maest-int8-1/maest_audio_int8.onnx",
+        maest.url,
+    );
+    try testing.expectEqual(@as(usize, 80_400_354), maest.size);
+    try testing.expectEqualStrings(
+        "fcdf35e3b8737cb0853bb83cadd7a62885f70f1afe30cde3f185e61eb06d843e",
+        &std.fmt.bytesToHex(maest.sha256, .lower),
+    );
 }
 
 test "startEmbeddingModelDownload_bodyWithAnotherDigest_failsAndKeepsTheDestination" {

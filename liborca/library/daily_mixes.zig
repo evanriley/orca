@@ -201,6 +201,7 @@ pub const Entry = struct {
 pub fn generate(
     allocator: std.mem.Allocator,
     library: *LibraryDatabase,
+    embedding_model: discovery.EmbeddingModel,
     options: Options,
     cancellation: ?*const scanner.CancellationToken,
 ) !Generation {
@@ -209,7 +210,7 @@ pub fn generate(
     const arena = arena_state.allocator();
     const reader = try library.openReader();
     defer reader.close();
-    const source: discovery.Source = .onConnection(reader, library.write_lane);
+    const source: discovery.Source = .onConnection(reader, library.write_lane, embedding_model);
     const settings = try discovery.readSettings(&source.settings);
     const day = mixDay(options.now_s, options.utc_offset_s);
 
@@ -1164,7 +1165,7 @@ const Fixture = struct {
     }
 
     fn source(self: *Fixture) discovery.Source {
-        return .of(&self.library);
+        return .of(&self.library, .clap_htsat_unfused);
     }
 
     fn themes(self: *Fixture, src: *const discovery.Source, day: i64) !Themes {

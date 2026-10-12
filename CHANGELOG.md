@@ -4,6 +4,36 @@
 
 ### Added
 
+- **`liborca` measures audio embeddings with either of two models.** The
+  model file a host names is recognised by its size and SHA-256 as
+  `clap_htsat_unfused` (512 values) or the new `discogs_maest`
+  (`maest_audio_int8.onnx`, 80.4 MB, 16 kHz input, 768 values), and
+  `Runtime.embeddingModel` returns which, or null unless
+  `embeddingModelState` is `ready`. Analysis, `libraryUnanalyzedCount` and
+  `libraryAnalysisCoverage` use that model: with `discogs_maest` named, every
+  file without its embedding is measured once and the 780-byte result is
+  stored in `analysis_results` under its own parameter hash, beside the
+  file's `clap_htsat_unfused` result, which is kept. Naming the first model
+  again measures nothing that is already stored. Radio, Daily Mixes and
+  `librarySimilarTracks` compare the stored vectors of that model only, and
+  those of `clap_htsat_unfused` when `embeddingModel` is null; vectors of two
+  models are never compared, and a file with no vector of the model in use
+  counts as one with no embedding. `orca-cli similar`, `radio`, `home` and
+  `mixes` take `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL` to name the
+  model. Daily Mixes already stored for the mix day are kept when the model
+  changes.
+  Library schema version 6 keys `file_audio_embeddings` by model and file:
+  opening a version 5 Library keeps every stored vector as
+  `clap_htsat_unfused` and adds the `discogs_maest` vectors of the results
+  already stored for unchanged files, and triggers keep both from then on.
+  `Runtime.startEmbeddingModelDownload(.discogs_maest, destination)` fetches
+  the new model in Zig, `orca-cli download-embedding-model PATH --model
+  discogs_maest` fetches it, and a C host passes
+  `ORCA_EMBEDDING_MODEL_DISCOGS_MAEST` (2) to
+  `orca_runtime_start_embedding_model_download` and reads the model in use
+  with `orca_runtime_embedding_model`, 0 unless the state is ready;
+  `orca-gtk` downloads the model chosen in Settings. The new build option
+  `-Dmaest-embedding-model=PATH` runs the tests that need the file.
 - **liborca downloads the audio-embedding model when a host asks.**
   `Runtime.startEmbeddingModelDownload(model, destination)` starts a
   `model_download` Job (`ORCA_JOB_KIND_MODEL_DOWNLOAD`, 14) that belongs to no
