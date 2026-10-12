@@ -351,7 +351,7 @@ fn buildFolders(self: *App) *gtk.Widget {
 }
 
 fn buildIdentify(self: *App) *gtk.Widget {
-    const top = heading("Analyze your music", gtk.gtk_label_new("Orca can measure each file’s loudness so albums play at an even volume, find duplicate copies, and learn the tempo, key and energy Radio and Daily Mixes use. It runs in the background while you listen."));
+    const top = heading("Analyze your music", gtk.gtk_label_new("Orca can measure each file’s loudness so albums play at an even volume, find duplicate copies, and learn the tempo, key, energy and sound Radio and Daily Mixes use. It runs in the background while you listen."));
     const analyze = toggle(true, "Analyze my music", analyzeSwitched, self);
     self.first_run.analyze_switch = gtk.cast(gtk.Switch, analyze);
     const text = label("Waiting to start", "first-run-progress-text");

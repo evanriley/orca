@@ -370,6 +370,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         }) });
         test_step.dependOn(&b.addRunArtifact(analysis_title_tests).step);
+        const embedding_model_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/embedding_model.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }) });
+        test_step.dependOn(&b.addRunArtifact(embedding_model_tests).step);
         const queue_menu_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("apps/linux/queue_menu.zig"),
             .target = target,

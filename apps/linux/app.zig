@@ -285,6 +285,8 @@ pub const ListeningControls = struct {
     now_playing_row: ?*gtk.Widget = null,
     pending_row: ?*gtk.Widget = null,
     pending_value: ?*gtk.Label = null,
+    model_row: ?*gtk.Widget = null,
+    model_check: ?*gtk.Widget = null,
     token: CredentialControls = .{},
 };
 
@@ -342,6 +344,8 @@ pub const App = struct {
     preferred_output: OwnedText = .{},
     library_path: ?[:0]u8 = null,
     libraries: libraries.State = .{},
+    embedding_model_override: ?[]const u8 = null,
+    embedding_model_path: OwnedText = .{},
     /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
     /// Development affordance only: it exists so an automated run can be held to a
     /// silent sink instead of device 0, which is the system default and therefore
@@ -1048,6 +1052,7 @@ pub const App = struct {
         self.artwork_review.deinit(self.allocator);
         self.metadata_issues.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
+        self.embedding_model_path.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
         self.libraries.deinit(self.allocator);
     }

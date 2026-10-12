@@ -52,6 +52,7 @@ const match_review = @import("match_review.zig");
 const offline = @import("offline.zig");
 const analysis_notice = @import("analysis_notice.zig");
 const libraries = @import("libraries.zig");
+const embedding_model = @import("embedding_model.zig");
 
 const App = app.App;
 
@@ -625,6 +626,8 @@ pub fn main(init: std.process.Init) !u8 {
         runtime.setCoverArtArchiveServer(server) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_LRCLIB_URL")) |server|
         runtime.setLrclibServer(server) catch {};
+    self.embedding_model_override = init.environ_map.get(embedding_model.environment_variable);
+    embedding_model.apply(&self);
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
