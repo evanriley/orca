@@ -91,6 +91,14 @@
   different model, and the dependency table in
   [architecture.md](docs/architecture.md#dependencies-and-licences) lists ONNX
   Runtime and the model's licence.
+- **`network.Gateway` can stream a response body into a sink.**
+  `Gateway.fetchInto` follows redirects as `fetch` does and writes the final
+  `2xx` body to a `network.client.Sink` in pieces of at most 64 KiB instead of
+  buffering it. Such a request asks for the identity encoding, is made once,
+  is bounded by `max_response_bytes`, times out after `request_timeout_ms`
+  without progress or at the Gateway's deadline, and reports a failed sink as
+  `error.SinkFailed`. `network.testing.ScriptedTransport` delivers scripted
+  bodies to a sink in chunks.
 
 ### Changed
 

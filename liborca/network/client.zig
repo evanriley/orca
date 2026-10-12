@@ -167,6 +167,22 @@ fn daysSinceUnixEpoch(year: u16, month: u8, day: u8) i64 {
     return era * 146_097 + day_of_era - 719_468;
 }
 
+/// Receives a response body in order, in pieces of at most
+/// `Sink.max_chunk_bytes`, instead of `Response.body`. A transport may call
+/// it from another thread, never after its `perform` returned and never twice
+/// at once. Its error reaches the caller as `error.SinkFailed`, so a sink that
+/// needs the cause keeps it behind `context`.
+pub const Sink = struct {
+    context: *anyopaque,
+    write_fn: *const fn (*anyopaque, []const u8) anyerror!void,
+
+    pub const max_chunk_bytes = 64 * 1024;
+
+    pub fn write(self: Sink, bytes: []const u8) error{SinkFailed}!void {
+        self.write_fn(self.context, bytes) catch return error.SinkFailed;
+    }
+};
+
 pub const Request = struct {
     method: Method = .get,
     url: []const u8,
@@ -174,9 +190,18 @@ pub const Request = struct {
     headers: []const Header = &.{},
     user_agent: []const u8,
     max_response_bytes: usize,
+    /// The longest the exchange may take. With `sink`, the longest it may go
+    /// without the response head or more of the body arriving.
     timeout_ms: u64,
+    /// With `sink`, the longest the exchange may take.
+    total_timeout_ms: ?u64 = null,
     cancel: ?*const std.atomic.Value(bool) = null,
+    sink: ?Sink = null,
 };
+
+pub fn isSuccess(status: u16) bool {
+    return status >= 200 and status < 300;
+}
 
 pub const Response = struct {
     allocator: std.mem.Allocator,
@@ -418,6 +443,18 @@ pub const Gateway = struct {
         body: ?[]const u8,
         headers: []const Header,
     ) !Response {
+        return self.request(allocator, method, url, body, headers, null);
+    }
+
+    fn request(
+        self: *Gateway,
+        allocator: std.mem.Allocator,
+        method: Method,
+        url: []const u8,
+        body: ?[]const u8,
+        headers: []const Header,
+        sink: ?Sink,
+    ) !Response {
         if (self.config.offline) return error.Offline;
         try self.config.validate();
         try self.checkCanceled();
@@ -433,7 +470,7 @@ pub const Gateway = struct {
                 try self.sleepCancelable(jittered(self.random, backoff));
                 backoff = @min(backoff *| 2, 60_000);
             }
-            const last_attempt = attempt + 1 == self.config.maximum_attempts;
+            const last_attempt = sink != null or attempt + 1 == self.config.maximum_attempts;
             const timeout_ms = try self.takeTurn();
             var keep_lease = false;
             defer if (!keep_lease) self.releaseLease();
@@ -445,9 +482,11 @@ pub const Gateway = struct {
                 .user_agent = user_agent,
                 .max_response_bytes = self.config.max_response_bytes,
                 .timeout_ms = timeout_ms,
+                .total_timeout_ms = if (sink != null) self.deadlineLeftMs() else null,
                 .cancel = self.cancel,
+                .sink = sink,
             }) catch |err| switch (err) {
-                error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout => return err,
+                error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout, error.SinkFailed => return err,
                 error.ConcurrencyUnavailable => return error.InvalidNetworkConfiguration,
                 else => if (last_attempt) return error.NetworkUnavailable else continue,
             };
@@ -479,12 +518,42 @@ pub const Gateway = struct {
         headers: []const Header,
         allowance: RedirectAllowance,
     ) !Response {
+        return self.fetchWith(allocator, url, headers, allowance, null);
+    }
+
+    /// `fetch` with the body of the final `2xx` written to `sink` and every
+    /// `Response.body` empty. A redirect or any other status writes nothing.
+    /// The request and each hop are made once whatever `maximum_attempts`
+    /// is, `max_response_bytes` bounds what the sink receives, and
+    /// `request_timeout_ms` bounds each wait for the head or for more of the
+    /// body, not the transfer, which only `deadline_ms` bounds. A failed
+    /// sink ends the request with `error.SinkFailed`. After any error the
+    /// sink may hold the start of a body.
+    pub fn fetchInto(
+        self: *Gateway,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        headers: []const Header,
+        allowance: RedirectAllowance,
+        sink: Sink,
+    ) !Response {
+        return self.fetchWith(allocator, url, headers, allowance, sink);
+    }
+
+    fn fetchWith(
+        self: *Gateway,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        headers: []const Header,
+        allowance: RedirectAllowance,
+        sink: ?Sink,
+    ) !Response {
         self.lease_pinned = true;
         defer {
             self.lease_pinned = false;
             self.releaseLease();
         }
-        var response = try self.execute(allocator, .get, url, null, headers);
+        var response = try self.request(allocator, .get, url, null, headers, sink);
         var current_url = try allocator.dupe(u8, url);
         defer allocator.free(current_url);
         var hops: u8 = 0;
@@ -495,12 +564,12 @@ pub const Gateway = struct {
             const target = try redirectTarget(allocator, current_url, location, allowance);
             allocator.free(current_url);
             current_url = target;
-            response = try self.follow(allocator, target);
+            response = try self.follow(allocator, target, sink);
         }
         return response;
     }
 
-    fn follow(self: *Gateway, allocator: std.mem.Allocator, target: []const u8) !Response {
+    fn follow(self: *Gateway, allocator: std.mem.Allocator, target: []const u8, sink: ?Sink) !Response {
         try self.checkCanceled();
         var timeout_ms = try self.requestTimeoutMs();
         if (!try self.holdLease(timeout_ms)) timeout_ms = try self.takeTurn();
@@ -512,9 +581,11 @@ pub const Gateway = struct {
             .user_agent = user_agent,
             .max_response_bytes = self.config.max_response_bytes,
             .timeout_ms = timeout_ms,
+            .total_timeout_ms = if (sink != null) self.deadlineLeftMs() else null,
             .cancel = self.cancel,
+            .sink = sink,
         }) catch |err| switch (err) {
-            error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout => return err,
+            error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout, error.SinkFailed => return err,
             error.ConcurrencyUnavailable => return error.InvalidNetworkConfiguration,
             else => return error.NetworkUnavailable,
         };
@@ -643,6 +714,11 @@ pub const Gateway = struct {
         return @min(self.config.request_timeout_ms, @as(u64, @intCast(left)));
     }
 
+    fn deadlineLeftMs(self: *Gateway) ?u64 {
+        const deadline = self.deadline_ms orelse return null;
+        return @intCast(@max(0, deadline -| self.clock.nowMs()));
+    }
+
     fn saveSharedState(self: *Gateway) !void {
         const sharing = self.sharing orelse return;
         if (!try self.holdLease(0)) {
@@ -701,7 +777,7 @@ pub const Gateway = struct {
             try self.saveSharedState();
             return true;
         }
-        if (response.status >= 200 and response.status < 300) self.rate_limit_backoff_ms = 0;
+        if (isSuccess(response.status)) self.rate_limit_backoff_ms = 0;
         // The caller gets the response even when the state cannot be stored.
         self.saveSharedState() catch {};
         return false;
@@ -823,13 +899,14 @@ pub const StandardTransport = struct {
         try self.refreshTrust(requested_at);
         defer self.noteTrustLoaded(requested_at);
         const started_ms = std.Io.Clock.awake.now(io).toMilliseconds();
+        var progress_ms: std.atomic.Value(i64) = .init(started_ms);
         var outcomes: [2]Outcome = undefined;
         var race: Race = .init(io, &outcomes);
-        race.concurrent(.watch, watch, .{ io, started_ms, request.timeout_ms, request.cancel }) catch |err| {
+        race.concurrent(.watch, watch, .{ io, started_ms, &progress_ms, request.timeout_ms, request.total_timeout_ms, request.cancel }) catch |err| {
             discardRemaining(&race);
             return err;
         };
-        race.concurrent(.exchange, exchange, .{ self, allocator, request }) catch |err| {
+        race.concurrent(.exchange, exchange, .{ self, allocator, request, &progress_ms }) catch |err| {
             discardRemaining(&race);
             return err;
         };
@@ -882,27 +959,45 @@ pub const StandardTransport = struct {
     fn watch(
         io: std.Io,
         started_ms: i64,
+        progress_ms: *const std.atomic.Value(i64),
         timeout_ms: u64,
+        total_timeout_ms: ?u64,
         cancel: ?*const std.atomic.Value(bool),
     ) Verdict {
         while (true) {
             if (cancel) |flag| {
                 if (flag.load(.acquire)) return .canceled;
             }
-            const elapsed_ms: u64 = @intCast(@max(0, std.Io.Clock.awake.now(io).toMilliseconds() - started_ms));
-            if (elapsed_ms >= timeout_ms) return .timed_out;
-            const wait_ms: i64 = @intCast(@min(cancel_poll_ms, timeout_ms - elapsed_ms));
+            const now_ms = std.Io.Clock.awake.now(io).toMilliseconds();
+            var left_ms = millisecondsLeft(now_ms, progress_ms.load(.acquire), timeout_ms);
+            if (total_timeout_ms) |total_ms| left_ms = @min(left_ms, millisecondsLeft(now_ms, started_ms, total_ms));
+            if (left_ms == 0) return .timed_out;
+            const wait_ms: i64 = @intCast(@min(cancel_poll_ms, left_ms));
             io.sleep(.fromMilliseconds(wait_ms), .awake) catch return .stopped;
         }
     }
 
-    fn exchange(self: *StandardTransport, allocator: std.mem.Allocator, request: Request) anyerror!Response {
+    fn millisecondsLeft(now_ms: i64, since_ms: i64, limit_ms: u64) u64 {
+        const elapsed_ms: u64 = @intCast(@max(0, now_ms - since_ms));
+        return limit_ms -| elapsed_ms;
+    }
+
+    fn noteProgress(self: *StandardTransport, progress_ms: *std.atomic.Value(i64)) void {
+        progress_ms.store(std.Io.Clock.awake.now(self.client.io).toMilliseconds(), .release);
+    }
+
+    fn exchange(
+        self: *StandardTransport,
+        allocator: std.mem.Allocator,
+        request: Request,
+        progress_ms: *std.atomic.Value(i64),
+    ) anyerror!Response {
         const choice: ConnectionChoice = switch (request.method) {
             .get => .pooled,
             .post => .fresh,
         };
-        return self.exchangeOn(allocator, request, choice) catch |err| switch (err) {
-            error.StaleConnection => self.exchangeOn(allocator, request, .fresh),
+        return self.exchangeOn(allocator, request, choice, progress_ms) catch |err| switch (err) {
+            error.StaleConnection => self.exchangeOn(allocator, request, .fresh, progress_ms),
             else => err,
         };
     }
@@ -912,11 +1007,9 @@ pub const StandardTransport = struct {
         allocator: std.mem.Allocator,
         request: Request,
         choice: ConnectionChoice,
+        progress_ms: *std.atomic.Value(i64),
     ) anyerror!Response {
         const uri = try std.Uri.parse(request.url);
-        const storage = try allocator.alloc(u8, request.max_response_bytes + 1);
-        defer allocator.free(storage);
-        var writer = std.Io.Writer.fixed(storage);
         const standard_headers = try allocator.alloc(std.http.Header, request.headers.len);
         defer allocator.free(standard_headers);
         for (request.headers, standard_headers) |source, *destination|
@@ -927,7 +1020,10 @@ pub const StandardTransport = struct {
         }, uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = request.method == .get,
-            .headers = .{ .user_agent = .{ .override = request.user_agent } },
+            .headers = .{
+                .user_agent = .{ .override = request.user_agent },
+                .accept_encoding = if (request.sink == null) .default else .{ .override = "identity" },
+            },
             .extra_headers = standard_headers,
         }, choice);
         const http_request = &opened.request;
@@ -950,7 +1046,9 @@ pub const StandardTransport = struct {
                 location = try allocator.dupe(u8, header.value);
         }
         const status = @backingInt(response.head.status);
-        if (!statusHasBody(response.head.status)) {
+        const sink = if (isSuccess(status)) request.sink else null;
+        if (request.sink != null) self.noteProgress(progress_ms);
+        if (!statusHasBody(response.head.status) or (request.sink != null and sink == null)) {
             http_request.connection.?.closing = true;
             return .{
                 .allocator = allocator,
@@ -968,10 +1066,43 @@ pub const StandardTransport = struct {
             .compress => return error.UnsupportedCompressionMethod,
         };
         defer self.client.allocator.free(decompress_buffer);
+        const declared_bytes: ?u64 = if (response.head.content_encoding == .identity) response.head.content_length else null;
 
         var transfer_buffer: [64]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
         const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        if (sink) |body_sink| {
+            if (declared_bytes) |declared| {
+                if (declared > request.max_response_bytes) return error.ResponseTooLarge;
+            }
+            const chunk = try allocator.alloc(u8, Sink.max_chunk_bytes);
+            defer allocator.free(chunk);
+            var delivered: usize = 0;
+            while (true) {
+                var vector = [1][]u8{chunk};
+                const read = reader.readVec(&vector) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
+                };
+                if (read == 0) continue;
+                self.noteProgress(progress_ms);
+                if (read > request.max_response_bytes - delivered) return error.ResponseTooLarge;
+                try body_sink.write(chunk[0..read]);
+                delivered += read;
+                self.noteProgress(progress_ms);
+            }
+            return .{
+                .allocator = allocator,
+                .status = status,
+                .body = try allocator.alloc(u8, 0),
+                .rate_limit = rate_limit,
+                .location = location,
+            };
+        }
+
+        const storage = try allocator.alloc(u8, request.max_response_bytes + 1);
+        defer allocator.free(storage);
+        var writer = std.Io.Writer.fixed(storage);
         _ = reader.streamRemaining(&writer) catch |err| switch (err) {
             error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
             error.WriteFailed => return error.ResponseTooLarge,
@@ -1690,6 +1821,7 @@ const KeepAliveServer = struct {
     group: std.Io.Group = .init,
     accepts: std.atomic.Value(u32) = .init(0),
     requests: std.atomic.Value(u32) = .init(0),
+    identity_requests: std.atomic.Value(u32) = .init(0),
 
     const Reply = enum {
         keep_alive,
@@ -1700,7 +1832,33 @@ const KeepAliveServer = struct {
         oversized,
         no_content,
         redirect,
+        not_found,
+        large,
+        large_chunked,
+        trickle,
     };
+
+    const large_body_bytes = 5 * Sink.max_chunk_bytes + 123;
+    const trickle_body = "twelve bytes";
+    const trickle_pause_ms = 50;
+
+    fn largeBodyByte(index: usize) u8 {
+        return @truncate(index *% 31 +% index / 251);
+    }
+
+    fn writeLargeBody(writer: *std.Io.Writer, chunked: bool) !void {
+        var block: [4096]u8 = undefined;
+        var sent: usize = 0;
+        while (sent < large_body_bytes) {
+            const length = @min(block.len, large_body_bytes - sent);
+            for (block[0..length], sent..) |*byte, index| byte.* = largeBodyByte(index);
+            if (chunked) try writer.print("{x}\r\n", .{length});
+            try writer.writeAll(block[0..length]);
+            if (chunked) try writer.writeAll("\r\n");
+            sent += length;
+        }
+        if (chunked) try writer.writeAll("0\r\n\r\n");
+    }
 
     const keep_alive_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 
@@ -1752,6 +1910,8 @@ const KeepAliveServer = struct {
                 const prefix = "content-length:";
                 if (std.ascii.startsWithIgnoreCase(line, prefix))
                     content_length = try std.fmt.parseInt(usize, std.mem.trim(u8, line[prefix.len..], " \r\n"), 10);
+                if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line, "\r\n"), "accept-encoding: identity"))
+                    _ = self.identity_requests.fetchAdd(1, .monotonic);
             }
             try reader.interface.discardAll(content_length);
             const index = self.requests.fetchAdd(1, .monotonic);
@@ -1773,6 +1933,23 @@ const KeepAliveServer = struct {
                 .oversized => try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n" ++ @as([32]u8, @splat('x'))),
                 .no_content => try writer.interface.writeAll("HTTP/1.1 204 No Content\r\n\r\n"),
                 .redirect => try writer.interface.writeAll("HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n"),
+                .not_found => try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\ngone"),
+                .large => {
+                    try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{large_body_bytes});
+                    try writeLargeBody(&writer.interface, false);
+                },
+                .large_chunked => {
+                    try writer.interface.writeAll("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                    try writeLargeBody(&writer.interface, true);
+                },
+                .trickle => {
+                    try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{trickle_body.len});
+                    for (trickle_body) |byte| {
+                        try writer.interface.flush();
+                        try self.io.sleep(.fromMilliseconds(trickle_pause_ms), .awake);
+                        try writer.interface.writeByte(byte);
+                    }
+                },
             }
             try writer.interface.flush();
         }
@@ -1829,6 +2006,14 @@ const PooledExchange = struct {
         const response = try self.gateway.execute(std.testing.allocator, method, url, if (method == .post) "{}" else null, &.{});
         defer response.deinit();
         if (response.status == 200) try std.testing.expectEqualStrings("ok", response.body);
+        return response.status;
+    }
+
+    fn stream(self: *PooledExchange, sink: *net_testing.CollectingSink) !u16 {
+        const url = try self.server.url(&self.url_buffer);
+        const response = try self.gateway.fetchInto(std.testing.allocator, url, &.{}, archive_allowance, sink.sink());
+        defer response.deinit();
+        try std.testing.expectEqual(@as(usize, 0), response.body.len);
         return response.status;
     }
 
@@ -2053,4 +2238,368 @@ test "execute returns a redirect to the caller without following it" {
     try std.testing.expectEqual(@as(u16, 307), response.status);
     try std.testing.expectEqualStrings("https://archive.org/download/a", response.location.?);
     try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+}
+
+const stream_url = "https://models.example.test/model.onnx";
+const stream_body = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789abcdefghijklmnopqrstuvwxyz";
+
+fn streamConfig(max_response_bytes: usize) Config {
+    return .{ .identity = net_testing.test_identity, .max_response_bytes = max_response_bytes, .request_timeout_ms = 1000 };
+}
+
+fn streamOnce(net: *TestGateway, sink: *net_testing.CollectingSink) !u16 {
+    const response = try net.gateway.fetchInto(std.testing.allocator, stream_url, &.{}, archive_allowance, sink.sink());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(usize, 0), response.body.len);
+    return response.status;
+}
+
+test "fetchInto delivers a body longer than a chunk in order and returns none of it" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    try std.testing.expectEqual(@as(u16, 200), try streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings(stream_body, sink.received());
+    try std.testing.expectEqual(net.transport.chunk_bytes, sink.largest_write);
+
+    net.transport.chunk_bytes = stream_body.len;
+    var whole: net_testing.CollectingSink = .{};
+    defer whole.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    try std.testing.expectEqual(@as(u16, 200), try streamOnce(&net, &whole));
+    try std.testing.expectEqualStrings(stream_body, whole.received());
+
+    var empty: net_testing.CollectingSink = .{};
+    defer empty.deinit();
+    try net.transport.script(.{ .respond = .{ .body = "" } });
+    try std.testing.expectEqual(@as(u16, 200), try streamOnce(&net, &empty));
+    try std.testing.expectEqualStrings("", empty.received());
+}
+
+test "a scripted body's chunking, wait and interruption do not change a request without a sink" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = streamConfig(8) });
+    defer net.deinit();
+    try net.transport.script(.{ .respond = .{
+        .body = stream_body,
+        .chunk_wait_ms = 5000,
+        .interruption = .{ .after_bytes = 4, .err = error.ConnectionResetByPeer },
+    } });
+    const response = try net.gateway.execute(std.testing.allocator, .get, stream_url, null, &.{});
+    defer response.deinit();
+    try std.testing.expectEqualStrings(stream_body, response.body);
+    try std.testing.expectEqual(@as(i64, 0), net.clock.now());
+}
+
+test "fetchInto follows redirects and delivers only the final body, sending their targets no headers but the user agent" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    net.transport.keep_history = true;
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .status = 302, .body = "moved", .location = "https://archive.org/download/model.onnx" } });
+    try net.transport.script(.{ .respond = .{ .status = 307, .body = "moved again", .location = "https://dn1.ca.archive.org/model.onnx" } });
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    const response = try net.gateway.fetchInto(
+        std.testing.allocator,
+        stream_url,
+        &.{.{ .name = "Authorization", .value = "Token secret" }},
+        archive_allowance,
+        sink.sink(),
+    );
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqual(@as(usize, 0), response.body.len);
+    try std.testing.expectEqualStrings(stream_body, sink.received());
+    try std.testing.expectEqual(@as(u32, 3), net.transport.requestCount());
+    try std.testing.expectEqualStrings("https://dn1.ca.archive.org/model.onnx", net.transport.history.items[2].url);
+    try std.testing.expectEqualStrings("", net.transport.lastAuthorization());
+    try std.testing.expectEqualStrings("Orca/" ++ liborca_version ++ " ( https://orca.invalid )", net.transport.lastUserAgent());
+}
+
+test "fetchInto delivers nothing when a redirect is refused or is one too many" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .status = 302, .body = "moved", .location = "https://example.org/model.onnx" } });
+    try std.testing.expectError(error.RedirectRefused, streamOnce(&net, &sink));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+
+    for (0..3) |_| try net.transport.script(redirectTo("https://archive.org/download/next"));
+    const response = try net.gateway.fetchInto(std.testing.allocator, stream_url, &.{}, archive_allowance, sink.sink());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 307), response.status);
+    try std.testing.expectEqualStrings("https://archive.org/download/next", response.location.?);
+    try std.testing.expectEqual(@as(u32, 4), net.transport.requestCount());
+    try std.testing.expectEqualStrings("", sink.received());
+}
+
+test "fetchInto delivers nothing of a response that is not a 2xx and returns its status and rate limit" {
+    for ([_]u16{ 304, 404, 500, 503 }) |status| {
+        var net: TestGateway = undefined;
+        net.init(.{});
+        defer net.deinit();
+        var sink: net_testing.CollectingSink = .{};
+        defer sink.deinit();
+        try net.transport.script(.{ .respond = .{ .status = status, .body = "an error page", .rate_limit = .{ .remaining = 3 } } });
+        const response = try net.gateway.fetchInto(std.testing.allocator, stream_url, &.{}, archive_allowance, sink.sink());
+        defer response.deinit();
+        try std.testing.expectEqual(status, response.status);
+        try std.testing.expectEqual(@as(?u32, 3), response.rate_limit.remaining);
+        try std.testing.expectEqual(@as(usize, 0), response.body.len);
+        try std.testing.expectEqualStrings("", sink.received());
+    }
+}
+
+test "fetchInto refuses a body declared longer than the limit before the first write" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = streamConfig(stream_body.len - 1) });
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    try std.testing.expectError(error.ResponseTooLarge, streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings("", sink.received());
+
+    net.gateway.config.max_response_bytes = stream_body.len;
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    try std.testing.expectEqual(@as(u16, 200), try streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings(stream_body, sink.received());
+}
+
+test "fetchInto stops a body of undeclared length at the limit, having delivered no more than the limit" {
+    const limit = 40;
+    var net: TestGateway = undefined;
+    net.init(.{ .config = streamConfig(limit) });
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body, .declares_length = false } });
+    try std.testing.expectError(error.ResponseTooLarge, streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings(stream_body[0..32], sink.received());
+    try std.testing.expect(sink.received().len <= limit);
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+}
+
+test "fetchInto ends with Canceled once the cancel flag is set during the body" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    var canceled: std.atomic.Value(bool) = .init(false);
+    net.gateway.cancel = &canceled;
+    var sink: net_testing.CollectingSink = .{ .trip = .{ .flag = &canceled, .after_bytes = 48 } };
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    try std.testing.expectError(error.Canceled, streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings(stream_body[0..48], sink.received());
+}
+
+test "a scripted failure after some bytes ends fetchInto as a network failure with exactly those bytes delivered" {
+    for ([_]usize{ 0, 16, 37, stream_body.len }) |after_bytes| {
+        var net: TestGateway = undefined;
+        net.init(.{});
+        defer net.deinit();
+        var sink: net_testing.CollectingSink = .{};
+        defer sink.deinit();
+        try net.transport.script(.{ .respond = .{
+            .body = stream_body,
+            .interruption = .{ .after_bytes = after_bytes, .err = error.ConnectionResetByPeer },
+        } });
+        try std.testing.expectError(error.NetworkUnavailable, streamOnce(&net, &sink));
+        try std.testing.expectEqualStrings(stream_body[0..after_bytes], sink.received());
+    }
+}
+
+test "a sink that fails ends fetchInto with SinkFailed, not a network failure, and keeps its cause" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = .{ .identity = net_testing.test_identity, .maximum_attempts = 3 } });
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{ .capacity = 40 };
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body } });
+    try std.testing.expectError(error.SinkFailed, streamOnce(&net, &sink));
+    try std.testing.expectEqual(@as(?anyerror, error.NoSpaceLeft), sink.cause);
+    try std.testing.expectEqualStrings(stream_body[0..32], sink.received());
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+}
+
+test "fetchInto outlasts the request timeout while the body keeps arriving and times out once it stalls" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = streamConfig(1024) });
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body, .chunk_wait_ms = 999 } });
+    try std.testing.expectEqual(@as(u16, 200), try streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings(stream_body, sink.received());
+    try std.testing.expectEqual(@as(i64, 7 * 999), net.clock.now());
+    try std.testing.expectEqual(@as(u64, 1000), net.transport.timeout_ms);
+
+    var stalled: net_testing.CollectingSink = .{};
+    defer stalled.deinit();
+    try net.transport.script(.{ .respond = .{ .body = stream_body, .chunk_wait_ms = 1000 } });
+    try std.testing.expectError(error.Timeout, streamOnce(&net, &stalled));
+    try std.testing.expectEqualStrings("", stalled.received());
+}
+
+test "fetchInto times out at the Gateway's deadline though the body keeps arriving, and at once when it has passed" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = streamConfig(1024) });
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    net.gateway.deadline_ms = 2500;
+    try net.transport.script(.{ .respond = .{ .body = stream_body, .chunk_wait_ms = 600 } });
+    try std.testing.expectError(error.Timeout, streamOnce(&net, &sink));
+    try std.testing.expectEqualStrings(stream_body[0..64], sink.received());
+    try std.testing.expectEqual(@as(i64, 2500), net.clock.now());
+
+    var late: net_testing.CollectingSink = .{};
+    defer late.deinit();
+    try std.testing.expectError(error.Timeout, streamOnce(&net, &late));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+    try std.testing.expectEqualStrings("", late.received());
+}
+
+test "fetchInto makes each request once though the Gateway allows three attempts" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = .{ .identity = net_testing.test_identity, .maximum_attempts = 3, .minimum_interval_ms = 0 } });
+    defer net.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try net.transport.script(.{ .respond = .{ .status = 503 } });
+    try std.testing.expectEqual(@as(u16, 503), try streamOnce(&net, &sink));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+
+    try net.transport.script(.{ .fail = error.ConnectionRefused });
+    try std.testing.expectError(error.NetworkUnavailable, streamOnce(&net, &sink));
+    try std.testing.expectEqual(@as(u32, 2), net.transport.requestCount());
+
+    try net.transport.script(.{ .respond = .{
+        .body = stream_body,
+        .interruption = .{ .after_bytes = 16, .err = error.ConnectionResetByPeer },
+    } });
+    try std.testing.expectError(error.NetworkUnavailable, streamOnce(&net, &sink));
+    try std.testing.expectEqual(@as(u32, 3), net.transport.requestCount());
+    try std.testing.expectEqualStrings(stream_body[0..16], sink.received());
+    try std.testing.expectEqual(@as(u64, 0), net.clock.slept());
+}
+
+fn expectLargeBody(received: []const u8) !void {
+    try std.testing.expectEqual(KeepAliveServer.large_body_bytes, received.len);
+    for (received, 0..) |byte, index| {
+        if (byte != KeepAliveServer.largeBodyByte(index)) return error.TestExpectedEqual;
+    }
+}
+
+test "a streamed GET asks for the identity encoding and delivers a body several chunks long intact" {
+    for ([_]KeepAliveServer.Reply{ .large, .large_chunked }) |reply| {
+        var exchange: PooledExchange = undefined;
+        try exchange.init(&.{ reply, .keep_alive }, pooledConfig(5000, KeepAliveServer.large_body_bytes));
+        defer exchange.deinit();
+        var sink: net_testing.CollectingSink = .{};
+        defer sink.deinit();
+        try std.testing.expectEqual(@as(u16, 200), try exchange.stream(&sink));
+        try expectLargeBody(sink.received());
+        try std.testing.expect(sink.largest_write <= Sink.max_chunk_bytes);
+        try std.testing.expectEqual(@as(u32, 1), exchange.server.identity_requests.load(.monotonic));
+        try std.testing.expectEqual(@as(u16, 200), try exchange.send(.get));
+        try std.testing.expectEqual(@as(u32, 1), exchange.server.identity_requests.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 1), exchange.accepts());
+    }
+}
+
+test "a streamed GET over the limit fails before the first write when its length is declared, and within the limit when it is not" {
+    const limit = 100_000;
+    var declared: PooledExchange = undefined;
+    try declared.init(&.{.large}, pooledConfig(5000, limit));
+    defer declared.deinit();
+    var untouched: net_testing.CollectingSink = .{};
+    defer untouched.deinit();
+    try std.testing.expectError(error.ResponseTooLarge, declared.stream(&untouched));
+    try std.testing.expectEqualStrings("", untouched.received());
+
+    var undeclared: PooledExchange = undefined;
+    try undeclared.init(&.{ .large_chunked, .keep_alive }, pooledConfig(5000, limit));
+    defer undeclared.deinit();
+    var partial: net_testing.CollectingSink = .{};
+    defer partial.deinit();
+    try std.testing.expectError(error.ResponseTooLarge, undeclared.stream(&partial));
+    try std.testing.expect(partial.received().len <= limit);
+    for (partial.received(), 0..) |byte, index| try std.testing.expectEqual(KeepAliveServer.largeBodyByte(index), byte);
+    try std.testing.expectEqual(@as(u16, 200), try undeclared.send(.get));
+    try std.testing.expectEqual(@as(u32, 2), undeclared.accepts());
+}
+
+test "a streamed GET delivers nothing of a 404 and only the final body after a redirect" {
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .not_found, .redirect, .keep_alive }, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    try std.testing.expectEqual(@as(u16, 404), try exchange.stream(&sink));
+    try std.testing.expectEqualStrings("", sink.received());
+    try std.testing.expectEqual(@as(u16, 200), try exchange.stream(&sink));
+    try std.testing.expectEqualStrings("ok", sink.received());
+    try std.testing.expectEqual(@as(u32, 3), exchange.server.requests.load(.monotonic));
+}
+
+test "a streamed GET whose body keeps arriving outlasts the request timeout, and one that stalls times out" {
+    const io = std.testing.io;
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{ .trickle, .stall_body }, pooledConfig(300, 1024));
+    defer exchange.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    const started = std.Io.Clock.awake.now(io).toMilliseconds();
+    try std.testing.expectEqual(@as(u16, 200), try exchange.stream(&sink));
+    try std.testing.expectEqualStrings(KeepAliveServer.trickle_body, sink.received());
+    try std.testing.expect(std.Io.Clock.awake.now(io).toMilliseconds() - started > 300);
+
+    var stalled: net_testing.CollectingSink = .{};
+    defer stalled.deinit();
+    const stalled_at = std.Io.Clock.awake.now(io).toMilliseconds();
+    try std.testing.expectError(error.Timeout, exchange.stream(&stalled));
+    const elapsed = std.Io.Clock.awake.now(io).toMilliseconds() - stalled_at;
+    try std.testing.expect(elapsed >= 300);
+    try std.testing.expect(elapsed < 1000);
+    try std.testing.expectEqualStrings("ok", stalled.received());
+}
+
+test "a streamed GET whose body keeps arriving times out at the Gateway's deadline" {
+    const io = std.testing.io;
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{.trickle}, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    var sink: net_testing.CollectingSink = .{};
+    defer sink.deinit();
+    const started = std.Io.Clock.awake.now(io).toMilliseconds();
+    exchange.gateway.deadline_ms = started + 300;
+    try std.testing.expectError(error.Timeout, exchange.stream(&sink));
+    const elapsed = std.Io.Clock.awake.now(io).toMilliseconds() - started;
+    try std.testing.expect(elapsed >= 300);
+    try std.testing.expect(elapsed < 550);
+    try std.testing.expect(sink.received().len < KeepAliveServer.trickle_body.len);
+}
+
+test "a streamed GET ends with Canceled within the poll interval of a cancel set during its body" {
+    const io = std.testing.io;
+    var exchange: PooledExchange = undefined;
+    try exchange.init(&.{.trickle}, pooledConfig(5000, 1024));
+    defer exchange.deinit();
+    var canceled: std.atomic.Value(bool) = .init(false);
+    exchange.gateway.cancel = &canceled;
+    var sink: net_testing.CollectingSink = .{ .trip = .{ .flag = &canceled, .after_bytes = 2 } };
+    defer sink.deinit();
+    const started = std.Io.Clock.awake.now(io).toMilliseconds();
+    try std.testing.expectError(error.Canceled, exchange.stream(&sink));
+    const elapsed = std.Io.Clock.awake.now(io).toMilliseconds() - started;
+    try std.testing.expect(elapsed < 2 * KeepAliveServer.trickle_pause_ms + 2 * cancel_poll_ms + 150);
+    try std.testing.expect(sink.received().len < KeepAliveServer.trickle_body.len);
 }
