@@ -39,7 +39,7 @@ expect_usage_failure() {
 expect_usage_failure "no command"
 expect_usage_failure "unknown command" no-such-command
 expect_usage_failure "too few arguments" scan "$scratch/library.db"
-expect_usage_failure "too many arguments" stats "$scratch/library.db" extra
+expect_usage_failure "too many arguments" project "$scratch/library.db" extra
 expect_usage_failure "arguments for a command that takes none" sources extra
 
 status=0

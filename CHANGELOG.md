@@ -15,11 +15,10 @@
   the CLAP audio model and stores their unit-length mean as 512 signed bytes
   and a scale, as `analysis_results` kind 7 (`orca.audio-embedding`). A file
   under 1 s or silent is stored as having none. `Runtime.libraryAnalyzeFile`
-  takes a `FileAnalysisOptions` whose `embedding_model` is an
-  `EmbeddingModel` the caller opened, and `orca-cli analyze` takes
-  `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL`. Without a model an
-  analysis stores what it did before. `analysis-bench` takes a model to time
-  the stages.
+  and `libraryReanalyzeFile` measure it when the runtime's model is ready, and
+  `orca-cli analyze` takes `--embedding-model PATH` or
+  `ORCA_EMBEDDING_MODEL`. Without a model an analysis stores what it did
+  before. `analysis-bench` takes a model to time the stages.
 - **The library-wide analysis pass can measure audio embeddings.**
   `LibraryAnalysis.embedding_model` is null by default; with a model the pass
   selects files on four measurements, gives each measuring thread its own
@@ -29,7 +28,19 @@
   `analysisSelectors` takes a `SelectionForm`, and
   `AnalysisCoverageCounts.missing` has a fourth entry. Without a model the
   selection, the coverage counts and the measurement set identifier are
-  unchanged. The runtime, the CLI and the C ABI do not pass a model.
+  unchanged.
+- **A host names the audio-embedding model and reads whether it is usable.**
+  `Runtime.setEmbeddingModelPath` copies the model file's path and checks the
+  file by size and SHA-256; `Runtime.embeddingModelState` returns
+  `built_without`, `missing`, `wrong_file`, `unusable` or `ready`
+  (`EmbeddingModelState`). While it is `ready`, `startLibraryAnalysis`,
+  `libraryAnalyzeFile` and `libraryReanalyzeFile` measure the embedding,
+  `libraryUnanalyzedCount` and `libraryAnalysisCoverage` count it, and
+  `MissingMeasurements.embedding` flags it. A job that cannot load the model
+  records why in the state and measures without it. `orca-cli analyze-library`
+  and `stats` take `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL`, and
+  exit 1 with the reason when the model cannot be used. The C ABI has no call
+  for the model.
 
 - **The Library keeps each file's audio embedding in a table.** Library schema
   version 5 adds `file_audio_embeddings`, kept by triggers on

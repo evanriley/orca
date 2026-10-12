@@ -5,6 +5,7 @@ const artist_info = @import("artist_info.zig");
 const release_info = @import("release_info.zig");
 const cover_art = @import("cover_art.zig");
 const database = @import("../database/root.zig");
+const embedding_model = @import("embedding_model.zig");
 const job = @import("job.zig");
 const lyrics_fetch = @import("lyrics_fetch.zig");
 const library_pass = @import("../library/root.zig");
@@ -901,9 +902,10 @@ pub const PublishedProgress = struct {
 /// One background worker behind a `JobHandle`.
 ///
 /// Threading contract, the same one `core/work.zig` states: the worker thread
-/// touches only this struct, the Library database it was handed and the
-/// runtime's `host_signal`. It never resolves a handle, never reads a
-/// `handle.Pool`, and touches nothing else of the runtime. The control lane
+/// touches only this struct, the Library database it was handed, the
+/// runtime's `host_signal` and the atomic an `embedding_model` claim points
+/// at. It never resolves a handle, never reads a `handle.Pool`, and touches
+/// nothing else of the runtime. The control lane
 /// cancels it, joins it through `work.Registry`, and only then reads anything
 /// that is not an atomic here.
 pub const JobWorker = struct {
@@ -943,6 +945,7 @@ pub const JobWorker = struct {
     /// joins the thread, not merely waits for `finish`, before it frees this
     /// struct or the runtime.
     host_signal: *control.HostSignal,
+    embedding_model: ?embedding_model.Claim = null,
 
     pub fn run(self: *JobWorker) void {
         defer {
@@ -1219,6 +1222,8 @@ pub const JobWorker = struct {
     /// output.
     fn runAnalysis(self: *JobWorker, request: AnalysisRequest) void {
         const stats = &self.stats.scan;
+        var model = if (self.embedding_model) |*claim| claim.open(self.allocator, self.threaded.io()) else null;
+        defer if (model) |*opened| opened.deinit();
         var pass: library_pass.LibraryAnalysis = .{
             .allocator = self.allocator,
             .io = self.threaded.io(),
@@ -1232,6 +1237,7 @@ pub const JobWorker = struct {
             .progress = &self.progress,
             .batch_size = request.batch_size,
             .threads = request.threads,
+            .embedding_model = model,
         };
         const result = pass.run() catch {
             self.failed.store(true, .release);

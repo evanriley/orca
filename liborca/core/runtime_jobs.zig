@@ -909,7 +909,7 @@ fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDat
             .incompletePropertiesCount(backfill.force) +
             try database.repository.unmeasuredCoverCount(library_database.queryDatabase()),
         .analysis => try library_database.files.unanalyzedCount(
-            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), .three_measurements),
+            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), runtime.analysisSelectionForm(self)),
         ),
         .duplicate_scan => try library_database.files.count(),
         .consistency => try library_database.releases.count(),
@@ -963,6 +963,7 @@ fn spawnWorkerForJob(
         .stats = .init(request),
         .host_signal = &self.host_signal,
         .walk_lock = walk_lock,
+        .embedding_model = if (request == .analysis) self.embedding_model.claim() else null,
     };
     worker.token.io = worker.threaded.io();
     registration.waker = .{ .context = &worker.token, .wake_fn = JobWorker.wakeFromPause };

@@ -42,12 +42,10 @@ fn describe(err: anyerror) []const u8 {
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.EmbeddingModelMissing => "no audio embedding was measured: the file --embedding-model or ORCA_EMBEDDING_MODEL names does not exist; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
-        error.EmbeddingModelMismatch => "no audio embedding was measured: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not the model this build expects, by size or SHA-256; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
-        error.EmbeddingsNotBuilt => "no audio embedding was measured: this orca-cli was built with -Dembeddings=false; build without it to use --embedding-model or ORCA_EMBEDDING_MODEL",
-        error.EmbeddingRuntimeTooOld => "no audio embedding was measured: the installed ONNX Runtime is older than 1.20; install 1.20 or newer",
-        error.EmbeddingSessionFailed => "no audio embedding was measured: ONNX Runtime could not load the embedding model",
-        error.EmbeddingModelUnreadable => "no audio embedding was measured: the file --embedding-model or ORCA_EMBEDDING_MODEL names could not be read; check that it is a readable file",
+        error.EmbeddingModelMissing => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names does not exist; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
+        error.EmbeddingModelMismatch => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not the model this build expects, by size or SHA-256; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
+        error.EmbeddingsNotBuilt => "the audio-embedding model cannot be used: this orca-cli was built with -Dembeddings=false; build without it to use --embedding-model or ORCA_EMBEDDING_MODEL",
+        error.EmbeddingModelUnusable => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names could not be read, or ONNX Runtime could not load it; check that it is a readable file and that ONNX Runtime 1.20 or newer is installed",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
         error.UnknownArtist => "no artist with that id",
         error.UnknownDailyMix => "no Daily Mix with that number; run mixes to list them",
@@ -230,7 +228,7 @@ const commands = [_]Command{
     .{ .name = "analyze", .usage = "analyze DATABASE AUDIO [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 4, .run = analyzeFile },
     .{
         .name = "analyze-library",
-        .usage = "analyze-library DATABASE [--batch=N] [--threads=N]\n" ++ usage_indent ++ "  [--cancel-after=MS]",
+        .usage = "analyze-library DATABASE [--batch=N] [--threads=N]\n" ++ usage_indent ++ "  [--cancel-after=MS] [--embedding-model PATH]",
         .min_arguments = 1,
         .max_arguments = null,
         .run = analyzeLibrary,
@@ -273,7 +271,7 @@ const commands = [_]Command{
     .{ .name = "availability", .usage = "availability DATABASE [RELEASE_ID...]", .min_arguments = 1, .max_arguments = null, .run = showAvailability },
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND [--albums]] [OFFSET]", .min_arguments = 1, .max_arguments = 4, .run = listHealthIssues },
-    .{ .name = "stats", .usage = "stats DATABASE", .min_arguments = 1, .max_arguments = 1, .run = printLibraryStats },
+    .{ .name = "stats", .usage = "stats DATABASE [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 3, .run = printLibraryStats },
     .{ .name = "listens", .usage = "listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]", .min_arguments = 1, .max_arguments = 4, .run = listenSettings },
     .{ .name = "cache", .usage = "cache DATABASE [--clear]", .min_arguments = 1, .max_arguments = 2, .run = providerCache },
     .{ .name = "sources", .usage = "sources", .min_arguments = 0, .max_arguments = 0, .run = listProviderSources, .shares_usage_line = true },
@@ -1624,9 +1622,12 @@ fn backfillProperties(context: Context) !void {
 /// what is left.
 fn analyzeLibrary(context: Context) !void {
     const stdout = context.stdout;
-    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .threads, .cancel_after });
+    const model = try takeEmbeddingModelOption(context, context.arguments[1..]);
+    const options = try parseJobOptions(model.rest, &.{ .batch, .threads, .cancel_after });
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
+    try model.requireReady(&runtime);
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var request: liborca.AnalysisRequest = .{ .threads = options.threads };
     if (options.batch_size) |batch_size| if (batch_size != 0) {
@@ -1641,6 +1642,47 @@ fn analyzeLibrary(context: Context) !void {
     try stdout.print("{d} files still to analyze\n", .{
         try runtime.libraryUnanalyzedCount(library_handle),
     });
+    try stdout.flush();
+    try model.requireReady(&runtime);
+}
+
+const EmbeddingModelOption = struct {
+    path: ?[]const u8,
+    rest: []const []const u8,
+
+    fn apply(self: EmbeddingModelOption, runtime: *liborca.Runtime) !void {
+        if (self.path) |path| try runtime.setEmbeddingModelPath(path);
+    }
+
+    fn requireReady(self: EmbeddingModelOption, runtime: *const liborca.Runtime) !void {
+        if (self.path == null) return;
+        return switch (runtime.embeddingModelState()) {
+            .ready => {},
+            .built_without => error.EmbeddingsNotBuilt,
+            .missing => error.EmbeddingModelMissing,
+            .wrong_file => error.EmbeddingModelMismatch,
+            .unusable => error.EmbeddingModelUnusable,
+        };
+    }
+};
+
+fn takeEmbeddingModelOption(context: Context, arguments: []const []const u8) !EmbeddingModelOption {
+    var path: ?[]const u8 = context.environ.get("ORCA_EMBEDDING_MODEL");
+    if (path) |value| if (value.len == 0) {
+        path = null;
+    };
+    var rest: std.ArrayList([]const u8) = try .initCapacity(context.allocator, arguments.len);
+    var index: usize = 0;
+    while (index < arguments.len) : (index += 1) {
+        if (!std.mem.eql(u8, arguments[index], "--embedding-model")) {
+            rest.appendAssumeCapacity(arguments[index]);
+            continue;
+        }
+        index += 1;
+        if (index == arguments.len) return error.MissingOptionValue;
+        path = arguments[index];
+    }
+    return .{ .path = path, .rest = rest.items };
 }
 
 /// The question the analysis exists to answer, asked over the stored
@@ -1891,42 +1933,16 @@ fn ignoreDuplicateGroup(context: Context) !void {
 }
 
 fn analyzeFile(context: Context) !void {
-    var model_path: ?[]const u8 = context.environ.get("ORCA_EMBEDDING_MODEL");
-    if (model_path) |path| if (path.len == 0) {
-        model_path = null;
-    };
-    if (context.arguments.len > 2) {
-        if (!std.mem.eql(u8, context.arguments[2], "--embedding-model")) return error.UnknownOption;
-        if (context.arguments.len == 3) return error.MissingOptionValue;
-        model_path = context.arguments[3];
-    }
-    var model_error: ?anyerror = null;
-    var model: ?liborca.EmbeddingModel = if (model_path) |path|
-        liborca.EmbeddingModel.open(context.gpa, context.io, path) catch |err| unopened: {
-            model_error = switch (@as(anyerror, err)) {
-                error.EmbeddingModelMissing,
-                error.EmbeddingModelMismatch,
-                error.EmbeddingsNotBuilt,
-                error.EmbeddingRuntimeTooOld,
-                error.EmbeddingSessionFailed,
-                error.OutOfMemory,
-                => err,
-                else => error.EmbeddingModelUnreadable,
-            };
-            break :unopened null;
-        }
-    else
-        null;
-    defer if (model) |*opened| opened.deinit();
-
+    const model = try takeEmbeddingModelOption(context, context.arguments[2..]);
+    if (model.rest.len != 0) return error.UnknownOption;
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const result = try runtime.libraryAnalyzeFile(
         library_handle,
         context.io,
         try absolutePath(context, context.arguments[1]),
-        .{ .embedding_model = model },
     );
     defer result.deinit();
     try context.stdout.print(
@@ -1945,16 +1961,14 @@ fn analyzeFile(context: Context) !void {
         "loudness={d:.2} LUFS replay_gain={d:.2} dB\n",
         .{ loudness, result.diagnostics.replay_gain_db.? },
     );
-    if (model != null) {
+    if (model.path != null and runtime.embeddingModelState() == .ready) {
         if (result.embedding) |embedding| switch (embedding) {
             .none => try context.stdout.writeAll("embedding=none\n"),
             .embedding => |vector| try context.stdout.print("embedding=stored windows={d}\n", .{vector.windows}),
         } else try context.stdout.writeAll("embedding=failed\n");
     }
-    if (model_error) |err| {
-        try context.stdout.flush();
-        return err;
-    }
+    try context.stdout.flush();
+    try model.requireReady(&runtime);
 }
 
 fn listHealthIssues(context: Context) !void {
@@ -2020,8 +2034,11 @@ fn listHealthIssues(context: Context) !void {
 }
 
 fn printLibraryStats(context: Context) !void {
+    const model = try takeEmbeddingModelOption(context, context.arguments[1..]);
+    if (model.rest.len != 0) return error.UnknownOption;
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const stats = try runtime.libraryStats(library_handle);
     try context.stdout.print(
@@ -2035,7 +2052,7 @@ fn printLibraryStats(context: Context) !void {
     const coverage = try runtime.libraryAnalysisCoverage(library_handle);
     try context.stdout.print("never_analyzed={d}\noutdated={d}\nmissing=", .{ coverage.never_analyzed, coverage.outdated });
     var separator: []const u8 = "";
-    inline for (.{ "loudness_and_checks", "fingerprint", "features" }) |name| {
+    inline for (.{ "loudness_and_checks", "fingerprint", "features", "embedding" }) |name| {
         if (@field(coverage.missing, name)) {
             try context.stdout.print("{s}{s}", .{ separator, name });
             separator = ",";
@@ -2043,6 +2060,8 @@ fn printLibraryStats(context: Context) !void {
     }
     if (separator.len == 0) try context.stdout.writeAll("-");
     try context.stdout.print("\nmeasurement_set={x:0>16}\n", .{coverage.measurement_set});
+    try context.stdout.flush();
+    try model.requireReady(&runtime);
 }
 
 fn listenSettings(context: Context) !void {

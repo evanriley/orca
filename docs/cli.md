@@ -61,12 +61,12 @@ zig build run -- health DATABASE --kind=artwork_problem --albums [OFFSET]   # on
 zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file, and `metadata_issues N`, open consistency issues
 zig build run -- formats   # each format Orca reads, `NAME<TAB>planned` for one recognized but not yet decoded
 zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
-zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=, never_analyzed=, outdated=, missing= (loudness_and_checks, fingerprint, features, comma-separated, or -), measurement_set=
+zig build run -- stats DATABASE [--embedding-model PATH]   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=, never_analyzed=, outdated=, missing= (loudness_and_checks, fingerprint, features, embedding, comma-separated, or -), measurement_set=; `--embedding-model PATH`, else ORCA_EMBEDDING_MODEL, counts the audio embedding as a measurement; a model that cannot be used is named on stderr and exits 1 after the output
 zig build run -- cache DATABASE [--clear]   # artwork_bytes= photo_bytes= lyrics_bytes= info_bytes= of fetched provider data; --clear deletes it and prints what it held; embedded and folder art and local lyrics stay
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
 zig build run -- health-restore DATABASE FILE_ID KIND
-zig build run -- analyze DATABASE AUDIO [--embedding-model PATH]   # cache=, peak=, rms=, clipped=, silent=, fingerprint_blocks=, chromaprint=, then loudness= and replay_gain= when measured; with a model, also `embedding=stored windows=N`, `embedding=none` (under 1 s or silent) or `embedding=failed`; the model is PATH, else ORCA_EMBEDDING_MODEL; a model that cannot be opened is named on stderr and exits 1 after the other measurements are stored and printed
-zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-after=MS]
+zig build run -- analyze DATABASE AUDIO [--embedding-model PATH]   # cache=, peak=, rms=, clipped=, silent=, fingerprint_blocks=, chromaprint=, then loudness= and replay_gain= when measured; with a model, also `embedding=stored windows=N`, `embedding=none` (under 1 s or silent) or `embedding=failed`; the model is PATH, else ORCA_EMBEDDING_MODEL; a model that cannot be used is named on stderr and exits 1 after the other measurements are stored and printed
+zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-after=MS] [--embedding-model PATH]   # with a model, PATH else ORCA_EMBEDDING_MODEL, also measures audio embeddings; a model that cannot be used is named on stderr and exits 1 before the job starts, or after its output when the job itself could not load the model
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]   # examined= exact= (same bytes) identical= (same lossless audio, other bytes) likely= (fingerprints match) unique= unreadable= batches=, then uncomparable= comparisons= truncated_buckets=; one finding per file, the strongest
 zig build run -- duplicates DATABASE --groups [--limit N] [--offset N]   # id, title, artist, copies= same_recording=yes|no similarity=0.99|- bytes_redundant= verdict=exact_duplicate|identical_audio|likely_duplicate, then `groups= bytes=`; a group's id is its lowest file id
 zig build run -- duplicates DATABASE --group=ID   # group= same_recording= similarity= verdict=, then the copies, suggested first: file= track= keep=yes|no locations= playlists= codec= rate= depth= bytes= ... path=
@@ -224,7 +224,7 @@ on any other value; `orca-gtk` ignores it.
 | `ORCA_LISTENBRAINZ_LABS_URL` | ListenBrainz Labs server | CLI |
 | `ORCA_LISTENBRAINZ_TOKEN` | ListenBrainz user token for `scrobble` | CLI |
 | `ORCA_ACOUSTID_USER_KEY` | AcoustID user key for `submit-acoustid` | CLI |
-| `ORCA_EMBEDDING_MODEL` | Audio-embedding model file for `analyze` | CLI |
+| `ORCA_EMBEDDING_MODEL` | Audio-embedding model file for `analyze`, `analyze-library` and `stats` | CLI |
 | `ORCA_LIBRARY` | Library `orca-gtk` opens | GTK |
 | `ORCA_OUTPUT_DEVICE` | Orca device id that overrides the output menu | GTK |
 | `ORCA_GTK_DEBUG` | Debug topics `art`, `frames` and `reveal`, separated by commas or spaces | GTK |

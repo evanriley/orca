@@ -138,7 +138,10 @@ after the drain has joined the thread.
 
 Progress with no honest denominator is a count, never a fraction. The property
 backfill and the library-wide analysis count the rows that still owe work with
-one indexed query before they start and report that total. A scan or reconcile
+one indexed query before they start and report that total. The analysis
+counts the audio embedding among its measurements, and measures it, when
+`embeddingModelState` is `ready` as its worker starts
+([analysis.md](analysis.md#audio-embedding)). A scan or reconcile
 first counts the files its walk will reach, opening none, and reports that
 count as its total from then on; a file added during the walk raises the total,
 and a finished walk replaces it with the files it saw, so a succeeded scan ends
