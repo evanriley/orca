@@ -2,6 +2,7 @@
   lib,
   stdenv,
   zig_0_17,
+  fetchurl,
   pkg-config,
   wrapGAppsHook4,
   sqlite,
@@ -63,8 +64,22 @@ stdenv.mkDerivation (finalAttrs: {
     libsecret
   ];
 
+  embeddingModel = fetchurl {
+    url = "https://github.com/evanriley/orca/releases/download/model-clap-int8-1/clap_audio_int8.onnx";
+    hash = "sha256-EtPiwVk7oRHfYQP+rC885PToXl78KtknrBaoQC57PDY=";
+  };
+
   postConfigure = ''
     ln -s ${finalAttrs.deps} "$ZIG_GLOBAL_CACHE_DIR/p"
+  '';
+
+  postInstall = ''
+    mkdir -p "$out/share/orca/models"
+    ln -s ${finalAttrs.embeddingModel} "$out/share/orca/models/clap_audio_int8.onnx"
+  '';
+
+  preFixup = ''
+    gappsWrapperArgs+=(--set-default ORCA_EMBEDDING_MODEL "$out/share/orca/models/clap_audio_int8.onnx")
   '';
 
   meta = {

@@ -21,7 +21,7 @@ core, several native frontends, no frontend owning behaviour.
    library · database · storage · codec · metadata · audio · analysis · jobs
                                          |
   SQLite · libFLAC · minimp3 · ALAC · libxaac · Xiph libraries · PipeWire
-  Chromaprint · KissFFT · libsamplerate
+  Chromaprint · KissFFT · libsamplerate · ONNX Runtime
 ```
 
 - Zig clients import the `liborca` module and call its Zig API
@@ -172,6 +172,7 @@ build` installs the licence texts of vendored and source-built code under
 | libFLAC, libogg, libopus, opusfile, libvorbis | BSD-3-Clause | system libraries |
 | libsamplerate | BSD-2-Clause | system library, behind `samplerate_shim.c` |
 | PipeWire | MIT | system library on Linux, behind `pipewire_shim.c` |
+| ONNX Runtime | MIT | system library, behind `embedding_shim.c` |
 | minimp3, QOA | CC0, MIT | vendored in `liborca/codec/vendor` |
 | ALAC, libxaac | Apache-2.0 | built from source by `build.zig` |
 | Chromaprint | MIT | built from source by `build/chromaprint.zig` |
@@ -180,6 +181,17 @@ build` installs the licence texts of vendored and source-built code under
 `build.zig.zon` pins the sources `build.zig` builds: ALAC (a git commit),
 libxaac (v0.1.13) and Chromaprint (v1.6.1). System libraries come from
 `pkg-config`, supplied by the dev shell and the Nix package.
+
+ONNX Runtime runs the audio-embedding model. It is MIT and carries some
+MPL-2.0 files; liborca links it dynamically and compiles none of its source.
+`-Dembeddings=false` builds liborca without it.
+
+The model, `clap_audio_int8.onnx`, is a data file, not part of liborca. It is
+Orca's int8 export of the audio part of `laion/clap-htsat-unfused`, whose
+weights are published as Apache-2.0, written by
+`scripts/embedding/export_model.py`. It is not in the repository. A host names
+its path, and liborca accepts only the file whose SHA-256 it was built with
+([analysis.md](analysis.md#audio-embedding)).
 
 Chromaprint's repository also carries FFmpeg's LGPL resampler
 (`src/avresample`). It is not compiled: `config.h` leaves

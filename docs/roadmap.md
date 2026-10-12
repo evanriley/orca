@@ -89,6 +89,10 @@ runtime path, per the rule in [architecture.md](architecture.md).
   each pick and feedback.
 - Tempo, key and energy measured from the audio
   ([analysis.md](analysis.md#audio-features)).
+- Sound similarity: with the audio-embedding model file installed, analysis
+  measures an embedding for each track, Radio and Daily Mixes rank by how
+  close a track sounds to the seed, and `orca-cli similar` lists the nearest
+  tracks ([analysis.md](analysis.md#audio-embedding)).
 
 ### Identification
 
@@ -255,6 +259,12 @@ release itself is the maintainer's call.
 
 ### Analysis
 
+- Orca downloading the audio-embedding model itself, after asking;
+  `network.Gateway` buffers a whole response today.
+- A larger or music-specific embedding model, and mixing the embedding with a
+  timbre descriptor.
+- Genre rarity weighting in Radio: a shared rare genre counts for more than a
+  shared common one.
 - Exact album loudness from block energies instead of a weighted mean.
 - True-peak measurement, 4x oversampled, and spectral transcode detection.
 

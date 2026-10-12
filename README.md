@@ -39,7 +39,8 @@ is next, what is planned, ideas and what is not planned.
 
 The flake packages Orca for `x86_64-linux`. The package installs `orca-gtk`,
 `orca-cli`, static and shared `liborca`, `include/orca/orca.h`,
-`lib/pkgconfig/orca.pc`, the desktop entry and the icons.
+`lib/pkgconfig/orca.pc`, the desktop entry, the icons and the
+[sound similarity model](#sound-similarity-model).
 
 Run it without installing:
 
@@ -243,6 +244,34 @@ The tests that run the embedding model are skipped unless
   `nix run github:evanriley/orca#orca-gtk`, `orca-gtk` may need
   [nixGL](https://github.com/nix-community/nixGL) to find the host's OpenGL
   drivers.
+
+## Sound similarity model
+
+Radio and Daily Mixes rank by how tracks sound when Orca has its
+audio-embedding model, `clap_audio_int8.onnx` (32.6 MB). Without the file they
+rank by tempo, key and energy instead, and nothing else changes. Orca never
+downloads the file itself.
+
+The Nix package includes the model. For any other build, download it to
+`orca-gtk`'s data directory and check it:
+
+```sh
+models="${XDG_DATA_HOME:-$HOME/.local/share}/orca/models"
+mkdir -p "$models"
+curl -L -o "$models/clap_audio_int8.onnx" \
+  https://github.com/evanriley/orca/releases/download/model-clap-int8-1/clap_audio_int8.onnx
+echo "12d3e2c1593ba111df6103feac2f3ce4f4e85e5efc2ad927ac16a8402e7b3c36  $models/clap_audio_int8.onnx" | sha256sum -c
+```
+
+`orca-gtk` shows whether it found the model in Settings › Listening, and
+`ORCA_EMBEDDING_MODEL=PATH` names another location. `orca-cli` takes
+`--embedding-model PATH` or the same variable. Analyze the Library afterwards
+so each track gets its embedding. A build with `-Dembeddings=false` does not
+use the model.
+
+The file is Orca's export of the audio part of
+[`laion/clap-htsat-unfused`](https://huggingface.co/laion/clap-htsat-unfused);
+`scripts/embedding/export_model.py` writes it from the published weights.
 
 ## Usage
 
