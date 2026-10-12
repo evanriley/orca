@@ -108,6 +108,43 @@ request: one attempt, no extra pacing slot. POST submissions send `Connection:
 close`. A connection that timed out, was canceled, failed or was not read in
 full is never reused.
 
+### Streamed responses
+
+`Gateway.fetchInto` is `Gateway.fetch` with the body written to a caller's
+`network.client.Sink` instead of held in memory, for a file too large to
+buffer. Its rules differ from a buffered request's in these ways:
+
+- The sink receives the body of the final `2xx` in order, in pieces of at most
+  64 KiB, and `Response.body` is empty. A redirect, a `4xx` or a `5xx` writes
+  nothing and returns its status with an empty body.
+- The request asks for `Accept-Encoding: identity`, so the sink receives the
+  bytes the origin stores. A body the server compresses anyway is decoded.
+- `Config.max_response_bytes` bounds what the sink receives. A longer
+  `Content-Length` fails with `error.ResponseTooLarge` before the first write;
+  a longer body of undeclared length fails once it passes the bound, with at
+  most the bound delivered.
+- `Config.request_timeout_ms` bounds each wait, for the response head or for
+  more of the body, not the transfer. `Gateway.deadline_ms`, when set, bounds
+  the transfer. Both end in `error.Timeout`. A cancel ends the transfer within
+  100 ms with `error.Canceled`.
+- The request and each redirect hop are made once whatever
+  `Config.maximum_attempts` is, because a second attempt would deliver bytes
+  again.
+- A sink that fails ends the request with `error.SinkFailed`; the sink keeps
+  its own cause. After any error the sink may hold the start of a body, which
+  the caller discards.
+- The standard transport calls the sink from another thread than the caller's,
+  one call at a time and never after `fetchInto` returns.
+- The lease covers the request timeout and is not extended while a body
+  arrives, so a transfer that outlasts it leaves the service claimable by
+  another Gateway.
+- A connection is reused after a body delivered in full, and never after a
+  response that was not a `2xx`.
+
+`network.testing.ScriptedTransport` delivers a scripted body to a sink in
+chunks of `chunk_bytes` and can script a wait before each chunk, a body of
+undeclared length and a failure after a number of delivered bytes.
+
 ### Batching and permanent refusals
 
 A backlog goes out as `import` requests of up to 100 listens; one listen goes

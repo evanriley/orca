@@ -199,6 +199,14 @@ pub const Reply = union(enum) {
         body: []const u8 = "{}",
         rate_limit: client.RateLimit = .{},
         location: ?[]const u8 = null,
+        declares_length: bool = true,
+        chunk_wait_ms: u64 = 0,
+        interruption: ?Interruption = null,
+    };
+
+    pub const Interruption = struct {
+        after_bytes: usize,
+        err: anyerror,
     };
 };
 
@@ -229,6 +237,7 @@ pub const ScriptedTransport = struct {
     replies: std.ArrayList(Reply) = .empty,
     next_reply: usize = 0,
     otherwise: Reply = .{ .respond = .{} },
+    chunk_bytes: usize = 16,
     responder: ?Responder = null,
     keep_history: bool = false,
     history: std.ArrayList(Recorded) = .empty,
@@ -307,7 +316,7 @@ pub const ScriptedTransport = struct {
         _ = self.requests.fetchAdd(1, .acq_rel);
 
         return switch (reply) {
-            .respond => |answer| respond: {
+            .respond => |answer| if (request.sink) |sink| self.deliver(allocator, request, sink, answer) else respond: {
                 const body = try allocator.dupe(u8, answer.body);
                 errdefer allocator.free(body);
                 break :respond .{
@@ -321,6 +330,55 @@ pub const ScriptedTransport = struct {
             .fail => |err| err,
             .hang => hang(request),
         };
+    }
+
+    fn deliver(
+        self: *ScriptedTransport,
+        allocator: std.mem.Allocator,
+        request: client.Request,
+        sink: client.Sink,
+        answer: Reply.Answer,
+    ) anyerror!client.Response {
+        if (client.isSuccess(answer.status)) try self.stream(request, sink, answer);
+        const body = try allocator.alloc(u8, 0);
+        errdefer allocator.free(body);
+        return .{
+            .allocator = allocator,
+            .status = answer.status,
+            .body = body,
+            .rate_limit = answer.rate_limit,
+            .location = if (answer.location) |location| try allocator.dupe(u8, location) else null,
+        };
+    }
+
+    fn stream(self: *ScriptedTransport, request: client.Request, sink: client.Sink, answer: Reply.Answer) anyerror!void {
+        std.debug.assert(self.chunk_bytes > 0 and self.chunk_bytes <= client.Sink.max_chunk_bytes);
+        if (answer.declares_length and answer.body.len > request.max_response_bytes) return error.ResponseTooLarge;
+        var total_left_ms: ?u64 = request.total_timeout_ms;
+        var delivered: usize = 0;
+        while (true) {
+            if (request.cancel) |cancel| if (cancel.load(.acquire)) return error.Canceled;
+            var end = @min(answer.body.len, delivered + self.chunk_bytes);
+            if (answer.interruption) |interruption| {
+                if (delivered >= interruption.after_bytes) return interruption.err;
+                end = @min(end, interruption.after_bytes);
+            }
+            if (delivered == answer.body.len) return;
+            const patience_ms = @min(request.timeout_ms, total_left_ms orelse request.timeout_ms);
+            if (answer.chunk_wait_ms >= patience_ms) {
+                self.pass(patience_ms);
+                return error.Timeout;
+            }
+            self.pass(answer.chunk_wait_ms);
+            if (total_left_ms) |*left_ms| left_ms.* -= answer.chunk_wait_ms;
+            if (end > request.max_response_bytes) return error.ResponseTooLarge;
+            try sink.write(answer.body[delivered..end]);
+            delivered = end;
+        }
+    }
+
+    fn pass(self: *ScriptedTransport, milliseconds: u64) void {
+        if (self.clock) |test_clock| test_clock.advance(@intCast(milliseconds));
     }
 
     fn record(self: *ScriptedTransport, index: u32, request: client.Request, form: []const u8) void {
@@ -340,6 +398,47 @@ pub const ScriptedTransport = struct {
             _ = std.c.nanosleep(&pause, null);
         }
         return error.Timeout;
+    }
+};
+
+pub const CollectingSink = struct {
+    allocator: std.mem.Allocator = std.testing.allocator,
+    bytes: std.ArrayList(u8) = .empty,
+    largest_write: usize = 0,
+    capacity: ?usize = null,
+    cause: ?anyerror = null,
+    trip: ?Trip = null,
+
+    pub const Trip = struct {
+        flag: *std.atomic.Value(bool),
+        after_bytes: usize,
+    };
+
+    pub fn deinit(self: *CollectingSink) void {
+        self.bytes.deinit(self.allocator);
+    }
+
+    pub fn sink(self: *CollectingSink) client.Sink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    pub fn received(self: *const CollectingSink) []const u8 {
+        return self.bytes.items;
+    }
+
+    fn write(context: *anyopaque, chunk: []const u8) anyerror!void {
+        const self: *CollectingSink = @ptrCast(@alignCast(context));
+        if (self.capacity) |capacity| {
+            if (self.bytes.items.len + chunk.len > capacity) {
+                self.cause = error.NoSpaceLeft;
+                return error.NoSpaceLeft;
+            }
+        }
+        try self.bytes.appendSlice(self.allocator, chunk);
+        self.largest_write = @max(self.largest_write, chunk.len);
+        if (self.trip) |trip| {
+            if (self.bytes.items.len >= trip.after_bytes) trip.flag.store(true, .release);
+        }
     }
 };
 
