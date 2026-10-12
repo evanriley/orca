@@ -22,13 +22,8 @@ pub const Descriptor = struct {
     sha256: [Sha256.digest_length]u8,
 
     pub fn of(model: audio_embedding.ModelId) Descriptor {
-        return switch (model) {
-            .clap_htsat_unfused => .{
-                .url = audio_embedding.model_url,
-                .size = audio_embedding.model_size,
-                .sha256 = audio_embedding.model_sha256,
-            },
-        };
+        const spec = model.spec();
+        return .{ .url = spec.url, .size = spec.size, .sha256 = spec.sha256 };
     }
 };
 

@@ -77,19 +77,16 @@ pub fn fingerprintSelector() database.repository.AnalysisSelector {
 
 /// Every measurement `Service.analyzeFile` stores, for selecting the files
 /// that still owe any of them, and the verdict that excuses a file `codecs`
-/// cannot decode. `.with_embedding` is for a caller whose analysis has a
-/// model: without one no file can ever stop owing the embedding.
+/// cannot decode. `embedding_model` is the model a caller's analysis has:
+/// without one no file can ever stop owing the embedding.
 pub fn analysisSelectors(
     parameters: diagnostics.Parameters,
     codecs: *const codec.CodecRegistry,
-    form: database.repository.SelectionForm,
+    embedding_model: ?audio_embedding.ModelId,
 ) database.repository.AnalysisSelectors {
     return .{
         .measurements = .{ diagnosticsSelector(parameters), fingerprintSelector(), featuresSelector() },
-        .embedding = switch (form) {
-            .three_measurements => null,
-            .with_embedding => embeddingSelector(),
-        },
+        .embedding = if (embedding_model) |model| embeddingSelector(model) else null,
         .undecodable = undecodableSelector(codecs),
     };
 }
@@ -141,20 +138,21 @@ pub fn featuresKey(
     };
 }
 
-pub fn embeddingSelector() database.repository.AnalysisSelector {
+pub fn embeddingSelector(model: audio_embedding.ModelId) database.repository.AnalysisSelector {
     return .{
         .kind = audio_embedding.cache_kind,
         .algorithm_id = audio_embedding.algorithm_id,
         .algorithm_version = audio_embedding.algorithm_version,
-        .parameter_hash = audio_embedding.parameterHash(),
+        .parameter_hash = audio_embedding.parameterHash(model),
     };
 }
 
 pub fn embeddingKey(
+    model: audio_embedding.ModelId,
     file_id: i64,
     source_identity: content_hash.Digest,
 ) database.AnalysisCacheKey {
-    const selector = embeddingSelector();
+    const selector = embeddingSelector(model);
     return .{
         .file_id = file_id,
         .kind = selector.kind,
@@ -489,8 +487,8 @@ pub const Service = struct {
         const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
         const chromaprint_key = chromaprint.cacheKey(file_id orelse 0, source_identity, .{});
         const features_key = featuresKey(file_id orelse 0, source_identity);
-        const embedding_key = embeddingKey(file_id orelse 0, source_identity);
         const embedder: ?audio_embedding.Embedder = if (audio_embedding.enabled) self.embedding else null;
+        const embedding_model: ?audio_embedding.ModelId = if (embedder) |value| value.id() else null;
         const cache = if (file_id == null) null else self.cache;
 
         var from_cache: StoredResults = .{ .source_identity = source_identity };
@@ -500,13 +498,14 @@ pub const Service = struct {
             from_cache.fingerprint = try value.get(self.allocator, fingerprint_key);
             from_cache.chromaprint = try value.get(self.allocator, chromaprint_key);
             from_cache.features = try value.get(self.allocator, features_key);
-            if (embedder != null) from_cache.embedding = try value.get(self.allocator, embedding_key);
+            if (embedding_model) |model|
+                from_cache.embedding = try value.get(self.allocator, embeddingKey(model, file_id orelse 0, source_identity));
         }
         var reused: Reused = .{};
         errdefer reused.deinit();
         if (if (cache == null) stored else &from_cache) |results| {
             if (std.mem.eql(u8, &results.source_identity, &source_identity))
-                reused = self.decodeStored(results);
+                reused = self.decodeStored(results, embedding_model);
         }
         if (reused.complete() and (embedder == null or reused.embedding != null)) {
             if (self.cancelled()) return error.Cancelled;
@@ -649,7 +648,8 @@ pub const Service = struct {
                 try value.put(chromaprint_key, bytes);
             };
             if (measured.features) if (reused.features) |result| try value.put(features_key, &result.encode());
-            if (measured.embedding) if (reused.embedding) |result| try value.put(embedding_key, &result.encode());
+            if (measured.embedding) if (reused.embedding) |result|
+                try value.put(embeddingKey(result.model(), file_id orelse 0, source_identity), result.encode().slice());
         }
         return .{
             .diagnostics = reused.diagnostics.?,
@@ -689,13 +689,19 @@ pub const Service = struct {
         }
     }
 
-    fn decodeStored(self: Service, results: *const StoredResults) Reused {
+    fn decodeStored(
+        self: Service,
+        results: *const StoredResults,
+        embedding_model: ?audio_embedding.ModelId,
+    ) Reused {
         var reused: Reused = .{};
         if (results.diagnostics) |bytes| reused.diagnostics = encoding.decode(self.allocator, bytes) catch null;
         if (results.fingerprint) |bytes| reused.fingerprint = fingerprint.decode(self.allocator, bytes) catch null;
         if (results.chromaprint) |bytes| reused.chromaprint = chromaprint.Fingerprint.decode(self.allocator, bytes) catch null;
         if (results.features) |bytes| reused.features = audio_features.Features.decode(bytes) catch null;
-        if (results.embedding) |bytes| reused.embedding = audio_embedding.Result.decode(bytes) catch null;
+        if (embedding_model) |model| {
+            if (results.embedding) |bytes| reused.embedding = audio_embedding.Result.decode(model, bytes) catch null;
+        }
         return reused;
     }
 };
@@ -708,9 +714,9 @@ fn sameIdentity(first: storage.StorageIdentity, second: storage.StorageIdentity)
 
 test "the measurement set changes with a measurement's version and ignores the decoder set" {
     const codecs = codec.CodecRegistry.builtins();
-    var selectors = analysisSelectors(.{}, &codecs, .three_measurements);
+    var selectors = analysisSelectors(.{}, &codecs, null);
     const current = measurementSetId(&selectors);
-    try std.testing.expectEqual(current, measurementSetId(&analysisSelectors(.{}, &codecs, .three_measurements)));
+    try std.testing.expectEqual(current, measurementSetId(&analysisSelectors(.{}, &codecs, null)));
 
     selectors.undecodable.algorithm_version += 1;
     try std.testing.expectEqual(current, measurementSetId(&selectors));
@@ -721,11 +727,13 @@ test "the measurement set changes with a measurement's version and ignores the d
 
 test "measurementSetId_withEmbedding_differsFromTheThreeMeasurementsAlone" {
     const codecs = codec.CodecRegistry.builtins();
-    const three = analysisSelectors(.{}, &codecs, .three_measurements);
-    var four = analysisSelectors(.{}, &codecs, .with_embedding);
+    const three = analysisSelectors(.{}, &codecs, null);
+    var four = analysisSelectors(.{}, &codecs, .clap_htsat_unfused);
     try std.testing.expect(three.embedding == null);
-    try std.testing.expectEqual(embeddingSelector().kind, four.embedding.?.kind);
+    try std.testing.expectEqual(embeddingSelector(.clap_htsat_unfused).kind, four.embedding.?.kind);
     try std.testing.expect(measurementSetId(&four) != measurementSetId(&three));
+    const with_other_model = analysisSelectors(.{}, &codecs, .discogs_maest);
+    try std.testing.expect(measurementSetId(&four) != measurementSetId(&with_other_model));
 
     const with_embedding = measurementSetId(&four);
     four.embedding.?.algorithm_version += 1;
@@ -861,16 +869,26 @@ test "the library keeps the audio embedding a default analysis stores, under the
         "fixtures/audio/generated-reference.flac",
         .{ .stable_key = "test:embedding-table" },
     );
-    var values: [audio_embedding.embedding_size]i8 = undefined;
-    for (&values, 0..) |*value, index| value.* = @truncate(@as(i32, @intCast(index)) - 200);
-    const result: audio_embedding.Result = .{ .embedding = .{ .windows = 2, .scale = 0.5, .values = values } };
-    try library.analysis_cache.put(embeddingKey(binding.file_id, @splat(0x11)), &result.encode());
+    for ([_]audio_embedding.ModelId{ .clap_htsat_unfused, .discogs_maest }) |model| {
+        var stored: audio_embedding.Embedding = .{ .model = model, .windows = 2, .scale = 0.5, .values = @splat(0) };
+        const values = stored.values[0..model.spec().embedding_size];
+        for (values, 0..) |*value, index| value.* = @truncate(@as(i32, @intCast(index)) - 200 * @as(i32, @backingInt(model)));
+        const result: audio_embedding.Result = .{ .embedding = stored };
+        try library.analysis_cache.put(embeddingKey(model, binding.file_id, @splat(0x11)), result.encode().slice());
 
-    var statement = try library.database.prepare("SELECT vector FROM file_audio_embeddings WHERE file_id = ?1;");
-    defer statement.deinit();
-    try statement.bindInt64(1, binding.file_id);
-    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
-    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&values), statement.columnBlob(0));
+        var statement = try library.database.prepare(
+            "SELECT vector FROM file_audio_embeddings WHERE model = ?1 AND file_id = ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @backingInt(model));
+        try statement.bindInt64(2, binding.file_id);
+        try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(values), statement.columnBlob(0));
+    }
+    var rows = try library.database.prepare("SELECT count(*) FROM file_audio_embeddings;");
+    defer rows.deinit();
+    try std.testing.expectEqual(database.sqlite.Step.row, try rows.step());
+    try std.testing.expectEqual(@as(i64, 2), rows.columnInt64(0));
 }
 
 fn storedEmbeddings(library: *database.LibraryDatabase, file_id: i64) !i64 {
@@ -912,9 +930,9 @@ test "a service without an embedder measures and stores no audio embedding" {
 
 test "an embedder adds the audio embedding to a file whose other results are stored, once" {
     const allocator = std.testing.allocator;
-    var model = try audio_embedding.Model.open(allocator, std.testing.io, try audio_embedding.testModelPath());
+    var model = try audio_embedding.Model.open(allocator, std.testing.io, try audio_embedding.testModelPath(.clap_htsat_unfused));
     defer model.deinit();
-    var front_end = try audio_embedding.FrontEnd.init(allocator);
+    var front_end = try audio_embedding.FrontEnd.init(allocator, model.id);
     defer front_end.deinit();
     var library = try database.LibraryDatabase.open(
         allocator,
@@ -954,12 +972,12 @@ test "an embedder adds the audio embedding to a file whose other results are sto
     const short = try library.resolveOrCreateFile(std.testing.io, short_path, .{ .stable_key = "test:embedder-short" });
     const none = try with.analyzeFile(short.file_id, short_path, .{});
     defer none.deinit();
-    try std.testing.expectEqual(audio_embedding.Result.none, none.embedding.?);
+    try std.testing.expectEqual(audio_embedding.Result{ .none = model.id }, none.embedding.?);
     try std.testing.expectEqual(@as(i64, 1), try storedEmbeddings(&library, short.file_id));
     const none_again = try with.analyzeFile(short.file_id, short_path, .{});
     defer none_again.deinit();
     try std.testing.expect(none_again.cache_hit);
-    try std.testing.expectEqual(audio_embedding.Result.none, none_again.embedding.?);
+    try std.testing.expectEqual(audio_embedding.Result{ .none = model.id }, none_again.embedding.?);
 }
 
 test "the AcoustID fingerprint taken in the analysis decode is the one a standalone fingerprint takes" {

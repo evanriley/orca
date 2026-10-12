@@ -20,6 +20,11 @@ pub fn build(b: *std.Build) void {
         "embedding-model",
         "Path of the pinned embedding model, absolute or relative to the repository; the tests that need it are skipped without it",
     );
+    const maest_embedding_model = b.option(
+        []const u8,
+        "maest-embedding-model",
+        "Path of the pinned MAEST embedding model, absolute or relative to the repository; the tests that need it are skipped without it",
+    );
     const app_options = b.addOptions();
     app_options.addOption([]const u8, "acoustid_key", acoustid_key);
     app_options.addOption([]const u8, "provider_contact", provider_contact);
@@ -38,6 +43,7 @@ pub fn build(b: *std.Build) void {
     version_options.addOption([]const u8, "version", @import("build.zig.zon").version);
     version_options.addOption(bool, "embeddings", embeddings);
     version_options.addOption(?[]const u8, "embedding_test_model", embedding_model);
+    version_options.addOption(?[]const u8, "maest_embedding_test_model", maest_embedding_model);
 
     const liborca_module = b.addModule("liborca", .{
         .root_source_file = b.path("liborca/root.zig"),

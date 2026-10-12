@@ -286,8 +286,8 @@ pub const LibraryAnalysis = struct {
         const helper_count = @min(threads, page_limit) - 1;
         const front_ends = self.createFrontEnds(helper_count + 1);
         defer self.destroyFrontEnds(front_ends);
-        const with_embedding = front_ends.len != 0;
-        const measurement_selectors = self.selectorsFor(if (with_embedding) .with_embedding else .three_measurements);
+        const embedding_model = if (front_ends.len != 0) self.measuredModel() else null;
+        const measurement_selectors = self.selectorsFor(embedding_model);
 
         const slots = try self.allocator.alloc(?(anyerror!Measurement.Outcome), page_limit);
         defer self.allocator.free(slots);
@@ -325,7 +325,7 @@ pub const LibraryAnalysis = struct {
                 results.* = null;
             };
             for (page.items, stored[0..page.items.len]) |item, *results|
-                results.* = try self.loadStored(item, with_embedding);
+                results.* = try self.loadStored(item, embedding_model);
             var batch: Batch = .{
                 .pass = self,
                 .codecs = codecs,
@@ -369,26 +369,27 @@ pub const LibraryAnalysis = struct {
     /// The measurements this pass selects on and stores under. One function, so
     /// "which files still owe work" and "what was written" cannot drift.
     pub fn selectors(self: *const LibraryAnalysis) database.repository.AnalysisSelectors {
-        return self.selectorsFor(if (self.measuresEmbedding()) .with_embedding else .three_measurements);
+        return self.selectorsFor(self.measuredModel());
     }
 
     fn selectorsFor(
         self: *const LibraryAnalysis,
-        form: database.repository.SelectionForm,
+        embedding_model: ?analysis.audio_embedding.ModelId,
     ) database.repository.AnalysisSelectors {
         const builtin_codecs = codec.CodecRegistry.builtins();
-        return analysis.service.analysisSelectors(self.parameters, self.codecs orelse &builtin_codecs, form);
+        return analysis.service.analysisSelectors(self.parameters, self.codecs orelse &builtin_codecs, embedding_model);
     }
 
-    fn measuresEmbedding(self: *const LibraryAnalysis) bool {
-        return analysis.audio_embedding.enabled and self.embedding_model != null;
+    fn measuredModel(self: *const LibraryAnalysis) ?analysis.audio_embedding.ModelId {
+        if (!analysis.audio_embedding.enabled) return null;
+        return if (self.embedding_model) |model| model.id else null;
     }
 
     fn createFrontEnds(self: *const LibraryAnalysis, count: usize) []FrontEnd {
-        if (!self.measuresEmbedding()) return &.{};
+        const model = self.measuredModel() orelse return &.{};
         const front_ends = self.allocator.alloc(FrontEnd, count) catch return &.{};
         for (front_ends, 0..) |*front_end, created| {
-            front_end.* = FrontEnd.init(self.allocator) catch {
+            front_end.* = FrontEnd.init(self.allocator, model) catch {
                 for (front_ends[0..created]) |*earlier| earlier.deinit();
                 self.allocator.free(front_ends);
                 return &.{};
@@ -409,7 +410,7 @@ pub const LibraryAnalysis = struct {
     fn loadStored(
         self: *const LibraryAnalysis,
         candidate: database.repository.AnalysisCandidate,
-        with_embedding: bool,
+        embedding_model: ?analysis.audio_embedding.ModelId,
     ) !?analysis.service.StoredResults {
         if (self.only_file_id != null) return null;
         const source_identity = candidate.content_hash orelse return null;
@@ -431,11 +432,11 @@ pub const LibraryAnalysis = struct {
             self.allocator,
             analysis.service.featuresKey(candidate.id, source_identity),
         );
-        if (with_embedding) results.embedding = try self.analysis_cache.get(
+        if (embedding_model) |model| results.embedding = try self.analysis_cache.get(
             self.allocator,
-            analysis.service.embeddingKey(candidate.id, source_identity),
+            analysis.service.embeddingKey(model, candidate.id, source_identity),
         );
-        if (results.complete() and (!with_embedding or results.embedding != null)) {
+        if (results.complete() and (embedding_model == null or results.embedding != null)) {
             self.freeStored(results);
             return null;
         }
@@ -591,7 +592,7 @@ pub const LibraryAnalysis = struct {
         const embedding_bytes = if (!fresh.embedding)
             null
         else if (measured.embedding) |value|
-            try self.allocator.dupe(u8, &value.encode())
+            try self.allocator.dupe(u8, value.encode().slice())
         else
             null;
         errdefer if (embedding_bytes) |bytes| self.allocator.free(bytes);
@@ -642,15 +643,18 @@ pub const LibraryAnalysis = struct {
                     continue;
                 }
                 try self.files.recordUnknownChannelsLocked(measurement.file_id, value.channels);
-                const results = [_]struct { ?[]u8, database.AnalysisCacheKey }{
+                const results = [_]struct { ?[]u8, ?database.AnalysisCacheKey }{
                     .{ value.diagnostics_bytes, analysis.service.diagnosticsKey(measurement.file_id, value.source_identity, self.parameters) },
                     .{ value.fingerprint_bytes, analysis.service.fingerprintKey(measurement.file_id, value.source_identity) },
                     .{ value.chromaprint_bytes, analysis.chromaprint.cacheKey(measurement.file_id, value.source_identity, .{}) },
                     .{ value.features_bytes, analysis.service.featuresKey(measurement.file_id, value.source_identity) },
-                    .{ value.embedding_bytes, analysis.service.embeddingKey(measurement.file_id, value.source_identity) },
+                    .{ value.embedding_bytes, if (self.measuredModel()) |model|
+                        analysis.service.embeddingKey(model, measurement.file_id, value.source_identity)
+                    else
+                        null },
                 };
                 for (results) |entry| if (entry[0]) |bytes| {
-                    try self.analysis_cache.putLocked(entry[1], bytes);
+                    try self.analysis_cache.putLocked(entry[1].?, bytes);
                     result.bytes_stored += bytes.len;
                 };
                 if (value.settles_health) {
@@ -2372,11 +2376,13 @@ const embedding_count_sql = std.fmt.comptimePrint(
     .{embedding_kind},
 );
 
+const test_model: analysis.audio_embedding.ModelId = .clap_htsat_unfused;
+
 fn openTestModel() !analysis.audio_embedding.Model {
     return analysis.audio_embedding.Model.open(
         testing.allocator,
         testing.io,
-        try analysis.audio_embedding.testModelPath(),
+        try analysis.audio_embedding.testModelPath(test_model),
     );
 }
 
@@ -2388,7 +2394,7 @@ fn storedEmbedding(fixture: *Fixture, file_id: i64) !analysis.audio_embedding.Re
     try statement.bindInt64(1, file_id);
     try statement.bindInt64(2, embedding_kind);
     if (try statement.step() != .row) return error.TestUnexpectedResult;
-    return analysis.audio_embedding.Result.decode(statement.columnBlob(0));
+    return analysis.audio_embedding.Result.decode(test_model, statement.columnBlob(0));
 }
 
 test "run_withModel_storesAnEmbeddingOrNoneForEveryFileAndSelectsNoneAgain" {
@@ -2413,8 +2419,8 @@ test "run_withModel_storesAnEmbeddingOrNoneForEveryFileAndSelectsNoneAgain" {
     try testing.expectEqual(@as(u64, 3), first.changed + first.unchanged);
     try testing.expectEqual(@as(i64, 3), try scalar(fixture.library.database, embedding_count_sql));
     try testing.expect(try storedEmbedding(&fixture, song) == .embedding);
-    try testing.expectEqual(analysis.audio_embedding.Result.none, try storedEmbedding(&fixture, blip));
-    try testing.expectEqual(analysis.audio_embedding.Result.none, try storedEmbedding(&fixture, silence));
+    try testing.expectEqual(analysis.audio_embedding.Result{ .none = test_model }, try storedEmbedding(&fixture, blip));
+    try testing.expectEqual(analysis.audio_embedding.Result{ .none = test_model }, try storedEmbedding(&fixture, silence));
     try testing.expectEqual(@as(i64, 1), try scalar(
         fixture.library.database,
         "SELECT count(*) FROM file_audio_embeddings;",
@@ -2481,7 +2487,7 @@ test "run_withModelOnALibraryAnalysedWithoutOne_storesOnlyTheEmbedding" {
     try testing.expectEqual(@as(u64, 3), second.files_seen);
     try testing.expectEqual(@as(u64, 3), second.changed + second.unchanged);
     try testing.expectEqual(@as(u64, 0), second.errors);
-    try testing.expectEqual(@as(u64, 3 * analysis.audio_embedding.Result.encoded_size), second.bytes_stored);
+    try testing.expectEqual(@as(u64, 3 * test_model.spec().encodedSize()), second.bytes_stored);
     try testing.expectEqual(@as(i64, 3), try scalar(fixture.library.database, embedding_count_sql));
     const others_after = try columnTextOwned(&fixture, others_sql);
     defer testing.allocator.free(others_after);
@@ -2511,7 +2517,7 @@ test "run_withoutModel_storesNoEmbeddingAndSelectsOnThreeMeasurements" {
     try testing.expect(three.embedding == null);
     const builtin_codecs = codec.CodecRegistry.builtins();
     try testing.expectEqual(
-        analysis.service.analysisSelectors(pass.parameters, &builtin_codecs, .three_measurements),
+        analysis.service.analysisSelectors(pass.parameters, &builtin_codecs, null),
         three,
     );
     try testing.expectEqual(@as(u64, 2), (try pass.run()).files_seen);
@@ -2527,7 +2533,7 @@ test "run_withoutModel_storesNoEmbeddingAndSelectsOnThreeMeasurements" {
     );
     try testing.expectEqual(@as(u64, 0), (try pass.run()).files_seen);
 
-    const four = analysis.service.analysisSelectors(pass.parameters, &builtin_codecs, .with_embedding);
+    const four = analysis.service.analysisSelectors(pass.parameters, &builtin_codecs, test_model);
     try testing.expect(analysis.service.measurementSetId(&four) != analysis.service.measurementSetId(&three));
     try testing.expectEqual(@as(u64, 2), try fixture.library.files.unanalyzedCount(four));
     try testing.expectEqual(
@@ -2614,7 +2620,7 @@ test "run_onlyFileWithModel_replacesTheStoredEmbedding" {
         "UPDATE analysis_results SET result = ?1 WHERE file_id = ?2 AND kind = ?3;",
     );
     defer overwrite.deinit();
-    try overwrite.bindBlob(1, &(analysis.audio_embedding.Result{ .none = {} }).encode());
+    try overwrite.bindBlob(1, (analysis.audio_embedding.Result{ .none = test_model }).encode().slice());
     try overwrite.bindInt64(2, song);
     try overwrite.bindInt64(3, embedding_kind);
     try testing.expectEqual(database.sqlite.Step.done, try overwrite.step());

@@ -7,15 +7,21 @@ const optionalInt64 = @import("../database/columns.zig").optionalInt64;
 const audio_embeddings = @import("../database/repository/audio_embeddings.zig");
 const AudioEmbeddingRepository = audio_embeddings.AudioEmbeddingRepository;
 const AudioEmbeddingRow = audio_embeddings.AudioEmbeddingRow;
+const Vector = audio_embeddings.Vector;
 
-pub const embedding_size = audio_embeddings.embedding_size;
+pub const Model = audio_embeddings.Model;
 pub const max_neighbours = 1000;
 
+pub const max_embedding_size = @import("../analysis/audio_embedding.zig").max_embedding_size;
 const max_page_rows = audio_embeddings.max_page_rows;
 const dot_lanes = 16;
 
 comptime {
-    std.debug.assert(embedding_size % dot_lanes == 0);
+    for (std.enums.values(Model)) |model| std.debug.assert(embeddingSize(model) % dot_lanes == 0);
+}
+
+fn embeddingSize(comptime model: Model) usize {
+    return @sizeOf(Vector(model));
 }
 
 pub const Neighbour = struct {
@@ -26,10 +32,40 @@ pub const Neighbour = struct {
 
 pub const RecordingSimilarities = std.AutoHashMapUnmanaged(i64, f32);
 
+pub const Query = struct {
+    model: Model,
+    values: [max_embedding_size]f32,
+
+    pub fn ofUnit(model: Model, unit_vector: []const f32) Query {
+        std.debug.assert(unit_vector.len == model.spec().embedding_size);
+        var values: [max_embedding_size]f32 = @splat(0);
+        @memcpy(values[0..unit_vector.len], unit_vector);
+        return .{ .model = model, .values = values };
+    }
+
+    pub fn ofStored(comptime model: Model, vector: *const Vector(model)) ?Query {
+        const unit_vector = unitVector(embeddingSize(model), vector) orelse return null;
+        return .ofUnit(model, &unit_vector);
+    }
+
+    pub fn ofFile(embeddings: *const AudioEmbeddingRepository, model: Model, file_id: i64) !?Query {
+        switch (model) {
+            inline else => |stored_model| {
+                const stored = try embeddings.fileEmbedding(stored_model, file_id) orelse return null;
+                return ofStored(stored_model, &stored);
+            },
+        }
+    }
+
+    pub fn unit(self: *const Query) []const f32 {
+        return self.values[0..self.model.spec().embedding_size];
+    }
+};
+
 pub fn nearestRecordings(
     allocator: std.mem.Allocator,
     embeddings: *const AudioEmbeddingRepository,
-    query: *const [embedding_size]f32,
+    query: *const Query,
     excluded_recordings: []const i64,
     out: []Neighbour,
 ) !usize {
@@ -40,7 +76,7 @@ pub fn nearestRecordings(
 pub fn nearestRecordingsWithSimilarities(
     allocator: std.mem.Allocator,
     embeddings: *const AudioEmbeddingRepository,
-    query: *const [embedding_size]f32,
+    query: *const Query,
     out: []Neighbour,
     similarities: *RecordingSimilarities,
 ) !usize {
@@ -50,23 +86,45 @@ pub fn nearestRecordingsWithSimilarities(
 fn search(
     allocator: std.mem.Allocator,
     embeddings: *const AudioEmbeddingRepository,
-    query: *const [embedding_size]f32,
+    query: *const Query,
     excluded_recordings: []const i64,
     out: []Neighbour,
     similarities: ?*RecordingSimilarities,
 ) !usize {
     if (out.len > max_neighbours) return error.SimilarLimitTooLarge;
-    const page = try allocator.alloc(AudioEmbeddingRow, max_page_rows);
+    switch (query.model) {
+        inline else => |model| return searchModel(
+            model,
+            allocator,
+            embeddings,
+            query.values[0..comptime embeddingSize(model)],
+            excluded_recordings,
+            out,
+            similarities,
+        ),
+    }
+}
+
+fn searchModel(
+    comptime model: Model,
+    allocator: std.mem.Allocator,
+    embeddings: *const AudioEmbeddingRepository,
+    query: *const [embeddingSize(model)]f32,
+    excluded_recordings: []const i64,
+    out: []Neighbour,
+    similarities: ?*RecordingSimilarities,
+) !usize {
+    const page = try allocator.alloc(AudioEmbeddingRow(model), max_page_rows);
     defer allocator.free(page);
     var found: usize = 0;
     var after_file_id: i64 = std.math.minInt(i64);
     while (true) {
-        const filled = try embeddings.embeddingsAfter(after_file_id, page);
+        const filled = try embeddings.embeddingsAfter(model, after_file_id, page);
         for (page[0..filled]) |*row| {
             const candidate: Neighbour = .{
                 .recording_id = row.recording_id orelse continue,
                 .file_id = row.file_id,
-                .similarity = cosine(query, &row.vector) orelse continue,
+                .similarity = cosine(embeddingSize(model), query, &row.vector) orelse continue,
             };
             if (similarities) |nearest_of| {
                 const entry = try nearest_of.getOrPut(allocator, candidate.recording_id);
@@ -79,25 +137,25 @@ fn search(
     }
 }
 
-pub fn unitVector(vector: *const [embedding_size]i8) ?[embedding_size]f32 {
-    const length = storedLength(vector) orelse return null;
-    var unit: [embedding_size]f32 = undefined;
+fn unitVector(comptime size: usize, vector: *const [size]i8) ?[size]f32 {
+    const length = storedLength(size, vector) orelse return null;
+    var unit: [size]f32 = undefined;
     for (&unit, vector) |*value, stored| value.* = @as(f32, @floatFromInt(stored)) / length;
     return unit;
 }
 
-fn storedLength(vector: *const [embedding_size]i8) ?f32 {
-    const wide: @Vector(embedding_size, i32) = @as(@Vector(embedding_size, i8), vector.*);
+fn storedLength(comptime size: usize, vector: *const [size]i8) ?f32 {
+    const wide: @Vector(size, i32) = @as(@Vector(size, i8), vector.*);
     const squared = @reduce(.Add, wide * wide);
     return if (squared == 0) null else @sqrt(@as(f32, @floatFromInt(squared)));
 }
 
-fn cosine(query: *const [embedding_size]f32, vector: *const [embedding_size]i8) ?f32 {
-    const length = storedLength(vector) orelse return null;
+fn cosine(comptime size: usize, query: *const [size]f32, vector: *const [size]i8) ?f32 {
+    const length = storedLength(size, vector) orelse return null;
     const Lanes = @Vector(dot_lanes, f32);
     var sums: Lanes = @splat(0);
     var offset: usize = 0;
-    while (offset < embedding_size) : (offset += dot_lanes) {
+    while (offset < size) : (offset += dot_lanes) {
         const stored: @Vector(dot_lanes, i8) = vector[offset..][0..dot_lanes].*;
         sums += @as(Lanes, query[offset..][0..dot_lanes].*) * @as(Lanes, @floatFromInt(stored));
     }
@@ -148,6 +206,7 @@ pub const SimilarTracks = struct {
 pub fn similarTracks(
     allocator: std.mem.Allocator,
     connection: sqlite.Database,
+    model: Model,
     track_id: i64,
     limit: usize,
 ) !SimilarTracks {
@@ -160,8 +219,7 @@ pub fn similarTracks(
     if (try seed.step() != .row) return error.TrackNotFound;
     const seed_recording = optionalInt64(seed, 0);
     const play_file = optionalInt64(seed, 1) orelse return error.NoAudioEmbedding;
-    const stored = try embeddings.fileEmbedding(play_file) orelse return error.NoAudioEmbedding;
-    const query = unitVector(&stored) orelse return error.NoAudioEmbedding;
+    const query = try Query.ofFile(&embeddings, model, play_file) orelse return error.NoAudioEmbedding;
 
     const neighbours = try allocator.alloc(Neighbour, limit);
     defer allocator.free(neighbours);
@@ -196,19 +254,27 @@ fn openTestLibrary(comptime name: []const u8) !database.LibraryDatabase {
     );
 }
 
-fn planeVector(x: i8, y: i8) [embedding_size]i8 {
-    var vector: [embedding_size]i8 = @splat(0);
+const clap: Model = .clap_htsat_unfused;
+const maest: Model = .discogs_maest;
+
+fn planeVectorOf(comptime model: Model, x: i8, y: i8) Vector(model) {
+    var vector: Vector(model) = @splat(0);
     vector[0] = x;
     vector[1] = y;
     return vector;
 }
 
-const along_x = unitVector(&planeVector(1, 0)).?;
+fn planeVector(x: i8, y: i8) Vector(clap) {
+    return planeVectorOf(clap, x, y);
+}
+
+const along_x = Query.ofStored(clap, &planeVector(1, 0)).?;
 
 const TestFile = struct {
     id: i64,
     recording_id: ?i64,
-    vector: [embedding_size]i8,
+    vector: Vector(clap),
+    maest_vector: ?Vector(maest) = null,
     content_hash: u8 = 1,
     embedded_hash: u8 = 1,
 };
@@ -221,7 +287,7 @@ fn insertFiles(library: *database.LibraryDatabase, files: []const TestFile) !voi
     );
     defer file.deinit();
     var embedding = try library.database.prepare(
-        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (?1, ?2, ?3);",
+        "INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) VALUES (?1, ?2, ?3, ?4);",
     );
     defer embedding.deinit();
     try library.database.exec("BEGIN;");
@@ -236,11 +302,18 @@ fn insertFiles(library: *database.LibraryDatabase, files: []const TestFile) !voi
         try file.bindOptionalInt64(2, row.recording_id);
         try file.bindBlob(3, &.{row.content_hash});
         try testing.expectEqual(sqlite.Step.done, try file.step());
-        try embedding.reset();
-        try embedding.bindInt64(1, row.id);
-        try embedding.bindBlob(2, &.{row.embedded_hash});
-        try embedding.bindBlob(3, std.mem.asBytes(&row.vector));
-        try testing.expectEqual(sqlite.Step.done, try embedding.step());
+        const vectors = [_]struct { Model, ?[]const u8 }{
+            .{ clap, std.mem.asBytes(&row.vector) },
+            .{ maest, if (row.maest_vector) |*vector| std.mem.asBytes(vector) else null },
+        };
+        for (vectors) |stored| {
+            try embedding.reset();
+            try embedding.bindInt64(1, @backingInt(stored[0]));
+            try embedding.bindInt64(2, row.id);
+            try embedding.bindBlob(3, &.{row.embedded_hash});
+            try embedding.bindBlob(4, stored[1] orelse continue);
+            try testing.expectEqual(sqlite.Step.done, try embedding.step());
+        }
     }
     try library.database.exec("COMMIT;");
 }
@@ -397,7 +470,7 @@ test "similarTracks_trackWithAnEmbedding_returnsOneTrackPerOtherRecording" {
         \\    (11, 1, 'seed'), (12, 2, 'far'), (13, 3, 'near'), (14, 3, 'near again'), (15, 5, 'changed'), (16, NULL, 'no file');
     );
 
-    var similar = try similarTracks(testing.allocator, library.queryDatabase(), 11, 10);
+    var similar = try similarTracks(testing.allocator, library.queryDatabase(), clap, 11, 10);
     defer similar.deinit();
     try testing.expectEqual(@as(usize, 2), similar.items.len);
     try testing.expectEqual(@as(i64, 13), similar.items[0].track_id);
@@ -405,13 +478,65 @@ test "similarTracks_trackWithAnEmbedding_returnsOneTrackPerOtherRecording" {
     try testing.expectEqual(@as(i64, 12), similar.items[1].track_id);
     try testing.expectApproxEqAbs(@as(f32, 0.6), similar.items[1].similarity, 1e-6);
 
-    var nearest = try similarTracks(testing.allocator, library.queryDatabase(), 11, 1);
+    var nearest = try similarTracks(testing.allocator, library.queryDatabase(), clap, 11, 1);
     defer nearest.deinit();
     try testing.expectEqual(@as(usize, 1), nearest.items.len);
     try testing.expectEqual(@as(i64, 13), nearest.items[0].track_id);
 
-    try testing.expectError(error.TrackNotFound, similarTracks(testing.allocator, library.queryDatabase(), 99, 10));
-    try testing.expectError(error.NoAudioEmbedding, similarTracks(testing.allocator, library.queryDatabase(), 15, 10));
-    try testing.expectError(error.NoAudioEmbedding, similarTracks(testing.allocator, library.queryDatabase(), 16, 10));
-    try testing.expectError(error.SimilarLimitTooLarge, similarTracks(testing.allocator, library.queryDatabase(), 11, max_neighbours + 1));
+    try testing.expectError(error.TrackNotFound, similarTracks(testing.allocator, library.queryDatabase(), clap, 99, 10));
+    try testing.expectError(error.NoAudioEmbedding, similarTracks(testing.allocator, library.queryDatabase(), clap, 15, 10));
+    try testing.expectError(error.NoAudioEmbedding, similarTracks(testing.allocator, library.queryDatabase(), clap, 16, 10));
+    try testing.expectError(error.SimilarLimitTooLarge, similarTracks(testing.allocator, library.queryDatabase(), clap, 11, max_neighbours + 1));
+}
+
+fn expectRecordings(library: *database.LibraryDatabase, query: *const Query, expected: []const i64) !void {
+    var out: [8]Neighbour = undefined;
+    const found = try nearestRecordings(testing.allocator, &library.audio_embeddings, query, &.{}, &out);
+    var recordings: [8]i64 = undefined;
+    for (out[0..found], recordings[0..found]) |neighbour, *recording_id| recording_id.* = neighbour.recording_id;
+    try testing.expectEqualSlices(i64, expected, recordings[0..found]);
+}
+
+test "nearestRecordings_filesHoldingVectorsOfBothModels_ranksByTheQueryModelOnly" {
+    var library = try openTestLibrary("models");
+    defer library.close();
+    var beyond_clap = planeVectorOf(maest, 0, 0);
+    beyond_clap[embeddingSize(clap)] = 100;
+    try insertFiles(&library, &.{
+        .{ .id = 1, .recording_id = 1, .vector = planeVector(100, 0), .maest_vector = planeVectorOf(maest, 0, 100) },
+        .{ .id = 2, .recording_id = 2, .vector = planeVector(80, 60), .maest_vector = planeVectorOf(maest, 60, 80) },
+        .{ .id = 3, .recording_id = 3, .vector = planeVector(0, 100), .maest_vector = planeVectorOf(maest, 100, 0) },
+        .{ .id = 4, .recording_id = 4, .vector = planeVector(60, 80) },
+        .{ .id = 5, .recording_id = 5, .vector = planeVector(0, 0), .maest_vector = beyond_clap },
+    });
+    try library.database.exec(
+        \\INSERT INTO tracks(id, recording_id, title) VALUES (11, 1, 'one'), (12, 2, 'two'), (13, 3, 'three'), (14, 4, 'four'), (15, 5, 'five');
+    );
+
+    try expectRecordings(&library, &along_x, &.{ 1, 2, 4, 3 });
+    try expectRecordings(&library, &Query.ofStored(maest, &planeVectorOf(maest, 1, 0)).?, &.{ 3, 2, 1, 5 });
+    try expectRecordings(&library, &Query.ofStored(maest, &beyond_clap).?, &.{ 5, 1, 2, 3 });
+
+    try testing.expectEqual(clap, (try Query.ofFile(&library.audio_embeddings, clap, 1)).?.model);
+    try testing.expectEqual(@as(usize, 768), (try Query.ofFile(&library.audio_embeddings, maest, 1)).?.unit().len);
+    try testing.expectEqual(@as(?Query, null), try Query.ofFile(&library.audio_embeddings, maest, 4));
+    try testing.expectEqual(@as(?Query, null), try Query.ofFile(&library.audio_embeddings, clap, 5));
+
+    var by_clap = try similarTracks(testing.allocator, library.queryDatabase(), clap, 11, 10);
+    defer by_clap.deinit();
+    try testing.expectEqual(@as(usize, 3), by_clap.items.len);
+    try testing.expectEqual(@as(i64, 12), by_clap.items[0].track_id);
+    try testing.expectEqual(@as(i64, 14), by_clap.items[1].track_id);
+    try testing.expectEqual(@as(i64, 13), by_clap.items[2].track_id);
+
+    var by_maest = try similarTracks(testing.allocator, library.queryDatabase(), maest, 11, 10);
+    defer by_maest.deinit();
+    try testing.expectEqual(@as(usize, 3), by_maest.items.len);
+    try testing.expectEqual(@as(i64, 12), by_maest.items[0].track_id);
+    try testing.expectApproxEqAbs(@as(f32, 0.8), by_maest.items[0].similarity, 1e-6);
+    try testing.expectEqual(@as(i64, 13), by_maest.items[1].track_id);
+    try testing.expectEqual(@as(i64, 15), by_maest.items[2].track_id);
+
+    try testing.expectError(error.NoAudioEmbedding, similarTracks(testing.allocator, library.queryDatabase(), maest, 14, 10));
+    try testing.expectError(error.NoAudioEmbedding, similarTracks(testing.allocator, library.queryDatabase(), clap, 15, 10));
 }

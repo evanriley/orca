@@ -136,12 +136,25 @@ analysis with and without the features.
 
 ## Audio embedding
 
-`analysis/audio_embedding.zig` turns a file into one 512-value vector that
-places it among other files by how it sounds. The vector is the output of the
-pinned CLAP audio model, run through ONNX Runtime; builds with
-`-Dembeddings=false` have no such measurement. The host names the model's
-file with `Runtime.setEmbeddingModelPath`, and the file is checked by size and
-SHA-256. The engine downloads the model only when the host calls
+`analysis/audio_embedding.zig` turns a file into one vector that places it
+among other files by how it sounds. The vector is the output of a pinned audio
+model, run through ONNX Runtime; builds with `-Dembeddings=false` have no such
+measurement. Two models are compiled in, each an `EmbeddingModel` (`ModelId`)
+whose `spec()` holds the values below:
+
+| | `clap_htsat_unfused` (1) | `discogs_maest` (2) |
+| --- | --- | --- |
+| File | `clap_audio_int8.onnx` | `maest_audio_int8.onnx` |
+| Size in bytes | 32,587,451 | 80,400,354 |
+| Input rate | 48 kHz mono | 16 kHz mono |
+| Input per window | 1001 frames of 64 bands | 626 frames of 96 bands |
+| Vector | 512 values | 768 values |
+
+The host names one model file with `Runtime.setEmbeddingModelPath`. The file
+is recognised by its size and then its SHA-256; a file whose size is neither
+model's is refused without being hashed. `Runtime.embeddingModel` returns the
+model that file is, the active model, or null unless the state is `ready`.
+The engine downloads a model only when the host calls
 `Runtime.startEmbeddingModelDownload(model, destination)`
 ([control-plane.md](control-plane.md#model-download)). Without a usable model
 an analysis measures and stores exactly what it does in a build without
@@ -157,7 +170,7 @@ same order, `ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT` 0 to `..._READY` 4:
 | --- | --- |
 | `built_without` | The build has `-Dembeddings=false` |
 | `missing` | No path is set, or no file is there |
-| `wrong_file` | The file's size or SHA-256 differs |
+| `wrong_file` | The file's size or SHA-256 is neither model's |
 | `unusable` | The file cannot be read, or ONNX Runtime refused it |
 | `ready` | Analysis measures the embedding |
 
@@ -166,8 +179,9 @@ Each analysis that starts while the state is `ready` copies the path, opens the
 model when it begins and closes it when it ends. An analysis that cannot open
 it changes the state to `missing`, `wrong_file` or `unusable`, unless the path
 was set again meanwhile, and measures without the embedding; it does not fail
-for that reason. A change to the file is seen at the next
-`setEmbeddingModelPath`.
+for that reason. An analysis that opens the other model at that path measures
+with it and makes it the active model. Any other change to the file is seen at
+the next `setEmbeddingModelPath`.
 
 The measurement shares the decode with the others. It keeps at most three
 windows of 10 s as mono (the mean of the channels) at the file's own rate, so
@@ -178,21 +192,48 @@ length, taken from the decoder's frame count:
 | --- | --- |
 | 30 s or more | three, centred at 25 %, 50 % and 75 % of the file |
 | 10 s to 30 s | one or two whole 10 s windows from the start |
-| under 10 s | the whole file, repeated to fill 10 s |
+| under 10 s | the whole file |
 | unknown | the first 10 s |
 
-When the decode ends, each window is resampled to 48 kHz by libsamplerate
-(`resampler.SampleRate`, `sinc_fastest`), converted to the model's log-mel
-input and embedded. Each window's output is scaled to unit length, the
-outputs are averaged, and the mean is scaled to unit length again. A window
-the decode never reached, because the file is shorter than its frame count
-says, is left out.
+When the decode ends, each window is resampled to the active model's input
+rate by libsamplerate (`resampler.SampleRate`, with the converter in the table
+below), converted to that model's log-mel input and embedded. Each window's
+output is scaled to unit length, the outputs are averaged, and the mean is
+scaled to unit length again. A window the decode never reached, because the
+file is shorter than its frame count says, is left out.
+
+Each model has its own log-mel input, computed by `FrontEnd`:
+
+| | `clap_htsat_unfused` | `discogs_maest` |
+| --- | --- | --- |
+| Converter | `sinc_fastest` | `sinc_medium` |
+| FFT and hop | 1024 and 480 samples | 512 and 256 samples |
+| Padding | reflected, 512 samples a side | zeros, 256 samples a side |
+| Window | periodic Hann | periodic Hann |
+| Mel bands | 64 over 50 Hz to 14 kHz | 96 over 0 Hz to 8 kHz |
+| Mel scale | Slaney, area-normalised | Slaney, area-normalised |
+| Level | `10 * log10(max(power, 1e-10))` | `log10(1 + 10000 * power)` |
+| Normalisation | none | `(x - 2.06755686098554) / (2 * 1.268292820667291)` |
+
+`discogs_maest` reads up to the 8 kHz edge of its input rate, where
+`sinc_fastest` has already rolled off, so it takes the wider converter.
+
+A window under 10 s is repeated to fill 10 s for `clap_htsat_unfused`. For
+`discogs_maest` it gives its own `1 + samples / 256` frames, and the frames
+after them hold the level of silence.
 
 The result is stored in `analysis_results` as kind 7, `orca.audio-embedding`
-version 1, under a parameter hash of the model's SHA-256, the sample rate, the
+version 1, under a parameter hash of the model's SHA-256, its input rate, the
 window rule, the silence threshold and the converter, and the content hash of
-the bytes. A different model is therefore a different key. The stored result
-is 524 bytes:
+the bytes. Each model is therefore a different key, and one file's results
+from both models are kept side by side:
+
+| Model | Parameter hash | Result |
+| --- | --- | --- |
+| `clap_htsat_unfused` | `D9194D8DF5B32D7660AFFE47B3178383B538327B1FC5F1D654B626272D38D905` | 524 bytes |
+| `discogs_maest` | `6A89F6A7C38041025E72DD12DD1A8E325E07D94291F2FBCED4020ACC261AC5E7` | 780 bytes |
+
+A stored result is a 12-byte header and the model's vector:
 
 | Offset | Size | Content |
 | --- | --- | --- |
@@ -201,10 +242,11 @@ is 524 bytes:
 | 6 | 1 | flags; bit 0 is set when a vector follows |
 | 7 | 1 | number of windows embedded |
 | 8 | 4 | scale, a little-endian IEEE 754 single |
-| 12 | 512 | the vector as signed bytes |
+| 12 | 512 or 768 | the vector as signed bytes |
 
 A component is its byte times the scale; the scale maps the largest component
-to 127. `audio_embedding.Result.encode` and `decode` are the two directions.
+to 127. `audio_embedding.Result.encode` and `decode` are the two directions;
+`decode` takes the model and refuses a result of any other length.
 A file under 1 s, or one whose windows all peak below −80 dBFS, is stored with
 no vector, so it is not measured again until its bytes change. A failure of
 the model, the resampler or an allocation costs only this result: the file's
@@ -217,9 +259,10 @@ analysis that has a model.
 `--embedding-model` or `ORCA_EMBEDDING_MODEL`. The library-wide pass is
 described in [The embedding in the pass](#the-embedding-in-the-pass).
 
-The `file_audio_embeddings` table holds each file's current vector
-([database.md](database.md)). [Similar tracks](#similar-tracks) describes how
-the vectors are searched.
+The `file_audio_embeddings` table holds each file's current vector of each
+model it was measured with ([database.md](database.md)).
+[Similar tracks](#similar-tracks) describes how the vectors of one model are
+searched.
 
 `zig build -Doptimize=ReleaseFast analysis-bench -- FILE 3 MODEL` also times
 the capture, the resampling, the log-mel front-end and the model for one file.
@@ -228,9 +271,12 @@ the capture, the resampling, the log-mel front-end and the model for one file.
 
 `library/audio_similarity.zig` finds the Recordings that sound most like a
 vector. `nearestRecordings(allocator, embeddings, query, excluded_recordings,
-out)` takes a unit-length `[512]f32` query and fills `out` with `Neighbour`
-values (`recording_id`, `file_id`, `similarity`), returning how many it wrote:
+out)` takes a `Query`, a unit-length vector and the `Model` it belongs to, and
+fills `out` with `Neighbour` values (`recording_id`, `file_id`, `similarity`),
+returning how many it wrote:
 
+- Only the stored vectors of the query's model are read. Vectors of two
+  models are never compared.
 - The similarity is the cosine between the query and a stored vector: their
   dot product divided by the stored vector's length.
 - The order is similarity descending, then Recording id ascending.
@@ -242,9 +288,10 @@ values (`recording_id`, `file_id`, `similarity`), returning how many it wrote:
 - `out` holds at most `max_neighbours`, 1,000; a longer one is
   `error.SimilarLimitTooLarge`.
 
-The search compares every stored vector. It reads them through
+The search compares every stored vector of the model. It reads them through
 `AudioEmbeddingRepository.embeddingsAfter` in pages of 4,096 rows, about
-2 MiB, and holds one page and `out` at a time. It builds no index.
+2 MiB for `clap_htsat_unfused` and 3 MiB for `discogs_maest`, and holds one
+page and `out` at a time. It builds no index.
 
 `nearestRecordingsWithSimilarities(allocator, embeddings, query, out,
 similarities)` runs the same search with nothing excluded and also records,
@@ -252,10 +299,18 @@ for every Recording it reads, the similarity of its nearest vector in
 `similarities`: one `f32` per Recording. Radio and Daily Mixes rank by it
 ([discovery.md](discovery.md#scoring)).
 
-`unitVector` turns a stored vector into a query.
-`similarTracks(allocator, connection, track_id, limit)` searches with the
-vector of the file the Track plays, excludes the Track's own Recording, and
-names each remaining Recording by its lowest Track id.
+`Query.ofStored` turns a stored vector into a query and `Query.ofFile` reads
+a file's vector of one model as a query.
+`similarTracks(allocator, connection, model, track_id, limit)` searches with
+that model's vector of the file the Track plays, excludes the Track's own
+Recording, and names each remaining Recording by its lowest Track id.
+
+The runtime reads the vectors of one model: the model `Runtime.embeddingModel`
+returns, or `clap_htsat_unfused` when that is null, which includes a build
+with `-Dembeddings=false`. `librarySimilarTracks`, Radio and Daily Mixes all
+use it. Naming the other model file switches the vectors they read; the
+vectors of the first model stay stored. A Track whose file has no vector of
+the model in use counts as a Track with no embedding.
 `Runtime.librarySimilarTracks`, `orca_library_similar_tracks` and
 `orca-cli similar` call it ([api.md](api.md#matching-and-release-review),
 [frontends.md](frontends.md#surface), [cli.md](cli.md)). The C call maps
@@ -393,9 +448,12 @@ a build with `-Dembeddings`, treats the
 [audio embedding](#audio-embedding) as a fourth measurement:
 
 - `LibraryAnalysis.selectors` returns the selectors with
-  `AnalysisSelectors.embedding` set, so a file owes work while it lacks any of
-  the four. `analysisSelectors` takes a `repository.SelectionForm` that says
-  which set to build.
+  `AnalysisSelectors.embedding` set to the selector of the model the pass
+  opened, so a file owes work while it lacks any of the four.
+  `analysisSelectors` takes the model, or null for the three measurements. A
+  file with a result from the other model only still owes the embedding, is
+  measured once and is not selected again; naming the first model again
+  selects none of the files that hold its result.
 - `FileRepository.analysisCoverage` reports the embedding as the fourth entry
   of `missing`, after the diagnostics, the fingerprint and the features, and
   `measurementSetId` hashes it after the other three.

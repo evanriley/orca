@@ -19,10 +19,13 @@ pub fn main(init: std.process.Init) void {
     };
 }
 
+const embedding_model_files = liborca.EmbeddingModel.clap_htsat_unfused.spec().file_name ++ " or " ++
+    liborca.EmbeddingModel.discogs_maest.spec().file_name;
+
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.TrackNotFound => "no track with that id",
-        error.NoAudioEmbedding => "the track's file has no audio embedding for the bytes it holds now; run analyze-library with --embedding-model PATH or ORCA_EMBEDDING_MODEL",
+        error.NoAudioEmbedding => "the track's file has no audio embedding of the model in use for the bytes it holds now; run analyze-library with the same --embedding-model PATH or ORCA_EMBEDDING_MODEL",
         error.SimilarLimitTooLarge => "--limit must be at most 1000",
         error.UnknownRoot => "no folder with that id",
         error.RootPathOverlaps => "PATH is inside or holds another root, files of another root, or the root's old folder while that still exists",
@@ -45,9 +48,10 @@ fn describe(err: anyerror) []const u8 {
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.EmbeddingModelMissing => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names does not exist; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
-        error.EmbeddingModelMismatch => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not the model this build expects, by size or SHA-256; name the clap_audio_int8.onnx that scripts/embedding/export_model.py writes",
+        error.EmbeddingModelMissing => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names does not exist; name " ++ embedding_model_files ++ ", which orca-cli download-embedding-model writes",
+        error.EmbeddingModelMismatch => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names is not a model this build expects, by size or SHA-256; name " ++ embedding_model_files ++ ", which orca-cli download-embedding-model writes",
         error.EmbeddingsNotBuilt => "the audio-embedding model cannot be used: this orca-cli was built with -Dembeddings=false; build without it to use --embedding-model or ORCA_EMBEDDING_MODEL",
+        error.UnknownEmbeddingModel => "--model names clap_htsat_unfused or discogs_maest",
         error.ModelDownloadNotBuilt => "this orca-cli was built with -Dembeddings=false and cannot use the audio-embedding model; build without it to download the model",
         error.EmbeddingModelUnusable => "the audio-embedding model cannot be used: the file --embedding-model or ORCA_EMBEDDING_MODEL names could not be read, or ONNX Runtime could not load it; check that it is a readable file and that ONNX Runtime 1.20 or newer is installed",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
@@ -276,7 +280,7 @@ const commands = [_]Command{
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND [--albums]] [OFFSET]", .min_arguments = 1, .max_arguments = 4, .run = listHealthIssues },
     .{ .name = "stats", .usage = "stats DATABASE [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 3, .run = printLibraryStats },
-    .{ .name = "download-embedding-model", .usage = "download-embedding-model PATH", .min_arguments = 1, .max_arguments = 1, .run = downloadEmbeddingModel },
+    .{ .name = "download-embedding-model", .usage = "download-embedding-model PATH [--model NAME]", .min_arguments = 1, .max_arguments = 3, .run = downloadEmbeddingModel },
     .{ .name = "listens", .usage = "listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]", .min_arguments = 1, .max_arguments = 4, .run = listenSettings },
     .{ .name = "cache", .usage = "cache DATABASE [--clear]", .min_arguments = 1, .max_arguments = 2, .run = providerCache },
     .{ .name = "sources", .usage = "sources", .min_arguments = 0, .max_arguments = 0, .run = listProviderSources, .shares_usage_line = true },
@@ -358,10 +362,10 @@ const commands = [_]Command{
     .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "features", .usage = "features DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showAudioFeatures },
-    .{ .name = "similar", .usage = "similar DATABASE TRACK_ID [--limit N]", .min_arguments = 2, .max_arguments = 4, .run = showSimilarTracks },
-    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--seed N] [--explain]", .min_arguments = 2, .max_arguments = 12, .run = previewRadio },
-    .{ .name = "home", .usage = "home DATABASE", .min_arguments = 1, .max_arguments = 1, .run = showHome },
-    .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N]", .min_arguments = 1, .max_arguments = 4, .run = showDailyMixes },
+    .{ .name = "similar", .usage = "similar DATABASE TRACK_ID [--limit N] [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 6, .run = showSimilarTracks },
+    .{ .name = "radio", .usage = "radio DATABASE (--track ID | --release ID | --artist ID | --genre ID | --decade YEAR | --loved) [--explore N] [--familiarity N] [--limit N] [--seed N] [--explain] [--embedding-model PATH]", .min_arguments = 2, .max_arguments = 14, .run = previewRadio },
+    .{ .name = "home", .usage = "home DATABASE [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 3, .run = showHome },
+    .{ .name = "mixes", .usage = "mixes DATABASE [--refresh] [--mix N] [--embedding-model PATH]", .min_arguments = 1, .max_arguments = 6, .run = showDailyMixes },
     .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{
         .name = "artwork",
@@ -962,9 +966,11 @@ const help_details =
     \\measurements outdated files lack (loudness_and_checks, fingerprint,
     \\features, or -), and measurement_set, which changes with them.
     \\
-    \\download-embedding-model fetches the audio-embedding model from Orca's
-    \\GitHub releases and writes it to PATH, creating its directory. It needs
-    \\no database. It prints `progress bytes= total=` lines to standard error
+    \\download-embedding-model fetches an audio-embedding model from Orca's
+    \\GitHub releases and writes it to PATH, creating its directory. --model
+    \\NAME picks clap_htsat_unfused, the default Standard model of 32.6 MB, or
+    \\discogs_maest, the Large model of 80.4 MB, whose file is licensed
+    \\CC BY-NC-SA 4.0. It needs no database. It prints `progress bytes= total=` lines to standard error
     \\every half second and PATH, made absolute, to standard output once the
     \\file is in place. A file is installed only when its size and SHA-256
     \\are the ones this build expects; a PATH that already holds the model is
@@ -2152,6 +2158,15 @@ const download_progress_interval_ms = 500;
 
 fn downloadEmbeddingModel(context: Context) !void {
     if (context.arguments[0].len == 0) return error.Usage;
+    var model: liborca.EmbeddingModel = .clap_htsat_unfused;
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        if (!std.mem.eql(u8, context.arguments[index], "--model")) return error.UnknownOption;
+        index += 1;
+        if (index == context.arguments.len) return error.MissingOptionValue;
+        model = std.meta.stringToEnum(liborca.EmbeddingModel, context.arguments[index]) orelse
+            return error.UnknownEmbeddingModel;
+    }
     const destination = try absolutePath(context, context.arguments[0]);
     var stderr_buffer: [256]u8 = undefined;
     var stderr_file_writer: std.Io.File.Writer = .initStreaming(.stderr(), context.io, &stderr_buffer);
@@ -2160,7 +2175,7 @@ fn downloadEmbeddingModel(context: Context) !void {
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
     try identifyOrca(&runtime);
-    const job_handle = runtime.startEmbeddingModelDownload(.clap_htsat_unfused, destination) catch |err| return switch (@as(anyerror, err)) {
+    const job_handle = runtime.startEmbeddingModelDownload(model, destination) catch |err| return switch (@as(anyerror, err)) {
         error.EmbeddingsNotBuilt => error.ModelDownloadNotBuilt,
         else => err,
     };
@@ -5319,16 +5334,19 @@ fn showAudioFeatures(context: Context) !void {
 fn showSimilarTracks(context: Context) !void {
     const stdout = context.stdout;
     const track_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const model = try takeEmbeddingModelOption(context, context.arguments[2..]);
     var limit: usize = 15;
-    var index: usize = 2;
-    while (index < context.arguments.len) : (index += 1) {
-        if (!std.mem.eql(u8, context.arguments[index], "--limit")) return error.UnknownOption;
+    var index: usize = 0;
+    while (index < model.rest.len) : (index += 1) {
+        if (!std.mem.eql(u8, model.rest[index], "--limit")) return error.UnknownOption;
         index += 1;
-        if (index == context.arguments.len) return error.MissingOptionValue;
-        limit = try std.fmt.parseInt(usize, context.arguments[index], 10);
+        if (index == model.rest.len) return error.MissingOptionValue;
+        limit = try std.fmt.parseInt(usize, model.rest[index], 10);
     }
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
+    try model.requireReady(&runtime);
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var similar = try runtime.librarySimilarTracks(library, context.allocator, track_id, limit);
     defer similar.deinit();
@@ -5352,9 +5370,10 @@ fn previewRadio(context: Context) !void {
     var limit: usize = 25;
     var explain = false;
     var session: liborca.RadioPreviewSession = .{};
-    var index: usize = 1;
-    while (index < context.arguments.len) : (index += 1) {
-        const argument = context.arguments[index];
+    const model = try takeEmbeddingModelOption(context, context.arguments[1..]);
+    var index: usize = 0;
+    while (index < model.rest.len) : (index += 1) {
+        const argument = model.rest[index];
         if (std.mem.eql(u8, argument, "--loved")) {
             if (seed != null) return error.InvalidArguments;
             seed = .loved;
@@ -5362,8 +5381,8 @@ fn previewRadio(context: Context) !void {
             explain = true;
         } else {
             index += 1;
-            if (index == context.arguments.len) return error.MissingOptionValue;
-            const value = context.arguments[index];
+            if (index == model.rest.len) return error.MissingOptionValue;
+            const value = model.rest[index];
             if (std.mem.eql(u8, argument, "--explore")) {
                 options.explore = try std.fmt.parseInt(u8, value, 10);
             } else if (std.mem.eql(u8, argument, "--familiarity")) {
@@ -5392,6 +5411,8 @@ fn previewRadio(context: Context) !void {
     }
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
+    try model.requireReady(&runtime);
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var picks = try runtime.libraryRadioPreview(library, context.allocator, seed orelse return error.InvalidArguments, options, limit, session);
     defer picks.deinit();
@@ -5444,8 +5465,12 @@ fn previewRadio(context: Context) !void {
 /// time in UTC, reading the database alone.
 fn showHome(context: Context) !void {
     const stdout = context.stdout;
+    const model = try takeEmbeddingModelOption(context, context.arguments[1..]);
+    if (model.rest.len != 0) return error.UnknownOption;
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
+    try model.requireReady(&runtime);
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const time: liborca.HomeLocalTime = .{ .now_s = std.Io.Clock.real.now(context.io).toSeconds(), .utc_offset_s = 0 };
 
@@ -5523,19 +5548,22 @@ fn showDailyMixes(context: Context) !void {
     const stdout = context.stdout;
     var force = false;
     var shown: ?usize = null;
-    var index: usize = 1;
-    while (index < context.arguments.len) : (index += 1) {
-        const argument = context.arguments[index];
+    const model = try takeEmbeddingModelOption(context, context.arguments[1..]);
+    var index: usize = 0;
+    while (index < model.rest.len) : (index += 1) {
+        const argument = model.rest[index];
         if (std.mem.eql(u8, argument, "--refresh")) {
             force = true;
         } else if (std.mem.eql(u8, argument, "--mix")) {
             index += 1;
-            if (index == context.arguments.len) return error.MissingOptionValue;
-            shown = try std.fmt.parseInt(usize, context.arguments[index], 10);
+            if (index == model.rest.len) return error.MissingOptionValue;
+            shown = try std.fmt.parseInt(usize, model.rest[index], 10);
         } else return error.UnknownOption;
     }
     var runtime = liborca.Runtime.init(context.gpa);
     defer runtime.deinit();
+    try model.apply(&runtime);
+    try model.requireReady(&runtime);
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const now_s = std.Io.Clock.real.now(context.io).toSeconds();
     const job_handle = try runtime.startDailyMixes(library, .{ .now_s = now_s, .force = force });

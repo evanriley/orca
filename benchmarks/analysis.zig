@@ -89,12 +89,13 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 4) return;
     var model = try audio_embedding.Model.open(allocator, init.io, args[3]);
     defer model.deinit();
-    var front_end = try audio_embedding.FrontEnd.init(allocator);
+    const spec = model.id.spec();
+    var front_end = try audio_embedding.FrontEnd.init(allocator, model.id);
     defer front_end.deinit();
-    const resampled = try allocator.create([audio_embedding.window_samples]f32);
-    defer allocator.destroy(resampled);
-    const mel = try allocator.create([audio_embedding.feature_count]f32);
-    defer allocator.destroy(mel);
+    const resampled = try allocator.alloc(f32, spec.windowSamples());
+    defer allocator.free(resampled);
+    const mel = try allocator.alloc(f32, spec.featureCount());
+    defer allocator.free(mel);
     const Stage = enum { capture, resample, front_end, model, finish };
     var best: std.EnumArray(Stage, i96) = .initFill(std.math.maxInt(i96));
     var windows: usize = 0;
@@ -110,15 +111,15 @@ pub fn main(init: std.process.Init) !void {
         windows = analyzer.plan.count;
         for (0..windows) |index| {
             mark = std.Io.Clock.awake.now(init.io);
-            const samples = try analyzer.windowSamples(index, resampled);
+            const samples = try analyzer.windowSamples(index, spec, resampled);
             spent.getPtr(.resample).* += mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
             if (samples.len == 0) continue;
             mark = std.Io.Clock.awake.now(init.io);
             try front_end.melSpectrogram(samples, mel);
             spent.getPtr(.front_end).* += mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
             mark = std.Io.Clock.awake.now(init.io);
-            var output: [audio_embedding.embedding_size]f32 = undefined;
-            try model.embed(mel, &output);
+            var output: [audio_embedding.max_embedding_size]f32 = undefined;
+            try model.embed(mel, output[0..spec.embedding_size]);
             spent.getPtr(.model).* += mark.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
         }
         mark = std.Io.Clock.awake.now(init.io);

@@ -167,7 +167,7 @@ sleep: 0 to pump now, null to wait for the waker alone. See
   `libraryUnanalyzedCount`. `missing` (`MissingMeasurements`) flags what the
   outdated files lack: `loudness_and_checks`, `fingerprint`, `features` or
   `embedding`. The audio embedding counts only while `embeddingModelState` is
-  `ready`.
+  `ready`, and then as the embedding of the model `embeddingModel` returns.
   `measurement_set` identifies the current set of measurements and changes
   only when a measurement is added or its version or parameters change, so a
   host can remember that the user dismissed a prompt to analyze again.
@@ -411,8 +411,8 @@ section lists the entry points, errors and limits.
   its `track_id` and `similarity`, nearest first. The caller calls `deinit`.
   `limit` is at most `max_similar_tracks`, 1,000
   (`error.SimilarLimitTooLarge`). `error.TrackNotFound` names an unknown
-  Track and `error.NoAudioEmbedding` one whose file has no embedding for the
-  bytes it holds now. See [analysis.md](analysis.md#similar-tracks).
+  Track and `error.NoAudioEmbedding` one whose file has no embedding of the
+  model in use for the bytes it holds now. See [analysis.md](analysis.md#similar-tracks).
 - `libraryTrackAudioFeatures(library, track_id)` returns the `AudioFeatures`
   of the file a Track plays: optional `tempo` (`bpm`, `confidence`), `key`
   (`pitch` 0–11 with C as 0, `mode` `major` or `minor`, `confidence`),
@@ -449,12 +449,17 @@ section lists the entry points, errors and limits.
   file, or clears it when null, and checks the file; it fails only when the
   runtime is not running, the path is longer than a path can be or memory
   runs out. `embeddingModelState` reports the result, and analysis measures
-  the embedding only when it is `ready`. An analysis takes the path as it was
-  when its worker started; see
-  [analysis.md](analysis.md#audio-embedding).
+  the embedding only when it is `ready`. `embeddingModel` returns which
+  `EmbeddingModel` the file is, `clap_htsat_unfused` or `discogs_maest`, or
+  null unless the state is `ready`; analysis measures and counts that model's
+  embedding. An analysis takes the path as it was when its worker started; see
+  [analysis.md](analysis.md#audio-embedding). `librarySimilarTracks`,
+  `libraryRadioPreview`, Radio sessions and `startDailyMixes` read the stored
+  vectors of that model only, or of `clap_htsat_unfused` when `embeddingModel`
+  is null ([analysis.md](analysis.md#similar-tracks)).
 - `startEmbeddingModelDownload(model, destination)` starts a `model_download`
-  Job that fetches the audio-embedding `model`, an `EmbeddingModel` (the one
-  member is `clap_htsat_unfused`), from `model_url` in
+  Job that fetches the audio-embedding `model`, an `EmbeddingModel`
+  (`clap_htsat_unfused` or `discogs_maest`), from the `url` of its `spec()` in
   `liborca/analysis/audio_embedding.zig` and installs it at `destination`,
   creating the directory. It needs no Library, takes no Library's slot and
   never waits. Its units are bytes and its total is the model's size. A file

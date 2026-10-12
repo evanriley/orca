@@ -644,7 +644,7 @@ test "a mix with stored embeddings ranks by them and says so only for entries th
     defer rig.deinit();
     try rig.exec("UPDATE files SET content_hash = CAST(id AS BLOB), content_hash_algorithm = 1;");
     var embedding = try (try rig.libraryDatabase()).database.prepare(
-        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) SELECT id, content_hash, ?2 FROM files WHERE id % 5 = ?1;",
+        "INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) SELECT 1, id, content_hash, ?2 FROM files WHERE id % 5 = ?1;",
     );
     defer embedding.deinit();
     for (0..5) |remainder| {

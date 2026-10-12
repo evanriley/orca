@@ -934,13 +934,13 @@ pub const OrcaRuntime = struct {
     /// Files that still owe the default loudness and fingerprint measurement.
     pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try libraryDatabase(self, library)).files.unanalyzedCount(
-            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), analysisSelectionForm(self)),
+            analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), self.embedding_model.model()),
         );
     }
 
     /// Splits `libraryUnanalyzedCount` into never-analyzed and outdated files.
     pub fn libraryAnalysisCoverage(self: *OrcaRuntime, library: LibraryHandle) !AnalysisCoverage {
-        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), analysisSelectionForm(self));
+        const selectors = analysis_service.analysisSelectors(.{}, &codec.CodecRegistry.builtins(), self.embedding_model.model());
         const counts = try (try libraryDatabase(self, library)).files.analysisCoverage(selectors);
         return .{
             .never_analyzed = counts.never_analyzed,
@@ -970,10 +970,10 @@ pub const OrcaRuntime = struct {
         const codecs = codec.CodecRegistry.builtins();
         var model = openEmbeddingModel(self, io);
         defer if (model) |*opened| opened.deinit();
-        var front_end: ?analysis_embedding.FrontEnd = if (model == null)
-            null
+        var front_end: ?analysis_embedding.FrontEnd = if (model) |opened|
+            analysis_embedding.FrontEnd.init(self.allocator, opened.id) catch null
         else
-            analysis_embedding.FrontEnd.init(self.allocator) catch null;
+            null;
         defer if (front_end) |*value| value.deinit();
         const service: analysis_service.Service = .{
             .allocator = self.allocator,
@@ -1525,6 +1525,10 @@ pub const OrcaRuntime = struct {
 
     pub fn embeddingModelState(self: *const OrcaRuntime) EmbeddingModelState {
         return self.embedding_model.state();
+    }
+
+    pub fn embeddingModel(self: *const OrcaRuntime) ?EmbeddingModel {
+        return self.embedding_model.model();
     }
 
     /// Starts downloading the audio-embedding model to `destination`, as a
@@ -2272,7 +2276,13 @@ pub const OrcaRuntime = struct {
         limit: usize,
     ) !SimilarTracks {
         const library_database = try libraryDatabase(self, library);
-        return library_pass.audio_similarity.similarTracks(allocator, library_database.queryDatabase(), track_id, limit);
+        return library_pass.audio_similarity.similarTracks(
+            allocator,
+            library_database.queryDatabase(),
+            similarityModel(self),
+            track_id,
+            limit,
+        );
     }
 
     /// Up to `limit` (at most 512) Recordings a Radio from `seed` would
@@ -4265,13 +4275,13 @@ pub fn libraryOwnerTag(library: LibraryHandle) work.Owner {
     return .{ .kind = .library, .index = library.index, .generation = library.generation };
 }
 
-pub fn analysisSelectionForm(self: *const OrcaRuntime) database.repository.SelectionForm {
-    return if (self.embedding_model.state() == .ready) .with_embedding else .three_measurements;
-}
-
 fn openEmbeddingModel(self: *OrcaRuntime, io: std.Io) ?embedding_model.Model {
     const claim = self.embedding_model.claim() orelse return null;
     return claim.open(self.allocator, io);
+}
+
+pub fn similarityModel(self: *const OrcaRuntime) EmbeddingModel {
+    return self.embedding_model.model() orelse .clap_htsat_unfused;
 }
 
 pub fn requireRunning(self: *const OrcaRuntime) error{RuntimeNotRunning}!void {

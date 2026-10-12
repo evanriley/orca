@@ -946,6 +946,7 @@ pub const JobWorker = struct {
     /// struct or the runtime.
     host_signal: *control.HostSignal,
     embedding_model: ?embedding_model.Claim = null,
+    similarity_model: embedding_model.ModelId,
 
     pub fn run(self: *JobWorker) void {
         defer {
@@ -1315,7 +1316,7 @@ pub const JobWorker = struct {
 
     fn runDailyMixes(self: *JobWorker, request: DailyMixesRequest) void {
         const stats = &self.stats.scan;
-        const generation = library_pass.daily_mixes.generate(self.allocator, self.database, request, &self.token) catch {
+        const generation = library_pass.daily_mixes.generate(self.allocator, self.database, self.similarity_model, request, &self.token) catch {
             self.failed.store(true, .release);
             return;
         };

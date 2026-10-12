@@ -24,20 +24,23 @@ state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
 [metadata.md](metadata.md#tag-write-files)). A Library with no file (in-memory)
 has none of them.
 
-`PRAGMA user_version` selects the schema. The current version is 5. Each
+`PRAGMA user_version` selects the schema. The current version is 6. Each
 version has one step in `migrations.steps`: `baseline` creates version 1, `v2`
 adds to it without rebuilding any table, `v3` drops and recreates the Daily
 Mix tables, whose rows are made again on the next run, and `v4` rebuilds
 `player_queue_entries` to add its foreign keys, nulling a dangling side while
-keeping the row and its position, and `v5` adds `file_audio_embeddings` and
-fills it from the kind 7 results already stored for unchanged files.
+keeping the row and its position, `v5` adds `file_audio_embeddings` and
+fills it from the kind 7 results already stored for unchanged files, and `v6`
+rebuilds `file_audio_embeddings` with a `model` column, keeping every row as
+model 1 with the same `file_id`, `source_identity` and `vector`, and fills
+model 2 from the `discogs_maest` results already stored for unchanged files.
 `migrations.apply` runs every step after the database's version, and sets the
 new version, in one transaction, so a failed step leaves the database at its
-old version. A database at version 0 gets the whole schema, versions 1 to 4
-are upgraded in place, version 5 opens unchanged, and any other
+old version. A database at version 0 gets the whole schema, versions 1 to 5
+are upgraded in place, version 6 opens unchanged, and any other
 `user_version`, negative or newer, is refused with `error.SchemaVersionTooNew`
-and left untouched. A Library at version 5 cannot be opened by Orca 0.4.0 or
-earlier.
+and left untouched. A Library at version 6 cannot be opened by an Orca whose
+schema version is lower.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
 
@@ -404,16 +407,24 @@ The tables by purpose; keys are those that carry identity or a contract.
   from it at read time ([analysis.md](analysis.md#audio-features));
   `file_audio_features_by_onset_rate`, `file_audio_features_by_centroid` and
   `file_loudness_by_lufs` count the ranks it needs.
-- `file_audio_embeddings`: one row per file with the 512 signed bytes of its
-  audio embedding in `vector` and the `source_identity` of the bytes embedded.
-  Triggers on `analysis_results` keep it: a kind 7 `orca.audio-embedding`
-  version 1 result under the parameter hash of
-  `audio_embedding.parameterHash()`, inserted or with its result updated,
-  deletes the file's row and then inserts one from bytes 13 to 524 of the
-  result, and deleting the result deletes the row with the same
-  `source_identity`. A result that is not 524 bytes, lacks the `OREM` version 1
-  header, has a flags byte other than 1 or a window count outside 1 to 3
-  leaves the file without a row, as does a valid result that holds no vector.
+- `file_audio_embeddings`: one row per file and audio-embedding model, keyed
+  `(model, file_id)`, with the signed bytes of the embedding in `vector` and
+  the `source_identity` of the bytes embedded. `model` is the `ModelId`
+  integer: 1 is `clap_htsat_unfused` with a 512-byte vector and 2 is
+  `discogs_maest` with a 768-byte vector. A CHECK refuses any other model and
+  a vector of another length. `file_audio_embeddings_by_file` serves the
+  cascade from `files`. Three triggers per model on `analysis_results` keep
+  the table, each touching only its own model's row: a kind 7
+  `orca.audio-embedding` version 1 result under the parameter hash of
+  `audio_embedding.parameterHash(model)`, inserted or with its result
+  updated, deletes the file's row of that model and then inserts one from the
+  bytes after the 12-byte header, and deleting the result deletes the row of
+  that model with the same `source_identity`. A result that is not the
+  model's length (524 or 780 bytes), lacks the `OREM` version 1 header, has a
+  flags byte other than 1 or a window count outside 1 to 3 leaves the file
+  without a row of that model, as does a valid result that holds no vector.
+  `AudioEmbeddingRepository.fileEmbedding` and `embeddingsAfter` take the
+  model and return only its rows.
   The scale is not copied; similarity between vectors is a cosine, which does
   not depend on it. `AudioEmbeddingRepository` reads a file's vector, or a
   page of vectors in file id order with each file's Recording id, only while
