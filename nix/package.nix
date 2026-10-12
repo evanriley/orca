@@ -78,10 +78,6 @@ stdenv.mkDerivation (finalAttrs: {
     ln -s ${finalAttrs.embeddingModel} "$out/share/orca/models/clap_audio_int8.onnx"
   '';
 
-  preFixup = ''
-    gappsWrapperArgs+=(--set-default ORCA_EMBEDDING_MODEL "$out/share/orca/models/clap_audio_int8.onnx")
-  '';
-
   meta = {
     description = "Local-files-first music player and library-maintenance application";
     homepage = "https://github.com/evanriley/orca";
