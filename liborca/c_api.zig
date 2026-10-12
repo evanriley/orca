@@ -5901,6 +5901,7 @@ pub fn importProviderService(value: u8) ?ProviderService {
 pub fn importEmbeddingModel(value: u8) ?core.runtime.EmbeddingModel {
     return switch (value) {
         1 => .clap_htsat_unfused,
+        2 => .discogs_maest,
         else => null,
     };
 }
@@ -6039,6 +6040,13 @@ pub export fn orca_runtime_embedding_model_state(runtime: ?*Runtime, output: ?*u
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = @backingInt(box.runtime.embeddingModelState());
+    return .ok;
+}
+
+pub export fn orca_runtime_embedding_model(runtime: ?*Runtime, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = if (box.runtime.embeddingModel()) |active| @backingInt(active) else 0;
     return .ok;
 }
 
@@ -12139,7 +12147,7 @@ test "the embedding model path and state are reachable and a similar-tracks sear
         \\INSERT INTO tracks(id, recording_id, title) VALUES (11, 1, 'seed'), (12, 2, 'far'), (13, 3, 'near'), (14, 4, 'unmeasured');
     );
     var embedding = try library_database.database.prepare(
-        "INSERT INTO file_audio_embeddings(file_id, source_identity, vector) VALUES (?1, x'01', ?2);",
+        "INSERT INTO file_audio_embeddings(model, file_id, source_identity, vector) VALUES (1, ?1, x'01', ?2);",
     );
     defer embedding.deinit();
     for ([_][2]i8{ .{ 100, 0 }, .{ 0, 100 }, .{ 80, 60 } }, 1..) |head, file_id| {
@@ -12204,7 +12212,7 @@ const ModelDownloadRig = struct {
             .clock = self.clock.clock(),
             .wall_clock = self.clock.wallClock(),
             .random = self.prng.random(),
-            .descriptor = .{ .url = audio_embedding.model_url, .size = model_download_body.len, .sha256 = digest },
+            .descriptor = .{ .url = audio_embedding.ModelId.clap_htsat_unfused.spec().url, .size = model_download_body.len, .sha256 = digest },
         };
     }
 
@@ -12239,7 +12247,7 @@ test "orca_runtime_start_embedding_model_download refuses an unknown model and s
     try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
     var started = std.mem.zeroes(Handle);
 
-    for ([_]u8{ 0, 2, 255 }) |unknown| {
+    for ([_]u8{ 0, 3, 255 }) |unknown| {
         try std.testing.expectEqual(Status.invalid_argument, orca_runtime_start_embedding_model_download(runtime, unknown, "model.onnx", &started));
         try std.testing.expectEqualStrings(
             "orca_runtime_start_embedding_model_download: unknown embedding model",
@@ -12303,6 +12311,64 @@ test "orca_runtime_start_embedding_model_download is unsupported without embeddi
 
     try std.testing.expectEqual(Status.unsupported, orca_runtime_start_embedding_model_download(runtime, model_id, "model.onnx", &started));
     try std.testing.expectEqual(std.mem.zeroes(Handle), started);
+}
+
+test "orca_runtime_embedding_model writes zero before a path and for a wrong file and refuses a null output" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var model: u8 = 255;
+    try std.testing.expectEqual(Status.ok, orca_runtime_embedding_model(runtime, &model));
+    try std.testing.expectEqual(@as(u8, 0), model);
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_embedding_model(runtime, null));
+    try std.testing.expectEqualStrings("orca_runtime_embedding_model: output is null", std.mem.span(orca_runtime_last_error(runtime)));
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "wrong.onnx", .data = "not a model" });
+    const wrong = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/wrong.onnx", .{temporary.sub_path}, 0);
+    defer std.testing.allocator.free(wrong);
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_embedding_model_path(runtime, wrong.ptr));
+    model = 255;
+    try std.testing.expectEqual(Status.ok, orca_runtime_embedding_model(runtime, &model));
+    try std.testing.expectEqual(@as(u8, 0), model);
+}
+
+test "orca_runtime_start_embedding_model_download installs the MAEST model and orca_runtime_embedding_model then writes 2" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    const spec = audio_embedding.ModelId.discogs_maest.spec();
+    const model_path = try audio_embedding.testModelPath(.discogs_maest);
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var rig: ModelDownloadRig = undefined;
+    try rig.init(box);
+    defer rig.deinit();
+    const model = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, model_path, std.testing.allocator, .limited(spec.size + 1));
+    defer std.testing.allocator.free(model);
+    box.runtime.model_download_hooks.descriptor = null;
+    rig.transport.chunk_bytes = network.client.Sink.max_chunk_bytes;
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Orca C Test", "1.0", "https://orca.invalid"));
+    try rig.transport.script(.{ .respond = .{ .status = 302, .body = "", .location = "https://release-assets.githubusercontent.com/model?signature=1" } });
+    try rig.transport.script(.{ .respond = .{ .body = model } });
+
+    var started = std.mem.zeroes(Handle);
+    try std.testing.expectEqual(Status.ok, orca_runtime_start_embedding_model_download(
+        runtime,
+        @backingInt(core.runtime.EmbeddingModel.discogs_maest),
+        rig.destination.ptr,
+        &started,
+    ));
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJobPumping(&box.runtime, importJob(started)));
+    const installed = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, rig.destination, std.testing.allocator, .limited(spec.size + 1));
+    defer std.testing.allocator.free(installed);
+    try std.testing.expectEqual(spec.size, installed.len);
+
+    var state: u8 = 255;
+    try std.testing.expectEqual(Status.ok, orca_runtime_embedding_model_state(runtime, &state));
+    try std.testing.expectEqual(@backingInt(core.embedding_model.State.ready), state);
+    var active: u8 = 255;
+    try std.testing.expectEqual(Status.ok, orca_runtime_embedding_model(runtime, &active));
+    try std.testing.expectEqual(@as(u8, 2), active);
 }
 
 test "orca_runtime_start_embedding_model_download installs the model, reports the job and refuses a second download while one runs" {

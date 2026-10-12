@@ -4931,6 +4931,10 @@ static int provider_settings_steps(orca_runtime *runtime) {
     SMOKE_CHECK(model_state == ORCA_EMBEDDING_MODEL_STATE_MISSING ||
                 model_state == ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT);
     SMOKE_CHECK(orca_runtime_embedding_model_state(runtime, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    uint8_t active_model = 255;
+    SMOKE_CHECK(orca_runtime_embedding_model(runtime, &active_model) == ORCA_STATUS_OK);
+    SMOKE_CHECK(active_model == 0);
+    SMOKE_CHECK(orca_runtime_embedding_model(runtime, 0) == ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_runtime_set_embedding_model_path(runtime, "/nonexistent/orca-smoke-model.onnx") ==
                 ORCA_STATUS_OK);
     uint8_t unset_state = model_state;
@@ -4955,6 +4959,9 @@ static int provider_settings_steps(orca_runtime *runtime) {
                 ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_runtime_start_embedding_model_download(
                     runtime, 200, "/nonexistent/orca-smoke-model.onnx", &model_job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_start_embedding_model_download(
+                    runtime, ORCA_EMBEDDING_MODEL_DISCOGS_MAEST, 0, &model_job) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(model_job.index == 0 && model_job.generation == 0);
     return 0;
