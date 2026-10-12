@@ -14,7 +14,12 @@
   on `githubusercontent.com`; nothing is retried or resumed; a failed Job's
   snapshot `detail` holds the reason. `orca-cli download-embedding-model PATH`
   runs it, and a C host calls `orca_runtime_start_embedding_model_download`.
-  `orca-gtk` cannot start it yet.
+- **`orca-gtk` downloads the audio-embedding model from Settings › Listening.**
+  Download in the Sound Similarity card fetches it (32.6 MB, from `github.com`)
+  to the user data directory, shows the megabytes received and can be
+  cancelled; a failure shows the Job's reason. The row names the size and the
+  host before the button is pressed. Download is not offered when
+  `ORCA_EMBEDDING_MODEL` is set.
 - **Radio and Daily Mixes rank by how alike tracks sound.** A seed whose
   tracks have a stored audio embedding scores each candidate's Audio component
   by the cosine similarity of its vector to the seed's mean: 1 from the 10th

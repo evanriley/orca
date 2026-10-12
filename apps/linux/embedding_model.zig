@@ -2,6 +2,8 @@ const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const app = @import("app.zig");
+const preferences = @import("preferences.zig");
+const analysis_notice = @import("analysis_notice.zig");
 
 const App = app.App;
 
@@ -28,35 +30,126 @@ pub fn choose(buffer: []u8, places: Places, context: anytype) error{NoSpaceLeft}
     return std.fmt.bufPrint(buffer, "{s}", .{bundled});
 }
 
+pub const model_bytes: u64 = 32_587_451;
+const download_host = "github.com";
+
+pub const Download = union(enum) {
+    idle,
+    running: liborca.JobHandle,
+    failed: liborca.JobHandle,
+    refused: []const u8,
+};
+
+pub const Progress = struct {
+    received_bytes: u64,
+    total_bytes: u64,
+};
+
+pub const Shown = union(enum) {
+    idle,
+    running: Progress,
+    failed: []const u8,
+};
+
+pub const Action = enum { none, download, cancel };
+
 pub const Status = struct {
     title: [:0]const u8,
     subtitle: [:0]const u8,
     can_check_again: bool,
+    action: Action = .none,
 };
 
-pub fn status(buffer: []u8, state: liborca.EmbeddingModelState, path: []const u8) Status {
-    return switch (state) {
-        .ready => .{ .title = "Model installed", .subtitle = terminated(buffer, path), .can_check_again = false },
-        .missing => .{
-            .title = "Model not installed",
-            .subtitle = std.fmt.bufPrintSentinel(buffer, "Put {s} in {s}, then check again.", .{
-                std.fs.path.basename(path),
-                std.fs.path.dirname(path) orelse ".",
-            }, 0) catch "",
-            .can_check_again = true,
-        },
-        .wrong_file => .{ .title = "That file is not Orca's model", .subtitle = terminated(buffer, path), .can_check_again = true },
-        .unusable => .{ .title = "The model could not be loaded", .subtitle = terminated(buffer, path), .can_check_again = true },
-        .built_without => .{
+pub const Request = struct {
+    state: liborca.EmbeddingModelState,
+    path: []const u8,
+    overridden: bool,
+    download: Shown,
+};
+
+const Megabytes = struct {
+    bytes: u64,
+
+    pub fn format(self: Megabytes, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const tenths = (self.bytes + 50_000) / 100_000;
+        try writer.print("{d}.{d}", .{ tenths / 10, tenths % 10 });
+    }
+};
+
+pub fn status(buffer: []u8, request: Request) Status {
+    const path = request.path;
+    switch (request.state) {
+        .ready => return .{ .title = "Model installed", .subtitle = terminated(buffer, path), .can_check_again = false },
+        .built_without => return .{
             .title = "Not available in this build",
             .subtitle = "This build of Orca was made without ONNX Runtime.",
             .can_check_again = false,
         },
+        .missing, .wrong_file, .unusable => {},
+    }
+    switch (request.download) {
+        .running => |progress| return .{
+            .title = "Downloading the model",
+            .subtitle = print(buffer, "{f} of {f} MB", .{
+                Megabytes{ .bytes = progress.received_bytes },
+                Megabytes{ .bytes = progress.total_bytes },
+            }),
+            .can_check_again = false,
+            .action = .cancel,
+        },
+        .idle, .failed => {},
+    }
+    const title: [:0]const u8 = switch (request.state) {
+        .missing => "Model not installed",
+        .wrong_file => "That file is not Orca's model",
+        .unusable => "The model could not be loaded",
+        .ready, .built_without => unreachable,
+    };
+    if (request.overridden) return .{
+        .title = title,
+        .subtitle = if (request.state == .missing)
+            print(buffer, "Put {s} in {s}, then check again.", .{ std.fs.path.basename(path), directory(path) })
+        else
+            terminated(buffer, path),
+        .can_check_again = true,
+    };
+    return .{
+        .title = title,
+        .subtitle = switch (request.download) {
+            .failed => |reason| failure(buffer, reason),
+            .idle, .running => if (request.state == .missing)
+                print(buffer, "Download it ({f} MB) from " ++ download_host ++ ", or put {s} in {s} and check again.", .{
+                    Megabytes{ .bytes = model_bytes },
+                    std.fs.path.basename(path),
+                    directory(path),
+                })
+            else
+                print(buffer, "{s}. Download fetches the model ({f} MB) from " ++ download_host ++ ".", .{
+                    path,
+                    Megabytes{ .bytes = model_bytes },
+                }),
+        },
+        .can_check_again = true,
+        .action = .download,
     };
 }
 
+fn failure(buffer: []u8, reason: []const u8) [:0]const u8 {
+    const sentence = std.mem.trimEnd(u8, reason, ".");
+    if (sentence.len == 0) return "The download failed.";
+    return print(buffer, "The download failed. {c}{s}.", .{ std.ascii.toUpper(sentence[0]), sentence[1..] });
+}
+
+fn directory(path: []const u8) []const u8 {
+    return std.fs.path.dirname(path) orelse ".";
+}
+
+fn print(buffer: []u8, comptime pattern: []const u8, args: anytype) [:0]const u8 {
+    return std.fmt.bufPrintSentinel(buffer, pattern, args, 0) catch "";
+}
+
 fn terminated(buffer: []u8, text: []const u8) [:0]const u8 {
-    return std.fmt.bufPrintSentinel(buffer, "{s}", .{text}, 0) catch "";
+    return print(buffer, "{s}", .{text});
 }
 
 const Files = struct {
@@ -86,6 +179,98 @@ pub fn apply(self: *App) void {
     self.embedding_model_path.set(self.allocator, path);
     self.runtime.setEmbeddingModelPath(path) catch |err|
         std.log.warn("Could not check the audio-embedding model at {s} ({t})", .{ path, err });
+}
+
+fn overridden(self: *const App) bool {
+    return if (self.embedding_model_override) |path| path.len != 0 else false;
+}
+
+fn userPath(buffer: []u8) error{NoSpaceLeft}![]const u8 {
+    return std.fmt.bufPrint(buffer, user_pattern, .{std.mem.span(gtk.g_get_user_data_dir())});
+}
+
+pub fn shownStatus(self: *App, buffer: []u8) Status {
+    var snapshot: ?liborca.JobSnapshot = null;
+    const download: Shown = switch (self.embedding_model_download) {
+        .idle => .idle,
+        .refused => |reason| .{ .failed = reason },
+        .running, .failed => |job| shown: {
+            snapshot = self.runtime.jobSnapshotSynced(job) catch break :shown .idle;
+            const read = &snapshot.?;
+            if (self.embedding_model_download == .failed) break :shown .{ .failed = read.detail.slice() };
+            break :shown .{ .running = .{
+                .received_bytes = read.completed_units,
+                .total_bytes = read.total_units orelse model_bytes,
+            } };
+        },
+    };
+    return status(buffer, .{
+        .state = self.runtime.embeddingModelState(),
+        .path = self.embedding_model_path.value,
+        .overridden = overridden(self),
+        .download = download,
+    });
+}
+
+fn startRefusal(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ModelDownloadAlreadyRunning => "the last download is still stopping; try again",
+        error.NameTooLong, error.NoSpaceLeft => "the model's path is too long",
+        else => "the download could not be started",
+    };
+}
+
+pub fn startDownload(self: *App) void {
+    if (self.embedding_model_download == .running or overridden(self)) return;
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    self.embedding_model_download = if (userPath(&buffer)) |destination|
+        if (self.runtime.startEmbeddingModelDownload(destination)) |job|
+            .{ .running = job }
+        else |err|
+            .{ .refused = startRefusal(err) }
+    else |err|
+        .{ .refused = startRefusal(err) };
+    self.requestTick();
+}
+
+pub fn cancelDownload(self: *App) void {
+    switch (self.embedding_model_download) {
+        .running => |job| self.runtime.cancelJob(job) catch |err|
+            std.log.warn("Could not cancel the audio-embedding model download ({t})", .{err}),
+        .idle, .failed, .refused => {},
+    }
+    self.requestTick();
+}
+
+pub fn dismissFailure(self: *App) void {
+    switch (self.embedding_model_download) {
+        .failed, .refused => self.embedding_model_download = .idle,
+        .idle, .running => {},
+    }
+}
+
+fn following(job: liborca.JobHandle, job_state: liborca.JobState) Download {
+    return switch (job_state) {
+        .succeeded, .cancelled => .idle,
+        .failed => .{ .failed = job },
+        .queued, .waiting, .running, .cancelling, .paused => .{ .running = job },
+    };
+}
+
+pub fn tick(self: *App) void {
+    const job = switch (self.embedding_model_download) {
+        .running => |job| job,
+        .idle, .failed, .refused => return,
+    };
+    if (self.runtime.jobSnapshotSynced(job)) |snapshot| {
+        self.embedding_model_download = following(job, snapshot.state);
+        if (snapshot.state == .succeeded) {
+            var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            if (userPath(&buffer)) |destination| self.embedding_model_path.set(self.allocator, destination) else |_| {}
+            analysis_notice.refresh(self);
+        }
+    } else |_| self.embedding_model_download = .idle;
+    preferences.showModel(self);
 }
 
 const TestFiles = struct {
@@ -138,33 +323,123 @@ test "choose_pathLongerThanTheBuffer_fails" {
     try std.testing.expectError(error.NoSpaceLeft, choose(&buffer, test_places, TestFiles{ .present = &.{} }));
 }
 
-test "status_missing_saysWhereTheFileGoes" {
-    var buffer: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    const row = status(&buffer, .missing, test_user);
-    try std.testing.expectEqualStrings("Model not installed", row.title);
-    try std.testing.expectEqualStrings("Put clap_audio_int8.onnx in /data/orca/models, then check again.", row.subtitle);
-    try std.testing.expect(row.can_check_again);
-    try std.testing.expectEqualStrings(
-        "Put model.onnx in /elsewhere, then check again.",
-        status(&buffer, .missing, "/elsewhere/model.onnx").subtitle,
-    );
+fn expectRow(expected: Status, request: Request) !void {
+    var buffer: [std.Io.Dir.max_path_bytes + 128]u8 = undefined;
+    const row = status(&buffer, request);
+    try std.testing.expectEqualStrings(expected.title, row.title);
+    try std.testing.expectEqualStrings(expected.subtitle, row.subtitle);
+    try std.testing.expectEqual(expected.can_check_again, row.can_check_again);
+    try std.testing.expectEqual(expected.action, row.action);
 }
 
-test "status_fileStates_showThePathAndOfferACheckOnlyWhenItCanHelp" {
-    var buffer: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    const ready = status(&buffer, .ready, test_user);
-    try std.testing.expectEqualStrings("Model installed", ready.title);
-    try std.testing.expectEqualStrings(test_user, ready.subtitle);
-    try std.testing.expect(!ready.can_check_again);
-    const wrong = status(&buffer, .wrong_file, test_user);
-    try std.testing.expectEqualStrings("That file is not Orca's model", wrong.title);
-    try std.testing.expectEqualStrings(test_user, wrong.subtitle);
-    try std.testing.expect(wrong.can_check_again);
-    const unusable = status(&buffer, .unusable, test_user);
-    try std.testing.expectEqualStrings("The model could not be loaded", unusable.title);
-    try std.testing.expect(unusable.can_check_again);
-    const without = status(&buffer, .built_without, test_user);
-    try std.testing.expectEqualStrings("Not available in this build", without.title);
-    try std.testing.expectEqualStrings("This build of Orca was made without ONNX Runtime.", without.subtitle);
-    try std.testing.expect(!without.can_check_again);
+fn requestFor(state: liborca.EmbeddingModelState, download: Shown) Request {
+    return .{ .state = state, .path = test_user, .overridden = false, .download = download };
+}
+
+test "status_missing_offersTheDownloadAndNamesItsSizeAndHost" {
+    try expectRow(.{
+        .title = "Model not installed",
+        .subtitle = "Download it (32.6 MB) from github.com, or put clap_audio_int8.onnx in /data/orca/models and check again.",
+        .can_check_again = true,
+        .action = .download,
+    }, requestFor(.missing, .idle));
+}
+
+test "status_missingWithOverride_saysWhereTheFileGoesAndOffersNoDownload" {
+    try expectRow(.{
+        .title = "Model not installed",
+        .subtitle = "Put model.onnx in /elsewhere, then check again.",
+        .can_check_again = true,
+    }, .{ .state = .missing, .path = "/elsewhere/model.onnx", .overridden = true, .download = .idle });
+}
+
+test "status_running_showsBytesAndOffersOnlyCancel" {
+    try expectRow(.{
+        .title = "Downloading the model",
+        .subtitle = "0.0 of 32.6 MB",
+        .can_check_again = false,
+        .action = .cancel,
+    }, requestFor(.missing, .{ .running = .{ .received_bytes = 0, .total_bytes = model_bytes } }));
+    try expectRow(.{
+        .title = "Downloading the model",
+        .subtitle = "12.4 of 32.6 MB",
+        .can_check_again = false,
+        .action = .cancel,
+    }, requestFor(.wrong_file, .{ .running = .{ .received_bytes = 12_449_999, .total_bytes = model_bytes } }));
+}
+
+test "status_failed_givesTheReasonAsASentenceAndOffersTheDownloadAgain" {
+    try expectRow(.{
+        .title = "Model not installed",
+        .subtitle = "The download failed. The network is unavailable.",
+        .can_check_again = true,
+        .action = .download,
+    }, requestFor(.missing, .{ .failed = "the network is unavailable" }));
+    try expectRow(.{
+        .title = "Model not installed",
+        .subtitle = "The download failed. The server answered 404.",
+        .can_check_again = true,
+        .action = .download,
+    }, requestFor(.missing, .{ .failed = "the server answered 404." }));
+    try expectRow(.{
+        .title = "Model not installed",
+        .subtitle = "The download failed.",
+        .can_check_again = true,
+        .action = .download,
+    }, requestFor(.missing, .{ .failed = "" }));
+}
+
+const test_job: liborca.JobHandle = .{ .index = 3, .generation = 1 };
+
+test "following_endedJob_leavesOnlyAFailureBehind" {
+    try std.testing.expectEqual(Download.idle, following(test_job, .cancelled));
+    try std.testing.expectEqual(Download.idle, following(test_job, .succeeded));
+    try std.testing.expectEqual(Download{ .failed = test_job }, following(test_job, .failed));
+    try std.testing.expectEqual(Download{ .running = test_job }, following(test_job, .running));
+    try std.testing.expectEqual(Download{ .running = test_job }, following(test_job, .cancelling));
+}
+
+test "status_ready_showsThePathWhateverTheDownloadDid" {
+    const ready: Status = .{ .title = "Model installed", .subtitle = test_user, .can_check_again = false };
+    try expectRow(ready, requestFor(.ready, .idle));
+    try expectRow(ready, requestFor(.ready, .{ .failed = "the download timed out" }));
+    try expectRow(ready, requestFor(.ready, .{ .running = .{ .received_bytes = 1, .total_bytes = 2 } }));
+}
+
+test "status_builtWithout_offersNothing" {
+    const without: Status = .{
+        .title = "Not available in this build",
+        .subtitle = "This build of Orca was made without ONNX Runtime.",
+        .can_check_again = false,
+    };
+    try expectRow(without, requestFor(.built_without, .idle));
+    try expectRow(without, requestFor(.built_without, .{ .failed = "the download timed out" }));
+}
+
+test "status_wrongOrUnusableFile_showsThePathAndWhatDownloadFetches" {
+    try expectRow(.{
+        .title = "That file is not Orca's model",
+        .subtitle = test_user ++ ". Download fetches the model (32.6 MB) from github.com.",
+        .can_check_again = true,
+        .action = .download,
+    }, requestFor(.wrong_file, .idle));
+    try expectRow(.{
+        .title = "The model could not be loaded",
+        .subtitle = test_user ++ ". Download fetches the model (32.6 MB) from github.com.",
+        .can_check_again = true,
+        .action = .download,
+    }, requestFor(.unusable, .idle));
+    try expectRow(.{
+        .title = "That file is not Orca's model",
+        .subtitle = "/elsewhere/model.onnx",
+        .can_check_again = true,
+    }, .{ .state = .wrong_file, .path = "/elsewhere/model.onnx", .overridden = true, .download = .idle });
+}
+
+test "megabytes_roundsToOneDecimal" {
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("32.6", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = model_bytes }}));
+    try std.testing.expectEqualStrings("0.0", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = 49_999 }}));
+    try std.testing.expectEqualStrings("0.1", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = 50_000 }}));
+    try std.testing.expectEqualStrings("1.0", try std.fmt.bufPrint(&buffer, "{f}", .{Megabytes{ .bytes = 1_000_000 }}));
 }

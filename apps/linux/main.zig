@@ -106,6 +106,7 @@ fn tick(self: *App) void {
         offline.tick(self);
         maintenance.tick(self);
         submissions.tick(self);
+        embedding_model.tick(self);
         preferences.tick(self);
         details.tick(self);
         lyrics.tick(self);

@@ -148,7 +148,8 @@ Servers: `github.com`, which redirects to
 published with Orca's releases.
 
 - Contacted only when a host starts the download: `orca-cli
-  download-embedding-model`. `orca-gtk` never starts it. Nothing is requested
+  download-embedding-model`, or Download in `orca-gtk`'s Settings › Listening.
+  `orca-gtk` starts it only when that button is pressed. Nothing is requested
   when the file is already in place.
 - Sent: one GET of the model's address, with the `User-Agent`. No token, tag
   text, path or Library content.
