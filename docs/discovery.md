@@ -77,6 +77,17 @@ seed's or of its half or double (300) in place of the nearest Recordings. Each
 draw is ordered by a hash of the Recording and the session seed, so the pool
 varies between sessions without favouring low ids.
 
+Genre and decade focus filters apply inside the prefilter, so every draw is
+filled with Recordings that pass them. An energy focus applies after the cap:
+energy is a Track's mean rank among the Library's measurements
+([audio features](analysis.md#audio-features)), stored in no column or index,
+and is read only for the Recordings already in the pool. Those outside the
+focused energy range are then dropped, as is a Recording whose Track has no
+energy: one without audio features, or with none of loudness, onset rate and
+centroid measured. A Radio with an energy focus therefore draws from the part
+of its 2,000 Recordings inside the range, not from 2,000 Recordings of that
+range, and that part shrinks with the share of the Library that is analysed.
+
 ## Scoring
 
 Each candidate gets seven component values from 0 to 1. The total is their
@@ -160,7 +171,9 @@ highest rank values (ties to the lower Recording id), and of those the one with
 the highest total score (ties likewise). The reach size is
 `clamp(round(0.30 × n × (explore / 100)²), 12, n)` for `n` candidates loaded
 for the call, after the energy focus filter: 12 at explore 0, and with
-`n` = 2,000, 74 at 35 and 600 at 100. The reach re-forms over the remaining
+`n` = 2,000, 74 at 35 and 600 at 100. Under an energy focus `n` is the part
+of the pool the filter kept ([Candidates](#candidates)), so the reach is
+narrower and the session exhausts sooner. The reach re-forms over the remaining
 candidates for every pick, so a request for more picks than the reach is still
 filled. Picks are subject to:
 
@@ -452,6 +465,12 @@ candidates, at most 2,000 in a seeded order, are ranked with the shared
 scoring core against one profile of the day's 50 most-played Artists. Their
 Tracks seed it, with their related Artists, and without an Artist pin.
 Never-played Recordings are candidates whatever `radio.include_unplayed` says.
+
+For Upbeat and Wind down the 2,000 are drawn from the Recordings whose Track
+has audio features, and the energy range is applied to that draw afterwards,
+as for Radio's energy focus. The 40 are counted among what remains: in a
+Library with more than 2,000 analysed Recordings, about the range's share of
+2,000 rather than every Recording in the range.
 
 ### Slots
 
