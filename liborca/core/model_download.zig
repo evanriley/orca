@@ -227,20 +227,7 @@ const Receiver = struct {
 fn holds(io: std.Io, path: []const u8, descriptor: Descriptor) bool {
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
     defer file.close(io);
-    const stat = file.stat(io) catch return false;
-    if (stat.size != descriptor.size) return false;
-    var hasher: Sha256 = .init(.{});
-    var buffer: [network.client.Sink.max_chunk_bytes]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < descriptor.size) {
-        const read = file.readPositionalAll(io, &buffer, offset) catch return false;
-        if (read == 0) return false;
-        hasher.update(buffer[0..read]);
-        offset += read;
-    }
-    var digest: [Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-    return std.mem.eql(u8, &digest, &descriptor.sha256);
+    return audio_embedding.fileHolds(io, file, descriptor.size, &descriptor.sha256) catch false;
 }
 
 const TestRig = struct {

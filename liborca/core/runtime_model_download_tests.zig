@@ -194,6 +194,49 @@ test "startEmbeddingModelDownload_succeeded_namesTheFileToTheRuntimeWhenReaped" 
     try testing.expectEqual(EmbeddingModelState.wrong_file, rig.runtime.embeddingModelState());
 }
 
+fn awaitWorkerUnreaped(runtime: *OrcaRuntime) !void {
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (!runtime.model_download.?.isFinished() and deadline.tick()) {}
+    try testing.expect(runtime.model_download.?.isFinished());
+}
+
+test "startEmbeddingModelDownload_destinationRemovedBeforeItIsReaped_recordsWhatTheWorkerVerifiedWithoutReadingIt" {
+    var rig: Rig = undefined;
+    try rig.init("model.onnx");
+    defer rig.deinit();
+    try rig.transport.script(.{ .respond = .{ .body = &body } });
+
+    const job_handle = try rig.start();
+    try awaitWorkerUnreaped(&rig.runtime);
+    try std.Io.Dir.cwd().deleteFile(testing.io, rig.destination);
+    try testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, job_handle));
+
+    try testing.expectEqualStrings(rig.destination, rig.runtime.embedding_model.path.?.view());
+    try testing.expectEqual(EmbeddingModelState.wrong_file, rig.runtime.embeddingModelState());
+}
+
+test "startEmbeddingModelDownload_theRealModelRemovedBeforeItIsReaped_isReadyFromTheWorkersDigest" {
+    const id: audio_embedding.ModelId = .clap_htsat_unfused;
+    const model_path = try audio_embedding.testModelPath(id);
+    const spec = id.spec();
+    var rig: Rig = undefined;
+    try rig.init(spec.file_name);
+    defer rig.deinit();
+    const model = try std.Io.Dir.cwd().readFileAlloc(testing.io, model_path, testing.allocator, .limited(spec.size + 1));
+    defer testing.allocator.free(model);
+    rig.runtime.model_download_hooks.descriptor = null;
+    rig.transport.chunk_bytes = network.client.Sink.max_chunk_bytes;
+    try rig.transport.script(.{ .respond = .{ .body = model } });
+
+    const job_handle = try rig.runtime.startEmbeddingModelDownload(id, rig.destination);
+    try awaitWorkerUnreaped(&rig.runtime);
+    try std.Io.Dir.cwd().deleteFile(testing.io, rig.destination);
+    try testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, job_handle));
+
+    try testing.expectEqual(EmbeddingModelState.ready, rig.runtime.embeddingModelState());
+    try testing.expectEqual(@as(?audio_embedding.ModelId, id), rig.runtime.embeddingModel());
+}
+
 fn expectRealModelDownload(id: audio_embedding.ModelId) !void {
     const model_path = try audio_embedding.testModelPath(id);
     const spec = id.spec();

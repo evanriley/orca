@@ -63,10 +63,17 @@ pub const Setting = struct {
     path: ?OwnedPath = null,
     status: std.atomic.Value(Status) = .init(.of(unset, 0)),
 
-    pub fn set(self: *Setting, allocator: std.mem.Allocator, io: std.Io, path: ?[]const u8) !void {
+    pub fn set(self: *Setting, io: std.Io, path: ?[]const u8) error{NameTooLong}!void {
         const owned: ?OwnedPath = if (path) |value| try .init(value) else null;
-        const checked: Checked = if (owned) |*value| try verified(allocator, io, value.view()) else unset;
-        self.path = owned;
+        self.store(owned, if (owned) |*value| recognised(io, value.view()) else unset);
+    }
+
+    pub fn setVerified(self: *Setting, path: OwnedPath, verified: ?ModelId) void {
+        self.store(path, if (verified) |id| .{ .ready = id } else .{ .refused = .wrong_file });
+    }
+
+    fn store(self: *Setting, path: ?OwnedPath, checked: Checked) void {
+        self.path = path;
         self.status.store(.of(checked, self.status.load(.acquire).generation +% 1), .release);
     }
 
@@ -110,9 +117,8 @@ pub const Claim = struct {
     }
 };
 
-fn verified(allocator: std.mem.Allocator, io: std.Io, path: []const u8) error{OutOfMemory}!Checked {
-    const id = Model.verify(allocator, io, path) catch |err|
-        return .{ .refused = stateOf(err) orelse return error.OutOfMemory };
+fn recognised(io: std.Io, path: []const u8) Checked {
+    const id = Model.recognise(io, path) catch |err| return .{ .refused = stateOf(err) orelse .unusable };
     return .{ .ready = id };
 }
 

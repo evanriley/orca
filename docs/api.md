@@ -453,10 +453,11 @@ section lists the entry points, errors and limits.
   its AcoustID work begins, from the store or else the key as it was when the
   job was started or queued; a change applies from the next job.
   `setEmbeddingModelPath(path)` copies the path of the audio-embedding model
-  file, or clears it when null, and checks the file; it fails only when the
-  runtime is not running, the path is longer than a path can be or memory
-  runs out. `embeddingModelState` reports the result, and analysis measures
-  the embedding only when it is `ready`. `embeddingModel` returns which
+  file, or clears it when null, and reads the file's size, not its contents;
+  it fails only when the runtime is not running or the path is longer than a
+  path can be. `embeddingModelState` reports the result, and analysis
+  measures the embedding only when it is `ready` and the file's SHA-256
+  matches as the analysis opens it. `embeddingModel` returns which
   `EmbeddingModel` the file is, `clap_htsat_unfused` or `discogs_maest`, or
   null unless the state is `ready`; analysis measures and counts that model's
   embedding. An analysis takes the path as it was when its worker started; see
@@ -474,9 +475,9 @@ section lists the entry points, errors and limits.
   compiled-in ones; a `destination` that already holds the model succeeds
   with no request. Any other end leaves `destination` as it was. When the
   pump reaps a succeeded download, the runtime names `destination` as
-  `setEmbeddingModelPath` does, so `embeddingModelState` reads `ready` once
-  the host sees `job_finished`; it stays unchanged only when memory runs out,
-  so a host reads the state and does not infer it. A failed Job's snapshot
+  `setEmbeddingModelPath` does and records the model the worker's SHA-256
+  check found, without reading the file again, so `embeddingModelState`
+  reads `ready` once the host sees `job_finished`. A failed Job's snapshot
   holds the reason as its `detail`. Errors: `error.EmbeddingsNotBuilt` in a
   build with `-Dembeddings=false`, `error.ClientIdentityRequired` before
   `setClientIdentity`, `error.ModelDownloadAlreadyRunning` while a download

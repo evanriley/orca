@@ -257,6 +257,14 @@
   only in lyrics, biographies and descriptions. Files the CLI writes (`changes
   --export`, `playlist-export`) keep their raw form.
 
+- **Opening Orca with an audio-embedding model installed no longer reads and
+  hashes the 32 to 80 MB file on the calling thread.** `setEmbeddingModelPath`
+  and `orca_runtime_set_embedding_model_path` recognise the file by its size.
+  Its SHA-256 is checked when an analysis opens it, on the bytes given to ONNX
+  Runtime, so a file of a model's size with another SHA-256 reads `ready` until
+  an analysis refuses it and `wrong_file` afterwards. A finished model download
+  records the model its worker verified without reading the file again.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

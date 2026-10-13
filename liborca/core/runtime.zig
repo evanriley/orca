@@ -1521,7 +1521,7 @@ pub const OrcaRuntime = struct {
 
     pub fn setEmbeddingModelPath(self: *OrcaRuntime, path: ?[]const u8) !void {
         try requireRunning(self);
-        try self.embedding_model.set(self.allocator, self.control_threaded.io(), path);
+        try self.embedding_model.set(self.control_threaded.io(), path);
     }
 
     pub fn embeddingModelState(self: *const OrcaRuntime) EmbeddingModelState {

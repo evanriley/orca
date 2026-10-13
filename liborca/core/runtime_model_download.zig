@@ -114,8 +114,10 @@ fn finalize(self: *OrcaRuntime, download: *Download, announce: bool) void {
     }
     self.jobs.finish(download.job, outcome.state()) catch {};
     if (!announce) return;
-    if (outcome == .succeeded)
-        self.embedding_model.set(self.allocator, self.control_threaded.io(), download.destination.view()) catch {};
+    if (outcome == .succeeded) self.embedding_model.setVerified(
+        download.destination,
+        audio_embedding.ModelId.ofDigest(download.descriptor.size, &download.descriptor.sha256),
+    );
     self.events.publish(.{
         .request_id = 0,
         .outcome = .{ .job_finished = .{ .job = download.job, .state = outcome.state() } },

@@ -151,9 +151,10 @@ whose `spec()` holds the values below:
 | Vector | 512 values | 768 values |
 
 The host names one model file with `Runtime.setEmbeddingModelPath`. The file
-is recognised by its size and then its SHA-256; a file whose size is neither
-model's is refused without being hashed. `Runtime.embeddingModel` returns the
-model that file is, the active model, or null unless the state is `ready`.
+is recognised by its size when the path is set and by its SHA-256 when an
+analysis opens it; a file whose size is neither model's is refused without
+being hashed. `Runtime.embeddingModel` returns the model of that size, the
+active model, or null unless the state is `ready`.
 The engine downloads a model only when the host calls
 `Runtime.startEmbeddingModelDownload(model, destination)`
 ([control-plane.md](control-plane.md#model-download)). Without a usable model
@@ -172,9 +173,20 @@ same order, `ORCA_EMBEDDING_MODEL_STATE_BUILT_WITHOUT` 0 to `..._READY` 4:
 | `missing` | No path is set, or no file is there |
 | `wrong_file` | The file's size or SHA-256 is neither model's |
 | `unusable` | The file cannot be read, or ONNX Runtime refused it |
-| `ready` | Analysis measures the embedding |
+| `ready` | The file has a model's size; analysis measures the embedding |
 
-The setter reads and hashes the file without loading it into ONNX Runtime.
+The setter opens the file and reads its size, nothing else, so it costs the
+calling thread no I/O in proportion to the model. A file of a model's size
+with another SHA-256 is therefore `ready` until an analysis opens it, and
+`wrong_file` from then on. Opening reads the file into memory once, takes the
+SHA-256 of those bytes and builds the ONNX Runtime session from the same
+bytes, so ONNX Runtime never receives bytes that did not match a compiled-in
+digest. A call that reads stored vectors only, such as similarity, Radio or
+the `orca-cli` commands `similar`, `radio`, `home`, `mixes` and `stats`, never
+opens the model and so does not refuse such a file. The model download checks
+a destination that may already hold the model by streaming it through a fixed
+64 KiB buffer.
+
 Each analysis that starts while the state is `ready` copies the path, opens the
 model when it begins and closes it when it ends. An analysis that cannot open
 it changes the state to `missing`, `wrong_file` or `unusable`, unless the path

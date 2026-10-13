@@ -281,7 +281,10 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `ORCA_MEASUREMENT_EMBEDDING` among them while the audio-embedding model is
   ready), `orca_library_backfill_pending`.
 - Audio embeddings: `orca_runtime_set_embedding_model_path` (the model file's
-  path; NULL clears it; a path that is not the model is not an error) and
+  path; NULL clears it; a path that is not the model is not an error; the
+  call reads the file's size only, and a file of a model's size with another
+  SHA-256 changes from `ORCA_EMBEDDING_MODEL_STATE_READY` to
+  `ORCA_EMBEDDING_MODEL_STATE_WRONG_FILE` when an analysis opens it) and
   `orca_runtime_embedding_model_state` (an `orca_embedding_model_state`, see
   [analysis.md](analysis.md#audio-embedding)), `orca_runtime_embedding_model`
   (the `orca_embedding_model` the file is, 0 unless the state is
@@ -299,8 +302,9 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   It installs a file at `path` only when it has the compiled-in
   size and SHA-256, succeeds without a request when `path` already holds the
   model, and then sets the model path as `orca_runtime_set_embedding_model_path`
-  does. Progress, cancel and the `job_finished` event use the ordinary Job
-  calls; a failed Job's reason is the `detail` of `orca_job_details_get`.
+  does, without reading the file again. Progress, cancel and the
+  `job_finished` event use the ordinary Job calls; a failed Job's reason is
+  the `detail` of `orca_job_details_get`.
   `ORCA_STATUS_INVALID_ARGUMENT` is a `model` that is not an
   `orca_embedding_model`, a NULL or empty `path`, one beyond the maximum path
   length, or a NULL `job`; `ORCA_STATUS_INVALID_STATE` is no

@@ -2428,17 +2428,23 @@ typedef enum orca_embedding_model_state {
     ORCA_EMBEDDING_MODEL_STATE_WRONG_FILE = 2,
     /* The file could not be read, or ONNX Runtime could not load it. */
     ORCA_EMBEDDING_MODEL_STATE_UNUSABLE = 3,
-    /* The file is one of the models; analysis computes audio embeddings with it. */
+    /* The file has the size of one of the models; analysis computes audio
+     * embeddings with it once its SHA-256 has matched. */
     ORCA_EMBEDDING_MODEL_STATE_READY = 4,
 } orca_embedding_model_state;
 
 /* The path of the audio-embedding model file that analysis uses to compute
  * each file's audio embedding. NUL-terminated; copied; NULL clears it. The
- * file is checked by size and SHA-256 now and is the model it matches, an
- * orca_embedding_model, which analysis and similarity then use. A path that
- * names none of the models is not an error: orca_runtime_embedding_model_state
- * reports it. Analysis that starts afterwards uses the new path. ORCA_STATUS_INVALID_ARGUMENT
- * for a path longer than the platform's maximum path length. */
+ * file is recognised by its size now, without being read, as the
+ * orca_embedding_model of that size, which analysis and similarity then use.
+ * Its SHA-256 is checked later, each time an analysis opens it, on the bytes
+ * given to ONNX Runtime: a file of a model's size with another SHA-256 is
+ * ORCA_EMBEDDING_MODEL_STATE_READY until an analysis refuses it, and
+ * ORCA_EMBEDDING_MODEL_STATE_WRONG_FILE from then on. A path that names none
+ * of the models is not an error: orca_runtime_embedding_model_state reports
+ * it. Analysis that starts afterwards uses the new path.
+ * ORCA_STATUS_INVALID_ARGUMENT for a path longer than the platform's maximum
+ * path length. */
 orca_status orca_runtime_set_embedding_model_path(orca_runtime *runtime, const char *path);
 
 /* Writes the orca_embedding_model_state of the model the last
@@ -2469,8 +2475,9 @@ orca_status orca_runtime_embedding_model(orca_runtime *runtime, uint8_t *output)
  * the file there as it was. The directory of `path` is created when it is
  * missing, also by a download that then fails. A `path` that
  * already holds the model succeeds with no request. When the job succeeds the
- * runtime uses the file as orca_runtime_set_embedding_model_path would, so
- * orca_runtime_embedding_model_state then reports it. Needs the client
+ * runtime uses `path` as after orca_runtime_set_embedding_model_path, without
+ * reading the file again: orca_runtime_embedding_model_state then reports the
+ * model the job checked. Needs the client
  * identity of orca_runtime_set_client_identity. One download runs at a time.
  *
  * Read progress and state with orca_job_snapshot_get and the events of
