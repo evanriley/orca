@@ -1281,4 +1281,5 @@ test {
     _ = @import("c_abi_layout.zig");
     _ = @import("library_locks.zig");
     _ = @import("library_roots.zig");
+    _ = @import("upgrade_fixtures.zig");
 }

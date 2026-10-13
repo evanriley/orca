@@ -4,7 +4,7 @@ const quick_hash = @import("../../storage/quick_hash.zig");
 const content_hash = @import("../../storage/content_hash.zig");
 const digestColumn = @import("../columns.zig").digestColumn;
 const max_supported_channels = @import("../../codec/decoder.zig").max_supported_channels;
-const max_supported_channels_sql = std.fmt.comptimePrint("{d}", .{max_supported_channels});
+pub const max_supported_channels_sql = std.fmt.comptimePrint("{d}", .{max_supported_channels});
 
 /// Whether the `files` row named `file` records a channel count that analysis
 /// and playback accept, so results stored for it count as a measurement. A

@@ -25,22 +25,24 @@ state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
 ([the copy made before an upgrade](#the-copy-before-an-upgrade)). A Library
 with no file (in-memory) has none of them.
 
-`PRAGMA user_version` selects the schema. The current version is 6. Each
+`PRAGMA user_version` selects the schema. The current version is 7. Each
 version has one step in `migrations.steps`: `baseline` creates version 1, `v2`
 adds to it without rebuilding any table, `v3` drops and recreates the Daily
 Mix tables, whose rows are made again on the next run, and `v4` rebuilds
 `player_queue_entries` to add its foreign keys, nulling a dangling side while
 keeping the row and its position, `v5` adds `file_audio_embeddings` and
-fills it from the kind 7 results already stored for unchanged files, and `v6`
+fills it from the kind 7 results already stored for unchanged files, `v6`
 rebuilds `file_audio_embeddings` with a `model` column, keeping every row as
 model 1 with the same `file_id`, `source_identity` and `vector`, and fills
-model 2 from the `discogs_maest` results already stored for unchanged files.
+model 2 from the `discogs_maest` results already stored for unchanged files,
+and `v7` adds the materialised sort columns (below), backfilling each from its
+subquery and creating the triggers and indexes that keep and serve it.
 `migrations.apply` runs every step after the database's version, and sets the
 new version, in one transaction, so a failed step leaves the database at its
-old version. A database at version 0 gets the whole schema, versions 1 to 5
-are upgraded in place, version 6 opens unchanged, and any other
+old version. A database at version 0 gets the whole schema, versions 1 to 6
+are upgraded in place, version 7 opens unchanged, and any other
 `user_version`, negative or newer, is refused with `error.SchemaVersionTooNew`
-and left untouched. A Library at version 6 cannot be opened by an Orca whose
+and left untouched. A Library at version 7 cannot be opened by an Orca whose
 schema version is lower.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
@@ -471,6 +473,21 @@ The tables by purpose; keys are those that carry identity or a contract.
   `audio_hash_tier`, `first_seen_at` and declared audio properties.
 - `locations`: `UNIQUE(volume_id, uri)`, `state`, inode, size and modification
   time.
+- Materialised sort columns, added at version 7 so the Songs sorts page at any
+  offset from an index rather than a per-row subquery: `files.sort_lufs` (the
+  integrated loudness that counts for the file, else NULL) and
+  `tracks.first_genre_id` (the ordinal-0 genre, else NULL). Each is authoritative
+  after migration: NULL means none, with no fallback. Triggers on
+  `track_genres`, `file_loudness` and `files` recompute the affected rows from
+  the same subquery the backfill used, so a writer never sets a column directly;
+  the `files` trigger fires only when `content_hash`, `content_hash_algorithm`
+  or `channels` changes value.
+  `files_by_sort_lufs`/`files_without_sort_lufs` and
+  `tracks_by_first_genre`/`tracks_without_first_genre` serve both the present
+  and the absent side of each sort. `migrations.sort_columns_drift_sql` counts
+  the rows whose column disagrees with its subquery and must be zero. The path
+  sort has no column: it orders by the best non-missing location's `uri`
+  through a subquery, and the sorted snapshot serves deep offsets.
 - `scan_runs`: one row per walk with its generation and end state.
 - `folder_images`: images beside the music, unique on `(volume_id, uri)`, never
   `files` rows, so they never reach projection, analysis or stats. `role` is
@@ -936,3 +953,31 @@ scan, the analysis pass and provider jobs. Orca copies the file only
 Repository tests live beside their modules under `liborca/database/` and
 `liborca/library/`. `zig build bench` generates 500,000 Tracks without a scanner
 and measures insertion, reopen and search latency.
+
+### Upgrade fixtures
+
+`fixtures/library/upgrade/v<N>.sqlite` is a binary database at schema version
+N, for every version from 1 to the current one, with rows in every user table.
+`tests/upgrade_fixtures.zig` copies each one, opens it through
+`LibraryDatabase.open`, and compares it with a database created at the current
+version from the same rows: the same tables, the same row counts, and the same
+rows column by column, including the tables and columns that triggers
+maintain (`genre_totals`, `genre_release_tracks`, `genre_artist_refs`,
+`file_loudness`, `file_audio_features`, `file_audio_embeddings`,
+`files.sort_lufs` and `tracks.first_genre_id`). Opening the
+newest fixture leaves its file byte-identical.
+
+The rows come from `tests/upgrade_fixtures/seed-v<N>.sql`, applied after the
+steps up to version N. Rows a later step drops or rewrites by design (the Daily
+Mix rows at `v3`, the dangling queue ids at `v4`) are in
+`legacy-v<N>.sql`, which only the fixtures get, and `settled-v<N>.sql`, which
+only the comparison database gets. A schema change adds a version stage to
+`tests/upgrade_fixtures/seed.zig` and a `seed-v<N>.sql` that fills each new
+table and column, then regenerates the fixtures:
+
+```sh
+zig build regenerate-upgrade-fixtures
+```
+
+The generator writes the same bytes each time, so a regeneration that changes
+a committed fixture means the seeds or an already released step changed.

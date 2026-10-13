@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 
-pub const current_version = 6;
+pub const current_version = 7;
 
 const baseline =
     \\CREATE TABLE volumes (
@@ -1504,7 +1504,54 @@ const v6: [:0]const u8 =
     \\
 ++ embeddingTriggers(v6_clap) ++ embeddingTriggers(v6_maest) ++ embeddingBackfill(v6_maest);
 
-const steps = [_][:0]const u8{ baseline, v2, v3, v4, v5, v6 };
+const first_genre_value =
+    "(SELECT genre_id FROM track_genres WHERE track_id = tracks.id AND ordinal = 0)";
+
+const sort_lufs_value =
+    "CASE WHEN content_hash_algorithm = 1 AND channels <= " ++ repository.max_supported_channels_sql ++ "\n" ++
+    "    THEN (SELECT integrated_lufs FROM file_loudness WHERE file_id = files.id AND source_identity = files.content_hash) END";
+
+const v7: [:0]const u8 =
+    "ALTER TABLE tracks ADD COLUMN first_genre_id INTEGER;\n" ++
+    "ALTER TABLE files ADD COLUMN sort_lufs REAL;\n" ++
+    "UPDATE tracks SET first_genre_id = " ++ first_genre_value ++ ";\n" ++
+    "UPDATE files SET sort_lufs = " ++ sort_lufs_value ++ ";\n" ++
+    "CREATE TRIGGER track_genres_first_genre_ai AFTER INSERT ON track_genres\n" ++
+    "WHEN new.ordinal = 0\n" ++
+    "BEGIN\n" ++
+    "    UPDATE tracks SET first_genre_id = new.genre_id WHERE id = new.track_id;\n" ++
+    "END;\n" ++
+    "CREATE TRIGGER track_genres_first_genre_ad AFTER DELETE ON track_genres\n" ++
+    "WHEN old.ordinal = 0\n" ++
+    "BEGIN\n" ++
+    "    UPDATE tracks SET first_genre_id = " ++ first_genre_value ++ " WHERE id = old.track_id;\n" ++
+    "END;\n" ++
+    "CREATE TRIGGER track_genres_first_genre_au AFTER UPDATE OF track_id, genre_id, ordinal ON track_genres\n" ++
+    "BEGIN\n" ++
+    "    UPDATE tracks SET first_genre_id = " ++ first_genre_value ++ " WHERE id = new.track_id;\n" ++
+    "    UPDATE tracks SET first_genre_id = " ++ first_genre_value ++ " WHERE id = old.track_id AND old.track_id IS NOT new.track_id;\n" ++
+    "END;\n" ++
+    "CREATE TRIGGER file_loudness_sort_ai AFTER INSERT ON file_loudness\n" ++
+    "BEGIN\n" ++
+    "    UPDATE files SET sort_lufs = " ++ sort_lufs_value ++ " WHERE id = new.file_id;\n" ++
+    "END;\n" ++
+    "CREATE TRIGGER file_loudness_sort_ad AFTER DELETE ON file_loudness\n" ++
+    "BEGIN\n" ++
+    "    UPDATE files SET sort_lufs = NULL WHERE id = old.file_id;\n" ++
+    "END;\n" ++
+    "CREATE TRIGGER files_sort_lufs_au AFTER UPDATE OF content_hash, content_hash_algorithm, channels ON files\n" ++
+    "WHEN old.content_hash IS NOT new.content_hash\n" ++
+    "    OR old.content_hash_algorithm IS NOT new.content_hash_algorithm\n" ++
+    "    OR old.channels IS NOT new.channels\n" ++
+    "BEGIN\n" ++
+    "    UPDATE files SET sort_lufs = " ++ sort_lufs_value ++ " WHERE id = new.id;\n" ++
+    "END;\n" ++
+    "CREATE INDEX files_by_sort_lufs ON files(sort_lufs) WHERE sort_lufs IS NOT NULL;\n" ++
+    "CREATE INDEX files_without_sort_lufs ON files(id) WHERE sort_lufs IS NULL;\n" ++
+    "CREATE INDEX tracks_by_first_genre ON tracks(first_genre_id, id) WHERE first_genre_id IS NOT NULL;\n" ++
+    "CREATE INDEX tracks_without_first_genre ON tracks(id) WHERE first_genre_id IS NULL;\n";
+
+const steps = [_][:0]const u8{ baseline, v2, v3, v4, v5, v6, v7 };
 
 comptime {
     std.debug.assert(steps.len == current_version);
@@ -1586,6 +1633,10 @@ pub const genre_totals_drift_sql =
     \\     + (SELECT count(*) FROM (SELECT * FROM genre_artist_refs EXCEPT SELECT * FROM fresh_artists))
     \\     + (SELECT count(*) FROM (SELECT * FROM fresh_artists EXCEPT SELECT * FROM genre_artist_refs));
 ;
+
+pub const sort_columns_drift_sql: [:0]const u8 =
+    "SELECT (SELECT count(*) FROM tracks WHERE first_genre_id IS NOT " ++ first_genre_value ++ ")\n" ++
+    "     + (SELECT count(*) FROM files WHERE sort_lufs IS NOT " ++ sort_lufs_value ++ ");";
 
 const scalar = @import("columns.zig").scalar;
 
@@ -2790,7 +2841,7 @@ test "a version 5 library upgrades to version 6 keeping its embeddings byte for 
 
     try apply(db);
 
-    try std.testing.expectEqual(@as(i64, 6), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try expectBaselineRowsKept(db);
     try std.testing.expectEqual(@as(i64, 11), try scalar(db, "SELECT count(*) FROM analysis_results;"));
     const kept = try embeddingRows(
@@ -2845,7 +2896,7 @@ test "a version 5 library whose upgrade fails stays at version 5 with its embedd
 test "a fresh library has the audio embedding table and its triggers at the current version" {
     const db = try fresh();
     defer db.close();
-    try std.testing.expectEqual(@as(i64, 6), current_version);
+    try std.testing.expectEqual(@as(i64, 7), current_version);
     try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 8), try scalar(db,
         \\SELECT count(*) FROM sqlite_master WHERE name IN (
@@ -2857,6 +2908,164 @@ test "a fresh library has the audio embedding table and its triggers at the curr
         \\SELECT count(*) FROM sqlite_master WHERE name IN (
         \\    'analysis_results_embedding_ai', 'analysis_results_embedding_au', 'analysis_results_embedding_ad');
     ));
+}
+
+fn atVersion6() !sqlite.Database {
+    const db = try atVersion5();
+    errdefer db.close();
+    try db.exec(v6);
+    try db.exec("PRAGMA user_version=6;");
+    return db;
+}
+
+test "a version 6 library upgrades to the current version materialising the sort columns from their subqueries and matching the fresh schema" {
+    const db = try atVersion6();
+    defer db.close();
+    try db.exec(
+        \\INSERT INTO library_roots(id, volume_id, path) VALUES (1, 1, '/music');
+        \\UPDATE files SET content_hash = x'aa', content_hash_algorithm = 1, channels = 2 WHERE id = 1;
+        \\UPDATE files SET content_hash = x'bb', content_hash_algorithm = 1, channels = 6 WHERE id = 2;
+        \\INSERT INTO files(id, recording_id, audio_format, size_bytes, content_hash, content_hash_algorithm, channels) VALUES
+        \\    (3, 1, 1, 10, x'cc', 2, 2), (4, 1, 1, 10, x'dd', 1, 2), (5, 1, 1, 10, x'ee', 1, 2);
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state) VALUES
+        \\    (1, 1, 1, 'file:///m/a-present.flac', 'present'),
+        \\    (1, 1, 1, 'file:///m/a-unverified.flac', 'unverified'),
+        \\    (1, 1, 1, 'file:///m/a-missing.flac', 'missing'),
+        \\    (2, 1, 1, 'file:///m/b-missing.flac', 'missing'),
+        \\    (3, 1, 1, 'file:///m/c-unverified.flac', 'unverified');
+        \\INSERT INTO file_loudness(file_id, source_identity, integrated_lufs) VALUES
+        \\    (1, x'aa', -14.0), (2, x'bb', -9.0), (3, x'cc', -7.0), (5, x'ff', -3.0);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Rock', 'rock'), (2, 'Jazz', 'jazz');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (10, 2, 0, 0), (10, 1, 1, 0);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try expectBaselineRowsKept(db);
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1 AND sort_lufs = -14.0;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 3 AND sort_lufs IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE sort_lufs IS NOT NULL;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT first_genre_id FROM tracks WHERE id = 10;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM tracks WHERE first_genre_id IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_foreign_key_check;"));
+
+    const upgraded = try schemaObjects(std.testing.allocator, db);
+    defer std.testing.allocator.free(upgraded);
+    const created = try fresh();
+    defer created.close();
+    const fresh_schema = try schemaObjects(std.testing.allocator, created);
+    defer std.testing.allocator.free(fresh_schema);
+    try std.testing.expectEqualStrings(fresh_schema, upgraded);
+}
+
+test "a version 6 library whose upgrade fails rolls back and leaves it at version 6 without the sort columns" {
+    const db = try atVersion6();
+    defer db.close();
+    try db.exec("INSERT INTO locations(file_id, volume_id, uri, state) VALUES (1, 1, 'file:///x.flac', 'present');");
+    try db.exec("CREATE INDEX files_by_sort_lufs ON files(id);");
+
+    try std.testing.expectError(error.SqlFailed, apply(db));
+
+    try std.testing.expectEqual(@as(i64, 6), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_table_info('files') WHERE name = 'sort_lufs';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'first_genre_id';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM sqlite_master WHERE name = 'track_genres_first_genre_ai';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM locations;"));
+}
+
+test "the sort_lufs migration embeds the decoder's measurable-channel limit so the backfill cannot drift from the query" {
+    try std.testing.expect(std.mem.indexOf(u8, v7, "channels <= " ++ repository.max_supported_channels_sql ++ "\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sort_columns_drift_sql, "channels <= " ++ repository.max_supported_channels_sql) != null);
+}
+
+const loudness_result_minus23 =
+    "CAST(x'4F5241440200' || x'0100' || x'0000B8C1' || zeroblob(60) AS BLOB)";
+const loudness_result_minus14 =
+    "CAST(x'4F5241440200' || x'0100' || x'000060C1' || zeroblob(60) AS BLOB)";
+
+test "the sort columns stay equal to their subqueries after location, genre, loudness and file writes" {
+    const db = try fresh();
+    defer db.close();
+    try db.exec(
+        \\INSERT INTO volumes(id, stable_key, label) VALUES (2, 'second', 'Second');
+        \\INSERT INTO library_roots(id, volume_id, path) VALUES (1, 1, '/music'), (2, 2, '/elsewhere');
+        \\INSERT INTO recordings(id, title) VALUES (1, 'R1'), (2, 'R2');
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Rel', 'rel');
+        \\INSERT INTO files(id, recording_id, audio_format, size_bytes, content_hash, content_hash_algorithm, channels) VALUES
+        \\    (1, 1, 1, 10, x'aa', 1, 2), (2, 2, 1, 10, x'bb', 1, 2), (3, 1, 1, 10, x'cc', 1, 6);
+        \\INSERT INTO tracks(id, release_id, recording_id, title) VALUES (10, 1, 1, 'T10'), (11, 1, 2, 'T11');
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Rock', 'rock'), (2, 'Jazz', 'jazz'), (3, 'Pop', 'pop');
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+
+    try db.exec(
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, size_bytes, modified_ns, state, last_seen_generation)
+        \\VALUES (1, 1, 1, 'file:///music/one.flac', 10, 0, 'unverified', 1)
+        \\ON CONFLICT(volume_id, uri) DO UPDATE SET file_id=excluded.file_id, state=excluded.state;
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1 AND sort_lufs IS NULL;"));
+
+    try db.exec(
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, size_bytes, modified_ns, state, last_seen_generation)
+        \\VALUES (1, 1, 1, 'file:///music/one.flac', 10, 0, 'present', 2)
+        \\ON CONFLICT(volume_id, uri) DO UPDATE SET file_id=excluded.file_id, state=excluded.state;
+        \\INSERT INTO locations(file_id, volume_id, root_id, uri, state, last_seen_generation)
+        \\VALUES (1, 1, 1, 'file:///music/one-alt.flac', 'unverified', 2);
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+
+    const location_writes = [_][:0]const u8{
+        "UPDATE locations SET last_seen_generation=max(last_seen_generation, 9) WHERE id=1;",
+        "UPDATE locations SET uri='file:///music/moved.flac', state='present', missing_since=NULL WHERE id=2;",
+        "UPDATE locations SET file_id=2, state='present', missing_since=NULL WHERE volume_id=1 AND uri='file:///music/one.flac';",
+        "UPDATE OR IGNORE locations SET volume_id=2, root_id=2 WHERE id=2;",
+        "UPDATE locations SET state='missing', missing_since=unixepoch() WHERE file_id=1 AND state<>'missing';",
+        "UPDATE locations SET state='missing', missing_since=unixepoch() WHERE root_id=1 AND last_seen_generation<100 AND state<>'missing';",
+        "DELETE FROM locations WHERE root_id=1;",
+    };
+    for (location_writes) |write| {
+        try db.exec(write);
+        try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+    }
+
+    const genre_writes = [_][:0]const u8{
+        "INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (10, 2, 0, 0), (10, 1, 1, 0);",
+        "DELETE FROM track_genres WHERE track_id = 10 AND provenance = 0;",
+        "INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (10, 3, 0, 0), (10, 1, 1, 1);",
+        "UPDATE track_genres SET genre_id = 2 WHERE track_id = 10 AND ordinal = 0;",
+        "INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) SELECT 11, genre_id, ordinal, provenance FROM track_genres WHERE track_id = 10 AND provenance = 1;",
+        "DELETE FROM track_genres WHERE track_id = 10;",
+    };
+    for (genre_writes) |write| {
+        try db.exec(write);
+        try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+    }
+
+    try db.exec(
+        "INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES " ++
+            "(1, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'aa', " ++ loudness_result_minus23 ++ ");",
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1 AND sort_lufs = -23.0;"));
+
+    const loudness_writes = [_][:0]const u8{
+        "INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES " ++
+            "(1, 1, 'orca.audio-diagnostics', 4, x'A5D7A479D64C3952CA86E311AFFEBB0CFCA41DAF406C7AA159255961CF9145CE', x'aa', " ++ loudness_result_minus14 ++ ") " ++
+            "ON CONFLICT DO UPDATE SET result = excluded.result;",
+        "UPDATE files SET channels = 6 WHERE id = 1;",
+        "UPDATE files SET channels = 2 WHERE id = 1;",
+        "UPDATE files SET content_hash = x'99' WHERE id = 1;",
+        "UPDATE files SET content_hash = x'aa' WHERE id = 1;",
+        "DELETE FROM analysis_results WHERE file_id = 1;",
+    };
+    for (loudness_writes) |write| {
+        try db.exec(write);
+        try std.testing.expectEqual(@as(i64, 0), try scalar(db, sort_columns_drift_sql));
+    }
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM files WHERE sort_lufs IS NOT NULL;"));
 }
 
 test "a daily mix keeps one row per ordinal, its artists and entries go with it, and an entry goes with its recording" {

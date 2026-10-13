@@ -183,6 +183,34 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const upgrade_fixture_versions = 7;
+    const upgrade_seed_module = b.createModule(.{
+        .root_source_file = b.path("tests/upgrade_fixtures/seed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+    });
+    const generate_upgrade_fixtures = b.addExecutable(.{
+        .name = "generate-upgrade-fixtures",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/upgrade_fixtures/generate.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "liborca", .module = liborca_module },
+                .{ .name = "upgrade_seed", .module = upgrade_seed_module },
+            },
+        }),
+    });
+    const run_generate_upgrade_fixtures = b.addRunArtifact(generate_upgrade_fixtures);
+    run_generate_upgrade_fixtures.addArg("fixtures/library/upgrade");
+    run_generate_upgrade_fixtures.has_side_effects = true;
+    const regenerate_upgrade_fixtures = b.step(
+        "regenerate-upgrade-fixtures",
+        "Rewrite fixtures/library/upgrade, one library per released schema version",
+    );
+    regenerate_upgrade_fixtures.dependOn(&run_generate_upgrade_fixtures.step);
+
     const integration_options = b.addOptions();
     integration_options.addOptionPath("orca_cli", cli.getEmittedBin());
     const integration_tests = b.addTest(.{
@@ -193,11 +221,15 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "liborca", .module = liborca_module },
                 .{ .name = "integration_options", .module = integration_options.createModule() },
+                .{ .name = "upgrade_seed", .module = upgrade_seed_module },
                 .{ .name = "orca_h", .module = orca_header_translate.createModule() },
             },
         }),
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
+    for (1..upgrade_fixture_versions + 1) |version| {
+        run_integration_tests.addFileInput(b.path(b.fmt("fixtures/library/upgrade/v{d}.sqlite", .{version})));
+    }
 
     const abi_compat_module = b.createModule(.{
         .root_source_file = b.path("tests/abi/compat.zig"),

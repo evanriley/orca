@@ -1001,10 +1001,10 @@ pub const track_columns =
     "       ratings.rating, play_file.codec, play_file.sample_rate, play_file.bit_depth,\n" ++
     "       play_file.first_seen_at, COALESCE(recording_play_stats.play_count, 0),\n" ++
     "       recording_play_stats.last_played_at, tracks.explicit, tracks.track_total,\n" ++
-    "       tracks.disc_total, " ++ release_year ++ ", " ++ play_file_loudness ++ ",\n" ++
+    "       tracks.disc_total, " ++ release_year ++ ", play_file.sort_lufs,\n" ++
     "       " ++ play_file_bitrate ++ ",\n" ++
     "       COALESCE(" ++ play_file_path ++ ", ''), track_release.album_artist_id,\n" ++
-    "       COALESCE(" ++ first_genre_name ++ ", '')\n";
+    "       COALESCE(first_genre.name, '')\n";
 
 /// How many columns `track_columns` selects, so a query that appends its own
 /// columns can read them past the end.
@@ -1015,32 +1015,30 @@ pub const release_year =
     "CASE WHEN substr(track_release.release_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]' " ++
     "THEN CAST(substr(track_release.release_date, 1, 4) AS INTEGER) END";
 
-const play_file_bitrate =
-    "CASE WHEN play_file.size_bytes > 0 AND play_file.duration_ms > 0 THEN " ++ indexed_bitrate ++ " END";
-
-const indexed_bitrate = "(play_file.size_bytes * 8 + play_file.duration_ms / 2) / play_file.duration_ms";
-
 fn bestLocation(comptime column: []const u8, comptime file_id: []const u8) []const u8 {
     return "(SELECT best_location." ++ column ++ " FROM locations AS best_location\n" ++
         "    WHERE best_location.file_id = " ++ file_id ++ " AND best_location.state <> 'missing'\n" ++
         "    ORDER BY CASE best_location.state WHEN 'present' THEN 0 ELSE 1 END, best_location.id LIMIT 1)";
 }
 
+const play_file_bitrate =
+    "CASE WHEN play_file.size_bytes > 0 AND play_file.duration_ms > 0 THEN " ++ indexed_bitrate ++ " END";
+
+const indexed_bitrate = "(play_file.size_bytes * 8 + play_file.duration_ms / 2) / play_file.duration_ms";
+
 const play_file_join = "LEFT JOIN files AS play_file ON play_file.id = " ++ track_play_file ++ "\n";
 pub const play_file_loudness = "(SELECT file_loudness.integrated_lufs FROM file_loudness " ++
     "WHERE file_loudness.file_id = play_file.id AND file_loudness.source_identity = play_file.content_hash " ++
     "AND play_file.content_hash_algorithm = 1 AND " ++ measurableChannels("play_file") ++ ")";
 const play_file_path = bestLocation("uri", "play_file.id");
-const first_genre_id = "(SELECT first_track_genre.genre_id FROM track_genres AS first_track_genre " ++
-    "WHERE first_track_genre.track_id = tracks.id AND first_track_genre.ordinal = 0)";
-const first_genre_name = "(SELECT first_genre.name FROM genres AS first_genre WHERE first_genre.id = " ++
-    first_genre_id ++ ")";
+const first_genre_join = "LEFT JOIN genres AS first_genre ON first_genre.id = tracks.first_genre_id\n";
 
 pub const recording_joins =
     "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n" ++
     "LEFT JOIN ratings ON ratings.recording_id = tracks.recording_id\n" ++
     "LEFT JOIN recording_play_stats ON recording_play_stats.recording_id = tracks.recording_id\n" ++
     play_file_join ++
+    first_genre_join ++
     "LEFT JOIN releases AS track_release ON track_release.id = tracks.release_id\n";
 
 const TrackFilter = enum { none, artist, release, artist_and_release };
@@ -1079,14 +1077,14 @@ pub fn orderTerms(comptime sort: TrackSort, comptime direction: SortDirection) [
         .last_played => "recording_play_stats.last_played_at IS NULL, " ++
             "recording_play_stats.last_played_at" ++ suffix ++ tiebreak,
         .year => "(" ++ release_year ++ ") IS NULL, " ++ release_year ++ suffix ++ tiebreak,
-        .loudness => play_file_loudness ++ suffix ++ " NULLS LAST" ++ tiebreak,
+        .loudness => "play_file.sort_lufs" ++ suffix ++ " NULLS LAST" ++ tiebreak,
         .bitrate => "(" ++ play_file_bitrate ++ ") IS NULL, " ++ play_file_bitrate ++ suffix ++ tiebreak,
         .path => play_file_path ++ suffix ++ " NULLS LAST" ++ tiebreak,
         .album_artist => "tracks.album_artist COLLATE NOCASE" ++ suffix ++
             ", tracks.album COLLATE NOCASE" ++ suffix ++
             ", " ++ positionTerms(direction) ++ tiebreak,
-        .genre => first_genre_name ++ " COLLATE NOCASE" ++ suffix ++ " NULLS LAST, " ++
-            first_genre_id ++ suffix ++ tiebreak,
+        .genre => "first_genre.name COLLATE NOCASE" ++ suffix ++ " NULLS LAST, " ++
+            "first_genre.id" ++ suffix ++ tiebreak,
     };
 }
 
@@ -1321,8 +1319,8 @@ const candidate_offset_max = 50_000;
 fn snapshotApplies(query: TrackQuery) bool {
     if (query.genre_id != null) return true;
     return switch (query.sort) {
-        .play_count, .last_played, .rating, .loved, .year, .date_added => true,
-        .id, .artist, .album, .title, .track_number, .duration, .album_artist, .loudness, .bitrate, .path, .genre => false,
+        .play_count, .last_played, .rating, .loved, .year, .date_added, .loudness, .bitrate, .path, .genre => true,
+        .id, .artist, .album, .title, .track_number, .duration, .album_artist => false,
     };
 }
 
@@ -1406,16 +1404,12 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
             "play_file.first_seen_at" ++ suffix ++ ", " ++ by_id,
         ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction),
         .loudness => candidatePart(
-            "file_loudness CROSS JOIN files AS play_file ON play_file.id = file_loudness.file_id " ++
-                "AND play_file.content_hash = file_loudness.source_identity AND play_file.content_hash_algorithm = 1 " ++
-                "AND " ++ measurableChannels("play_file") ++ "\n" ++
-                "CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id",
-            "file_loudness.integrated_lufs" ++ suffix ++ ", " ++ by_id,
+            "files AS play_file CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id\n" ++
+                "WHERE play_file.sort_lufs IS NOT NULL",
+            "play_file.sort_lufs" ++ suffix ++ ", " ++ by_id,
         ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
-            "tracks WHERE tracks.preferred_file_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM files " ++
-                "CROSS JOIN file_loudness ON file_loudness.file_id = files.id " ++
-                "AND file_loudness.source_identity = files.content_hash AND files.content_hash_algorithm = 1 " ++
-                "WHERE files.id = tracks.preferred_file_id AND " ++ measurableChannels("files") ++ ")",
+            "files AS play_file CROSS JOIN tracks ON tracks.preferred_file_id = play_file.id\n" ++
+                "WHERE play_file.sort_lufs IS NULL",
             by_id,
         ),
         .bitrate => candidatePart(
@@ -1438,15 +1432,9 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
             by_id,
         ),
         .genre => candidatePart(
-            "genres AS first_genre CROSS JOIN track_genres AS first_track_genre " ++
-                "ON first_track_genre.genre_id = first_genre.id AND first_track_genre.ordinal = 0\n" ++
-                "CROSS JOIN tracks ON tracks.id = first_track_genre.track_id",
+            "genres AS first_genre CROSS JOIN tracks ON tracks.first_genre_id = first_genre.id",
             "first_genre.name COLLATE NOCASE" ++ suffix ++ ", first_genre.id" ++ suffix ++ ", " ++ by_id,
-        ) ++ "UNION ALL\n" ++ candidatePart(
-            "tracks WHERE NOT EXISTS (SELECT 1 FROM track_genres " ++
-                "WHERE track_genres.track_id = tracks.id AND track_genres.ordinal = 0)",
-            by_id,
-        ),
+        ) ++ "UNION ALL\n" ++ candidatePart("tracks WHERE tracks.first_genre_id IS NULL", by_id),
     };
 }
 
@@ -1463,7 +1451,8 @@ fn candidatePart(comptime from: []const u8, comptime order: []const u8) []const 
 /// chosen without joining every row of the library to all of them.
 fn sortJoin(comptime sort: TrackSort) []const u8 {
     return switch (sort) {
-        .id, .artist, .album, .title, .track_number, .duration, .album_artist, .genre => "",
+        .id, .artist, .album, .title, .track_number, .duration, .album_artist => "",
+        .genre => first_genre_join,
         .date_added, .bitrate, .loudness, .path => play_file_join,
         .rating => "LEFT JOIN ratings ON ratings.recording_id = tracks.recording_id\n",
         .loved => "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n",
@@ -1773,6 +1762,13 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
         \\    SELECT id, 1, '/a/' || id, 'present' FROM files WHERE id % 3 = 1;
     );
 
+    try std.testing.expectEqual(@as(i64, 0), try @import("../columns.zig").scalar(library.database, @import("../migrations.zig").sort_columns_drift_sql));
+    const reader = try library.openReader();
+    defer reader.close();
+    const repositories = [_]TrackRepository{
+        library.tracks,
+        .{ .db = reader, .write_lane = library.write_lane },
+    };
     const windows = [_][2]u32{ .{ 30, 0 }, .{ 5, 0 }, .{ 5, 7 }, .{ 4, 26 }, .{ 10, 25 } };
     inline for (.{ .play_count, .last_played, .rating, .loved, .year, .date_added, .loudness, .bitrate, .path, .album_artist, .genre }) |sort| {
         inline for (.{ .ascending, .descending }) |direction| {
@@ -1780,8 +1776,8 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
                 recording_joins ++ "ORDER BY " ++
                 comptime orderTerms(sort, direction) ++ "\nLIMIT ?1 OFFSET ?2;");
             defer expected.deinit();
-            for (windows) |window| for ([_]PageForm{ .scan, .candidates }) |form| {
-                var page = try library.tracks.pageAs(std.testing.allocator, .{
+            for (repositories) |repository| for (windows) |window| for ([_]PageForm{ .scan, .candidates }) |form| {
+                var page = try repository.pageAs(std.testing.allocator, .{
                     .sort = sort,
                     .direction = direction,
                     .limit = window[0],
@@ -2073,23 +2069,18 @@ test "a whole-library page by loudness, bitrate, path, album artist or first gen
     );
     defer library.close();
     inline for (.{
-        .{ TrackSort.loudness, PageForm.candidates, "SCAN file_loudness USING INDEX file_loudness_by_lufs\n" },
+        .{ TrackSort.loudness, PageForm.candidates, "SEARCH play_file USING COVERING INDEX files_by_sort_lufs (sort_lufs>?)\n" },
+        .{ TrackSort.loudness, PageForm.candidates, "SCAN play_file USING INDEX files_without_sort_lufs\n" },
         .{ TrackSort.bitrate, PageForm.candidates, "SCAN play_file USING INDEX files_by_bitrate\n" },
         .{ TrackSort.bitrate, PageForm.candidates, "SCAN play_file USING INDEX files_without_bitrate\n" },
         .{ TrackSort.path, PageForm.candidates, "SCAN play_location USING INDEX locations_by_uri\n" },
         .{ TrackSort.album_artist, PageForm.scan, "SCAN tracks USING INDEX tracks_sort_album_artist\n" },
         .{ TrackSort.genre, PageForm.candidates, "SCAN first_genre USING COVERING INDEX genres_by_name\n" },
+        .{ TrackSort.genre, PageForm.candidates, "SEARCH tracks USING COVERING INDEX tracks_by_first_genre (first_genre_id=?)\n" },
     }) |case| inline for (.{ SortDirection.ascending, SortDirection.descending }) |direction| {
-        var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++
-            comptime trackQueryText(.none, false, false, case[0], direction, case[1]));
-        defer statement.deinit();
-        var plan: std.ArrayList(u8) = .empty;
-        defer plan.deinit(std.testing.allocator);
-        while (try statement.step() == .row) {
-            try plan.appendSlice(std.testing.allocator, statement.columnText(3));
-            try plan.append(std.testing.allocator, '\n');
-        }
-        try std.testing.expect(std.mem.indexOf(u8, plan.items, case[2]) != null);
+        const plan = try explainPlan(&library, comptime trackQueryText(.none, false, false, case[0], direction, case[1]));
+        defer std.testing.allocator.free(plan);
+        try std.testing.expect(std.mem.indexOf(u8, plan, case[2]) != null);
     };
 }
 
@@ -2106,6 +2097,19 @@ test "a whole-library page by path tests each file's locations from the index of
         try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN unlocated_file") != null);
         try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH locations USING COVERING INDEX locations_held (file_id=?)\n") != null);
     }
+}
+
+test "a whole-library page by first genre lists the Tracks without one from tracks_without_first_genre in id order" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-genre-tail-plan?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const plan = try explainPlan(&library, comptime candidatePart("tracks WHERE tracks.first_genre_id IS NULL", "tracks.id"));
+    defer std.testing.allocator.free(plan);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN tracks USING INDEX tracks_without_first_genre\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "USE TEMP B-TREE") == null);
 }
 
 test "an unnarrowed listing filtered by its files collects the matching files once, and a narrowed one does not" {
