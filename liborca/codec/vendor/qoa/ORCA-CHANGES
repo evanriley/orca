@@ -1,0 +1,19 @@
+phoboslab's QOA decoder, vendored for Orca.
+
+Upstream: https://github.com/phoboslab/qoa
+Commit:   bc0589710ff6aa2f50e08fb4d0a815d567bc0f3e (2026-09-27, head of master)
+Licence:  MIT (LICENSE)
+
+Files taken from the repository at that commit:
+  qoa.h
+and LICENSE from the repository root.
+
+qoa.h is compiled by liborca/codec/qoa_shim.c, which decodes QOA frames. This
+commit already carries the 2026 decoder hardening (af36bdf, 7328d93, 3c1d9f1,
+f73b4a3).
+
+sha256 of qoa.h:
+  7b2396063eb960b10001db7db28ba25e284d4e772191968012e612dc8834952c
+
+Vendored unmodified. This file records the exact commit so a future advisory
+can be matched to Orca's copy.

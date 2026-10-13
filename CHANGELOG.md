@@ -196,6 +196,12 @@
   instead of as a generic failure. `liborca.libraryUpgradeCopyPath` returns the
   copy's path. The scanner and the folder watcher ignore the copy.
 
+- **Every vendored decoder records its exact upstream commit.** New
+  `ORCA-CHANGES` files beside the vendored minimp3 (lieff/minimp3 `ea99364f`,
+  CC0) and QOA (phoboslab/qoa `bc058971`, MIT) sources record the upstream
+  repository, commit, licence, compiled files and header SHA-256, both vendored
+  unmodified, so a future advisory can be matched to Orca's copy.
+
 ### Fixed
 
 - **Pull-request CI no longer skips building after a docs-only follow-up push.**
@@ -382,6 +388,14 @@
   Problems, the first-run screens, the Libraries list and the Settings About
   and duplicate-scan rows keep their last numbers until the new ones arrive.
   The C ABI still has only the synchronous calls.
+
+- **libxaac is pinned to a newer upstream commit for decoder security fixes.**
+  `build.zig.zon` moves libxaac from tag v0.1.13 to `main` commit
+  2fbadd57bca46693b7a077bcf1513131106d960c, which lands six AAC-decoder
+  hardening fixes, including OSV-2026-1043 in the loudness-levelling path Orca
+  builds with `-DLOUDNESS_LEVELING_SUPPORT`. The Nix `fetchDeps` hash is
+  updated to match. No encoder code is compiled, so the encoder-side advisories
+  do not apply.
 
 ## 0.4.0 - 2026-10-11
 
