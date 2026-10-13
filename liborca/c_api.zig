@@ -9994,7 +9994,7 @@ fn mapError(err: anyerror) Status {
         error.RadioNotActive, error.NoAudioEmbedding => .invalid_state,
         error.TrackNotOnRelease, error.UnknownReleaseTrack => .not_found,
         error.NoReleaseTracklist, error.ReleaseTrackAlreadyPaired, error.ReleaseNotPlaced => .invalid_state,
-        error.ReleaseTooLarge, error.EmbeddingsNotBuilt => .unsupported,
+        error.ReleaseTooLarge, error.EmbeddingsNotBuilt, error.SchemaVersionTooNew => .unsupported,
         error.MutationGroupAlreadyUndone, error.TrackNotPaired, error.ReleaseNotReviewed => .already_done,
         error.MutationNeedsReconciliation => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
@@ -11650,6 +11650,10 @@ test "artwork requests past 64 outstanding are busy until a result is taken, and
     try std.testing.expectEqual(@as(usize, 0), captured.image.length);
     try std.testing.expectEqual(Status.ok, orca_library_request_artwork(runtime, library, 0, 3, &request));
     try std.testing.expectEqual(Status.busy, orca_library_request_artwork(runtime, library, 0, 3, &request));
+}
+
+test "a Library that a newer Orca migrated is unsupported, whether the open or a later write met it" {
+    try std.testing.expectEqual(Status.unsupported, mapError(error.SchemaVersionTooNew));
 }
 
 test "an undone, unreconciled or pruned tag write and a write still running each report their own status" {

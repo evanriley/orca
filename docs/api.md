@@ -144,7 +144,10 @@ sleep: 0 to pump now, null to wait for the waker alone. See
 - `openLibrary` upgrades a Library written by an earlier release in place,
   after writing a copy of it beside the database; it fails with
   `error.PreUpgradeCopyFailed` when the copy cannot be written and with
-  `error.SchemaVersionTooNew` when a newer Orca wrote the Library.
+  `error.SchemaVersionTooNew` when a newer Orca wrote the Library. A call
+  that writes to an open Library fails with the same error once another
+  process has upgraded the file; see
+  [database.md](database.md#concurrency).
   `libraryUpgradeCopyPath(io, database_path, buffer)` returns the path of that
   copy, or null. See
   [database.md](database.md#the-copy-before-an-upgrade).

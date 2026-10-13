@@ -265,6 +265,15 @@
   an analysis refuses it and `wrong_file` afterwards. A finished model download
   records the model its worker verified without reading the file again.
 
+- **An Orca left running no longer writes to a Library that a newer Orca has
+  upgraded.** Each write checks the Library's schema version under SQLite's
+  write lock and is refused with `error.SchemaVersionTooNew`
+  (`ORCA_STATUS_UNSUPPORTED` from C) when another process has migrated the
+  file; nothing is stored, the Library stays open for reading, and a queued
+  listen is dropped and counted instead of retried. `orca_library_open` now
+  also returns `ORCA_STATUS_UNSUPPORTED`, not `ORCA_STATUS_INTERNAL`, for a
+  Library a newer Orca wrote.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

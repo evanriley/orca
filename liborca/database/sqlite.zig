@@ -26,6 +26,7 @@ pub const Database = struct {
     /// How a statement that meets a shared-cache table lock waits it out. Null
     /// for a standalone handle, whose statements never retry.
     io: ?std.Io = null,
+    guard: ?*SchemaGuard = null,
 
     fn resolved(self: Database) Database {
         const connections = self.connections orelse return self;
@@ -70,19 +71,24 @@ pub const Database = struct {
 
     pub fn exec(self: Database, sql: [:0]const u8) Error!void {
         const db = self.resolved();
+        if (db.guard) |guard| return guard.exec(sql);
+        if (!db.run(sql)) return error.SqlFailed;
+    }
+
+    fn run(self: Database, sql: [:0]const u8) bool {
         var message: [*c]u8 = null;
-        const result = c.sqlite3_exec(db.handle, sql.ptr, null, null, &message);
+        const result = c.sqlite3_exec(self.handle, sql.ptr, null, null, &message);
         if (message != null) c.sqlite3_free(message);
-        if (result != c.SQLITE_OK) return error.SqlFailed;
+        return result == c.SQLITE_OK;
     }
 
     pub fn prepare(self: Database, sql: [:0]const u8) Error!Statement {
         const db = self.resolved();
         var raw: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(db.handle, sql.ptr, -1, &raw, null) != c.SQLITE_OK) {
-            return error.SqlFailed;
+            return if (db.guard) |guard| guard.failure() else error.SqlFailed;
         }
-        return .{ .handle = raw.?, .io = db.io };
+        return .{ .handle = raw.?, .io = db.io, .guard = db.guard };
     }
 
     pub fn filename(self: Database) ?[]const u8 {
@@ -121,9 +127,103 @@ pub const Connections = struct {
     ownsLane: *const fn (context: *anyopaque) bool,
 };
 
+/// Keeps one write connection from committing to a database file whose
+/// `user_version` is no longer the one this process opened, which happens when
+/// another process migrates the file while this one has it open.
+///
+/// The commit hook is the rule: SQLite calls it for every write transaction on
+/// the connection, however the transaction was started, while the connection
+/// holds the write lock, and a refused commit is rolled back. `exec` also
+/// checks a write transaction as it opens, so `BEGIN IMMEDIATE` is refused
+/// before any of its statements run. A commit hook may not use its own
+/// connection, so it reads the version through `verifier`, which sees the
+/// state the write lock froze.
+pub const SchemaGuard = struct {
+    expected: i64,
+    writer: Database,
+    writer_version: Statement,
+    verifier: Database,
+    verifier_version: Statement,
+    verified: bool = false,
+
+    pub fn install(self: *SchemaGuard, writer: Database, path: [:0]const u8, expected: i64) Error!void {
+        const verifier = try Database.openReadOnly(path);
+        errdefer verifier.close();
+        try verifier.exec("PRAGMA busy_timeout=0;");
+        const verifier_version = try verifier.prepare(user_version_sql);
+        errdefer verifier_version.deinit();
+        const writer_version = try writer.prepare(user_version_sql);
+        self.* = .{
+            .expected = expected,
+            .writer = .{ .handle = writer.handle },
+            .writer_version = writer_version,
+            .verifier = verifier,
+            .verifier_version = verifier_version,
+        };
+        _ = c.sqlite3_commit_hook(writer.handle, onCommit, self);
+        _ = c.sqlite3_rollback_hook(writer.handle, onRollback, self);
+    }
+
+    pub fn remove(self: *SchemaGuard) void {
+        _ = c.sqlite3_commit_hook(self.writer.handle, null, null);
+        _ = c.sqlite3_rollback_hook(self.writer.handle, null, null);
+        self.writer_version.deinit();
+        self.verifier_version.deinit();
+        self.verifier.close();
+        self.* = undefined;
+    }
+
+    fn onCommit(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *SchemaGuard = @ptrCast(@alignCast(context.?));
+        const allowed = self.verified or version(self.verifier_version) == self.expected;
+        self.verified = false;
+        return @intFromBool(!allowed);
+    }
+
+    fn onRollback(context: ?*anyopaque) callconv(.c) void {
+        const self: *SchemaGuard = @ptrCast(@alignCast(context.?));
+        self.verified = false;
+    }
+
+    fn exec(self: *SchemaGuard, sql: [:0]const u8) Error!void {
+        const handle = self.writer.handle;
+        const mutex = c.sqlite3_db_mutex(handle);
+        c.sqlite3_mutex_enter(mutex);
+        defer c.sqlite3_mutex_leave(mutex);
+        const outside_transaction = c.sqlite3_get_autocommit(handle) != 0;
+        if (outside_transaction) self.verified = false;
+        if (!self.writer.run(sql)) return self.failure();
+        if (!outside_transaction or c.sqlite3_txn_state(handle, "main") != c.SQLITE_TXN_WRITE) return;
+        const found = version(self.writer_version);
+        if (found == self.expected) {
+            self.verified = true;
+            return;
+        }
+        _ = self.writer.run("ROLLBACK;");
+        return if (found == null) error.SqlFailed else error.SchemaVersionTooNew;
+    }
+
+    fn failure(self: *SchemaGuard) Error {
+        const found = version(self.verifier_version) orelse return error.SqlFailed;
+        return if (found == self.expected) error.SqlFailed else error.SchemaVersionTooNew;
+    }
+
+    const user_version_sql = "PRAGMA user_version;";
+
+    fn version(statement: Statement) ?i64 {
+        const mutex = c.sqlite3_db_mutex(c.sqlite3_db_handle(statement.handle));
+        c.sqlite3_mutex_enter(mutex);
+        defer c.sqlite3_mutex_leave(mutex);
+        defer _ = c.sqlite3_reset(statement.handle);
+        if (c.sqlite3_step(statement.handle) != c.SQLITE_ROW) return null;
+        return c.sqlite3_column_int64(statement.handle, 0);
+    }
+};
+
 pub const Statement = struct {
     handle: *c.sqlite3_stmt,
     io: ?std.Io = null,
+    guard: ?*SchemaGuard = null,
 
     pub fn deinit(self: Statement) void {
         _ = c.sqlite3_finalize(self.handle);
@@ -192,15 +292,19 @@ pub const Statement = struct {
                 c.SQLITE_ROW => .row,
                 c.SQLITE_DONE => .done,
                 c.SQLITE_LOCKED => locked: {
-                    if (self.io == null or remaining == 0) break :locked error.SqlFailed;
+                    if (self.io == null or remaining == 0) break :locked self.failure();
                     _ = c.sqlite3_reset(self.handle);
                     if (self.io) |io| io.sleep(.fromMilliseconds(1), .awake) catch {};
                     remaining -= 1;
                     continue;
                 },
-                else => error.SqlFailed,
+                else => self.failure(),
             };
         }
+    }
+
+    fn failure(self: Statement) Error {
+        return if (self.guard) |guard| guard.failure() else error.SqlFailed;
     }
 
     pub fn reset(self: Statement) Error!void {

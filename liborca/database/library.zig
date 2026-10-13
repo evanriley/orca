@@ -77,6 +77,7 @@ pub const LibraryDatabase = struct {
     /// write-lane ownership. Held by pointer so the repositories can point at
     /// it without the Library struct becoming self-referential.
     connections: *sqlite.Connections,
+    schema_guard: ?*sqlite.SchemaGuard,
     write_lane: *repository.WriteLane,
     tracks: repository.TrackRepository,
     artists: repository.ArtistRepository,
@@ -154,6 +155,17 @@ pub const LibraryDatabase = struct {
             null;
         errdefer if (walk_lock_path) |lock_path| allocator.free(lock_path);
         try migrate(allocator, io, database, migrations.current_version);
+        const schema_guard: ?*sqlite.SchemaGuard = if (database.filename() != null) guard: {
+            const guard = try allocator.create(sqlite.SchemaGuard);
+            errdefer allocator.destroy(guard);
+            try guard.install(database, path, migrations.current_version);
+            break :guard guard;
+        } else null;
+        errdefer if (schema_guard) |guard| {
+            guard.remove();
+            allocator.destroy(guard);
+        };
+        database.guard = schema_guard;
         const reader = try sqlite.Database.openReadOnly(path);
         errdefer reader.close();
         const connections = try allocator.create(sqlite.Connections);
@@ -196,6 +208,7 @@ pub const LibraryDatabase = struct {
             .recovery_deferred = .init(recovery_deferred),
             .database = database,
             .connections = connections,
+            .schema_guard = schema_guard,
             .write_lane = write_lane,
             .tracks = .{ .db = dynamic, .write_lane = write_lane },
             .artists = .{ .db = dynamic, .write_lane = write_lane },
@@ -260,6 +273,10 @@ pub const LibraryDatabase = struct {
     pub fn close(self: *LibraryDatabase) void {
         self.connections.reader.close();
         self.allocator.destroy(self.connections);
+        if (self.schema_guard) |guard| {
+            guard.remove();
+            self.allocator.destroy(guard);
+        }
         self.database.close();
         self.allocator.destroy(self.write_lane);
         if (self.backup_directory) |directory| self.allocator.free(directory);
@@ -5209,4 +5226,102 @@ test "a later upgrade replaces the copy an earlier upgrade made" {
         upgrade_copy.newest(std.testing.io, fixture.path, &buffer).?,
         "library.db.pre-v4.sqlite",
     ));
+}
+
+const MigratedFixture = struct {
+    upgrade: UpgradeFixture,
+    library: LibraryDatabase,
+    other_process: sqlite.Database,
+
+    const insert_playlist = "INSERT INTO playlists(name, created_at, updated_at) VALUES ('Raw', 0, 0);";
+
+    fn init(self: *MigratedFixture) !void {
+        self.upgrade = try UpgradeFixture.init();
+        errdefer self.upgrade.deinit();
+        self.library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, self.upgrade.path);
+        errdefer self.library.close();
+        self.other_process = try sqlite.Database.open(self.upgrade.path);
+    }
+
+    fn deinit(self: *MigratedFixture) void {
+        self.other_process.close();
+        self.library.close();
+        self.upgrade.deinit();
+    }
+
+    fn migrateElsewhere(self: *const MigratedFixture) !void {
+        try self.other_process.exec(std.fmt.comptimePrint("PRAGMA user_version={d};", .{migrations.current_version + 1}));
+    }
+
+    fn count(self: *const MigratedFixture, comptime table: []const u8) !i64 {
+        return testScalar(self.other_process, "SELECT count(*) FROM " ++ table ++ ";");
+    }
+};
+
+test "a write transaction is refused once another process has migrated the Library" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    _ = try fixture.library.playlists.create("Before");
+    try fixture.migrateElsewhere();
+
+    try std.testing.expectError(error.SchemaVersionTooNew, fixture.library.playlists.create("After"));
+    try std.testing.expectError(error.SchemaVersionTooNew, fixture.library.playlists.create("Later"));
+    try std.testing.expectEqual(@as(i64, 1), try fixture.count("playlists"));
+    try fixture.other_process.exec(MigratedFixture.insert_playlist);
+    try std.testing.expectEqual(@as(u64, 2), try fixture.library.playlists.pageCount(.{}));
+}
+
+test "a write outside a transaction is refused once another process has migrated the Library" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.library.settings.setFlag("before", true);
+    try fixture.migrateElsewhere();
+
+    try std.testing.expectError(error.SchemaVersionTooNew, fixture.library.settings.setFlag("after", true));
+    try std.testing.expectError(error.SchemaVersionTooNew, fixture.library.settings.setFlag("before", false));
+    try std.testing.expectEqual(@as(i64, 1), try fixture.count("library_settings WHERE key='before' AND value='1'"));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.count("library_settings WHERE key='after'"));
+}
+
+test "a transaction that takes the write lock at its first write is refused when it commits" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const db = fixture.library.database;
+    try fixture.migrateElsewhere();
+
+    try db.exec("BEGIN;");
+    try db.exec(MigratedFixture.insert_playlist);
+    try std.testing.expectError(error.SchemaVersionTooNew, db.exec("COMMIT;"));
+    try db.exec("SAVEPOINT sweep;");
+    try db.exec(MigratedFixture.insert_playlist);
+    try std.testing.expectError(error.SchemaVersionTooNew, db.exec("RELEASE sweep;"));
+    try std.testing.expectEqual(@as(i64, 0), try fixture.count("playlists"));
+    try fixture.other_process.exec(MigratedFixture.insert_playlist);
+}
+
+test "a statement the migrated schema no longer accepts reports the newer schema, not a SQL failure" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.other_process.exec("DROP TABLE library_settings;");
+
+    try std.testing.expectError(error.SqlFailed, fixture.library.settings.setFlag("flag", true));
+    try fixture.migrateElsewhere();
+    try std.testing.expectError(error.SchemaVersionTooNew, fixture.library.settings.setFlag("flag", true));
+}
+
+test "a Library keeps writing while another process writes rows at the same schema version" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.other_process.exec(MigratedFixture.insert_playlist);
+    try fixture.other_process.exec(std.fmt.comptimePrint("PRAGMA user_version={d};", .{migrations.current_version}));
+
+    _ = try fixture.library.playlists.create("Ours");
+    try fixture.library.settings.setFlag("ours", true);
+    try std.testing.expectEqual(@as(i64, 2), try fixture.count("playlists"));
+    try std.testing.expectEqual(@as(i64, 1), try fixture.count("library_settings WHERE key='ours'"));
 }
