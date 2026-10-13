@@ -307,6 +307,11 @@
   fetched through `build.zig.zon`. `ORCA-CHANGES` beside them records the
   upstream commit. Decoding is unchanged.
 
+- **Library analysis hashes decoded audio faster.** The audio-content hash
+  gives Blake3 each decoded chunk whole instead of 256 samples at a time, which
+  cut the analysis of a 5-minute stereo WAV without audio features from 554 ms
+  to 433 ms. Hash values are unchanged.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in
