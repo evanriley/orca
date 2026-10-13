@@ -25,6 +25,12 @@ const failure_backoff_ms: u64 = 60_000;
 
 const feedback_settle_ms: i64 = database.repository.feedback_settle_seconds * 1000;
 
+const record_retry_ms: i64 = 5_000;
+
+/// Tries a listen gets before it is dropped, so a write that can never
+/// succeed cannot hold the queue.
+const record_attempts_maximum: u32 = 12;
+
 /// How often an idle scrobbling worker reads the queue for listens and
 /// feedback another process added. A database read; the token and network are
 /// touched only when something is due.
@@ -75,7 +81,8 @@ pub const Status = struct {
     /// Listens recorded since the Library was opened.
     recorded_total: u64 = 0,
     /// Listens heard since the Library was opened and not recorded: the ring
-    /// was full, the Track had gone, or the database refused the write.
+    /// was full, the Track had gone, or the database refused the write on every
+    /// try.
     dropped: u64 = 0,
 
     fn eql(a: Status, b: Status) bool {
@@ -241,6 +248,8 @@ pub const Worker = struct {
     listen_failures: u32 = 0,
     feedback_failures: u32 = 0,
     published: Status = .{},
+    record_attempts: u32 = 0,
+    record_retry_at_ms: i64 = 0,
 
     pub fn run(self: *Worker) void {
         self.published = self.listens.status.load();
@@ -272,7 +281,7 @@ pub const Worker = struct {
         self.adoptIdentity(&gateway, initial);
         self.serve(&gateway, &delivery, initial);
         gateway.releaseLease();
-        _ = self.drainRing(self.listens.config.load());
+        _ = self.drainRing(self.listens.config.load(), .final);
         standard.deinit();
         self.registration.finish();
     }
@@ -330,7 +339,7 @@ pub const Worker = struct {
             }
 
             const announcing = config.enabled and config.now_playing;
-            const drained = self.drainRing(config);
+            const drained = self.drainRing(config, .running);
             const history_generation = self.listens.history_generation.load(.acquire);
             if (drained.recorded or drained.queued or history_generation != seen_history) {
                 seen_history = history_generation;
@@ -489,37 +498,62 @@ pub const Worker = struct {
         now_playing: ?Entry = null,
     };
 
-    fn drainRing(self: *Worker, config: Config) Drained {
+    const DrainMode = enum { running, final };
+
+    fn drainRing(self: *Worker, config: Config, mode: DrainMode) Drained {
         var drained: Drained = .{};
-        while (self.listens.ring.pop()) |entry| switch (entry.kind) {
-            .eligible => switch (self.record(entry.listen, config)) {
-                .dropped => {
-                    _ = self.listens.dropped.fetchAdd(1, .monotonic);
-                    self.listens.raiseHost();
+        while (self.listens.ring.peek()) |entry| {
+            switch (entry.kind) {
+                .eligible => {
+                    if (mode == .running and self.record_attempts > 0 and self.sampleNowMs() < self.record_retry_at_ms)
+                        break;
+                    const outcome = self.record(entry.listen, config);
+                    if (outcome == .retry) {
+                        self.record_attempts += 1;
+                        if (mode == .running and self.record_attempts < record_attempts_maximum) {
+                            self.record_retry_at_ms = self.sampleNowMs() +| record_retry_ms;
+                            break;
+                        }
+                    }
+                    self.record_attempts = 0;
+                    switch (outcome) {
+                        .dropped, .retry => {
+                            _ = self.listens.dropped.fetchAdd(1, .monotonic);
+                            self.listens.raiseHost();
+                        },
+                        .duplicate => {},
+                        .recorded, .queued => {
+                            _ = self.listens.recorded.fetchAdd(1, .monotonic);
+                            self.listens.raiseHost();
+                            drained.recorded = true;
+                            drained.queued = drained.queued or outcome == .queued;
+                        },
+                    }
                 },
-                .duplicate => {},
-                .recorded, .queued => |outcome| {
-                    _ = self.listens.recorded.fetchAdd(1, .monotonic);
-                    self.listens.raiseHost();
-                    drained.recorded = true;
-                    drained.queued = drained.queued or outcome == .queued;
+                .finished => if (self.finish(entry.listen, config)) {
+                    drained.queued = true;
                 },
-            },
-            .finished => if (self.finish(entry.listen, config)) {
-                drained.queued = true;
-            },
-            .now_playing => {
-                drained.now_playing = entry;
-            },
-        };
+                .now_playing => {
+                    drained.now_playing = entry;
+                },
+            }
+            _ = self.listens.ring.pop();
+        }
         return drained;
     }
 
-    const Recorded = enum { dropped, duplicate, recorded, queued };
+    const Recorded = enum { dropped, retry, duplicate, recorded, queued };
+
+    fn recordFailure(err: anyerror) Recorded {
+        return switch (err) {
+            error.SqlFailed, error.OutOfMemory => .retry,
+            else => .dropped,
+        };
+    }
 
     fn record(self: *Worker, listen: Listen, config: Config) Recorded {
-        const subject = (self.database.listens.listenSubject(self.allocator, listen.track_id) catch
-            return .dropped) orelse return .dropped;
+        const subject = (self.database.listens.listenSubject(self.allocator, listen.track_id) catch |err|
+            return recordFailure(err)) orelse return .dropped;
         defer subject.deinit();
         const file_id = subject.file_id orelse return .dropped;
         const input: database.ListenInput = .{
@@ -538,14 +572,14 @@ pub const Worker = struct {
             var event = providers.scrobble.Event.fromSubject(&subject, listen.started_at, listen.listened_ms);
             if (event.duration_ms == 0) event.duration_ms = listen.duration_ms;
             if (event.eligible()) {
-                const payload = event.encode(self.allocator) catch return .dropped;
+                const payload = event.encode(self.allocator) catch |err| return recordFailure(err);
                 defer self.allocator.free(payload);
-                const id = self.database.listens.recordAndQueue(input, listenbrainz.service, payload) catch
-                    return .dropped;
+                const id = self.database.listens.recordAndQueue(input, listenbrainz.service, payload) catch |err|
+                    return recordFailure(err);
                 return if (id == null) .duplicate else .queued;
             }
         }
-        const id = self.database.listens.record(input) catch return .dropped;
+        const id = self.database.listens.record(input) catch |err| return recordFailure(err);
         return if (id == null) .duplicate else .recorded;
     }
 
@@ -949,9 +983,129 @@ test "a recorded listen wakes the host" {
     const listen: Listen = .{ .track_id = track, .started_at = 1_700_000_000, .listened_ms = 100_000, .duration_ms = 180_000 };
     _ = rig.listens.ring.push(.{ .kind = .eligible, .listen = listen });
 
-    try testing.expect(rig.worker.drainRing(.{}).recorded);
+    try testing.expect(rig.worker.drainRing(.{}, .running).recorded);
     try testing.expectEqual(@as(u32, 1), counter.count());
     try testing.expectEqual(@as(u64, 1), rig.listens.recorded.load(.monotonic));
+}
+
+const refuse_listen_trigger =
+    "CREATE TRIGGER refuse_listen BEFORE INSERT ON listens BEGIN SELECT RAISE(ABORT, 'refused'); END;";
+
+fn pushListens(rig: *TestRig, track: i64, total: usize) void {
+    for (0..total) |index| {
+        _ = rig.listens.ring.push(.{ .kind = .eligible, .listen = .{
+            .track_id = track,
+            .started_at = 1_700_000_000 + @as(i64, @intCast(index)),
+            .listened_ms = 100_000,
+            .duration_ms = 180_000,
+        } });
+    }
+}
+
+test "drainRing keeps a listen whose write fails once and stores it exactly once on the retry" {
+    var rig: TestRig = undefined;
+    try rig.start("record-retry");
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, 1);
+    try rig.library.database.exec(refuse_listen_trigger);
+
+    try testing.expect(!rig.worker.drainRing(.{}, .running).recorded);
+    try testing.expectEqual(@as(usize, 1), rig.listens.ring.len());
+    try testing.expectEqual(@as(u64, 0), rig.listens.dropped.load(.monotonic));
+
+    try rig.library.database.exec("DROP TRIGGER refuse_listen;");
+    rig.service.clock.set(rig.service.now() + record_retry_ms);
+    try testing.expect(rig.worker.drainRing(.{}, .running).recorded);
+    try testing.expectEqual(@as(usize, 0), rig.listens.ring.len());
+    try testing.expectEqual(@as(u64, 1), try rig.library.listens.count());
+    try testing.expectEqual(@as(u64, 0), rig.listens.dropped.load(.monotonic));
+}
+
+test "drainRing retries a failing listen once per interval, not on every wake" {
+    var rig: TestRig = undefined;
+    try rig.start("record-no-spin");
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, 1);
+    try rig.library.database.exec(refuse_listen_trigger);
+
+    for (0..50) |_| _ = rig.worker.drainRing(.{}, .running);
+    try testing.expectEqual(@as(u32, 1), rig.worker.record_attempts);
+
+    rig.service.clock.set(rig.service.now() + record_retry_ms);
+    for (0..50) |_| _ = rig.worker.drainRing(.{}, .running);
+    try testing.expectEqual(@as(u32, 2), rig.worker.record_attempts);
+    try testing.expectEqual(@as(usize, 1), rig.listens.ring.len());
+    try testing.expectEqual(@as(u64, 0), rig.listens.dropped.load(.monotonic));
+}
+
+test "drainRing drops a listen that fails every attempt so it cannot hold the queue" {
+    var rig: TestRig = undefined;
+    try rig.start("record-give-up");
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, 1);
+    try rig.library.database.exec(refuse_listen_trigger);
+
+    for (0..record_attempts_maximum) |_| {
+        _ = rig.worker.drainRing(.{}, .running);
+        rig.service.clock.set(rig.service.now() + record_retry_ms);
+    }
+    try testing.expectEqual(@as(usize, 0), rig.listens.ring.len());
+    try testing.expectEqual(@as(u64, 1), rig.listens.dropped.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), rig.worker.record_attempts);
+}
+
+test "drainRing stores listens in the order they were heard across a retry" {
+    var rig: TestRig = undefined;
+    try rig.start("record-order");
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, 3);
+    try rig.library.database.exec(refuse_listen_trigger);
+
+    _ = rig.worker.drainRing(.{}, .running);
+    try testing.expectEqual(@as(usize, 3), rig.listens.ring.len());
+    try rig.library.database.exec("DROP TRIGGER refuse_listen;");
+    rig.service.clock.set(rig.service.now() + record_retry_ms);
+    _ = rig.worker.drainRing(.{}, .running);
+
+    var statement = try rig.library.database.prepare("SELECT started_at FROM listens ORDER BY id;");
+    defer statement.deinit();
+    for (0..3) |index| {
+        try testing.expect(try statement.step() == .row);
+        try testing.expectEqual(1_700_000_000 + @as(i64, @intCast(index)), statement.columnInt64(0));
+    }
+    try testing.expect(try statement.step() == .done);
+}
+
+test "push drops and counts a listen once the ring holds a stuck listen at capacity" {
+    var rig: TestRig = undefined;
+    try rig.start("record-bound");
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, ring_capacity);
+    try rig.library.database.exec(refuse_listen_trigger);
+    _ = rig.worker.drainRing(.{}, .running);
+
+    rig.listens.push(testing.io, .{ .kind = .eligible, .listen = .{ .track_id = track, .started_at = 1_800_000_000, .listened_ms = 100_000, .duration_ms = 180_000 } });
+    try testing.expectEqual(@as(usize, ring_capacity), rig.listens.ring.len());
+    try testing.expectEqual(@as(u64, 1), rig.listens.dropped.load(.monotonic));
+}
+
+test "the final drain tries a held listen once more without waiting for its retry time" {
+    var rig: TestRig = undefined;
+    try rig.start("record-final");
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, 1);
+    try rig.library.database.exec(refuse_listen_trigger);
+    _ = rig.worker.drainRing(.{}, .running);
+    try rig.library.database.exec("DROP TRIGGER refuse_listen;");
+
+    try testing.expect(rig.worker.drainRing(.{}, .final).recorded);
+    try testing.expectEqual(@as(u64, 1), try rig.library.listens.count());
 }
 
 test "feedback goes out one change per pass, and a pass that sent one asks to run again at once" {
@@ -1064,7 +1218,7 @@ test "Now Playing is aged from when it was heard, not from when the worker drain
 
     for ([_]i64{ 30_000, 95_000 }) |heard_at_ms| {
         _ = rig.listens.ring.push(.{ .kind = .now_playing, .listen = listen, .mono_ms = heard_at_ms });
-        const entry = rig.worker.drainRing(config).now_playing.?;
+        const entry = rig.worker.drainRing(config, .running).now_playing.?;
         try testing.expectEqual(heard_at_ms, entry.mono_ms);
         rig.now_playing = .{ .listen = entry.listen, .heard_at_ms = entry.mono_ms };
         _ = rig.pass();
