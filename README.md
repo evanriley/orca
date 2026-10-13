@@ -132,8 +132,8 @@ locally.
 
 ## Build from source
 
-The steps below are checked in clean containers of Arch Linux, Fedora 43,
-Debian 13 and Ubuntu 24.04.
+CI runs the Debian 13 and Fedora 43 steps below in clean containers on every
+code change. The Arch Linux and Ubuntu 24.04 steps are not run by CI.
 
 ### Requirements
 
@@ -198,7 +198,10 @@ zig build -Doptimize=ReleaseSafe -p ~/.local
 
 `-p` sets the install prefix. Add `-Dgtk=false` to build without `orca-gtk`
 or `-Dembeddings=false` to build without ONNX Runtime, and pass the same
-options to `zig build test`. The install holds:
+options to `zig build test`. The build targets the baseline CPU of the
+architecture; `-Dcpu=native` uses every instruction set of the building
+machine, which speeds analysis by up to 15 % and produces a binary that may
+not run on another CPU. The install holds:
 
 - `bin/orca-gtk` and `bin/orca-cli`;
 - `lib/liborca.a`, `lib/liborca.so` and `lib/pkgconfig/orca.pc`;

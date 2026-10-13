@@ -230,6 +230,13 @@ symbols liborca uses; install `libc++` on Arch, `libcxx-devel` on Fedora or
 `libc++-dev` on Debian and Ubuntu. Set `PKG_CONFIG_PATH` to the install's
 `lib/pkgconfig` when it is not a system prefix.
 
+`liborca.so` exports only `orca_` symbols. `liborca.a` also defines the global
+symbols of the code compiled into it: libxaac (`ixheaacd_*`, `ixheaac_*`),
+Chromaprint (`chromaprint_*` and its C++ symbols), KissFFT (`kiss_*`), QOA
+(`qoa_*`), minimp3 (`mp3dec_*`) and ALAC (`BitBuffer*` and its C++ symbols). A
+host that links its own copy of one of these beside `liborca.a` gets
+duplicate-symbol errors; link `liborca.so` in that case.
+
 ### Surface
 
 Each area lists its main entry points. Details, structs and enums are in the

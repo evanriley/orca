@@ -60,6 +60,12 @@ lock; when another process holds it, recovery is deferred to the next holder.
 - A file Library uses WAL and `synchronous=NORMAL`, so a read-only connection
   sees a per-statement snapshot of committed state: never a batch's in-flight
   rows, never a half-applied transaction.
+- `synchronous=NORMAL` syncs the WAL at a checkpoint, not at each commit. A
+  process crash loses no committed transaction. A power failure or kernel
+  crash can lose the transactions committed since the last checkpoint (a
+  rating, a love, a Playlist edit, a listen, the saved queue) and leaves the
+  database consistent. The mutation journal is the exception: its
+  transactions run at `synchronous=FULL` and are on disk when they commit.
 - An in-memory `cache=shared` Library has no WAL; SQLite isolates its
   connections with table locks instead. A read against an open write
   transaction, or a write against a reader holding the table, gets

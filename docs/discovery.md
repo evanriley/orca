@@ -466,15 +466,17 @@ With N = `mixes.count`:
 
 Themes are taken in the order `decade`, `new_to_you`, `deep_cuts`, `upbeat`,
 `wind_down`, starting at kind (mix day mod 5) and wrapping, skipping themes that
-do not qualify; so the kept slot rotates daily. Mixes are stored genre mixes
-first, then theme mixes, then "Rarely played". A Library with three genre
+do not qualify; so the kept slot rotates daily. Mixes are filled in the order
+genre mixes, "Rarely played", theme mixes, and stored genre mixes first, then
+theme mixes, then "Rarely played". A Library with three genre
 clusters and no rarely-played Recordings gets three genre mixes and three
 theme mixes; one with many clusters and rarely-played Recordings gets four
 genre mixes, one theme mix and "Rarely played". Cancellation is checked
 before each mix.
 
-The jitter seed is a hash of the mix day and the mix's position, so one mix
-day always produces the same mixes from the same Library.
+The jitter seed is a hash of the mix day and a number fixed per mix: the slot
+index for a genre mix, 6 for "Rarely played" and 7 plus the theme's kind for a
+theme mix. One mix day always produces the same mixes from the same Library.
 
 ### Filling a mix
 
@@ -496,7 +498,8 @@ Left out of every mix:
   me;
 - Recordings played within `discovery.avoid_days`, unless no candidate is left
   without them, as in Radio;
-- Recordings an earlier mix of the day holds;
+- Recordings a mix of the day filled earlier holds, so a theme mix leaves out
+  the Recordings of "Rarely played";
 - picks that would break the Picking rules: no more than 2 consecutive by one
   Artist, no more than 2 from one Release in any 10. Mixes never relax them;
 - picks that would break Artist variety, from `discovery.artist_variety` or

@@ -2465,7 +2465,8 @@ orca_status orca_runtime_embedding_model(orca_runtime *runtime, uint8_t *output)
  * NUL-terminated and copied. The job belongs to no Library and its units are
  * bytes, the total being the model's size. Only a file with the model's
  * compiled-in size and SHA-256 is installed at `path`; anything else leaves
- * the file there as it was. A `path` that
+ * the file there as it was. The directory of `path` is created when it is
+ * missing, also by a download that then fails. A `path` that
  * already holds the model succeeds with no request. When the job succeeds the
  * runtime uses the file as orca_runtime_set_embedding_model_path would, so
  * orca_runtime_embedding_model_state then reports it. Needs the client
