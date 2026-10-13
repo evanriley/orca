@@ -333,6 +333,7 @@ pub const Config = struct {
 const cancel_poll_ms = 100;
 const lease_poll_ms = 250;
 const maximum_inline_hold_ms = 5_000;
+const maximum_retry_after_ms: i64 = 24 * 60 * 60 * 1000;
 /// What a lease must have left when a request is sent or its state saved, so
 /// the save commits and the request ends before another Gateway may claim
 /// the service.
@@ -628,11 +629,11 @@ pub const Gateway = struct {
         const stored = try sharing.store.load(sharing.service) orelse return;
         self.rate_limit_backoff_ms = stored.backoff_ms;
         if (stored.next_request_ms) |wall_next| {
-            const next = self.monotonicFromWall(wall_next);
+            const next = @min(self.monotonicFromWall(wall_next), self.clock.nowMs() +| maximum_retry_after_ms);
             self.hold_until_ms = if (self.hold_until_ms) |current| @max(current, next) else next;
         }
         const wall_until = stored.blocked_until_ms orelse return;
-        const until = self.monotonicFromWall(wall_until);
+        const until = @min(self.monotonicFromWall(wall_until), self.clock.nowMs() +| maximum_retry_after_ms);
         self.blocked_until_ms = if (self.blocked_until_ms) |current| @max(current, until) else until;
     }
 
@@ -784,10 +785,11 @@ pub const Gateway = struct {
     }
 
     fn retryAfterUntil(self: *Gateway, retry_after: RetryAfter) i64 {
-        return switch (retry_after) {
+        const requested = switch (retry_after) {
             .seconds => |seconds| self.clock.nowMs() +| std.math.lossyCast(i64, seconds *| 1000),
             .date => |unix_s| self.monotonicFromWall(unix_s *| 1000),
         };
+        return @min(requested, self.clock.nowMs() +| maximum_retry_after_ms);
     }
 
     fn boundedMs(self: *Gateway, milliseconds: u64) u64 {
@@ -1353,9 +1355,11 @@ test "a 429 blocks requests until Reset-In when it is longer than the backoff" {
     try expectBlockedFor(429, .{ .reset_in_s = 300, .remaining = 0 }, 0, 300_000, 300_000);
 }
 
-test "a Retry-After of two hours, or of three years, is honoured in full" {
+test "a Retry-After of two hours is honoured in full and one of three years is cut to 24 hours" {
     try expectBlockedFor(429, .{ .retry_after = .{ .seconds = 2 * 60 * 60 } }, 0, 7_200_000, 7_200_000);
-    try expectBlockedFor(429, .{ .retry_after = .{ .seconds = 99_999_999 } }, 0, 99_999_999_000, 99_999_999_000);
+    try expectBlockedFor(429, .{ .retry_after = .{ .seconds = 99_999_999 } }, 0, 86_400_000, 86_400_000);
+    const date_s: i64 = 1_792_567_680;
+    try expectBlockedFor(429, .{ .retry_after = .{ .date = date_s + 3 * 365 * 86_400 } }, date_s * 1000, 86_400_000, 86_400_000);
 }
 
 test "a Retry-After date blocks requests until that date, and one in the past only for the backoff" {
@@ -1504,6 +1508,21 @@ test "a quota window a previous Gateway was told of blocks a fresh Gateway's fir
     try std.testing.expectEqual(@as(u64, 0), gateways.net.clock.slept());
     try std.testing.expectEqual(@as(?i64, reset_wall_ms), gateways.store.state.?.blocked_until_ms);
     try std.testing.expectEqual(@as(?i64, reset_wall_ms), gateways.second.blockedUntilWallMs());
+}
+
+test "a block stored for three years stops blocking a fresh Gateway after 24 hours" {
+    var gateways: SuccessiveGateways = undefined;
+    gateways.init();
+    defer gateways.deinit();
+    const three_years_ms: i64 = 3 * 365 * 24 * 60 * 60 * 1000;
+    const stored_until = gateways.net.clock.wallNow() + three_years_ms;
+    gateways.store.state = .{ .blocked_until_ms = stored_until, .next_request_ms = stored_until };
+    try gateways.second.loadSharedState();
+    try std.testing.expectEqual(@as(?i64, 5000 + 86_400_000), gateways.second.blockedUntilMs());
+    try std.testing.expectEqual(@as(?i64, 5000 + 86_400_000), gateways.second.hold_until_ms);
+
+    gateways.net.clock.set(5000 + 86_400_000);
+    try std.testing.expectEqual(@as(?i64, null), gateways.second.blockedUntilMs());
 }
 
 test "a fresh Gateway's first request waits the minimum interval after a previous Gateway's last" {
