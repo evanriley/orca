@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
     try timeSmartPlaylists(&library, allocator, init.io);
     try timeLibrarySearch(&library, allocator, init.io);
     try timeFolders(&library, allocator, init.io);
-    try timeLibraryStats(&library, init.io);
+    try timeLibraryStats(&library, allocator, init.io);
     try timeFileSorts(&library, allocator, init.io);
 }
 
@@ -240,7 +240,7 @@ fn timeFolders(library: *liborca.internal.database.LibraryDatabase, allocator: s
     std.debug.print(", artist tracks {d}: {d} ms\n", .{ track_ids.len, millisecondsSince(io, play_start) });
 }
 
-fn timeLibraryStats(library: *liborca.internal.database.LibraryDatabase, io: std.Io) !void {
+fn timeLibraryStats(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
     const seed_start = std.Io.Clock.awake.now(io);
     const volume = liborca.internal.database.LibraryDatabase.null_volume;
     var sql: [2048]u8 = undefined;
@@ -280,7 +280,7 @@ fn timeLibraryStats(library: *liborca.internal.database.LibraryDatabase, io: std
     _ = try library.stats.stats();
     std.debug.print(", again in {d} ms", .{millisecondsSince(io, warm_stats_start)});
     const summary_start = std.Io.Clock.awake.now(io);
-    const summary = try library.health_issues.summary();
+    const summary = try library.health_issues.summary(allocator);
     std.debug.print(", health summary of {d} kinds in {d} ms\n", .{ summary.len, millisecondsSince(io, summary_start) });
     for (summary.items()) |entry| std.debug.print("  {t}: {d} files, {d} bytes\n", .{ entry.kind, entry.files, entry.bytes });
 }

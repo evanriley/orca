@@ -185,6 +185,16 @@
   `error.SinkFailed`. `network.testing.ScriptedTransport` delivers scripted
   bodies to a sink in chunks.
 
+### Fixed
+
+- **Pull-request CI no longer skips building after a docs-only follow-up push.**
+  The `changes` job diffs a pull request against its base (`HEAD^1` of the merge
+  commit) instead of the previous head, and treats the first push of a branch as
+  a code change. The benchmark programs compile again
+  (`library.health_issues.summary` takes an allocator), and the new `zig build
+  bench-build` step, which `zig build test` depends on, compiles them without
+  running them.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

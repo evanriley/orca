@@ -59,7 +59,8 @@ omitted device selects the system default output, which is real hardware.
 - `distro`: a build with the official Zig release against the libraries of
   Debian 13 (with `-Dgtk=false`) and Fedora 43.
 
-A `required` job fails when any of them fails. A change that touches only
+A `required` job fails when any of them fails. A push to `main`, or a pull
+request as a whole against its base, that touches only
 `docs/`, `orca-design/` or Markdown files skips `test`, `lint`, `cross-macos`,
 `package` and `distro`. The `nix` job runs on every push to `main` and on pull
 requests that change `flake.nix`, `flake.lock`, `nix/`, `build/`, `build.zig`
