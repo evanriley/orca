@@ -1,8 +1,21 @@
 const std = @import("std");
-const released = @import("orca_h_released");
 const current = @import("orca_h");
 
-const released_header = "tests/abi/orca-0.1.0.h";
+const baselines = .{
+    .{ "0.1.0", @import("orca_h_0_1_0") },
+    .{ "0.2.0", @import("orca_h_0_2_0") },
+    .{ "0.3.0", @import("orca_h_0_3_0") },
+    .{ "0.4.0", @import("orca_h_0_4_0") },
+};
+
+const renamed_reserved_fields = [_][]const u8{
+    "orca_track_view.reserved",
+    "orca_track_summary_view.track.reserved",
+    "orca_playlist_entry_view.track.reserved",
+    "orca_release_field_diff_view.reserved",
+    "orca_radio_options.reserved",
+    "orca_radio_status_view.options.reserved",
+};
 
 fn isOrcaName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "orca_") or std.mem.startsWith(u8, name, "ORCA_");
@@ -10,6 +23,13 @@ fn isOrcaName(name: []const u8) bool {
 
 fn isReservedField(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "reserved");
+}
+
+fn isListedRename(comptime field_path: []const u8) bool {
+    for (renamed_reserved_fields) |listed| {
+        if (std.mem.eql(u8, listed, field_path)) return true;
+    }
+    return false;
 }
 
 fn isNamedAggregate(comptime T: type) bool {
@@ -49,8 +69,13 @@ fn compareTypes(comptime Released: type, comptime Current: type, comptime path: 
                 );
             }
             for (released_struct.field_names, released_struct.field_types) |field_name, FieldType| {
-                if (isReservedField(field_name)) continue;
                 const field_path = path ++ "." ++ field_name;
+                if (isReservedField(field_name)) {
+                    if (!@hasField(Current, field_name) and !isListedRename(field_path)) {
+                        problems = problems ++ field_path ++ ": reserved field renamed or removed; list it in renamed_reserved_fields once it gains a meaning for which zero keeps the old behaviour\n";
+                    }
+                    continue;
+                }
                 if (!@hasField(Current, field_name)) {
                     problems = problems ++ field_path ++ ": removed\n";
                     continue;
@@ -159,53 +184,65 @@ fn compareValues(comptime released_value: anytype, comptime current_value: anyty
     return std.fmt.comptimePrint("{s}: was {d}, is now {d}\n", .{ name, released_value, current_value });
 }
 
-const incompatibilities = blk: {
-    @setEvalBranchQuota(10_000_000);
-    var problems: []const u8 = "";
-    for (@typeInfo(released).@"struct".decl_names) |decl_name| {
-        if (!isOrcaName(decl_name)) continue;
-        if (!@hasDecl(current, decl_name)) {
-            problems = problems ++ decl_name ++ ": removed from orca.h\n";
-            continue;
+fn incompatibilities(comptime released: type) []const u8 {
+    return comptime blk: {
+        @setEvalBranchQuota(10_000_000);
+        var problems: []const u8 = "";
+        for (@typeInfo(released).@"struct".decl_names) |decl_name| {
+            if (!isOrcaName(decl_name)) continue;
+            if (!@hasDecl(current, decl_name)) {
+                problems = problems ++ decl_name ++ ": removed from orca.h\n";
+                continue;
+            }
+            const released_decl = @field(released, decl_name);
+            const current_decl = @field(current, decl_name);
+            const Released = @TypeOf(released_decl);
+            if (Released == type) {
+                problems = problems ++ compareTypes(released_decl, current_decl, decl_name);
+            } else if (@typeInfo(Released) == .@"fn") {
+                problems = problems ++ compareTypes(Released, @TypeOf(current_decl), decl_name);
+            } else {
+                problems = problems ++ compareValues(released_decl, current_decl, decl_name);
+            }
         }
-        const released_decl = @field(released, decl_name);
-        const current_decl = @field(current, decl_name);
-        const Released = @TypeOf(released_decl);
-        if (Released == type) {
-            problems = problems ++ compareTypes(released_decl, current_decl, decl_name);
-        } else if (@typeInfo(Released) == .@"fn") {
-            problems = problems ++ compareTypes(Released, @TypeOf(current_decl), decl_name);
-        } else {
-            problems = problems ++ compareValues(released_decl, current_decl, decl_name);
-        }
-    }
-    break :blk problems;
-};
-
-const released_function_names = blk: {
-    @setEvalBranchQuota(10_000_000);
-    var names: []const []const u8 = &.{};
-    for (@typeInfo(released).@"struct".decl_names) |decl_name| {
-        if (isOrcaName(decl_name) and @typeInfo(@TypeOf(@field(released, decl_name))) == .@"fn") {
-            names = names ++ .{decl_name};
-        }
-    }
-    break :blk names;
-};
-
-test "released header: every struct, constant and function keeps its layout and value" {
-    if (incompatibilities.len != 0) {
-        std.debug.print("orca.h is incompatible with {s}:\n{s}", .{ released_header, incompatibilities });
-        return error.AbiIncompatible;
-    }
+        break :blk problems;
+    };
 }
 
-test "released header: every function it declares is still linked from liborca" {
-    var linked: usize = 0;
-    inline for (released_function_names) |name| {
-        const address: *const volatile anyopaque = @ptrCast(&@field(released, name));
-        if (@intFromPtr(address) != 0) linked += 1;
+fn releasedFunctionNames(comptime released: type) []const []const u8 {
+    return comptime blk: {
+        @setEvalBranchQuota(10_000_000);
+        var names: []const []const u8 = &.{};
+        for (@typeInfo(released).@"struct".decl_names) |decl_name| {
+            if (isOrcaName(decl_name) and @typeInfo(@TypeOf(@field(released, decl_name))) == .@"fn") {
+                names = names ++ .{decl_name};
+            }
+        }
+        break :blk names;
+    };
+}
+
+test "released headers: every struct, constant and function keeps its layout and value" {
+    var incompatible = false;
+    inline for (baselines) |baseline| {
+        const problems = comptime incompatibilities(baseline[1]);
+        if (problems.len != 0) {
+            std.debug.print("orca.h is incompatible with tests/abi/orca-{s}.h:\n{s}", .{ baseline[0], problems });
+            incompatible = true;
+        }
     }
-    try std.testing.expectEqual(released_function_names.len, linked);
-    try std.testing.expect(linked > 0);
+    if (incompatible) return error.AbiIncompatible;
+}
+
+test "released headers: every function they declare is still linked from liborca" {
+    inline for (baselines) |baseline| {
+        const names = comptime releasedFunctionNames(baseline[1]);
+        var linked: usize = 0;
+        inline for (names) |name| {
+            const address: *const volatile anyopaque = @ptrCast(&@field(baseline[1], name));
+            if (@intFromPtr(address) != 0) linked += 1;
+        }
+        try std.testing.expectEqual(names.len, linked);
+        try std.testing.expect(linked > 0);
+    }
 }

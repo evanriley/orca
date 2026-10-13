@@ -5086,6 +5086,14 @@ static int matching_smoke(orca_runtime *runtime, orca_handle library, int64_t tr
     orca_match_stats_v2 stats_v2;
     memset(&stats_v2, 0xff, sizeof stats_v2);
     SMOKE_CHECK(orca_job_match_stats_v2(runtime, job, &stats_v2) == ORCA_STATUS_STALE_HANDLE);
+    int64_t matched_release = -1;
+    uint8_t has_matched_release = 9;
+    SMOKE_CHECK(orca_job_match_release(runtime, job, &matched_release, &has_matched_release) ==
+                ORCA_STATUS_STALE_HANDLE);
+    SMOKE_CHECK(orca_job_match_release(runtime, job, 0, &has_matched_release) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_job_match_release(runtime, job, &matched_release, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
 
     uint64_t count = 0;
     SMOKE_CHECK(orca_library_unidentified_count(runtime, library, &count) == ORCA_STATUS_OK);
@@ -5507,7 +5515,29 @@ static int job_queue_smoke(orca_runtime *runtime, orca_handle library, int64_t r
     return 0;
 }
 
-int main(int argc, char **argv) {
+static int zone_lifecycle_smoke(orca_runtime *runtime, uint64_t device_id) {
+    orca_handle zone;
+    orca_handle player;
+    SMOKE_CHECK(orca_zone_create(runtime, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_zone_create(runtime, &zone) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_create(runtime, &player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_zone_open_output(runtime, zone, device_id, 2, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_zone_attach_player(runtime, zone, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_zone_open_output(runtime, zone, device_id, 0, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_zone_close_output(runtime, zone) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_zone_detach(runtime, zone) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_zone_destroy(runtime, zone) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_destroy(runtime, player) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(orca_zone_open_output(runtime, zone, device_id, 0, 0) ==
+                ORCA_STATUS_STALE_HANDLE);
+    SMOKE_CHECK(orca_zone_close_output(runtime, zone) == ORCA_STATUS_STALE_HANDLE);
+    SMOKE_CHECK(orca_zone_detach(runtime, zone) == ORCA_STATUS_STALE_HANDLE);
+    return drain_events(runtime);
+}
+
+static int smoke(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
     printf("routing playback at device %llu\n", (unsigned long long)device_id);
@@ -5851,6 +5881,26 @@ int main(int argc, char **argv) {
         ORCA_STATUS_OK)
         return 114;
     if (one_artist.count != 0) return 115;
+
+    struct genre_capture artist_genres;
+    memset(&artist_genres, 0, sizeof artist_genres);
+    artist_genres.wanted = -1;
+    if (orca_library_artist_genres(runtime, library, artists.first_id, 16, &artist_genres,
+                                   capture_genre_count) != ORCA_STATUS_OK ||
+        artist_genres.count > 16)
+        return 292;
+    memset(&artist_genres, 0, sizeof artist_genres);
+    if (orca_library_artist_genres(runtime, library, 9999999, 16, &artist_genres,
+                                   capture_genre_count) != ORCA_STATUS_OK ||
+        artist_genres.count != 0)
+        return 293;
+    if (orca_library_artist_genres(runtime, library, artists.first_id, 0, 0,
+                                   capture_genre_count) != ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_artist_genres(runtime, library, artists.first_id, 513, 0,
+                                   capture_genre_count) != ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_artist_genres(runtime, library, artists.first_id, 16, 0, 0) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 294;
 
     struct release_capture releases;
     memset(&releases, 0, sizeof releases);
@@ -6585,6 +6635,7 @@ int main(int argc, char **argv) {
     if (zone_status.output_state == ORCA_OUTPUT_ACTIVE) return 238;
     if (orca_zone_attach_player(runtime, zone, player) != ORCA_STATUS_OK) return 239;
     if (orca_player_destroy(runtime, second_player) != ORCA_STATUS_OK) return 240;
+    if (zone_lifecycle_smoke(runtime, device_id) != 0) return 295;
 
     if (orca_player_pause(runtime, player) != ORCA_STATUS_OK) return 75;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 76;
@@ -6594,6 +6645,21 @@ int main(int argc, char **argv) {
     uint64_t epoch_after = 0;
     if (orca_player_seek_ms(runtime, player, 50, &epoch_after) != ORCA_STATUS_OK) return 78;
     if (epoch_after <= epoch_before) return 79;
+    uint64_t seek_generation = 0;
+    if (orca_player_seek(runtime, player, 0, &seek_generation) != ORCA_STATUS_OK) return 296;
+    if (seek_generation <= epoch_after) return 297;
+    uint8_t stepped_back = 9;
+    if (orca_player_previous(runtime, player, &stepped_back) != ORCA_STATUS_OK) return 298;
+    if (stepped_back > 1) return 299;
+    uint8_t stop_armed = 9;
+    if (orca_player_set_stop_after_current(runtime, player, 1) != ORCA_STATUS_OK ||
+        orca_player_stop_after_current(runtime, player, &stop_armed) != ORCA_STATUS_OK ||
+        stop_armed != 1)
+        return 300;
+    if (orca_player_set_stop_after_current(runtime, player, 0) != ORCA_STATUS_OK ||
+        orca_player_stop_after_current(runtime, player, &stop_armed) != ORCA_STATUS_OK ||
+        stop_armed != 0)
+        return 301;
 
     uint8_t moved = 9;
     /* One entry, repeat all: next wraps back onto the same entry. */
@@ -6708,4 +6774,10 @@ int main(int argc, char **argv) {
     close(wake_pipe[0]);
     close(wake_pipe[1]);
     return 0;
+}
+
+int main(int argc, char **argv) {
+    int failed = smoke(argc, argv);
+    if (failed != 0) fprintf(stderr, "c_abi_smoke: check %d failed\n", failed);
+    return failed != 0;
 }

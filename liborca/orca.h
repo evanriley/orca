@@ -368,8 +368,13 @@ typedef struct orca_release_view {
     uint8_t is_compilation;
     /* The album itself is loved, apart from any of its Tracks. */
     uint8_t loved;
-    /* orca_explicit: EXPLICIT when any Track is; else CLEAN, then NONE. */
+    /* orca_explicit: EXPLICIT when any Track is; else CLEAN, then NONE. Named
+     * explicit_ in C++, where explicit is a keyword. */
+#ifdef __cplusplus
+    uint8_t explicit_;
+#else
     uint8_t explicit;
+#endif
     uint8_t reserved[1];
     orca_string_view title;
     orca_string_view album_artist;
@@ -689,7 +694,12 @@ typedef struct orca_track_facts_view {
     /* `codec` names an encoding that discards audio; zero for an unknown
      * codec. */
     uint8_t lossy;
-    uint8_t explicit;  /* orca_explicit */
+    /* orca_explicit; explicit_ in C++. */
+#ifdef __cplusplus
+    uint8_t explicit_;
+#else
+    uint8_t explicit;
+#endif
     uint8_t has_added_at;
     uint8_t has_last_played_at;
     uint8_t has_track_total;
@@ -816,7 +826,12 @@ typedef struct orca_track_details_extra_view {
     /* No file states the total: it is the number of the Release's Tracks on
      * the disc. */
     uint8_t track_total_inferred;
-    uint8_t explicit;  /* orca_explicit */
+    /* orca_explicit; explicit_ in C++. */
+#ifdef __cplusplus
+    uint8_t explicit_;
+#else
+    uint8_t explicit;
+#endif
     uint8_t reserved[2];
 } orca_track_details_extra_view;
 

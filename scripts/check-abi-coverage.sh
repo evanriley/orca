@@ -4,18 +4,22 @@
 # with the reason it has none. A new Runtime method either gets an orca_*
 # function in liborca/c_api.zig or an entry here; an entry for a method that
 # is gone, or that c_api.zig now calls, fails as well. Only c_api.zig up to
-# its first test counts, so test rigs do not cover anything.
+# its first test counts, so test rigs do not cover anything. It also fails when
+# an orca_* function that orca.h declares is never called by the C smoke test.
 #
 # Usage:
-#   scripts/check-abi-coverage.sh liborca/core/runtime.zig liborca/c_api.zig
+#   scripts/check-abi-coverage.sh liborca/core/runtime.zig liborca/c_api.zig \
+#       liborca/orca.h tests/c_abi_smoke.c
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-    echo "usage: $0 RUNTIME_ZIG C_API_ZIG" >&2
+if [[ $# -ne 4 ]]; then
+    echo "usage: $0 RUNTIME_ZIG C_API_ZIG ORCA_H C_ABI_SMOKE_C" >&2
     exit 2
 fi
 runtime=$1
 c_api=$2
+header=$3
+smoke=$4
 
 declare -A reasons=(
     [createLibrary]="orca_library_open opens a Library; an empty in-memory one has no use to a host"
@@ -97,5 +101,15 @@ if [[ ${#uncovered[@]} -gt 0 || ${#stale[@]} -gt 0 ]]; then
         echo "Entries in $0 to remove:" >&2
         printf '  %s\n' "${stale[@]}" >&2
     fi
+    exit 1
+fi
+
+declared=$(grep -oE '^[A-Za-z_0-9 ]+[ *]orca_[a-z0-9_]+\(' "$header" |
+    sed -E 's/.*[ *](orca_[a-z0-9_]+)\($/\1/' | sort -u)
+smoke_called=$(grep -oE '\borca_[a-z0-9_]+\(' "$smoke" | tr -d '(' | sort -u)
+never_called=$(comm -23 <(echo "$declared") <(echo "$smoke_called"))
+if [[ -n $never_called ]]; then
+    echo "Exports in $header that $smoke never calls (call each, with the real path or the documented refusal):" >&2
+    sed 's/^/  /' <<<"$never_called" >&2
     exit 1
 fi
