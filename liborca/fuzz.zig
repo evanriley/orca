@@ -5,9 +5,14 @@
 //! allocation no declared bound limits fails.
 
 const std = @import("std");
+const analysis = @import("analysis/root.zig");
 const codec = @import("codec/root.zig");
+const database = @import("database/root.zig");
 const eq_text = @import("audio/eq_text.zig");
+const job_history = @import("core/job_history.zig");
 const m3u = @import("library/m3u.zig");
+const network = @import("network/root.zig");
+const providers = @import("providers/root.zig");
 const smart_playlist = @import("library/smart_playlist.zig");
 const metadata = @import("metadata/root.zig");
 const storage = @import("storage/root.zig");
@@ -69,6 +74,7 @@ const scanner_fixtures = id3v2_fixtures ++ mp4_fixtures ++ vorbis_comment_fixtur
     aiff_fixtures ++ adts_fixtures ++ mp3_stream_fixtures;
 const playlist_fixtures = [_][]const u8{ "relative.m3u8", "latin1.m3u", "bom.m3u8" };
 const lrc_fixtures = [_][]const u8{"fingerprint-reference.lrc"};
+const id3v1_fixtures = mp3_stream_fixtures ++ id3v2_fixtures;
 const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner", "lrc", "alac" };
 const audio_fixture_dir = "fixtures/audio";
 
@@ -114,6 +120,26 @@ test "fuzz: LRC lyrics parse or fail cleanly" {
 
 test "fuzz: ALAC packets decode or fail cleanly" {
     try fuzzTarget(exerciseAlac, "fixtures/fuzz", &.{}, &.{"alac"});
+}
+
+test "fuzz: ID3v1 tags parse or fail cleanly" {
+    try fuzzTarget(exerciseId3v1, audio_fixture_dir, &id3v1_fixtures, &.{"id3v1"});
+}
+
+test "fuzz: image headers measure or fail cleanly" {
+    try fuzzTarget(exerciseImageHeader, "fixtures/fuzz", &.{}, &.{"image"});
+}
+
+test "fuzz: stored fingerprints decode or fail cleanly" {
+    try fuzzTarget(exerciseFingerprints, "fixtures/fuzz", &.{}, &.{"fingerprint"});
+}
+
+test "fuzz: job-history retry requests decode or fail cleanly" {
+    try fuzzTarget(exerciseJobHistory, "fixtures/fuzz", &.{}, &.{"job-history"});
+}
+
+test "fuzz: provider responses parse or fail cleanly" {
+    try fuzzTarget(exerciseProviders, "fixtures/fuzz", &.{}, &.{"providers"});
 }
 
 test "fuzz: smart playlist rules parse and compile to bound parameters or fail cleanly" {
@@ -415,6 +441,123 @@ fn exerciseAlac(allocator: std.mem.Allocator, input: []const u8) void {
     const output = allocator.alloc(f32, samples) catch return;
     defer allocator.free(output);
     _ = engine.decode(input[24..], output) catch return;
+}
+
+fn exerciseId3v1(allocator: std.mem.Allocator, input: []const u8) void {
+    if (input.len >= 128) _ = metadata.id3v1.parse(input[0..128]);
+    if (metadata.id3v1.latin1ToUtf8(allocator, input)) |text| allocator.free(text) else |_| {}
+    if (input.len != 0) _ = metadata.id3v1.genreName(input[0]);
+}
+
+fn exerciseImageHeader(_: std.mem.Allocator, input: []const u8) void {
+    _ = metadata.image_header.dimensions(input);
+    _ = metadata.image_header.measure(input);
+    _ = metadata.image_header.hash(input);
+}
+
+fn exerciseFingerprints(allocator: std.mem.Allocator, input: []const u8) void {
+    if (analysis.chromaprint.Fingerprint.decode(allocator, input)) |fingerprint| {
+        fingerprint.deinit();
+    } else |_| {}
+    if (input.len != 0) {
+        if (analysis.chromaprint.Raw.decode(input)) |raw| raw.deinit() else |_| {}
+    }
+    if (analysis.fingerprint.decode(allocator, input)) |result| result.deinit() else |_| {}
+}
+
+fn exerciseJobHistory(allocator: std.mem.Allocator, input: []const u8) void {
+    if (job_history.RetryRequest.decode(allocator, input)) |parsed| parsed.deinit() else |_| {}
+}
+
+const ProviderRig = struct {
+    var counter: std.atomic.Value(u64) = .init(0);
+
+    library: database.LibraryDatabase,
+    net: network.testing.TestGateway,
+    cache: providers.cached_get.CachedGet,
+
+    fn init(self: *ProviderRig, input: []const u8) !void {
+        var name_buffer: [64]u8 = undefined;
+        const ordinal = counter.fetchAdd(1, .monotonic);
+        const uri = try std.fmt.bufPrintSentinel(&name_buffer, "file:orca-fuzz-{d}?mode=memory&cache=shared", .{ordinal}, 0);
+        self.library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, uri);
+        self.net.init(.{ .now_ms = 1_800_000_000_000 });
+        self.net.gateway.config.minimum_interval_ms = 0;
+        self.net.transport.otherwise = .{ .respond = .{ .status = 200, .body = input } };
+        self.cache = .{
+            .gateway = &self.net.gateway,
+            .cache = &self.library.provider_cache,
+            .wall_clock = self.net.clock.wallClock(),
+            .service = "fuzz",
+        };
+    }
+
+    fn deinit(self: *ProviderRig) void {
+        self.net.deinit();
+        self.library.close();
+    }
+};
+
+fn consume(result: anytype) void {
+    const value = result catch return;
+    deinitValue(value);
+}
+
+fn deinitValue(value: anytype) void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .optional => if (value) |present| deinitValue(present),
+        else => if (comptime std.meta.hasMethod(T, "deinit")) {
+            var owned = value;
+            owned.deinit();
+        },
+    }
+}
+
+fn exerciseProviders(allocator: std.mem.Allocator, input: []const u8) void {
+    var rig: ProviderRig = undefined;
+    rig.init(input) catch return;
+    defer rig.deinit();
+
+    const mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+
+    consume(providers.wikidata.entity(&rig.cache, allocator, "https://www.wikidata.org", "Q42", "en"));
+    consume(providers.wikipedia.summary(&rig.cache, allocator, null, "en", "Title"));
+    consume(providers.wikimedia_commons.imageInfo(&rig.cache, allocator, "https://commons.wikimedia.org", "Example.jpg"));
+    consume(providers.listenbrainz_labs.similarArtists(&rig.cache, allocator, "https://labs.api.listenbrainz.org", mbid));
+
+    consume(providers.listenbrainz.artistListeners(&rig.net.gateway, allocator, "https://api.listenbrainz.org", mbid));
+
+    var lrclib: providers.lrclib.Lrclib = .{ .gateway = &rig.net.gateway };
+    if (lrclib.get(allocator, providers.lrclib.Query.init("Title", "Artist", "Album", 200_000))) |answer| {
+        switch (answer) {
+            .found => |record| record.deinit(),
+            .missing => {},
+        }
+    } else |_| {}
+
+    var mb: providers.musicbrainz.MusicBrainz = .{
+        .gateway = &rig.net.gateway,
+        .cache = &rig.library.provider_cache,
+        .wall_clock = rig.net.clock.wallClock(),
+    };
+    consume(mb.search(allocator, .{ .title = "Title", .artist = "Artist", .album = "Album" }));
+    consume(mb.lookUpRelease(allocator, mbid));
+    consume(mb.lookUpArtist(allocator, mbid));
+    consume(mb.lookUpReleaseGroup(allocator, mbid));
+    consume(mb.lookUpArea(allocator, mbid));
+    consume(mb.browseReleaseGroups(allocator, mbid));
+
+    var acoust: providers.acoustid.AcoustId = .{
+        .gateway = &rig.net.gateway,
+        .cache = &rig.library.provider_cache,
+        .wall_clock = rig.net.clock.wallClock(),
+        .client_key = "fuzz-client-key",
+    };
+    const queries = [_]providers.acoustid.LookupQuery{.{ .duration_s = 180, .fingerprint = "AQADtNkkhUkSRRGVE" }};
+    consume(acoust.lookup(allocator, &queries));
+
+    if (providers.wikimedia_commons.plainText(allocator, input)) |text| allocator.free(text) else |_| {}
 }
 
 fn decodeSome(allocator: std.mem.Allocator, opened: codec.Decoder) void {
