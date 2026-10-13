@@ -206,6 +206,19 @@ zig build run -- release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline
 zig build run -- submit-acoustid DATABASE [--dry-run]
 ```
 
+## Printed text
+
+Text that comes from files, tags, paths, provider responses and database rows
+is filtered the same way whether the output goes to a terminal or a pipe. C0
+control characters, DEL, C1 control characters (U+0080 to U+009F) and bytes
+that are not valid UTF-8 print as `\xNN`, one escape per byte, so a tag cannot
+send a terminal escape sequence. Valid non-ASCII UTF-8 prints unchanged.
+Multi-line free text (lyrics, biographies and descriptions) also keeps tab and
+newline. Every other value, including a title or path that holds a newline,
+stays on one line. Files the CLI writes, such as `changes --export` and
+`playlist-export`, keep their raw contract. No command prints JSON or
+NUL-separated output.
+
 ## Environment variables
 
 `orca-cli` and `orca-gtk` select provider servers from the environment so
