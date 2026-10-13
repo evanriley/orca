@@ -3598,13 +3598,13 @@ fn importOptionalFlag(has: u8, value: u8) error{Invalid}!?bool {
 
 fn importRadioOptions(options: *const RadioOptionsView) ?discovery.RadioOptions {
     if (options.focus_count > discovery.max_focus or options.include_live > 1) return null;
-    if (options.familiarity != 255 and options.familiarity > 100) return null;
+    if (options.familiarity > 101) return null;
     var result: discovery.RadioOptions = .{
         .explore = options.explore,
         .include_unplayed = importOptionalFlag(options.has_include_unplayed, options.include_unplayed) catch return null,
         .avoid_recent = importOptionalFlag(options.has_avoid_recent, options.avoid_recent) catch return null,
         .include_live = options.include_live == 1,
-        .familiarity = if (options.familiarity == 255) null else options.familiarity,
+        .familiarity = if (options.familiarity == 0) null else options.familiarity - 1,
     };
     for (options.focus[0..options.focus_count], result.focus[0..options.focus_count]) |view, *focus| {
         focus.* = switch (importRadioFocusKind(view.kind) orelse return null) {
@@ -4203,7 +4203,7 @@ fn exportRadioSeed(seed: discovery.Seed) RadioSeedView {
     return .{ .id = id, .kind = @backingInt(std.meta.activeTag(seed)) };
 }
 
-fn exportRadioOptions(options: discovery.RadioOptions, library_familiarity: u8) RadioOptionsView {
+fn exportRadioOptions(options: discovery.RadioOptions) RadioOptionsView {
     var view: RadioOptionsView = .{
         .focus = @splat(.{ .id = 0, .kind = 0 }),
         .focus_count = 0,
@@ -4213,7 +4213,7 @@ fn exportRadioOptions(options: discovery.RadioOptions, library_familiarity: u8) 
         .has_avoid_recent = @intFromBool(options.avoid_recent != null),
         .avoid_recent = @intFromBool(options.avoid_recent orelse false),
         .include_live = @intFromBool(options.include_live),
-        .familiarity = options.familiarity orelse library_familiarity,
+        .familiarity = if (options.familiarity) |dial| dial + 1 else 0,
     };
     for (options.focus) |entry| {
         const focus = entry orelse continue;
@@ -4295,14 +4295,10 @@ pub export fn orca_player_radio_status(
     const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     const status = (box.runtime.playerRadio(importPlayer(player)) catch |err|
         return box.fail(@src(), err)) orelse return .ok;
-    const library_familiarity = blk: {
-        const settings = box.runtime.libraryDiscoverySettings(status.library) catch break :blk 0;
-        break :blk settings.familiarity;
-    };
     const view: RadioStatusView = .{
         .library = exportLibraryHandle(status.library),
         .seed = exportRadioSeed(status.seed),
-        .options = exportRadioOptions(status.options, library_familiarity),
+        .options = exportRadioOptions(status.options),
         .title = stringView(status.title()),
         .picks_added = status.counts.picks_added,
         .user_queued = status.counts.user_queued,
@@ -13706,20 +13702,15 @@ test "the discovery settings round-trip and refuse values outside their sets, an
     try std.testing.expectEqual(Status.invalid_argument, orca_library_radio_preview(runtime, library, &loved, &options, null, 10, &visited, countRadioPicks));
     options.focus[0] = .{ .id = 0, .kind = @backingInt(std.meta.Tag(discovery.Focus).high_energy) };
     var familiarity_view = std.mem.zeroes(RadioOptionsView);
-    familiarity_view.familiarity = 255;
-    try std.testing.expectEqual(@as(?u8, null), (importRadioOptions(&familiarity_view) orelse return error.ImportFailed).familiarity);
-    familiarity_view.familiarity = 100;
+    familiarity_view.familiarity = 101;
     const hundred = importRadioOptions(&familiarity_view) orelse return error.ImportFailed;
     try std.testing.expectEqual(@as(?u8, 100), hundred.familiarity);
-    try std.testing.expectEqual(@as(u8, 100), exportRadioOptions(hundred, 0).familiarity);
+    try std.testing.expectEqual(@as(u8, 101), exportRadioOptions(hundred).familiarity);
     const defaults = std.mem.zeroes(RadioOptionsView);
-    var setting_view = std.mem.zeroes(RadioOptionsView);
-    setting_view.familiarity = 255;
-    try std.testing.expectEqual(@as(u8, 40), exportRadioOptions(importRadioOptions(&setting_view) orelse return error.ImportFailed, 40).familiarity);
-    try std.testing.expectEqual(@as(u8, 0), exportRadioOptions(importRadioOptions(&defaults) orelse return error.ImportFailed, 40).familiarity);
-    familiarity_view.familiarity = 150;
+    try std.testing.expectEqual(@as(u8, 0), exportRadioOptions(importRadioOptions(&defaults) orelse return error.ImportFailed).familiarity);
+    familiarity_view.familiarity = 102;
     try std.testing.expect(importRadioOptions(&familiarity_view) == null);
-    familiarity_view.familiarity = 255;
+    familiarity_view.familiarity = 0;
     const box = runtimeBox(runtime).?;
     try box.runtime.setLibraryDiscoverySettings(importLibrary(library), .{ .familiarity = 40 });
     const session: RadioPreviewSessionView = .{ .now_s = 2_000_000_000, .seed = 1, .has_now = 1, .has_seed = 1 };
@@ -13727,6 +13718,19 @@ test "the discovery settings round-trip and refuse values outside their sets, an
     try std.testing.expectEqual(Status.ok, orca_library_radio_preview(runtime, library, &loved, &options, &session, 10, &visited, countRadioPicks));
     try std.testing.expect(visited > 2);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "a zero familiarity byte in C radio options reads the Library setting" {
+    var view = std.mem.zeroes(RadioOptionsView);
+    try std.testing.expectEqual(@as(?u8, null), (importRadioOptions(&view) orelse return error.ImportFailed).familiarity);
+    view.familiarity = 1;
+    try std.testing.expectEqual(@as(?u8, 0), (importRadioOptions(&view) orelse return error.ImportFailed).familiarity);
+    view.familiarity = 101;
+    try std.testing.expectEqual(@as(?u8, 100), (importRadioOptions(&view) orelse return error.ImportFailed).familiarity);
+    view.familiarity = 102;
+    try std.testing.expect(importRadioOptions(&view) == null);
+    view.familiarity = 255;
+    try std.testing.expect(importRadioOptions(&view) == null);
 }
 
 test "a discovery settings write from C keeps the stored Artist variety" {

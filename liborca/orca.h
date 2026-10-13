@@ -925,9 +925,10 @@ typedef struct orca_radio_focus {
  * of 0 reads the Library's setting instead of its value: `include_unplayed`
  * lets Radio pick Recordings that were never played, and `avoid_recent`
  * leaves out what was played within discovery.avoid_days (3 days when that is
- * 0). `include_live` admits live Releases. `familiarity` runs from 0, ranking
- * by the match alone, to 100, leaning on play history; 255 reads the
- * Library's radio.familiarity setting. */
+ * 0). `include_live` admits live Releases. `familiarity` of 0 reads the
+ * Library's radio.familiarity setting; 1 to 101 set the dial to one less, so
+ * 1 ranks by the match alone and 101 leans fully on play history; any other
+ * value is ORCA_STATUS_INVALID_ARGUMENT. */
 typedef struct orca_radio_options {
     orca_radio_focus focus[4];
     uint8_t focus_count;
