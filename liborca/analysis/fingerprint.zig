@@ -41,7 +41,7 @@ pub const AudioHasher = struct {
     used_bits: u32 = 0,
     samples: std.crypto.hash.Blake3 = .init(.{}),
 
-    const chunk_samples = 256;
+    const swap_chunk_samples = 1024;
 
     pub fn init(tier: AudioHashTier, sample_rate: u32, channels: u16) !AudioHasher {
         if (sample_rate == 0 or channels == 0) return error.InvalidAudioFormat;
@@ -55,33 +55,45 @@ pub const AudioHasher = struct {
     pub fn updateIntegers(self: *AudioHasher, samples: []const i32) !void {
         if (self.tier != .lossless_integer) return error.AudioHashTierMismatch;
         if (samples.len % self.channels != 0) return error.IncompleteAudioFrame;
-        var encoded: [chunk_samples * 4]u8 = undefined;
-        var index: usize = 0;
-        while (index < samples.len) {
-            const chunk = samples[index..@min(samples.len, index + chunk_samples)];
-            for (chunk, 0..) |sample, offset| {
-                self.used_bits |= @bitCast(sample);
-                std.mem.writeInt(i32, encoded[offset * 4 ..][0..4], sample, .little);
-            }
-            self.samples.update(encoded[0 .. chunk.len * 4]);
-            index += chunk.len;
-        }
+        self.used_bits |= orAll(samples);
+        self.updateWords(i32, samples);
         self.frames += samples.len / self.channels;
     }
 
     pub fn updateFloats(self: *AudioHasher, samples: []const f32) !void {
         if (self.tier != .decoded_float) return error.AudioHashTierMismatch;
         if (samples.len % self.channels != 0) return error.IncompleteAudioFrame;
-        var encoded: [chunk_samples * 4]u8 = undefined;
+        self.updateWords(f32, samples);
+        self.frames += samples.len / self.channels;
+    }
+
+    fn orAll(samples: []const i32) u32 {
+        const lanes = 8;
+        var acc: @Vector(lanes, u32) = @splat(0);
+        var index: usize = 0;
+        while (index + lanes <= samples.len) : (index += lanes) {
+            const block: @Vector(lanes, i32) = samples[index..][0..lanes].*;
+            acc |= @bitCast(block);
+        }
+        var bits: u32 = @reduce(.Or, acc);
+        for (samples[index..]) |sample| bits |= @bitCast(sample);
+        return bits;
+    }
+
+    fn updateWords(self: *AudioHasher, comptime T: type, samples: []const T) void {
+        if (comptime @import("builtin").cpu.arch.endian() == .little) {
+            self.samples.update(std.mem.sliceAsBytes(samples));
+            return;
+        }
+        var encoded: [swap_chunk_samples * 4]u8 = undefined;
         var index: usize = 0;
         while (index < samples.len) {
-            const chunk = samples[index..@min(samples.len, index + chunk_samples)];
+            const chunk = samples[index..@min(samples.len, index + swap_chunk_samples)];
             for (chunk, 0..) |sample, offset|
                 std.mem.writeInt(u32, encoded[offset * 4 ..][0..4], @bitCast(sample), .little);
             self.samples.update(encoded[0 .. chunk.len * 4]);
             index += chunk.len;
         }
-        self.frames += samples.len / self.channels;
     }
 
     pub fn finish(self: *AudioHasher) AudioHash {
@@ -480,4 +492,52 @@ test "a version 1 fingerprint result is refused and a corrupt tier is invalid" {
     const decoded = try decode(allocator, encoded);
     defer decoded.deinit();
     try std.testing.expectEqual(result.audio_hash, decoded.audio_hash);
+}
+
+fn referenceUpdate(hasher: *std.crypto.hash.Blake3, used_bits: *u32, words: []const u32) void {
+    var encoded: [256 * 4]u8 = undefined;
+    var index: usize = 0;
+    while (index < words.len) {
+        const chunk = words[index..@min(words.len, index + 256)];
+        for (chunk, 0..) |word, offset| {
+            used_bits.* |= word;
+            std.mem.writeInt(u32, encoded[offset * 4 ..][0..4], word, .little);
+        }
+        hasher.update(encoded[0 .. chunk.len * 4]);
+        index += chunk.len;
+    }
+}
+
+test "the audio hash matches the 256-sample reference over every buffer length" {
+    var prng = std.Random.DefaultPrng.init(0x0ca4_a5ee);
+    const random = prng.random();
+    const lengths = [_]usize{ 0, 1, 255, 256, 257, 511, 1023, 1024, 1025, 4095, 4096, 4097, 9999 };
+    const channel_counts = [_]u8{ 1, 2, 3, 5 };
+    for (channel_counts) |channels| {
+        for (lengths) |base| {
+            const len = base - base % channels;
+            const words = try std.testing.allocator.alloc(u32, len);
+            defer std.testing.allocator.free(words);
+            random.bytes(std.mem.sliceAsBytes(words));
+            for (words) |*word| word.* &= 0xffff_ff00;
+
+            var reference_hasher = std.crypto.hash.Blake3.init(.{});
+            var reference_bits: u32 = 0;
+            referenceUpdate(&reference_hasher, &reference_bits, words);
+            var expected: [32]u8 = undefined;
+            reference_hasher.final(&expected);
+
+            var integers = try AudioHasher.init(.lossless_integer, 44_100, channels);
+            try integers.updateIntegers(@ptrCast(words));
+            try std.testing.expectEqual(reference_bits, integers.used_bits);
+            var actual: [32]u8 = undefined;
+            integers.samples.final(&actual);
+            try std.testing.expectEqualSlices(u8, &expected, &actual);
+
+            var floats = try AudioHasher.init(.decoded_float, 44_100, channels);
+            try floats.updateFloats(@ptrCast(words));
+            floats.samples.final(&actual);
+            try std.testing.expectEqualSlices(u8, &expected, &actual);
+        }
+    }
 }
