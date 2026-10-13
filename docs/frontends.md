@@ -318,7 +318,10 @@ header; the Zig counterparts are in [api.md](api.md#surface).
   `ORCA_STATUS_NOT_FOUND` when unknown). Reason kinds and `ORCA_SOUND_*` flags
   are in [discovery.md](discovery.md#reasons).
 - Library Radio: `orca_player_start_radio` (NULL `options` takes the defaults;
-  `ORCA_STATUS_INVALID_STATE` for a Player with no Library),
+  `ORCA_STATUS_INVALID_STATE` for a Player with no Library;
+  `orca_radio_options.familiarity` 0 reads the Library's `radio.familiarity`
+  setting, 1 to 101 set the dial to one less, and a larger value is
+  `ORCA_STATUS_INVALID_ARGUMENT`),
   `orca_player_stop_radio`, `orca_player_set_radio_options`,
   `orca_player_radio_less_like_this` (by the `entry_id` of an
   `orca_radio_queue_pick_view`; `ORCA_STATUS_NOT_FOUND` for an entry that is

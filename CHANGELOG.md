@@ -209,6 +209,18 @@
   co-listening counts. Daily Mixes rank as before. `orca-cli radio` takes
   `--seed N`, and `orca-gtk` describes the dial in new words.
 
+- **A C host that passes `orca_radio_options.familiarity` must now add one to
+  the dial, or pass 0.** The field is 0 for the Library's `radio.familiarity`
+  setting and 1 to 101 for the dial at one less; any other value, including the
+  former 255, is `ORCA_STATUS_INVALID_ARGUMENT`. A host built against the 0.4.0
+  header that passed 0 to 100 or 255 must add one or pass 0. A host built
+  against 0.3.0 or earlier, which zeroed the then-reserved byte, forced the dial
+  to 0 under 0.4.0 and reads the setting again, as the header promises for a
+  reserved byte. `orca_radio_status_view.options.familiarity` reports the
+  options as given, 0 when the session reads the setting. `ORCA_ABI_VERSION`
+  stays 0, the struct layout is unchanged, and the Zig
+  `RadioOptions.familiarity` is unchanged.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in
