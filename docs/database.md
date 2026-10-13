@@ -87,8 +87,11 @@ name. Changes made after the upgrade are not in the copy.
 ## Concurrency
 
 - A Library opens two connections to the same file (or shared cache): the
-  primary write connection and a read-only connection. Every connection sets
-  `foreign_keys=ON`, a five-second busy timeout and SQLite's full-mutex mode.
+  primary write connection and a read-only connection. A file Library opens a
+  third, the schema-check connection: a read-only connection that only reads
+  `user_version` for the check below. Every connection sets `foreign_keys=ON`,
+  a five-second busy timeout and SQLite's full-mutex mode; the schema-check
+  connection drops its busy timeout to zero after its first read.
 - Which connection a call uses is chosen inside the database layer, not at the
   call site. A thread that holds the write lane reads and writes through the
   primary connection, so a flow inside a write transaction sees its own
@@ -97,9 +100,13 @@ name. Changes made after the upgrade are not in the copy.
   scratch creation) and raw SQL that writes use the primary connection
   directly; every other raw-SQL read goes through the same ownership-selected
   handle as repository reads.
-- A file Library uses WAL and `synchronous=NORMAL`, so a read-only connection
-  sees a per-statement snapshot of committed state: never a batch's in-flight
-  rows, never a half-applied transaction.
+- A file Library uses WAL and `synchronous=NORMAL`. Open requires SQLite to
+  answer `wal` to `PRAGMA journal_mode=WAL`; any other answer fails the open
+  with `error.OpenFailed` and one logged line naming the journal mode. In a
+  rollback-journal mode a commit takes the exclusive lock before the schema
+  check can read, so the check would refuse every large commit. A read-only
+  connection sees a per-statement snapshot of committed state: never a batch's
+  in-flight rows, never a half-applied transaction.
 - `synchronous=NORMAL` syncs the WAL at a checkpoint, not at each commit. A
   process crash loses no committed transaction. A power failure or kernel
   crash can lose the transactions committed since the last checkpoint (a
@@ -126,20 +133,24 @@ name. Changes made after the upgrade are not in the copy.
   a newer Orca among them migrates it on open. The write connection of a file
   Library therefore checks `user_version` in every write transaction while it
   holds SQLite's write lock, so no migration can land between the check and
-  the commit. `BEGIN IMMEDIATE` reads the version as it takes the lock and is
-  rolled back on a mismatch, before any statement of the transaction runs. A
-  SQLite commit hook covers every other write transaction, whether a single
-  statement, a deferred `BEGIN` or a savepoint, and turns its commit into a
-  rollback. The hook reads the version through a third, read-only connection
-  that the check owns, because a commit hook may not use its own connection.
-  A refused write returns `error.SchemaVersionTooNew` and changes nothing;
-  the Library stays open and every later write is refused the same way until
-  it is reopened by an Orca of the newer version. A statement that fails on
-  the write connection for another reason, such as a table the migration
-  dropped, also returns `error.SchemaVersionTooNew` when the file's version
-  has changed. Reads are not checked: a read cannot store a row, and it holds
-  no lock that would keep a check true. A read against a migrated file returns
-  rows under the old schema's reading of them or fails with `error.SqlFailed`.
+  the commit. `BEGIN IMMEDIATE`, when run by itself, reads the version as it
+  takes the lock and is rolled back on a mismatch, before any statement of the
+  transaction runs. A SQLite commit hook covers every other write transaction,
+  whether a single statement, a deferred `BEGIN`, a savepoint or a
+  `BEGIN IMMEDIATE` that is not run by itself, and turns its commit into a
+  rollback. The hook reads the version through the schema-check connection,
+  because a commit hook may not use its own connection. A refused write returns
+  `error.SchemaVersionTooNew` and changes nothing; the Library stays open and
+  every later write is refused the same way until it is reopened by an Orca of
+  the newer version. A statement that fails on the write connection for another
+  reason, such as a table the migration dropped, also returns
+  `error.SchemaVersionTooNew` when the file's version has changed; this holds
+  for reads on the write connection as well. Reads on the read-only connection
+  are not checked: a read cannot store a row, and it holds no lock that would
+  keep a check true. Such a read against a migrated file returns rows under the
+  old schema's reading of them or fails with `error.SqlFailed`. Opening a file
+  Library whose `user_version` already differs from the one this process
+  expects fails with `error.SchemaVersionTooNew`.
   An in-memory Library has no check.
 - One process at a time owns the mutation journal: the holder of an exclusive
   `flock` on `<database>.orca-journal.lock`, taken without waiting by open's

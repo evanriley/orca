@@ -283,6 +283,16 @@
   Radio that cannot continue after the queue ends each log a warning with the
   error name.
 
+- **Opening a Library no longer fails when another connection closes at the
+  same instant, and a file Library that cannot use WAL is refused at open.**
+  The schema check added in this release made its first read of `user_version`
+  with no busy timeout; `SchemaGuard.install` now makes that read with the
+  normal five-second timeout and returns `SchemaVersionTooNew` when the file is
+  already at another version. `Library.open` checks that `PRAGMA
+  journal_mode=WAL` answered `wal` and otherwise fails with `OpenFailed` and
+  one logged line naming the mode, because in a rollback-journal mode the
+  schema check would refuse large commits.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

@@ -138,7 +138,8 @@ pub const LibraryDatabase = struct {
         const write_lane = try allocator.create(repository.WriteLane);
         errdefer allocator.destroy(write_lane);
         write_lane.* = .{ .io = io };
-        try database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+        try requireWriteAheadLog(database);
+        try database.exec("PRAGMA synchronous=NORMAL;");
         const backup_directory: ?[]u8 = if (database.filename()) |file|
             try std.fmt.allocPrint(allocator, "{s}.orca-backups", .{file})
         else
@@ -254,6 +255,17 @@ pub const LibraryDatabase = struct {
             .recording_verifications = .{ .db = dynamic, .write_lane = write_lane },
             .acoustid_submissions = .{ .db = dynamic, .write_lane = write_lane },
         };
+    }
+
+    fn requireWriteAheadLog(database: sqlite.Database) !void {
+        var statement = try database.prepare("PRAGMA journal_mode=WAL;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        const mode = statement.columnText(0);
+        const file = database.filename() orelse return;
+        if (std.ascii.eqlIgnoreCase(mode, "wal")) return;
+        std.log.err("{s}: journal mode is {s}, expected wal; the Library cannot be opened", .{ file, mode });
+        return error.OpenFailed;
     }
 
     /// Finishes whatever an interrupted holder of the journal lock left
@@ -5324,4 +5336,36 @@ test "a Library keeps writing while another process writes rows at the same sche
     try fixture.library.settings.setFlag("ours", true);
     try std.testing.expectEqual(@as(i64, 2), try fixture.count("playlists"));
     try std.testing.expectEqual(@as(i64, 1), try fixture.count("library_settings WHERE key='ours'"));
+}
+
+test "installing the schema guard refuses a file whose schema was raised after the migration" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.migrateElsewhere();
+
+    var guard: sqlite.SchemaGuard = undefined;
+    try std.testing.expectError(
+        error.SchemaVersionTooNew,
+        guard.install(fixture.other_process, fixture.upgrade.path, migrations.current_version),
+    );
+    try fixture.other_process.exec(MigratedFixture.insert_playlist);
+    try std.testing.expectEqual(@as(i64, 1), try fixture.count("playlists"));
+}
+
+test "a BEGIN IMMEDIATE transaction commits its other statements after one statement fails a constraint" {
+    var fixture: MigratedFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const db = fixture.library.database;
+
+    try db.exec("BEGIN IMMEDIATE;");
+    try db.exec(MigratedFixture.insert_playlist);
+    try std.testing.expectError(
+        error.SqlFailed,
+        db.exec("INSERT INTO playlists(name, created_at, updated_at) VALUES (NULL, 0, 0);"),
+    );
+    try db.exec("INSERT INTO playlists(name, created_at, updated_at) VALUES ('Second', 0, 0);");
+    try db.exec("COMMIT;");
+    try std.testing.expectEqual(@as(i64, 2), try fixture.count("playlists"));
 }
