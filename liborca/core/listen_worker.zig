@@ -761,11 +761,11 @@ const TestRig = struct {
     now_playing: ?Worker.PendingNowPlaying,
 
     fn start(self: *TestRig, comptime name: []const u8) !void {
-        self.library = try database.LibraryDatabase.open(
-            testing.allocator,
-            testing.io,
-            "file:orca-worker-" ++ name ++ "?mode=memory&cache=shared",
-        );
+        try self.startAt("file:orca-worker-" ++ name ++ "?mode=memory&cache=shared");
+    }
+
+    fn startAt(self: *TestRig, path: [:0]const u8) !void {
+        self.library = try database.LibraryDatabase.open(testing.allocator, testing.io, path);
         self.listens = .{};
         self.service.start();
         self.prng = .init(network.testing.default_seed);
@@ -1055,6 +1055,27 @@ test "drainRing drops a listen that fails every attempt so it cannot hold the qu
     try testing.expectEqual(@as(usize, 0), rig.listens.ring.len());
     try testing.expectEqual(@as(u64, 1), rig.listens.dropped.load(.monotonic));
     try testing.expectEqual(@as(u32, 0), rig.worker.record_attempts);
+}
+
+test "drainRing drops listens at once when another process has migrated the Library" {
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try std.fmt.allocPrintSentinel(testing.allocator, ".zig-cache/tmp/{s}/library.db", .{temporary.sub_path}, 0);
+    defer testing.allocator.free(path);
+    var rig: TestRig = undefined;
+    try rig.startAt(path);
+    defer rig.stop();
+    const track = try rig.addTrack(null);
+    pushListens(&rig, track, 2);
+    const other_process = try database.sqlite.Database.open(path);
+    defer other_process.close();
+    try other_process.exec("PRAGMA user_version=1000000;");
+
+    try testing.expect(!rig.worker.drainRing(.{}, .running).recorded);
+    try testing.expectEqual(@as(usize, 0), rig.listens.ring.len());
+    try testing.expectEqual(@as(u64, 2), rig.listens.dropped.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), rig.worker.record_attempts);
+    try testing.expectEqual(@as(u64, 0), try rig.library.listens.count());
 }
 
 test "drainRing stores listens in the order they were heard across a retry" {

@@ -71,7 +71,9 @@ typedef enum orca_status {
      * holds its mutation journal or is walking it. Backpressure, not failure. */
     ORCA_STATUS_BUSY = 7,
     /* No codec can read those bytes, no backend can open that device, or
-     * this liborca was built without the feature. */
+     * this liborca was built without the feature. Also a Library that a newer
+     * Orca migrated: opening it returns this, and so does a call that writes
+     * to an open Library after another process upgraded it. */
     ORCA_STATUS_UNSUPPORTED = 8,
     /* Debug builds only: called from a thread other than the owning one. */
     ORCA_STATUS_WRONG_THREAD = 9,

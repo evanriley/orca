@@ -121,6 +121,26 @@ name. Changes made after the upgrade are not in the copy.
   complete write transactions. A scan holds it across one bounded 256-row
   transaction while UI threads read committed state on the read-only
   connection.
+- A process never commits a write to a database file whose `user_version` is
+  not the one it opened. Several processes can hold one Library file open, and
+  a newer Orca among them migrates it on open. The write connection of a file
+  Library therefore checks `user_version` in every write transaction while it
+  holds SQLite's write lock, so no migration can land between the check and
+  the commit. `BEGIN IMMEDIATE` reads the version as it takes the lock and is
+  rolled back on a mismatch, before any statement of the transaction runs. A
+  SQLite commit hook covers every other write transaction, whether a single
+  statement, a deferred `BEGIN` or a savepoint, and turns its commit into a
+  rollback. The hook reads the version through a third, read-only connection
+  that the check owns, because a commit hook may not use its own connection.
+  A refused write returns `error.SchemaVersionTooNew` and changes nothing;
+  the Library stays open and every later write is refused the same way until
+  it is reopened by an Orca of the newer version. A statement that fails on
+  the write connection for another reason, such as a table the migration
+  dropped, also returns `error.SchemaVersionTooNew` when the file's version
+  has changed. Reads are not checked: a read cannot store a row, and it holds
+  no lock that would keep a check true. A read against a migrated file returns
+  rows under the old schema's reading of them or fails with `error.SqlFailed`.
+  An in-memory Library has no check.
 - One process at a time owns the mutation journal: the holder of an exclusive
   `flock` on `<database>.orca-journal.lock`, taken without waiting by open's
   recovery and by each tag write, undo and prune
