@@ -98,6 +98,10 @@ pub const Database = struct {
         return if (path.len == 0) null else path;
     }
 
+    pub fn readOnly(self: Database) bool {
+        return c.sqlite3_db_readonly(self.resolved().handle, "main") == 1;
+    }
+
     pub fn lastError(self: Database) []const u8 {
         return std.mem.span(c.sqlite3_errmsg(self.resolved().handle));
     }

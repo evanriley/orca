@@ -440,6 +440,19 @@ full-text search read the same predicate text.
 - A page selects its ids first with only the join its sort needs, then joins the
   columns of the summary. `TrackSummary.feedback` and `recording_id` come from
   the same statement, never a query per row.
+- A Track sort by a value outside the Track indexes (play count, last played,
+  rating, loved, year, date added) and every genre listing are served from a
+  per-connection TEMP snapshot `track_page_snapshot(ord, track_id)`: the first
+  page of a given filter and sort pays one full sort to fill it, and every later
+  page reads an `ord` range instead of re-sorting, so deep offsets cost a few
+  milliseconds rather than growing with the offset. The snapshot holds the same
+  order the single ORDER BY would, tiebreak included. It is refilled when the
+  query changes or when `PRAGMA data_version` reports that another connection
+  committed, so a Library change is never served from a stale snapshot; it is
+  TEMP, so it never reaches the schema version and each connection keeps its
+  own. Shallow pages of those sorts still walk the per-index candidate lists,
+  and an index-walk sort (id, artist, album, title, track number, duration,
+  album artist) never builds one.
 - Date added orders by `files.first_seen_at` of the playing file, not
   `tracks.created_at`, which a reprojection resets. A Track is loved when its
   Recording's `feedback.score` is `1`; a Release is loved through
