@@ -149,9 +149,13 @@ pub const SchemaGuard = struct {
     pub fn install(self: *SchemaGuard, writer: Database, path: [:0]const u8, expected: i64) Error!void {
         const verifier = try Database.openReadOnly(path);
         errdefer verifier.close();
-        try verifier.exec("PRAGMA busy_timeout=0;");
         const verifier_version = try verifier.prepare(user_version_sql);
         errdefer verifier_version.deinit();
+        const found = version(verifier_version) orelse return error.SqlFailed;
+        if (found != expected) return error.SchemaVersionTooNew;
+        // The first read takes the file's shared lock and must wait out a
+        // closing connection; only later reads may fail at once.
+        try verifier.exec("PRAGMA busy_timeout=0;");
         const writer_version = try writer.prepare(user_version_sql);
         self.* = .{
             .expected = expected,
