@@ -12,6 +12,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const jobs = @import("jobs.zig");
+const library_summary = @import("library_summary.zig");
 const tags = @import("tags.zig");
 const matches = @import("matches.zig");
 const page_ui = @import("page.zig");
@@ -820,7 +821,7 @@ fn showStat(label_widget: ?*gtk.Label, count: u64) void {
     gtk.gtk_label_set_text(label_widget orelse return, strings.format(&buffer, "{f}", .{strings.grouped(count)}).ptr);
 }
 
-fn showOverview(self: *App, library: liborca.LibraryHandle, counts: std.EnumArray(Row, u64)) void {
+fn showOverview(self: *App, counts: std.EnumArray(Row, u64)) void {
     var attention: u64 = 0;
     for (std.enums.values(Row)) |row| attention += counts.get(row);
     const urgent = counts.get(.missing_files) != 0;
@@ -833,7 +834,11 @@ fn showOverview(self: *App, library: liborca.LibraryHandle, counts: std.EnumArra
     else
         "A few things could use a look. Nothing changes on disk until you review and confirm it.");
 
-    const stats = self.runtime.libraryStats(library) catch return;
+    showStats(self);
+}
+
+fn showStats(self: *App) void {
+    const stats = self.library_summary.stats orelse return;
     showStat(self.health.album_count, stats.releases);
     showStat(self.health.track_count, stats.tracks);
     if (self.health.last_analyzed) |when| {
@@ -880,6 +885,21 @@ pub fn reload(self: *App) void {
     metadata_issues.invalidate(self);
     metadata_issues.refreshStatus(self);
     if (!self.health.built) return;
+    library_summary.requestStats(self);
+    library_summary.requestHealth(self);
+    render(self);
+}
+
+pub fn statsArrived(self: *App) void {
+    if (self.health.built) showStats(self);
+}
+
+pub fn summaryArrived(self: *App) void {
+    if (self.health.built) render(self);
+}
+
+fn render(self: *App) void {
+    const summary = self.library_summary.health orelse return;
     const scroller = self.health.scroller orelse return;
     const library = self.library orelse return;
     const scrolled = self.health.restore_scroll orelse if (gtk.gtk_scrolled_window_get_vadjustment(scroller)) |adjustment| gtk.gtk_adjustment_get_value(adjustment) else 0;
@@ -890,7 +910,6 @@ pub fn reload(self: *App) void {
 
     var by_kind: std.EnumArray(Kind, u64) = .initFill(0);
     var duplicate_bytes: u64 = 0;
-    const summary = self.runtime.libraryHealthSummary(library) catch return self.toast("Could not read the library's health");
     for (summary.items()) |item| {
         by_kind.set(item.kind, item.count);
         if (std.mem.indexOfScalar(Kind, info(.duplicates).kinds, item.kind) != null) duplicate_bytes += item.bytes;
@@ -904,7 +923,7 @@ pub fn reload(self: *App) void {
     counts.set(.missing_files, self.runtime.libraryMissingFileCount(library) catch 0);
     counts.set(.mismatched, metadata_issues.openCount(self));
 
-    showOverview(self, library, counts);
+    showOverview(self, counts);
     for (std.enums.values(Row)) |row| showRow(self, row, counts.get(row), duplicate_bytes);
 
     if (self.health.restore_scroll == null) _ = gtk.g_idle_add(restoreScroll, self);

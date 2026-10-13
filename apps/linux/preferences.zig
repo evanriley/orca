@@ -17,6 +17,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const jobs = @import("jobs.zig");
+const library_summary = @import("library_summary.zig");
 const settings = @import("settings.zig");
 const secret = @import("secret.zig");
 const transport = @import("transport.zig");
@@ -574,15 +575,24 @@ fn showMeasure(self: *App) void {
 }
 
 fn duplicatesSubtitle(buffer: []u8, self: *App) [:0]const u8 {
-    const library = self.library orelse return "Compares audio";
-    const stats = self.runtime.libraryStats(library) catch return "Compares audio";
+    const stats = self.library_summary.stats orelse return "Compares audio";
     const scanned = stats.last_duplicate_scan_at orelse return "Compares audio · never run";
     var ago_buffer: [32]u8 = undefined;
     const now = std.Io.Clock.real.now(self.io).toSeconds();
     return strings.format(buffer, "Compares audio · last scan {s}", .{activity.agoText(&ago_buffer, now, scanned)});
 }
 
+pub fn statsArrived(self: *App) void {
+    renderDuplicates(self);
+    renderAbout(self);
+}
+
 fn showDuplicates(self: *App) void {
+    library_summary.requestStats(self);
+    renderDuplicates(self);
+}
+
+fn renderDuplicates(self: *App) void {
     const row = self.settings_page.duplicates_row orelse return;
     var buffer: [96]u8 = undefined;
     setSubtitle(row, duplicatesSubtitle(&buffer, self));
@@ -2946,11 +2956,6 @@ fn writeDsp(writer: *std.Io.Writer, maybe_path: ?liborca.SignalPath) std.Io.Writ
     if (stages == 0) try writer.writeAll("none");
 }
 
-fn libraryStats(self: *App) ?liborca.LibraryStats {
-    const library = self.library orelse return null;
-    return self.runtime.libraryStats(library) catch null;
-}
-
 fn writeDiagnostics(writer: *std.Io.Writer, self: *App, stats: ?liborca.LibraryStats) std.Io.Writer.Error!void {
     const path = signalPath(self);
     try writer.print("{s: <11}{f} (liborca {f})\n", .{ "orca", liborca.version, liborca.version });
@@ -2995,7 +3000,7 @@ fn diagnosticsText(buffer: []u8, self: *App, stats: ?liborca.LibraryStats) [:0]c
 fn copyDiagnosticsClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     var buffer: [4096]u8 = undefined;
-    copyText(self, diagnosticsText(&buffer, self, libraryStats(self)).ptr);
+    copyText(self, diagnosticsText(&buffer, self, self.library_summary.stats).ptr);
 }
 
 fn aboutButton(label: [*:0]const u8, icon: ?[*:0]const u8, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
@@ -3133,12 +3138,18 @@ fn diagnosticsCard(self: *App) *gtk.Widget {
 }
 
 fn showAbout(self: *App) void {
+    if (self.settings_page.contents[@backingInt(app.SettingsTab.about)] == null) return;
+    library_summary.requestStats(self);
+    renderAbout(self);
+}
+
+fn renderAbout(self: *App) void {
     const page = &self.settings_page;
     if (page.contents[@backingInt(app.SettingsTab.about)] == null) return;
     if (page.about_device) |label| gtk.gtk_label_set_text(label, transport.deviceName(self).ptr);
     var text_buffer: [512]u8 = undefined;
     if (page.about_formats) |label| gtk.gtk_label_set_text(label, deviceFormatsText(&text_buffer, self).ptr);
-    const stats = libraryStats(self);
+    const stats = self.library_summary.stats;
     var count_buffer: [32]u8 = undefined;
     if (page.about_tracks) |label|
         gtk.gtk_label_set_text(label, if (stats) |value| strings.format(&count_buffer, "{f}", .{strings.grouped(value.tracks)}).ptr else "—");

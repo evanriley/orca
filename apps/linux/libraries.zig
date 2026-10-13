@@ -38,6 +38,7 @@ const changes = @import("changes.zig");
 const offline = @import("offline.zig");
 const analysis_notice = @import("analysis_notice.zig");
 const folders = @import("folders.zig");
+const library_summary = @import("library_summary.zig");
 const lyrics = @import("lyrics.zig");
 const palette = @import("palette.zig");
 const genres = @import("genres.zig");
@@ -340,11 +341,10 @@ fn switchTo(self: *App, index: usize, create: bool) bool {
     return true;
 }
 
-fn rememberTracks(self: *App) void {
+pub fn rememberTracks(self: *App) void {
     const libraries = &self.libraries;
     const index = libraries.active orelse return;
-    const library = self.library orelse return;
-    const stats = self.runtime.libraryStats(library) catch return;
+    const stats = self.library_summary.stats orelse return;
     libraries.entries.items[index].tracks = stats.tracks;
 }
 
@@ -377,6 +377,7 @@ fn closeCurrent(self: *App) void {
     self.pending_play_request = 0;
     const library = self.library orelse return;
     rememberTracks(self);
+    library_summary.forgetLibrary(self);
     self.runtime.pausePlayer(self.player) catch {};
     self.runtime.playerSaveState(self.player, library) catch |err|
         std.log.warn("The queue and position were not saved before switching libraries ({t})", .{err});

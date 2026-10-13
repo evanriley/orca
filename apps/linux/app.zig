@@ -31,6 +31,7 @@ const offline = @import("offline.zig");
 const analysis_notice = @import("analysis_notice.zig");
 const embedding_model = @import("embedding_model.zig");
 const health = @import("health.zig");
+const library_summary = @import("library_summary.zig");
 const activity = @import("activity.zig");
 const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
@@ -505,6 +506,7 @@ pub const App = struct {
     palette: palette.State = .{},
 
     health: health.State = .{},
+    library_summary: library_summary.State = .{},
     activity: activity.State = .{},
     changes: changes.State = .{},
     duplicates: duplicates.State = .{},
@@ -876,6 +878,7 @@ pub const App = struct {
                 .pending => {},
             }
         }
+        if (library_summary.retryWaiting(self)) waiting = true;
         if (self.tracks.paged) |paged| {
             if (paged.retryWaiting()) waiting = true;
         }
@@ -895,6 +898,8 @@ pub const App = struct {
                     self.totalsFailed();
                 } else if (albums.isCountRequest(self, result.request)) {
                     albums.countFailed(self);
+                } else if (library_summary.isRequest(self, result.request)) {
+                    library_summary.failed(self, result.request);
                 } else if (albums.pageFailed(self, result.request)) {
                     self.noteAlbumsFailure();
                 } else if (self.tracks.paged) |paged| {
@@ -911,6 +916,7 @@ pub const App = struct {
                 .track_totals => |totals| if (self.isTotalsRequest(result.request)) self.totalsArrived(totals),
                 .release_page => |page| albums.pageArrived(self, result.request, page),
                 .release_count => |count| if (albums.isCountRequest(self, result.request)) albums.countArrived(self, count),
+                .library_stats, .health_summary => library_summary.arrived(self, result.request, payload),
             }
         }
         if (took) self.retryBrowse();

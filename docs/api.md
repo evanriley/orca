@@ -264,7 +264,9 @@ sleep: 0 to pump now, null to wait for the waker alone. See
   hit adds reason hits within its kind's cap (`tracks_by`, `main_genre_of`).
   `SearchResults.top` is the hit to feature, a copy not freed separately.
 - `libraryRequestBrowse` queues a `BrowseRequest` (`track_page`, `track_totals`,
-  `release_page`, `release_count`) on the Library's browse loader and returns
+  `release_page`, `release_count`, `library_stats`, `health_summary`; the last
+  two carry no query and answer `libraryStats` and `libraryHealthSummary`
+  without blocking the caller) on the Library's browse loader and returns
   its id; `libraryTakeBrowse` collects a finished `BrowseResult` (its `payload`
   is the synchronous method's result or error; `deinit` frees a page) and
   `libraryCancelBrowse` skips a request not started. Text and codec are copied
