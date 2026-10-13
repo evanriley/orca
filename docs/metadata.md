@@ -709,6 +709,28 @@ changes the file's permissions.
   The Library stays closed until the file is writable again, then the next
   open finishes the recovery.
 
+### Hard-linked files
+
+A tag write replaces one path by renaming the stage onto it, so a file with
+more than one hard link is written like a file with a byte-identical copy
+elsewhere:
+
+- The written path becomes a new inode with a link count of 1. Every other
+  link, inside a root or outside every root, keeps the original inode and
+  bytes, with a link count one lower. The two no longer share storage.
+- When another link is a location of the same file, the re-observation after
+  the write gives the written path a file of its own, per
+  [Divergence](database.md#divergence), and the other link stays on the file
+  it had. No `files` row is shared by paths with different bytes.
+- The next plan for the Track offers the same change for the other link.
+- An undo restores the written path's bytes from the backup as another new
+  inode. It does not link the paths again.
+- A link outside every root is not a location: the Library records nothing
+  about it and its bytes do not change.
+
+`planTagWrite` does not skip a file for its link count. A move renames the
+path and keeps its inode, so the other links and the link count are unchanged.
+
 ### Undo
 
 Logical groups undo in reverse action order. `undoGroup` starts from the states

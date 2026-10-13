@@ -4719,6 +4719,81 @@ test "writing tags to one copy of a shared file splits that copy off and marks t
     try runtime.discardTagWrite(library, again.plan_id);
 }
 
+test "writing tags to one hard link replaces that path alone, and the other links keep the original through write and undo" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    for ([_][]const u8{ "one", "two" }) |folder| try temporary.dir.createDir(std.testing.io, folder, .default_dir);
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "one/song.flac");
+    try temporary.dir.hardLink("one/song.flac", temporary.dir, "two/song.flac", std.testing.io, .{});
+    try temporary.dir.hardLink("one/song.flac", data.dir, "outside.flac", std.testing.io, .{});
+    const original = try data.dir.readFileAlloc(std.testing.io, "outside.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    const linked = try data.dir.statFile(std.testing.io, "outside.flac", .{});
+    try std.testing.expectEqual(3, linked.nlink);
+    const root = try absoluteTestPath(".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, database_path);
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, "SELECT count(*) FROM files;"));
+
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Written Album" }})).deinit();
+    const edited = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(edited);
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 0), preview.skipped.len);
+    try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+    const shared = preview.files[0].file_id;
+    const written_path = preview.files[0].path;
+    const written_name: []const u8, const untouched_name: []const u8 =
+        if (std.mem.endsWith(u8, written_path, "one/song.flac")) .{ "one/song.flac", "two/song.flac" } else .{ "two/song.flac", "one/song.flac" };
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+
+    const untouched_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ root, untouched_name });
+    defer std.testing.allocator.free(untouched_path);
+    try std.testing.expect((try library_database.files.resolveByUri(binding.volume_id, written_path)).? != shared);
+    try std.testing.expectEqual(@as(?i64, shared), try library_database.files.resolveByUri(binding.volume_id, untouched_path));
+    try expectUnlinkedFrom(temporary.dir, written_name, linked.inode);
+    const written = try temporary.dir.readFileAlloc(std.testing.io, written_name, std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(written);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Written Album") != null);
+    try expectLinkHolds(temporary.dir, untouched_name, linked.inode, original);
+    try expectLinkHolds(data.dir, "outside.flac", linked.inode, original);
+
+    try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
+    try expectUnlinkedFrom(temporary.dir, written_name, linked.inode);
+    const restored = try temporary.dir.readFileAlloc(std.testing.io, written_name, std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualSlices(u8, original, restored);
+    try expectLinkHolds(temporary.dir, untouched_name, linked.inode, original);
+    try expectLinkHolds(data.dir, "outside.flac", linked.inode, original);
+}
+
+fn expectUnlinkedFrom(dir: std.Io.Dir, name: []const u8, inode: std.Io.File.INode) !void {
+    const stat = try dir.statFile(std.testing.io, name, .{});
+    try std.testing.expect(stat.inode != inode);
+    try std.testing.expectEqual(1, stat.nlink);
+}
+
+fn expectLinkHolds(dir: std.Io.Dir, name: []const u8, inode: std.Io.File.INode, expected: []const u8) !void {
+    const stat = try dir.statFile(std.testing.io, name, .{});
+    try std.testing.expectEqual(inode, stat.inode);
+    try std.testing.expectEqual(2, stat.nlink);
+    const bytes = try dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualSlices(u8, expected, bytes);
+}
+
 fn collectArtwork(runtime: *OrcaRuntime, library: LibraryHandle, results: []?ArtworkResult, first_request: u64, wanted: usize) !usize {
     var deadline: TestDeadline = .init(10_000);
     var collected: usize = 0;
