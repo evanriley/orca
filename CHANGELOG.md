@@ -220,6 +220,18 @@
   and TRDA byte for byte. A `YYYY-MM` value still stores the year only, since
   TDAT is `DDMM`.
 
+- **Out-of-range host input no longer aborts the host process.** A large
+  `orca_player_seek_ms` value, a large `orca_player_seek` frame, a file that
+  declares an enormous length, and out-of-range host clock values (`now_s`,
+  `utc_offset_s`) are handled without an integer overflow. The clock values are
+  rejected with `ORCA_STATUS_INVALID_ARGUMENT`; `orca.h` documents the bounds
+  (`now_s` within 2^40 seconds of the epoch, `utc_offset_s` within 18 hours).
+  `orca_library_start_reconcile` rejects more than 4096 directories.
+  `orca_library_open` reports a missing file or directory as
+  `ORCA_STATUS_NOT_FOUND`, a database written by a newer Orca as
+  `ORCA_STATUS_UNSUPPORTED`, and a directory or a file that is not an SQLite
+  database as `ORCA_STATUS_INVALID_ARGUMENT`.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
