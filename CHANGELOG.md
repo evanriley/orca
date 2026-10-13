@@ -239,6 +239,16 @@
   dropped and counted in `dropped`, as are listens pushed while the 64-entry
   queue is full.
 
+- **A song keeps its rating, love, Not for me and playlist entries when its
+  file joins another song's position.** When two Recordings became one (a retag
+  or move landing two files on one Release position), only listens and play
+  counts followed; the rest stayed on a Recording nothing showed. They now move
+  to the surviving Recording in the same transaction: the higher rating wins,
+  loved or hated on the surviving song wins over the other's, playlist and
+  saved-queue entries are re-pointed, and listens of files since removed follow
+  too. Rows orphaned by earlier merges are left as they are, because the
+  surviving Recording can no longer be identified.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

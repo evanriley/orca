@@ -22,6 +22,48 @@ pub const RecordingSummary = struct {
     }
 };
 
+const absorb_statements = [_][:0]const u8{
+    \\INSERT INTO ratings(recording_id, rating, updated_at)
+    \\SELECT ?1, rating, updated_at FROM ratings WHERE recording_id = ?2
+    \\ON CONFLICT(recording_id) DO UPDATE SET
+    \\    rating = max(ratings.rating, excluded.rating),
+    \\    updated_at = max(ratings.updated_at, excluded.updated_at);
+    ,
+    "DELETE FROM ratings WHERE recording_id = ?2;",
+    \\INSERT INTO feedback(recording_id, score, updated_at)
+    \\SELECT ?1, score, updated_at FROM feedback WHERE recording_id = ?2 AND score <> 0
+    \\ON CONFLICT(recording_id) DO UPDATE SET
+    \\    score = excluded.score,
+    \\    updated_at = max(feedback.updated_at, excluded.updated_at),
+    \\    last_error = ''
+    \\WHERE feedback.score = 0;
+    ,
+    "DELETE FROM feedback WHERE recording_id = ?2;",
+    \\INSERT INTO recommendation_feedback(recording_id, created_at, expires_at)
+    \\SELECT ?1, created_at, expires_at FROM recommendation_feedback WHERE recording_id = ?2
+    \\ON CONFLICT(recording_id) DO NOTHING;
+    ,
+    "DELETE FROM recommendation_feedback WHERE recording_id = ?2;",
+    "UPDATE playlist_entries SET recording_id = ?1 WHERE recording_id = ?2;",
+    "UPDATE player_queue_entries SET recording_id = ?1 WHERE recording_id = ?2;",
+    "UPDATE listens SET recording_id = ?1 WHERE recording_id = ?2;",
+    "DELETE FROM recording_play_stats WHERE recording_id IN (?1, ?2);",
+    \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+    \\SELECT recording_id, count(*), max(started_at) FROM listens
+    \\WHERE recording_id IN (?1, ?2) GROUP BY recording_id;
+    ,
+};
+
+pub fn absorbLocked(db: sqlite.Database, survivor: i64, absorbed: i64) !void {
+    for (absorb_statements) |sql| {
+        var statement = try db.prepare(sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, survivor);
+        try statement.bindInt64(2, absorbed);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+}
+
 /// Recordings — performances — which files encode and tracks position.
 ///
 /// The schema carries no key column for a recording, so the projection keeps

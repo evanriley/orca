@@ -3505,6 +3505,236 @@ test "a Track's rating, love and playlist entries stay with its song when the so
     try testing.expectEqual(@as(i64, 2), try scalar(library.database, title));
 }
 
+const Feedback = database.repository.Feedback;
+
+const TwoSongs = struct {
+    files: [2]i64,
+    tracks: [2]i64,
+    recordings: [2]i64,
+};
+
+const MergedSong = struct {
+    track: i64,
+    recording: i64,
+    kept: usize,
+};
+
+fn recordingOf(library: *database.LibraryDatabase, file_id: i64) !i64 {
+    var buffer: [96]u8 = undefined;
+    return scalar(library.database, try std.fmt.bufPrintSentinel(
+        &buffer,
+        "SELECT recording_id FROM files WHERE id = {d};",
+        .{file_id},
+        0,
+    ));
+}
+
+fn projectedSongs(library: *database.LibraryDatabase, files: [2]i64) !TwoSongs {
+    var songs: TwoSongs = .{ .files = files, .tracks = undefined, .recordings = undefined };
+    for (songs.files, &songs.tracks, &songs.recordings) |file_id, *track, *recording| {
+        recording.* = try recordingOf(library, file_id);
+        var buffer: [96]u8 = undefined;
+        track.* = try scalar(library.database, try std.fmt.bufPrintSentinel(
+            &buffer,
+            "SELECT id FROM tracks WHERE recording_id = {d};",
+            .{recording.*},
+            0,
+        ));
+    }
+    try testing.expect(songs.recordings[0] != songs.recordings[1]);
+    return songs;
+}
+
+fn projectTwoSongs(library: *database.LibraryDatabase, projection: *Projection) !TwoSongs {
+    var files: [2]i64 = undefined;
+    try observeAlbum(library, &files, "Album");
+    _ = try projection.run(.all);
+    return projectedSongs(library, files);
+}
+
+fn mergeOntoOnePosition(library: *database.LibraryDatabase, projection: *Projection, songs: TwoSongs) !MergedSong {
+    try library.observed_tags.upsert(.{ .file_id = songs.files[1], .values = albumTags("Album", 1) });
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    const recording = try recordingOf(library, songs.files[0]);
+    try testing.expectEqual(recording, try recordingOf(library, songs.files[1]));
+    const kept: usize = if (recording == songs.recordings[0]) 0 else 1;
+    try testing.expectEqual(songs.recordings[kept], recording);
+    try testing.expectEqual(recording, try scalar(library.database, "SELECT recording_id FROM tracks;"));
+    return .{
+        .track = try scalar(library.database, "SELECT id FROM tracks;"),
+        .recording = recording,
+        .kept = kept,
+    };
+}
+
+fn expectPlaylistTracks(library: *database.LibraryDatabase, playlist: i64, expected: []const i64) !void {
+    const listed = try library.playlists.trackIds(testing.allocator, playlist, .{ .now = 0, .seed = 0 });
+    defer testing.allocator.free(listed);
+    try testing.expectEqualSlices(i64, expected, listed);
+}
+
+fn expectMergeKeepsBothSongsState(name: [:0]const u8, ratings: [2]u8) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    const songs = try projectTwoSongs(&library, &projection);
+    const shared = try library.playlists.create("Shared");
+    const own: [2]i64 = .{ try library.playlists.create("First"), try library.playlists.create("Second") };
+    for (songs.tracks, songs.files, ratings, own, 0..) |track, file_id, rating, playlist, index| {
+        _ = try library.ratings.set(&.{track}, rating);
+        _ = try library.feedback.set(&.{track}, .loved);
+        _ = try library.playlists.insert(playlist, &.{track}, null);
+        _ = try library.playlists.insert(shared, &.{track}, null);
+        _ = try library.listens.record(.{
+            .file_id = file_id,
+            .started_at = 1_700_000_000 + @as(i64, @intCast(index)),
+            .listened_ms = 100_000,
+            .title = "Song",
+            .artist = "Artist",
+        });
+    }
+
+    const merged = try mergeOntoOnePosition(&library, &projection, songs);
+
+    try testing.expectEqual(@as(?u8, @max(ratings[0], ratings[1])), try library.ratings.forTrack(merged.track));
+    try testing.expectEqual(Feedback.loved, try library.feedback.forTrack(merged.track));
+    for (own) |playlist| try expectPlaylistTracks(&library, playlist, &.{merged.track});
+    try expectPlaylistTracks(&library, shared, &.{ merged.track, merged.track });
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM ratings;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM feedback;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM recording_play_stats;"));
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT play_count FROM recording_play_stats;"));
+    try testing.expectEqual(merged.recording, try scalar(library.database, "SELECT recording_id FROM recording_play_stats;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "two rated, loved songs merging onto one position leave one Track with the higher rating, the love and every playlist entry" {
+    try expectMergeKeepsBothSongsState("file:orca-projection-merge-both-rising?mode=memory&cache=shared", .{ 40, 90 });
+    try expectMergeKeepsBothSongsState("file:orca-projection-merge-both-falling?mode=memory&cache=shared", .{ 90, 40 });
+}
+
+fn expectMergeKeepsOneSongsState(name: [:0]const u8, holder: usize) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    const songs = try projectTwoSongs(&library, &projection);
+    const track = songs.tracks[holder];
+    _ = try library.ratings.set(&.{track}, 80);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const playlist = try library.playlists.create("Mix");
+    _ = try library.playlists.insert(playlist, &.{track}, null);
+    try @import("daily_mixes.zig").notForMe(&library, track, 1_700_000_000);
+    try library.player_state.save(
+        .{ .cursor = 0, .position_ms = 0, .repeat = 0, .shuffle = false },
+        &.{ .{ .entry = 0, .track_id = songs.tracks[0] }, .{ .entry = 1, .track_id = songs.tracks[1] } },
+        1_700_000_000,
+    );
+
+    const merged = try mergeOntoOnePosition(&library, &projection, songs);
+
+    try testing.expectEqual(@as(?u8, 80), try library.ratings.forTrack(merged.track));
+    try testing.expectEqual(Feedback.loved, try library.feedback.forTrack(merged.track));
+    try expectPlaylistTracks(&library, playlist, &.{merged.track});
+    try testing.expectEqual(merged.recording, try scalar(library.database, "SELECT recording_id FROM recommendation_feedback;"));
+    const restored = (try library.player_state.load(testing.allocator)).?;
+    defer restored.deinit();
+    try testing.expectEqual(@as(usize, 2), restored.entries.len);
+    for (restored.entries) |entry| try testing.expectEqual(@as(?i64, merged.track), entry.track_id);
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a song merging onto another's position takes its rating, love, Not for me, playlist and queue entries along" {
+    try expectMergeKeepsOneSongsState("file:orca-projection-merge-one-first?mode=memory&cache=shared", 0);
+    try expectMergeKeepsOneSongsState("file:orca-projection-merge-one-second?mode=memory&cache=shared", 1);
+}
+
+fn expectMergeKeepsSurvivorsVerdict(name: [:0]const u8, feedback: [2]Feedback) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    const songs = try projectTwoSongs(&library, &projection);
+    const hidden_at: [2]i64 = .{ 1_700_000_000, 1_800_000_000 };
+    for (songs.tracks, feedback, hidden_at) |track, verdict, now_s| {
+        _ = try library.feedback.set(&.{track}, verdict);
+        try @import("daily_mixes.zig").notForMe(&library, track, now_s);
+    }
+
+    const merged = try mergeOntoOnePosition(&library, &projection, songs);
+
+    try testing.expectEqual(feedback[merged.kept], try library.feedback.forTrack(merged.track));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM feedback;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM recommendation_feedback;"));
+    try testing.expectEqual(hidden_at[merged.kept], try scalar(library.database, "SELECT created_at FROM recommendation_feedback;"));
+    try testing.expectEqual(merged.recording, try scalar(library.database, "SELECT recording_id FROM recommendation_feedback;"));
+}
+
+test "a loved song and a hated song merging onto one position keep the surviving song's love or hate and its Not for me" {
+    try expectMergeKeepsSurvivorsVerdict("file:orca-projection-merge-loved-hated?mode=memory&cache=shared", .{ .loved, .hated });
+    try expectMergeKeepsSurvivorsVerdict("file:orca-projection-merge-hated-loved?mode=memory&cache=shared", .{ .hated, .loved });
+}
+
+fn expectMergeLovesOverClearedFeedback(name: [:0]const u8, cleared: usize) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    const songs = try projectTwoSongs(&library, &projection);
+    _ = try library.feedback.set(&.{songs.tracks[cleared]}, .loved);
+    try library.feedback.markSynced(songs.recordings[cleared], .loved);
+    _ = try library.feedback.set(&.{songs.tracks[cleared]}, .none);
+    _ = try library.feedback.set(&.{songs.tracks[1 - cleared]}, .loved);
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM feedback;"));
+
+    const merged = try mergeOntoOnePosition(&library, &projection, songs);
+
+    try testing.expectEqual(Feedback.loved, try library.feedback.forTrack(merged.track));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM feedback;"));
+}
+
+test "a loved song merging with one whose love was cleared leaves the Track loved" {
+    try expectMergeLovesOverClearedFeedback("file:orca-projection-merge-cleared-first?mode=memory&cache=shared", 0);
+    try expectMergeLovesOverClearedFeedback("file:orca-projection-merge-cleared-second?mode=memory&cache=shared", 1);
+}
+
+fn expectMergeMovesListensOfForgottenFile(name: [:0]const u8, copied: usize) !void {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    const kept_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Kept");
+    const removed_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Gone");
+    const files: [2]i64 = .{
+        try observeUnderRoot(&library, kept_root, "/m/Kept/Album/1.flac", albumTags("Album", 1)),
+        try observeUnderRoot(&library, kept_root, "/m/Kept/Album/2.flac", albumTags("Album", 2)),
+    };
+    const copy = try observeUnderRoot(&library, removed_root, "/m/Gone/Album/copy.flac", albumTags("Album", @intCast(copied + 1)));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try testing.expectEqual(try recordingOf(&library, files[copied]), try recordingOf(&library, copy));
+    _ = try library.listens.record(.{
+        .file_id = copy,
+        .started_at = 1_700_000_000,
+        .listened_ms = 100_000,
+        .title = "Song",
+        .artist = "Artist",
+    });
+    const removal = try library.library_roots.remove(testing.allocator, removed_root);
+    defer removal.deinit();
+    _ = try projection.run(.all);
+    const songs = try projectedSongs(&library, files);
+
+    const merged = try mergeOntoOnePosition(&library, &projection, songs);
+
+    try testing.expectEqual(merged.recording, try scalar(library.database, "SELECT recording_id FROM listens WHERE file_id IS NULL;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM recording_play_stats;"));
+    try testing.expectEqual(merged.recording, try scalar(library.database, "SELECT recording_id FROM recording_play_stats;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT play_count FROM recording_play_stats;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a song merging onto another's position takes the listens of a copy that was removed from the library along" {
+    try expectMergeMovesListensOfForgottenFile("file:orca-projection-merge-listens-first?mode=memory&cache=shared", 0);
+    try expectMergeMovesListensOfForgottenFile("file:orca-projection-merge-listens-second?mode=memory&cache=shared", 1);
+}
+
 test "a Track's lyrics survive its file moving it to another Release" {
     var library = try openTestLibrary("file:orca-projection-move-lyrics?mode=memory&cache=shared");
     defer library.close();
