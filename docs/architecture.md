@@ -174,12 +174,13 @@ build` installs the licence texts of vendored and source-built code under
 | PipeWire | MIT | system library on Linux, behind `pipewire_shim.c` |
 | ONNX Runtime | MIT | system library, behind `embedding_shim.c` |
 | minimp3, QOA | CC0, MIT | vendored in `liborca/codec/vendor` |
-| ALAC, libxaac | Apache-2.0 | built from source by `build.zig` |
+| ALAC | Apache-2.0 | vendored in `liborca/codec/vendor/alac` |
+| libxaac | Apache-2.0 | built from source by `build.zig` |
 | Chromaprint | MIT | built from source by `build/chromaprint.zig` |
 | KissFFT (in Chromaprint) | BSD-3-Clause | built from source with Chromaprint |
 
-`build.zig.zon` pins the sources `build.zig` builds: ALAC (a git commit),
-libxaac (v0.1.13) and Chromaprint (v1.6.1). System libraries come from
+`build.zig.zon` pins the sources `build.zig` builds: libxaac (v0.1.13) and
+Chromaprint (v1.6.1). System libraries come from
 `pkg-config`, supplied by the dev shell and the Nix package.
 
 ONNX Runtime runs the audio-embedding model. It is MIT and carries some

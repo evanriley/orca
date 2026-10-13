@@ -283,6 +283,12 @@
   Delays up to 24 hours, the 401/403/429 backoff schedule and the 1-hour
   `X-RateLimit-Reset-In` bound are unchanged.
 
+- **The ALAC decoder is vendored in the source tree.** Apple's reference
+  decoder sources (Apache-2.0, `macosforge/alac` at `c38887c`) live in
+  `liborca/codec/vendor/alac/`, byte-identical to upstream, instead of being
+  fetched through `build.zig.zon`. `ORCA-CHANGES` beside them records the
+  upstream commit. Decoding is unchanged.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in

@@ -666,8 +666,7 @@ fn pkgConfigIncludeDir(b: *std.Build, package: []const u8) std.Build.LazyPath {
 /// reference left-shifts negative values, which two's-complement targets
 /// define, so the undefined-behaviour sanitizer is off for its files only.
 fn addAlac(b: *std.Build, module: *std.Build.Module) void {
-    const alac = b.dependency("alac", .{});
-    const codec = alac.path("codec");
+    const codec = b.path("liborca/codec/vendor/alac");
     module.addIncludePath(codec);
     module.link_libcpp = true;
     module.addCSourceFiles(.{
@@ -700,8 +699,7 @@ fn installLicenses(b: *std.Build) void {
     b.installFile("LICENSE", directory ++ "/orca/LICENSE");
     b.installFile("liborca/codec/vendor/minimp3/LICENSE", directory ++ "/minimp3/LICENSE");
     b.installFile("liborca/codec/vendor/qoa/LICENSE", directory ++ "/qoa/LICENSE");
-    const alac = b.dependency("alac", .{});
-    b.getInstallStep().dependOn(&b.addInstallFile(alac.path("LICENSE"), directory ++ "/alac/LICENSE").step);
+    b.installFile("liborca/codec/vendor/alac/LICENSE", directory ++ "/alac/LICENSE");
     const libxaac = b.dependency("libxaac", .{});
     b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("LICENSE"), directory ++ "/libxaac/LICENSE").step);
     b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("NOTICE"), directory ++ "/libxaac/NOTICE").step);
