@@ -195,6 +195,15 @@
   bench-build` step, which `zig build test` depends on, compiles them without
   running them.
 
+- **Downloading an embedding model no longer writes through a symlink at
+  `<destination>.part`.** The download deletes whatever is at
+  `<destination>.part` and creates the file exclusively, so a link placed there
+  by another user of a shared model directory is replaced instead of followed;
+  when the path cannot be replaced the download fails with `write_failed`.
+  `liborca/core/model_download.zig` gains a test for each failure: short, long
+  and wrong-digest bodies, a non-200 status, a transport error, a timeout and a
+  cancellation mid-body, a refused redirect and an unwritable destination.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
