@@ -81,6 +81,7 @@ pub const AnalysisCandidate = analysis.AnalysisCandidate;
 pub const AnalysisCandidatePage = analysis.AnalysisCandidatePage;
 pub const AnalysisCoverageCounts = analysis.AnalysisCoverageCounts;
 pub const analysisCoverageSql = analysis.analysisCoverageSql;
+pub const max_supported_channels_sql = analysis.max_supported_channels_sql;
 pub const DuplicateCandidate = duplicates.DuplicateCandidate;
 pub const DuplicatePeer = duplicates.DuplicatePeer;
 pub const DuplicateCandidatePage = duplicates.DuplicateCandidatePage;

@@ -223,3 +223,10 @@ seed the EqualizerAPO fuzz target: a longer correction, every filter type with a
 `BW Oct` bandwidth and summed preamps, a CRLF file with a byte order mark, lower
 case and stray spacing, and a file with a band pass filter and a `Channel:` line
 that the parser rejects.
+
+`library/upgrade/v1.sqlite` to `v7.sqlite` are libraries at each released
+schema version, with rows in every user table. `zig build
+regenerate-upgrade-fixtures` rebuilds them from `tests/upgrade_fixtures/`
+and writes identical bytes. [The database
+document](../docs/database.md#upgrade-fixtures)
+describes the seeds and what the upgrade test compares.

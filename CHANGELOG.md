@@ -202,6 +202,22 @@
   repository, commit, licence, compiled files and header SHA-256, both vendored
   unmodified, so a future advisory can be matched to Orca's copy.
 
+- **The fuzz suite and CI now cover more untrusted-byte paths.** New fuzz
+  targets feed bytes through the ID3v1, image-header, fingerprint, job-history
+  retry and provider-response parsers; an AAC decoder sanitizer harness joins
+  the ALAC one; and a CI job runs both decoders under AddressSanitizer and
+  UndefinedBehaviorSanitizer and the test suite once under ReleaseSafe.
+
+- **Upgrades are verified against real databases from each schema version, not
+  against re-run step text.** `fixtures/library/upgrade/` holds a binary
+  library for schema versions 1 to 7, with rows in every table, and the test
+  suite opens each through `LibraryDatabase.open` and compares it with a
+  database created at the current version from the same rows, table by table
+  and row by row, including the genre totals, loudness, feature, embedding and
+  sort columns that triggers maintain. Opening the current fixture leaves the
+  file byte-identical. `zig build regenerate-upgrade-fixtures` rebuilds the
+  fixtures deterministically from `tests/upgrade_fixtures`.
+
 ### Fixed
 
 - **Pull-request CI no longer skips building after a docs-only follow-up push.**
@@ -326,6 +342,15 @@
   and every later page reads from it, so a deep scroll costs a few milliseconds
   instead of hundreds.
 
+- **Sorting tracks by file path, loudness, or genre is now fast at any scroll
+  depth.** Loudness and genre read the version 7 columns `files.sort_lufs` and
+  `tracks.first_genre_id`, which triggers keep current, instead of running a
+  subquery per row, and their pages are chosen by walking the covering indexes
+  `files_by_sort_lufs` and `tracks_by_first_genre` (with their `_without_`
+  counterparts). File path keeps its per-row best-location subquery, already
+  fast at shallow offsets. For all three, deep offsets are served from the
+  sorted snapshot like the other value sorts.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
@@ -403,6 +428,13 @@
   builds with `-DLOUDNESS_LEVELING_SUPPORT`. The Nix `fetchDeps` hash is
   updated to match. No encoder code is compiled, so the encoder-side advisories
   do not apply.
+
+- **A Library opened by this version upgrades to schema v7 and cannot then be
+  opened by an older Orca.** v7 adds the trigger-maintained sort columns
+  `files.sort_lufs` and `tracks.first_genre_id` with their indexes, backfilled
+  during the one-transaction migration. The loudness trigger fires only when a
+  file's `content_hash`, `content_hash_algorithm` or `channels` changes value,
+  so a rescan that rewrites the same values does not churn the sort indexes.
 
 ## 0.4.0 - 2026-10-11
 
