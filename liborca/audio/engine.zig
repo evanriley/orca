@@ -381,7 +381,7 @@ pub const PlayerEngine = struct {
 
     /// Engine thread, after a pass: whether the next pass would do nothing
     /// until the control lane, an output or cancellation wakes the engine.
-    fn isIdle(self: *const PlayerEngine) bool {
+    pub fn isIdle(self: *const PlayerEngine) bool {
         if (self.player.pending_seek != null or self.pending_source != null) return false;
         if (self.player.state.load(.acquire) == .playing and !self.queueFinished()) return false;
         if (self.hint_owed) return false;

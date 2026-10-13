@@ -154,6 +154,15 @@ display-only defect, and removes its entry.
   check-point and delete the WAL under the first, and the first process's
   later writes are lost. Linux uses OFD locks; see
   [database.md](database.md#concurrency).
+- Sorting tracks by file path opens its first page in a few milliseconds when
+  each file has one location, but builds a full sort when many files have
+  several non-missing locations, that is, true duplicates at several paths.
+  The sort reads each file's best location through a per-row subquery, and with
+  several locations per file SQLite cannot prove the `locations_by_uri` order
+  survives the best-location filter. A materialised best-location column would
+  keep that case fast but was dropped because its triggers slowed every Library
+  scan by 150 to 250 percent. Deep offsets of the sort are served from the
+  per-connection snapshot and stay fast. See [database.md](database.md).
 
 ## Next
 

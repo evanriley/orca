@@ -487,7 +487,9 @@ The tables by purpose; keys are those that carry identity or a contract.
   and the absent side of each sort. `migrations.sort_columns_drift_sql` counts
   the rows whose column disagrees with its subquery and must be zero. The path
   sort has no column: it orders by the best non-missing location's `uri`
-  through a subquery, and the sorted snapshot serves deep offsets.
+  through a subquery, and the sorted snapshot serves deep offsets. The shallow
+  `candidates` page reads the unlocated files only when the located window does
+  not fill `offset + limit`, so the common case never scans the file table.
 - `scan_runs`: one row per walk with its generation and end state.
 - `folder_images`: images beside the music, unique on `(volume_id, uri)`, never
   `files` rows, so they never reach projection, analysis or stats. `role` is
