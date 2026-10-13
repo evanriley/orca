@@ -2203,7 +2203,7 @@ fn rowActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c
     const self = state(data);
     const index = gtk.gtk_list_box_row_get_index(gtk.cast(gtk.ListBoxRow, row));
     if (index < 0 or @as(usize, @intCast(index)) >= self.home.entry_count) return;
-    self.runtime.playerSetShuffle(self.player, false) catch {};
+    self.runtime.playerSetShuffle(self.player, false) catch |err| std.log.warn("Shuffle was not set before playing ({t})", .{err});
     transport.playIds(self, self.home.entry_ids[0..self.home.entry_count], @intCast(index));
 }
 
@@ -2217,7 +2217,7 @@ fn shuffleClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn play(self: *App, shuffle: bool) void {
     if (self.home.entry_count == 0) return;
-    self.runtime.playerSetShuffle(self.player, shuffle) catch {};
+    self.runtime.playerSetShuffle(self.player, shuffle) catch |err| std.log.warn("Shuffle was not set before playing ({t})", .{err});
     transport.playIds(self, self.home.entry_ids[0..self.home.entry_count], 0);
 }
 
