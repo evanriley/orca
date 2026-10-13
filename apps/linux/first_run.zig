@@ -11,6 +11,7 @@ const settings = @import("settings.zig");
 const watching = @import("watching.zig");
 const preferences = @import("preferences.zig");
 const window = @import("window.zig");
+const library_summary = @import("library_summary.zig");
 
 const App = app.App;
 
@@ -109,6 +110,7 @@ pub const State = struct {
     stages: [4]Stage = undefined,
     problems: ?*gtk.Widget = null,
     problems_title: ?*gtk.Label = null,
+    problems_listed: u64 = 0,
     problems_list: ?*gtk.Box = null,
     found_count: ?*gtk.Label = null,
     slots: [found_slots]Slot = undefined,
@@ -900,6 +902,21 @@ fn shortPath(path: []const u8) []const u8 {
     return path;
 }
 
+pub fn healthArrived(self: *App) void {
+    if (self.first_run.problems_listed != 0) showProblemsTitle(self);
+}
+
+fn showProblemsTitle(self: *App) void {
+    const first = &self.first_run;
+    const title = first.problems_title orelse return;
+    var count: u64 = first.problems_listed;
+    if (self.library_summary.health) |summary| for (summary.items()) |kind| {
+        if (kind.kind == .unreadable_file) count = kind.count;
+    };
+    var buffer: [128]u8 = undefined;
+    gtk.gtk_label_set_text(title, strings.format(&buffer, "{f} {s} couldn’t be read", .{ strings.grouped(count), plural(count, "file", "files") }).ptr);
+}
+
 fn refreshProblems(self: *App) void {
     const library = self.library orelse return;
     const first = &self.first_run;
@@ -907,14 +924,11 @@ fn refreshProblems(self: *App) void {
     const page = self.runtime.libraryHealthIssuePageOfKind(library, .unreadable_file, problem_rows, 0) catch return;
     defer page.deinit();
     if (first.problems) |problems| gtk.gtk_widget_set_visible(problems, boolean(page.items.len != 0));
+    first.problems_listed = page.items.len;
     if (page.items.len == 0) return;
-    var count: u64 = page.items.len;
-    const summary = self.runtime.libraryHealthSummary(library) catch null;
-    if (summary) |value| for (value.items()) |kind| {
-        if (kind.kind == .unreadable_file) count = kind.count;
-    };
+    library_summary.requestHealth(self);
+    showProblemsTitle(self);
     var buffer: [512]u8 = undefined;
-    if (first.problems_title) |text| gtk.gtk_label_set_text(text, strings.format(&buffer, "{f} {s} couldn’t be read", .{ strings.grouped(count), plural(count, "file", "files") }).ptr);
     while (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, list))) |child| gtk.gtk_box_remove(list, child);
     for (page.items) |issue| {
         const short = shortPath(issue.path);
@@ -963,15 +977,23 @@ fn showAnalysis(self: *App) void {
     }
 }
 
+pub fn statsArrived(self: *App) void {
+    if (self.first_run.flow == .done) showListenNumbers(self);
+}
+
+fn showListenNumbers(self: *App) void {
+    const stats = self.library_summary.stats orelse return;
+    var buffer: [32]u8 = undefined;
+    for ([_]u64{ stats.releases, stats.artists, stats.tracks }, self.first_run.listen_numbers) |value, number| {
+        if (number) |text| gtk.gtk_label_set_text(text, grouped(&buffer, value).ptr);
+    }
+}
+
 fn showListen(self: *App) void {
     const first = &self.first_run;
     first.flow = .done;
-    var buffer: [32]u8 = undefined;
-    if (self.library) |library| if (self.runtime.libraryStats(library)) |stats| {
-        for ([_]u64{ stats.releases, stats.artists, stats.tracks }, first.listen_numbers) |value, number| {
-            if (number) |text| gtk.gtk_label_set_text(text, grouped(&buffer, value).ptr);
-        }
-    } else |_| {};
+    library_summary.requestStats(self);
+    showListenNumbers(self);
     const analyzing = first.analysis_job != null and jobs.active(self, .analysis);
     if (first.listen_note) |note| gtk.gtk_label_set_text(note, if (analyzing)
         "Music analysis continues in the background."

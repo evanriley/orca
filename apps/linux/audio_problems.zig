@@ -9,6 +9,7 @@ const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const jobs = @import("jobs.zig");
+const library_summary = @import("library_summary.zig");
 const page_ui = @import("page.zig");
 const window = @import("window.zig");
 const health = @import("health.zig");
@@ -451,14 +452,24 @@ pub fn showCategory(self: *App, category: Category) void {
 }
 
 fn reload(self: *App) void {
+    if (!self.audio_problems.built) return;
+    library_summary.requestHealth(self);
+    render(self);
+}
+
+pub fn summaryArrived(self: *App) void {
+    if (self.current_page == .audio_problems) render(self);
+}
+
+fn render(self: *App) void {
     const problems = &self.audio_problems;
     if (!problems.built) return;
+    const summary = self.library_summary.health orelse return;
     problems.stale = false;
     const library = self.library orelse return;
     const cards = problems.cards orelse return;
 
     var counts: std.EnumArray(Kind, u64) = .initFill(0);
-    const summary = self.runtime.libraryHealthSummary(library) catch return self.toast("Could not read the library's health");
     for (summary.items()) |item| counts.set(item.kind, item.count);
 
     var buffer: [256]u8 = undefined;

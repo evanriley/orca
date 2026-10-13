@@ -47,6 +47,7 @@ const palette = @import("palette.zig");
 const lyrics = @import("lyrics.zig");
 const offline = @import("offline.zig");
 const analysis_notice = @import("analysis_notice.zig");
+const library_summary = @import("library_summary.zig");
 
 const App = app.App;
 const Column = track_model.Column;
@@ -949,10 +950,12 @@ pub fn focusSidebar(self: *App) void {
 }
 
 pub fn refreshCounts(self: *App) void {
-    const stats: ?liborca.LibraryStats = if (self.appearance.sidebar_counts)
-        if (self.library) |library| self.runtime.libraryStats(library) catch null else null
-    else
-        null;
+    library_summary.requestStats(self);
+    showCounts(self);
+}
+
+pub fn showCounts(self: *App) void {
+    const stats: ?liborca.LibraryStats = if (self.appearance.sidebar_counts) self.library_summary.stats else null;
     for (std.enums.values(LibraryCount)) |kind| {
         const label = self.library_counts.get(kind) orelse continue;
         const value = stats orelse {

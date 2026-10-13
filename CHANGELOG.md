@@ -354,6 +354,14 @@
   top-up runs (the nearest 300 Recordings with the similarities map) five
   times.
 
+- **Opening a window, switching Library or finishing a job no longer freezes
+  orca-gtk while Library stats and the health summary are read.**
+  `BrowseRequest` gains `library_stats` and `health_summary`, answered on the
+  browse loader's reader thread. The sidebar counts, Library Health, Audio
+  Problems, the first-run screens, the Libraries list and the Settings About
+  and duplicate-scan rows keep their last numbers until the new ones arrive.
+  The C ABI still has only the synchronous calls.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in

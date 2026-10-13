@@ -9,7 +9,7 @@ const sqlite = database.sqlite;
 pub const capacity = 8;
 pub const max_codec_name = 32;
 
-pub const Kind = enum { track_page, track_totals, release_page, release_count };
+pub const Kind = enum { track_page, track_totals, release_page, release_count, library_stats, health_summary };
 
 pub const TrackListing = struct {
     text: []const u8 = "",
@@ -21,6 +21,8 @@ pub const Request = union(Kind) {
     track_totals: TrackListing,
     release_page: database.ReleaseQuery,
     release_count: database.ReleaseQuery,
+    library_stats,
+    health_summary,
 };
 
 pub const Payload = union(Kind) {
@@ -28,6 +30,8 @@ pub const Payload = union(Kind) {
     track_totals: database.TrackTotals,
     release_page: database.ReleasePage,
     release_count: u64,
+    library_stats: database.LibraryStats,
+    health_summary: database.HealthSummary,
 };
 
 pub const Result = struct {
@@ -40,7 +44,7 @@ pub const Result = struct {
         switch (payload) {
             .track_page => |page| page.deinit(),
             .release_page => |page| page.deinit(),
-            .track_totals, .release_count => {},
+            .track_totals, .release_count, .library_stats, .health_summary => {},
         }
     }
 };
@@ -115,6 +119,8 @@ const Listing = union(Kind) {
     track_totals: QueuedTracks,
     release_page: QueuedReleases,
     release_count: QueuedReleases,
+    library_stats,
+    health_summary,
 
     fn copy(request: Request) !Listing {
         return switch (request) {
@@ -122,6 +128,8 @@ const Listing = union(Kind) {
             .track_totals => |listing| .{ .track_totals = try .copy(listing) },
             .release_page => |query| .{ .release_page = try .copy(query) },
             .release_count => |query| .{ .release_count = try .copy(query) },
+            .library_stats => .library_stats,
+            .health_summary => .health_summary,
         };
     }
 };
@@ -137,6 +145,8 @@ pub const Loader = struct {
     reader: sqlite.Database,
     tracks: database.TrackRepository,
     releases: database.ReleaseRepository,
+    stats: database.LibraryStatsRepository,
+    health_issues: database.HealthIssueRepository,
     registration: *work.Registration,
     host_signal: ?*control.HostSignal = null,
     threaded: std.Io.Threaded = .init_single_threaded,
@@ -159,6 +169,8 @@ pub const Loader = struct {
             .reader = reader,
             .tracks = .{ .db = reader, .write_lane = library_database.write_lane },
             .releases = .{ .db = reader, .write_lane = library_database.write_lane },
+            .stats = .{ .db = reader },
+            .health_issues = .{ .db = reader, .write_lane = library_database.write_lane },
             .registration = registration,
         };
     }
@@ -264,6 +276,8 @@ pub const Loader = struct {
                 try self.tracks.searchTotals(tracks.text.slice(), tracks.query()) },
             .release_page => |*releases| .{ .release_page = try self.releases.page(self.allocator, releases.query()) },
             .release_count => |*releases| .{ .release_count = try self.releases.countMatching(releases.query()) },
+            .library_stats => .{ .library_stats = try self.stats.stats() },
+            .health_summary => .{ .health_summary = try self.health_issues.summary(self.allocator) },
         };
     }
 };
@@ -394,6 +408,23 @@ test "a failed query arrives as an error result for its request" {
     try std.testing.expectEqual(@as(u64, 7), result.request);
     try std.testing.expectEqual(Kind.track_page, result.kind);
     try std.testing.expectError(error.PageOutOfRange, result.payload);
+}
+
+test "stats and health summary requests answer as the repositories do" {
+    var fixture: TestLibrary = undefined;
+    var loader = try fixture.open("file:orca-browse-loader-summary?mode=memory&cache=shared");
+    defer fixture.library.close();
+    defer loader.deinit();
+    try loader.request(std.testing.io, 1, .library_stats);
+    try loader.request(std.testing.io, 2, .health_summary);
+    while (loader.step()) {}
+    const stats = loader.take().?;
+    try std.testing.expectEqual(Kind.library_stats, stats.kind);
+    try std.testing.expectEqual(try fixture.library.stats.stats(), (try stats.payload).library_stats);
+    const summary = loader.take().?;
+    try std.testing.expectEqual(Kind.health_summary, summary.kind);
+    try std.testing.expectEqual(@as(usize, 0), (try summary.payload).health_summary.len);
+    try std.testing.expect(loader.take() == null);
 }
 
 test "cancellation wakes a parked loader and its thread finishes" {
