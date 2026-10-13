@@ -1421,16 +1421,18 @@ fn candidateIds(comptime sort: TrackSort, comptime direction: SortDirection) ?[]
                 "WHERE (play_file.size_bytes > 0 AND play_file.duration_ms > 0) IS NOT 1",
             by_id,
         ),
-        .path => candidatePart(
-            "locations AS play_location CROSS JOIN tracks ON tracks.preferred_file_id = play_location.file_id\n" ++
-                "WHERE play_location.id = " ++ bestLocation("id", "play_location.file_id"),
-            "play_location.uri" ++ suffix ++ ", " ++ by_id,
-        ) ++ "UNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++ candidatePart(
-            "files AS unlocated_file CROSS JOIN tracks ON tracks.preferred_file_id = unlocated_file.id\n" ++
-                "WHERE NOT EXISTS (SELECT 1 FROM locations " ++
-                "WHERE locations.file_id = unlocated_file.id AND locations.state <> 'missing')",
-            by_id,
-        ),
+        .path => "WITH located(page_id) AS MATERIALIZED (SELECT tracks.id " ++
+            "FROM locations AS play_location CROSS JOIN tracks ON tracks.preferred_file_id = play_location.file_id\n" ++
+            "WHERE play_location.id = " ++ bestLocation("id", "play_location.file_id") ++
+            "\nORDER BY play_location.uri" ++ suffix ++ ", " ++ by_id ++ "\nLIMIT ?1 + ?2)\n" ++
+            "SELECT page_id FROM located\nUNION ALL\n" ++ withoutPreferredFile(sort, direction) ++ "UNION ALL\n" ++
+            candidatePartLimited(
+                "files AS unlocated_file CROSS JOIN tracks ON tracks.preferred_file_id = unlocated_file.id\n" ++
+                    "WHERE NOT EXISTS (SELECT 1 FROM locations " ++
+                    "WHERE locations.file_id = unlocated_file.id AND locations.state <> 'missing')",
+                by_id,
+                "max(?1 + ?2 - (SELECT count(*) FROM located), 0)",
+            ),
         .genre => candidatePart(
             "genres AS first_genre CROSS JOIN tracks ON tracks.first_genre_id = first_genre.id",
             "first_genre.name COLLATE NOCASE" ++ suffix ++ ", first_genre.id" ++ suffix ++ ", " ++ by_id,
@@ -1443,8 +1445,12 @@ fn withoutPreferredFile(comptime sort: TrackSort, comptime direction: SortDirect
 }
 
 fn candidatePart(comptime from: []const u8, comptime order: []const u8) []const u8 {
+    return candidatePartLimited(from, order, "?1 + ?2");
+}
+
+fn candidatePartLimited(comptime from: []const u8, comptime order: []const u8, comptime limit: []const u8) []const u8 {
     return "SELECT page_id FROM (SELECT tracks.id AS page_id FROM " ++ from ++
-        "\nORDER BY " ++ order ++ "\nLIMIT ?1 + ?2)\n";
+        "\nORDER BY " ++ order ++ "\nLIMIT " ++ limit ++ ")\n";
 }
 
 /// The one join of `recording_joins` that a sort reads, so a page's ids are
@@ -2081,6 +2087,42 @@ test "a whole-library page by loudness, bitrate, path, album artist or first gen
         const plan = try explainPlan(&library, comptime trackQueryText(.none, false, false, case[0], direction, case[1]));
         defer std.testing.allocator.free(plan);
         try std.testing.expect(std.mem.indexOf(u8, plan, case[2]) != null);
+    };
+}
+
+test "every whole-library sort walks its intended index, in both directions" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-track-order-plans?mode=memory&cache=shared",
+    );
+    defer library.close();
+    inline for (.{
+        .{ TrackSort.artist, "SCAN tracks USING COVERING INDEX tracks_sort_artist\n" },
+        .{ TrackSort.album, "SCAN tracks USING COVERING INDEX tracks_sort_album\n" },
+        .{ TrackSort.title, "SCAN tracks USING COVERING INDEX tracks_sort_title\n" },
+        .{ TrackSort.track_number, "SCAN tracks USING COVERING INDEX tracks_sort_position\n" },
+        .{ TrackSort.duration, "SCAN tracks USING COVERING INDEX tracks_sort_duration\n" },
+        .{ TrackSort.album_artist, "SCAN tracks USING COVERING INDEX tracks_sort_album_artist\n" },
+    }) |case| inline for (.{ SortDirection.ascending, SortDirection.descending }) |direction| {
+        inline for (.{ PageForm.scan, PageForm.candidates }) |form| {
+            const plan = try explainPlan(&library, comptime trackQueryText(.none, false, false, case[0], direction, form));
+            defer std.testing.allocator.free(plan);
+            try std.testing.expect(std.mem.indexOf(u8, plan, case[1]) != null);
+        }
+    };
+    inline for (.{
+        .{ TrackSort.date_added, "SCAN play_file USING COVERING INDEX files_by_first_seen\n" },
+        .{ TrackSort.rating, "SCAN ratings USING COVERING INDEX ratings_by_rating\n" },
+        .{ TrackSort.loved, "SCAN feedback USING COVERING INDEX feedback_loved\n" },
+        .{ TrackSort.play_count, "SCAN recording_play_stats USING COVERING INDEX recording_play_stats_by_count\n" },
+        .{ TrackSort.last_played, "SCAN recording_play_stats USING COVERING INDEX recording_play_stats_by_last_played\n" },
+        .{ TrackSort.year, "SCAN track_release USING COVERING INDEX releases_by_year\n" },
+        .{ TrackSort.bitrate, "SCAN play_file USING INDEX files_by_bitrate\n" },
+    }) |case| inline for (.{ SortDirection.ascending, SortDirection.descending }) |direction| {
+        const plan = try explainPlan(&library, comptime trackQueryText(.none, false, false, case[0], direction, .candidates));
+        defer std.testing.allocator.free(plan);
+        try std.testing.expect(std.mem.indexOf(u8, plan, case[1]) != null);
     };
 }
 

@@ -60,6 +60,7 @@ jobs:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - run: nix develop -c zig build
+      - run: nix develop -c zig build bench-build -Doptimize=ReleaseFast
       - run: nix develop -c scripts/headless-audio.sh zig build test
       - run: nix develop -c scripts/headless-audio.sh zig build test -Doptimize=ReleaseSafe
       - run: nix develop -c zig build fuzz

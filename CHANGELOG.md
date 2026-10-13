@@ -347,9 +347,11 @@
   `tracks.first_genre_id`, which triggers keep current, instead of running a
   subquery per row, and their pages are chosen by walking the covering indexes
   `files_by_sort_lufs` and `tracks_by_first_genre` (with their `_without_`
-  counterparts). File path keeps its per-row best-location subquery, already
-  fast at shallow offsets. For all three, deep offsets are served from the
-  sorted snapshot like the other value sorts.
+  counterparts). File path keeps its per-row best-location subquery; its
+  shallow page reads the files without a held location only when the located
+  window leaves part of the page unfilled, so a library whose files all have a
+  location no longer scans the whole file table on every page. For all three,
+  deep offsets are served from the sorted snapshot like the other value sorts.
 
 ### Changed
 
