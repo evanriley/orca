@@ -215,6 +215,11 @@
   and wrong-digest bodies, a non-200 status, a transport error, a timeout and a
   cancellation mid-body, a refused redirect and an unwritable destination.
 
+- **Writing a date to an ID3v2.3 file no longer deletes its TIME and TRDA
+  frames.** A v2.3 date write now replaces only TYER and TDAT and keeps TIME
+  and TRDA byte for byte. A `YYYY-MM` value still stores the year only, since
+  TDAT is `DDMM`.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

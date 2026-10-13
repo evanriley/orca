@@ -933,7 +933,7 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
         .disc_number => &.{"TPOS"},
         .compilation => &.{"TCMP"},
         .composer => &.{"TCOM"},
-        .date => if (major >= 4) &.{"TDRC"} else &.{ "TYER", "TDAT", "TIME", "TRDA" },
+        .date => if (major >= 4) &.{"TDRC"} else &.{ "TYER", "TDAT" },
         .musicbrainz_recording_id,
         .musicbrainz_release_id,
         .musicbrainz_release_group_id,
@@ -1644,6 +1644,39 @@ test "an ID3v2.3 tag stays 2.3, with non-Latin text written as UTF-16" {
     try std.testing.expectEqualStrings("2024-03-15", after.date.?);
     try std.testing.expect(std.mem.indexOf(u8, written, "COMM") != null);
     try std.testing.expect(std.mem.endsWith(u8, written, "\xff\xfb\x90\x64audio"));
+}
+
+test "a date written to an ID3v2.3 tag replaces TYER and TDAT and keeps TIME and TRDA byte for byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const time_frame = try buildFrame(allocator, "TIME", 3, "\x001230");
+    const recording_dates = try buildFrame(allocator, "TRDA", 3, "\x00June 5th");
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TYER", 3, "\x001999"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TDAT", 3, "\x000101"));
+    try frames.appendSlice(allocator, time_frame);
+    try frames.appendSlice(allocator, recording_dates);
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 3, 0, frames.items),
+        "\xff\xfb\x90\x64audio",
+    });
+
+    const full = try applyRewrite(allocator, original, &.{
+        .{ .field = .date, .before = "1999-01-01", .after = "2024-03-15" },
+    });
+    try std.testing.expect(std.mem.indexOf(u8, full, time_frame) != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, recording_dates) != null);
+    try std.testing.expectEqualStrings("2024-03-15", (try expectTags(allocator, full)).?.date.?);
+
+    const year_only = try applyRewrite(allocator, original, &.{
+        .{ .field = .date, .before = "1999-01-01", .after = "2024" },
+    });
+    try std.testing.expect(std.mem.indexOf(u8, year_only, time_frame) != null);
+    try std.testing.expect(std.mem.indexOf(u8, year_only, recording_dates) != null);
+    try std.testing.expect(std.mem.indexOf(u8, year_only, "TDAT") == null);
+    try std.testing.expectEqualStrings("2024", (try expectTags(allocator, year_only)).?.date.?);
 }
 
 test "a stream with no ID3v2 tag gets a 2.4 one, and its ID3v1 trailer is updated too" {

@@ -954,6 +954,10 @@ only the tag region is rewritten.
 - ID3v2 keeps the file's version (2.3 or 2.4), copies unchanged frames verbatim,
   keeps a `n/total` total, and updates an existing ID3v1 trailer. A file with no
   ID3v2 tag gets a 2.4 one.
+- A date replaces `TDRC` in 2.4. In 2.3 it replaces `TYER` and `TDAT`, and
+  keeps `TIME` and `TRDA` byte for byte. A full `YYYY-MM-DD` value writes `TYER`
+  and a `DDMM` `TDAT`; any shorter value, `YYYY-MM` included, writes the year
+  only and leaves no `TDAT`, because the month cannot be stored without a day.
 - A recording ID replaces only the MusicBrainz `UFID` and the `TXXX` frames the
   reader takes one from (`MusicBrainz Track Id`, `MUSICBRAINZ_TRACKID`). The
   release, release-group, release-track and album-artist IDs are `TXXX` frames
