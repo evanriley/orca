@@ -231,6 +231,14 @@
   stays 0, the struct layout is unchanged, and the Zig
   `RadioOptions.familiarity` is unchanged.
 
+- **A provider's `Retry-After` can no longer disable a service for more than 24
+  hours.** Both the delay-seconds and HTTP-date forms are cut to 24 hours from
+  receipt in `network.Gateway`, and a longer block or next-request time already
+  stored in `provider_state` by an earlier version is cut to 24 hours from the
+  time it is loaded. This replaces the earlier rule that honoured any value.
+  Delays up to 24 hours, the 401/403/429 backoff schedule and the 1-hour
+  `X-RateLimit-Reset-In` bound are unchanged.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in

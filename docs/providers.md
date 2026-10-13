@@ -29,8 +29,8 @@ module's `minimum_interval_ms`, taken from what the service publishes. A Gateway
 configured without an interval waits 1000 ms.
 
 Each interval is the service's published rate with no margin added. Back-off
-the service asks for, through `Retry-After`, a `429` or a `503`, is honoured in
-full; see [429 and 503](#429-and-503).
+the service asks for, through `Retry-After`, a `429` or a `503`, is honoured up
+to 24 h; see [429 and 503](#429-and-503).
 
 | Service | Interval |
 | --- | --- |
@@ -53,8 +53,10 @@ success resets the backoff. A `503` without `Retry-After` goes back to the
 caller as a failure.
 
 `Retry-After` is read as delay-seconds or as an IMF-fixdate HTTP-date and is
-honoured however long it is. A value in neither form is ignored, and a past date
-adds nothing. `X-RateLimit-Reset-In` counts for at most 1 h.
+honoured up to 24 h from receipt; a longer delay is cut to 24 h. A block stored
+with a later end is cut to 24 h from the time it is loaded. A value in neither
+form is ignored, and a past date adds nothing. `X-RateLimit-Reset-In` counts for
+at most 1 h.
 
 A refusal or outage on one endpoint delays every endpoint of that service.
 
