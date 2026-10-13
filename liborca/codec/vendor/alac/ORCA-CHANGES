@@ -1,0 +1,17 @@
+Apple's reference ALAC decoder, vendored for Orca.
+
+Upstream: https://github.com/macosforge/alac
+Commit:   c38887c5c5e64a4b31108733bd79ca9b2496d987
+Licence:  Apache-2.0 (LICENSE)
+
+Files taken from codec/ at that commit:
+  ALACDecoder.cpp, ALACDecoder.h, ALACAudioTypes.h,
+  ALACBitUtilities.c, ALACBitUtilities.h, ag_dec.c, aglib.h,
+  dp_dec.c, dplib.h, matrix_dec.c, matrixlib.h,
+  EndianPortable.c, EndianPortable.h
+and LICENSE from the repository root.
+
+Not taken: the encoders, makefile, convert-utility, APPLE_LICENSE.txt and the
+repository's Markdown and text files.
+
+No file is modified.
