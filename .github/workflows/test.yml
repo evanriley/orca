@@ -30,9 +30,14 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          base=${BEFORE:-HEAD^1}
+          base=HEAD^1
+          if [ "$EVENT" = push ] && [ -n "$BEFORE" ]; then
+            base=$BEFORE
+          fi
           code=true
-          if files=$(git diff --name-only "$base" HEAD) && [ -n "$files" ] &&
+          files=
+          if [ "$base" != 0000000000000000000000000000000000000000 ] &&
+            files=$(git diff --name-only "$base" HEAD) && [ -n "$files" ] &&
             ! grep -Ev '^(docs|orca-design)/|\.md$' <<<"$files" >/dev/null; then
             code=false
           fi

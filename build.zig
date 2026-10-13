@@ -567,6 +567,12 @@ pub fn build(b: *std.Build) void {
     run_analysis_benchmark.addPassthruArgs();
     const analysis_benchmark_step = b.step("analysis-bench", "Time the analysis of one file with and without audio features");
     analysis_benchmark_step.dependOn(&run_analysis_benchmark.step);
+
+    const benchmark_build_step = b.step("bench-build", "Compile the benchmark programs without running them");
+    benchmark_build_step.dependOn(&benchmark.step);
+    benchmark_build_step.dependOn(&dsp_benchmark.step);
+    benchmark_build_step.dependOn(&analysis_benchmark.step);
+    test_step.dependOn(benchmark_build_step);
 }
 
 fn abiVersion(header: []const u8) u32 {
