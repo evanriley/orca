@@ -199,12 +199,6 @@ pub fn build(b: *std.Build) void {
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
-    const released_header_translate = b.addTranslateC(.{
-        .root_source_file = b.path("tests/abi/orca-0.1.0.h"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
     const abi_compat_module = b.createModule(.{
         .root_source_file = b.path("tests/abi/compat.zig"),
         .target = target,
@@ -212,9 +206,23 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "orca_h", .module = orca_header_translate.createModule() },
-            .{ .name = "orca_h_released", .module = released_header_translate.createModule() },
         },
     });
+    const released_headers = [_]struct { version: []const u8, module: []const u8 }{
+        .{ .version = "0.1.0", .module = "orca_h_0_1_0" },
+        .{ .version = "0.2.0", .module = "orca_h_0_2_0" },
+        .{ .version = "0.3.0", .module = "orca_h_0_3_0" },
+        .{ .version = "0.4.0", .module = "orca_h_0_4_0" },
+    };
+    for (released_headers) |released| {
+        const released_header_translate = b.addTranslateC(.{
+            .root_source_file = b.path(b.fmt("tests/abi/orca-{s}.h", .{released.version})),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        abi_compat_module.addImport(released.module, released_header_translate.createModule());
+    }
     abi_compat_module.linkLibrary(liborca);
     const abi_compat_tests = b.addTest(.{
         .name = "abi-compat",
@@ -229,7 +237,11 @@ pub fn build(b: *std.Build) void {
     });
     c_abi_module.addCSourceFile(.{
         .file = b.path("tests/c_abi_smoke.c"),
-        .flags = &.{"-std=c11"},
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic" },
+    });
+    c_abi_module.addCSourceFile(.{
+        .file = b.path("tests/c_abi_smoke_cpp.cpp"),
+        .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" },
     });
     c_abi_module.addIncludePath(b.path("liborca"));
     const c_abi_smoke = b.addExecutable(.{
@@ -258,7 +270,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_c_abi_smoke.step);
-    const abi_compat_step = b.step("abi-compat", "Check orca.h keeps the layouts, values and functions of the released 0.1.0 header");
+    const abi_compat_step = b.step("abi-compat", "Check orca.h keeps the layouts, values and functions of every released header");
     abi_compat_step.dependOn(&run_abi_compat_tests.step);
     test_step.dependOn(&run_abi_compat_tests.step);
     if (target.result.os.tag == .linux) {
@@ -274,7 +286,9 @@ pub fn build(b: *std.Build) void {
     check_abi_coverage.addFileArg(b.path("scripts/check-abi-coverage.sh"));
     check_abi_coverage.addFileArg(b.path("liborca/core/runtime.zig"));
     check_abi_coverage.addFileArg(b.path("liborca/c_api.zig"));
-    const abi_coverage_step = b.step("abi-coverage", "Check every Runtime method has a C ABI path or a stated reason it has none");
+    check_abi_coverage.addFileArg(b.path("liborca/orca.h"));
+    check_abi_coverage.addFileArg(b.path("tests/c_abi_smoke.c"));
+    const abi_coverage_step = b.step("abi-coverage", "Check every Runtime method has a C ABI path or a stated reason it has none, and the smoke test calls every export");
     abi_coverage_step.dependOn(&check_abi_coverage.step);
     test_step.dependOn(&check_abi_coverage.step);
     const check_cli_stdio = b.addSystemCommand(&.{"bash"});

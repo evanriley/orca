@@ -189,16 +189,29 @@ lib/liborca.so   -> liborca.so.0
 - `liborca.so` exports exactly the functions `orca.h` declares. A version script
   hides everything else, and `zig build test` fails when the two differ
   (`scripts/check-exports.sh`).
-- `tests/abi/orca-0.1.0.h` is the baseline header. `zig build test` (and `zig
-  build abi-compat` alone) fails when `orca.h` changes the size, alignment or a
-  non-reserved field offset of any struct in it, the value of any of its enum
-  constants or defines, or the parameters of any of its functions, or when
-  liborca stops providing one of them (`tests/abi/compat.zig`).
+- `tests/abi/orca-VERSION.h` is the header as each release shipped it, one per
+  release from 0.1.0. `zig build test` (and `zig build abi-compat` alone) fails
+  when `orca.h` changes the size, alignment or a non-reserved field offset of
+  any struct in one of them, the value of any of its enum constants or defines,
+  or the parameters of any of its functions, or when liborca stops providing
+  one of them (`tests/abi/compat.zig`). A reserved field that a baseline has and
+  `orca.h` no longer names fails too, unless `renamed_reserved_fields` in
+  `compat.zig` lists it as `struct.field`.
+- The check compares layout, not meaning. A reserved field that gains a name
+  keeps zero as "behave as before", and the CHANGELOG lists the change under
+  Changed. A host built against the older header zeroes the field, and the
+  compatibility test cannot see a name whose zero value does something new.
+- `orca.h` compiles as C11 with `-Wall -Wextra -Werror -pedantic` and as C++17
+  with `-Wall -Wextra -Werror`; `zig build test` builds both. In C++ the three
+  `explicit` fields are named `explicit_`, because `explicit` is a keyword
+  there. The layout is the same.
 - `tests/c_abi_layout.zig` checks every struct layout and enum value in
   `orca.h` against the Zig side.
 - `scripts/check-abi-coverage.sh`, which `zig build test` runs, fails when a
   public `Runtime` method has no C ABI path and no stated reason for having
   none. Its list of reasons is the record of what the C ABI leaves out.
+  It also fails when `tests/c_abi_smoke.c` never calls a function `orca.h`
+  declares.
 
 ### Linking
 

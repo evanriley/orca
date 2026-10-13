@@ -293,6 +293,17 @@
   one logged line naming the mode, because in a rollback-journal mode the
   schema check would refuse large commits.
 
+- **`orca.h` can be included from C++.** Three fields named `explicit`
+  (`orca_release_view`, `orca_track_facts_view`,
+  `orca_track_details_extra_view`) stopped a C++ compiler; under `__cplusplus`
+  they are named `explicit_`. C sources and the struct layouts are unchanged.
+  `zig build test` now compiles the header as C11 with `-Wall -Wextra -Werror
+  -pedantic` and as C++17, checks it against the header of every release from
+  0.1.0 to 0.4.0 (`tests/abi/orca-VERSION.h`), fails when a reserved field of a
+  released header loses its name without being listed in
+  `tests/abi/compat.zig`, and fails when the C smoke test does not call an
+  export. The smoke test no longer exits 0 for a failed check numbered 256.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

@@ -49,9 +49,11 @@ A different model is a new file under a new tag, never a replaced asset:
 1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
    and state the Library schema version it ships.
 2. Set `.version` in `build.zig.zon`.
-3. Commit on a branch and merge it into `main` through a pull request once CI
+3. Copy `liborca/orca.h` to `tests/abi/orca-X.Y.Z.h`, and add the version to
+   the baselines in `build.zig` and `tests/abi/compat.zig`.
+4. Commit on a branch and merge it into `main` through a pull request once CI
    passes.
-4. Check out the updated `main`, tag the release commit (`RELEASE_COMMIT`
+5. Check out the updated `main`, tag the release commit (`RELEASE_COMMIT`
    below) with a signed, annotated `vX.Y.Z` tag whose message is that
    version's section of `CHANGELOG.md`, and push the tag:
 
@@ -65,7 +67,7 @@ A different model is a new file under a new tag, never a replaced asset:
 
    `--cleanup=whitespace` keeps the `###` headings, which the default
    cleanup removes as comments.
-5. Update Orca's application entry on the AcoustID website to the new
+6. Update Orca's application entry on the AcoustID website to the new
    version. Every lookup and submission sends the version as
    `clientversion`, and the registered details should match what the
    service receives.
