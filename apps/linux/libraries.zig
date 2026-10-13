@@ -262,16 +262,38 @@ pub fn openFailed(self: *App, err: anyerror) void {
     std.log.warn("The library could not be opened ({t})", .{err});
     const index = self.libraries.active orelse return;
     self.libraries.active = null;
-    const entry = self.libraries.entries.items[index];
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const shown = preferences.homePath(&path_buffer, entry.path);
-    if (err == error.SchemaVersionTooNew)
-        reportProblem(self, "Could not open {s}", .{entry.name}, incompatible, .{shown})
-    else
-        reportProblem(self, "Could not open {s}", .{entry.name}, "{s} is not an Orca library, or it cannot be read", .{shown});
+    reportFailure(self, "Could not open {s}", self.libraries.entries.items[index], failureOf(err));
 }
 
-const incompatible = "{s} was made by a different version of Orca; create a new library";
+const Failure = enum { missing, unreadable, incompatible, copy_not_written };
+
+fn failureOf(err: anyerror) Failure {
+    return switch (err) {
+        error.SchemaVersionTooNew => .incompatible,
+        error.PreUpgradeCopyFailed => .copy_not_written,
+        else => .unreadable,
+    };
+}
+
+fn reportFailure(self: *App, comptime title: []const u8, entry: Entry, failure: Failure) void {
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const shown = preferences.homePath(&path_buffer, entry.path);
+    switch (failure) {
+        .missing => reportProblem(self, title, .{entry.name}, "No database at {s}", .{shown}),
+        .unreadable => reportProblem(self, title, .{entry.name}, "{s} is not an Orca library, or it cannot be read", .{shown}),
+        .incompatible => {
+            var copy_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            if (liborca.libraryUpgradeCopyPath(self.io, entry.path, &copy_buffer)) |copy|
+                reportProblem(self, title, .{entry.name}, incompatible ++ " A copy from before the last upgrade is {s} beside it.", .{ shown, std.fs.path.basename(copy) })
+            else
+                reportProblem(self, title, .{entry.name}, incompatible, .{shown});
+        },
+        .copy_not_written => reportProblem(self, title, .{entry.name}, copy_not_written, .{shown}),
+    }
+}
+
+const incompatible = "{s} was last opened by a newer version of Orca. Update Orca to open it.";
+const copy_not_written = "{s} needs an upgrade, and the copy Orca keeps of it first could not be written beside it. Free some space or allow writing to its folder, then open it again.";
 
 /// Switches on idle: the dropdown or button that asked is rebuilt by the switch.
 pub fn requestSwitch(self: *App, index: usize) void {
@@ -287,17 +309,8 @@ fn switchLater(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
-const Failure = enum { missing, unreadable, incompatible };
-
 fn fail(self: *App, index: usize, failure: Failure) void {
-    const entry = self.libraries.entries.items[index];
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const shown = preferences.homePath(&path_buffer, entry.path);
-    switch (failure) {
-        .missing => reportProblem(self, "Could not switch to {s}", .{entry.name}, "No database at {s}", .{shown}),
-        .unreadable => reportProblem(self, "Could not switch to {s}", .{entry.name}, "{s} is not an Orca library, or it cannot be read", .{shown}),
-        .incompatible => reportProblem(self, "Could not switch to {s}", .{entry.name}, incompatible, .{shown}),
-    }
+    reportFailure(self, "Could not switch to {s}", self.libraries.entries.items[index], failure);
     preferences.rebuildPage(self);
     refreshDialog(self);
     showFailure(self);
@@ -318,7 +331,7 @@ fn switchTo(self: *App, index: usize, create: bool) bool {
     const library = self.runtime.openLibrary(self.io, path) catch |err| {
         self.allocator.free(path);
         std.log.warn("A library could not be opened ({t})", .{err});
-        fail(self, index, if (err == error.SchemaVersionTooNew) .incompatible else .unreadable);
+        fail(self, index, failureOf(err));
         return false;
     };
     closeCurrent(self);

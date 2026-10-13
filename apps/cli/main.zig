@@ -163,7 +163,8 @@ fn describe(err: anyerror) []const u8 {
         error.JobQueueFull => "32 jobs are already waiting; start this one when one has finished",
         error.UnknownJobHistory => "no finished job with that id; list them with jobs DATABASE --history",
         error.JobNotRetryable => "that job succeeded, or its request cannot be repeated",
-        error.SchemaVersionTooNew => "the Library's schema is not one this version of Orca can open; create a new Library",
+        error.SchemaVersionTooNew => "the Library was last opened by a newer version of Orca; update Orca to open it, or use the copy from before the last upgrade, DATABASE.pre-vN.sqlite beside it, when one exists",
+        error.PreUpgradeCopyFailed => "the Library needs an upgrade and the copy made first, DATABASE.pre-vN.sqlite beside it, could not be written; free some space or allow writing to its folder",
         else => @errorName(err),
     };
 }

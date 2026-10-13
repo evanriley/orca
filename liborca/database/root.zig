@@ -6,6 +6,7 @@ pub const repository = @import("repository.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const sqlite_locks = @import("sqlite_locks.zig");
 pub const text_key = @import("text_key.zig");
+pub const upgrade_copy = @import("upgrade_copy.zig");
 
 pub const ContentMeasurements = content_measurements.ContentMeasurements;
 pub const LibraryDatabase = library.LibraryDatabase;
@@ -309,4 +310,5 @@ test {
     _ = @import("sqlite.zig");
     _ = @import("sqlite_locks.zig");
     _ = @import("text_key.zig");
+    _ = @import("upgrade_copy.zig");
 }

@@ -11,6 +11,7 @@ const platform = @import("../platform.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
 const repository = @import("repository.zig");
 const sqlite = @import("sqlite.zig");
+const upgrade_copy = @import("upgrade_copy.zig");
 
 /// How a Library should decide which volume a path lives on.
 pub const VolumeOptions = struct {
@@ -48,6 +49,15 @@ pub const FileBinding = struct {
 fn laneHeldByCurrentThread(context: *anyopaque) bool {
     const write_lane: *repository.WriteLane = @ptrCast(@alignCast(context));
     return write_lane.heldByCurrentThread();
+}
+
+fn migrate(allocator: std.mem.Allocator, io: std.Io, database: sqlite.Database, target: usize) !void {
+    const copier: upgrade_copy.Copier = .{ .allocator = allocator, .io = io };
+    const upgraded_from = try migrations.upgrade(database, target, copier) orelse return;
+    if (upgraded_from == 0) return;
+    const file = database.filename() orelse return;
+    copier.removeOlder(file, upgraded_from) catch |err|
+        std.log.warn("{s}: an older copy from before a schema upgrade could not be removed ({t})", .{ file, err });
 }
 
 /// One independently openable Library and its serialized write connection.
@@ -143,7 +153,7 @@ pub const LibraryDatabase = struct {
         else
             null;
         errdefer if (walk_lock_path) |lock_path| allocator.free(lock_path);
-        try migrations.apply(database);
+        try migrate(allocator, io, database, migrations.current_version);
         const reader = try sqlite.Database.openReadOnly(path);
         errdefer reader.close();
         const connections = try allocator.create(sqlite.Connections);
@@ -5036,4 +5046,167 @@ test "an under-lane read sees its own uncommitted transaction through a reposito
     try std.testing.expectEqual(committed + 1, try library.tracks.count());
     try library.database.exec("ROLLBACK;");
     try std.testing.expectEqual(committed, try library.tracks.count());
+}
+
+const UpgradeFixture = struct {
+    temporary: std.testing.TmpDir,
+    path: [:0]u8,
+
+    const user_rows =
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two');
+        \\INSERT INTO files(id, recording_id, audio_format, size_bytes) VALUES (1, 1, 1, 10), (2, 2, 1, 10);
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist)
+        \\VALUES (1, 1, 100, 1000, 'One', 'A'), (1, 1, 200, 1000, 'One', 'A'), (2, 2, 300, 1000, 'Two', 'B');
+        \\INSERT INTO ratings VALUES (1, 80, 0);
+        \\INSERT INTO playlists(id, name, created_at, updated_at) VALUES (1, 'Mix', 0, 0);
+        \\INSERT INTO playlist_entries VALUES (1, 0, 1, 0), (1, 1, 2, 0);
+    ;
+
+    fn init() !UpgradeFixture {
+        var temporary = std.testing.tmpDir(.{ .iterate = true });
+        errdefer temporary.cleanup();
+        const path = try std.fmt.allocPrintSentinel(
+            std.testing.allocator,
+            ".zig-cache/tmp/{s}/library.db",
+            .{temporary.sub_path},
+            0,
+        );
+        return .{ .temporary = temporary, .path = path };
+    }
+
+    fn deinit(self: *UpgradeFixture) void {
+        std.testing.allocator.free(self.path);
+        self.temporary.cleanup();
+    }
+
+    fn released(self: *const UpgradeFixture, version: usize) !sqlite.Database {
+        const raw = try sqlite.Database.open(self.path);
+        errdefer raw.close();
+        try raw.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+        try migrate(std.testing.allocator, std.testing.io, raw, version);
+        try raw.exec(user_rows);
+        return raw;
+    }
+
+    fn copyCount(self: *const UpgradeFixture) !usize {
+        var count: usize = 0;
+        var iterator = self.temporary.dir.iterate();
+        while (try iterator.next(std.testing.io)) |entry| {
+            if (std.mem.startsWith(u8, entry.name, "library.db.pre-v")) count += 1;
+        }
+        return count;
+    }
+
+    fn expectUserRows(db: sqlite.Database) !void {
+        try std.testing.expectEqual(@as(i64, 3), try testScalar(db, "SELECT count(*) FROM listens;"));
+        try std.testing.expectEqual(@as(i64, 1), try testScalar(db, "SELECT count(*) FROM ratings;"));
+        try std.testing.expectEqual(@as(i64, 1), try testScalar(db, "SELECT count(*) FROM playlists;"));
+        try std.testing.expectEqual(@as(i64, 2), try testScalar(db, "SELECT count(*) FROM playlist_entries;"));
+    }
+
+    fn expectCopy(self: *const UpgradeFixture, version: usize) !void {
+        const copy_path = try std.fmt.allocPrintSentinel(
+            std.testing.allocator,
+            "{s}.pre-v{d}.sqlite",
+            .{ self.path, version },
+            0,
+        );
+        defer std.testing.allocator.free(copy_path);
+        const copy = try sqlite.Database.openReadOnly(copy_path);
+        defer copy.close();
+        try std.testing.expectEqual(@as(i64, @intCast(version)), try testScalar(copy, "PRAGMA user_version;"));
+        try expectText(copy, "PRAGMA integrity_check;", "ok");
+        try expectText(copy, "PRAGMA journal_mode;", "delete");
+        try expectUserRows(copy);
+    }
+
+    fn expectText(db: sqlite.Database, sql: [:0]const u8, expected: []const u8) !void {
+        var statement = try db.prepare(sql);
+        defer statement.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+        try std.testing.expectEqualStrings(expected, statement.columnText(0));
+    }
+};
+
+test "opening a Library at a released schema copies it beside itself before upgrading it" {
+    var fixture = try UpgradeFixture.init();
+    defer fixture.deinit();
+    const other_connection = try fixture.released(4);
+    defer other_connection.close();
+
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, fixture.path);
+    defer library.close();
+
+    try std.testing.expectEqual(@as(usize, 1), try fixture.copyCount());
+    try fixture.expectCopy(4);
+    try std.testing.expectEqual(
+        @as(i64, migrations.current_version),
+        try testScalar(library.database, "PRAGMA user_version;"),
+    );
+    try UpgradeFixture.expectUserRows(library.database);
+}
+
+test "opening a new Library or a current one makes no copy" {
+    var fixture = try UpgradeFixture.init();
+    defer fixture.deinit();
+    {
+        var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, fixture.path);
+        defer library.close();
+        try std.testing.expectEqual(@as(usize, 0), try fixture.copyCount());
+    }
+
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, fixture.path);
+    defer library.close();
+
+    try std.testing.expectEqual(@as(usize, 0), try fixture.copyCount());
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), upgrade_copy.newest(std.testing.io, fixture.path, &buffer));
+}
+
+test "a copy that cannot be written fails the open and leaves the Library at its version" {
+    std.testing.log_level = .err;
+    var fixture = try UpgradeFixture.init();
+    defer fixture.deinit();
+    (try fixture.released(1)).close();
+    try fixture.temporary.dir.createDirPath(std.testing.io, "library.db.pre-v1.sqlite");
+
+    try std.testing.expectError(
+        error.PreUpgradeCopyFailed,
+        LibraryDatabase.open(std.testing.allocator, std.testing.io, fixture.path),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), try fixture.copyCount());
+    const raw = try sqlite.Database.open(fixture.path);
+    defer raw.close();
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(raw, "PRAGMA user_version;"));
+    try UpgradeFixture.expectUserRows(raw);
+}
+
+test "a later upgrade replaces the copy an earlier upgrade made" {
+    var fixture = try UpgradeFixture.init();
+    defer fixture.deinit();
+    {
+        const raw = try fixture.released(1);
+        defer raw.close();
+        try migrate(std.testing.allocator, std.testing.io, raw, 4);
+    }
+    try std.testing.expectEqual(@as(usize, 1), try fixture.copyCount());
+    try fixture.expectCopy(1);
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        upgrade_copy.newest(std.testing.io, fixture.path, &buffer).?,
+        "library.db.pre-v1.sqlite",
+    ));
+
+    var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, fixture.path);
+    defer library.close();
+
+    try std.testing.expectEqual(@as(usize, 1), try fixture.copyCount());
+    try fixture.expectCopy(4);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        upgrade_copy.newest(std.testing.io, fixture.path, &buffer).?,
+        "library.db.pre-v4.sqlite",
+    ));
 }
