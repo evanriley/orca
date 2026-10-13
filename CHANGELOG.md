@@ -249,6 +249,14 @@
   too. Rows orphaned by earlier merges are left as they are, because the
   surviving Recording can no longer be identified.
 
+- **`orca-cli` no longer prints control bytes from tags, paths and provider
+  text.** A title holding an escape sequence could rewrite the terminal title.
+  Every CLI print of text from files, tags, paths, provider responses and
+  database rows now passes one filter that prints C0 controls, DEL, C1 controls
+  and invalid UTF-8 as `\xNN`, keeps valid UTF-8, and keeps tab and newline
+  only in lyrics, biographies and descriptions. Files the CLI writes (`changes
+  --export`, `playlist-export`) keep their raw form.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

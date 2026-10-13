@@ -340,6 +340,13 @@ pub fn build(b: *std.Build) void {
     const fuzz_step = b.step("fuzz", "Replay fuzz seeds; add --fuzz to fuzz");
     fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
+    const cli_printable_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("apps/cli/printable.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(cli_printable_tests).step);
+
     if (target.result.os.tag == .linux) {
         const signal_path_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("apps/linux/signal_path.zig"),

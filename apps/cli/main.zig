@@ -1,6 +1,8 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const liborca = @import("liborca");
+const printable = @import("printable.zig").printable;
+const printableText = @import("printable.zig").printableText;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
@@ -1068,9 +1070,9 @@ fn awaitScan(runtime: *liborca.Runtime, stdout: *std.Io.Writer, job_handle: libo
             const current = stats.current_path.slice();
             try stdout.print("progress stage={t} files={d} total=", .{ stats.stage, stats.files_seen });
             if (snapshot.total_units) |total| try stdout.print("{d}", .{total}) else try stdout.writeAll("-");
-            try stdout.print(" albums={d} current={s}\n", .{
+            try stdout.print(" albums={d} current={f}\n", .{
                 stats.albums_found,
-                if (current.len == 0) "-" else current,
+                printable(if (current.len == 0) "-" else current),
             });
             try stdout.flush();
             printed_stage = stats.stage;
@@ -1453,8 +1455,8 @@ fn printJobHistory(
         });
         if (entry.total_units) |total| try stdout.print("\ttotal={d}", .{total});
         if (entry.undo_group_id) |group| try stdout.print("\tundo={d}", .{group});
-        if (entry.error_text.len != 0) try stdout.print("\terror={s}", .{entry.error_text.slice()});
-        try stdout.print("\tretry={s}\tsummary={s}\n", .{ if (entry.retryable) "yes" else "no", entry.summary.slice() });
+        if (entry.error_text.len != 0) try stdout.print("\terror={f}", .{printable(entry.error_text.slice())});
+        try stdout.print("\tretry={s}\tsummary={f}\n", .{ if (entry.retryable) "yes" else "no", printable(entry.summary.slice()) });
     }
 }
 
@@ -1791,25 +1793,25 @@ fn listMetadataIssues(context: Context) !void {
     defer page.deinit();
     const stdout = context.stdout;
     for (page.items) |group| {
-        try stdout.print("group={d} release={d} category={t} field={t} tracks={d} title={s} artist={s}\n", .{
+        try stdout.print("group={d} release={d} category={t} field={t} tracks={d} title={f} artist={f}\n", .{
             group.id,
             group.release_id,
             group.category,
             group.field,
             group.track_count,
-            group.title,
-            group.artist,
+            printable(group.title),
+            printable(group.artist),
         });
-        for (group.options) |option| try stdout.print("  option={d} value={s} support={s}\n", .{
+        for (group.options) |option| try stdout.print("  option={d} value={f} support={f}\n", .{
             option.id,
-            option.value,
-            option.support.slice(),
+            printable(option.value),
+            printable(option.support.slice()),
         });
-        for (group.proposals) |proposal| try stdout.print("  proposal track={d} title={s} current={s} proposed={s}\n", .{
+        for (group.proposals) |proposal| try stdout.print("  proposal track={d} title={f} current={f} proposed={f}\n", .{
             proposal.track_id,
-            proposal.title,
-            proposal.current orelse "-",
-            proposal.proposed,
+            printable(proposal.title),
+            printable(proposal.current orelse "-"),
+            printable(proposal.proposed),
         });
     }
     try stdout.print("issues={d}\n", .{try runtime.libraryMetadataIssueCount(library, category)});
@@ -1871,10 +1873,10 @@ fn listDuplicateGroups(context: Context) !void {
     var page = try runtime.libraryDuplicateGroupPage(library, context.allocator, limit, offset);
     defer page.deinit();
     for (page.items) |group| {
-        try context.stdout.print("{d}\t{s}\t{s}\tcopies={d} same_recording={s} similarity=", .{
+        try context.stdout.print("{d}\t{f}\t{f}\tcopies={d} same_recording={s} similarity=", .{
             group.id,
-            group.title,
-            group.artist,
+            printable(group.title),
+            printable(group.artist),
             group.copies,
             if (group.same_recording) "yes" else "no",
         });
@@ -1903,8 +1905,8 @@ fn showDuplicateGroup(context: Context, group_id: i64) !void {
             copy.playlist_count,
         });
         if (copy.details) |details| {
-            try context.stdout.print(" codec={s} rate={d} depth={d} bytes={d} duration_ms={d} plays={d} rating=", .{
-                details.codec,
+            try context.stdout.print(" codec={f} rate={d} depth={d} bytes={d} duration_ms={d} plays={d} rating=", .{
+                printable(details.codec),
                 details.sample_rate orelse 0,
                 details.bit_depth orelse 0,
                 details.size_bytes orelse 0,
@@ -1914,7 +1916,7 @@ fn showDuplicateGroup(context: Context, group_id: i64) !void {
             if (details.rating) |rating| try context.stdout.print("{d}", .{rating}) else try context.stdout.writeByte('-');
             try context.stdout.print(" lufs=", .{});
             if (details.loudness) |loudness| try context.stdout.print("{d:.1}", .{loudness.integrated_lufs}) else try context.stdout.writeByte('-');
-            try context.stdout.print(" album={s} title={s} path={s}", .{ details.album, details.title, details.path orelse "-" });
+            try context.stdout.print(" album={f} title={f} path={f}", .{ printable(details.album), printable(details.title), printable(details.path orelse "-") });
         }
         try context.stdout.writeByte('\n');
     }
@@ -2030,7 +2032,7 @@ fn listHealthIssues(context: Context) !void {
                 try context.stdout.print("size={d}x{d}", .{ album.finding.width.?, album.finding.height.? })
             else
                 try context.stdout.writeAll("size=-");
-            try context.stdout.print("\t{s}\n", .{if (release) |summary_row| summary_row.title else "-"});
+            try context.stdout.print("\t{f}\n", .{printable(if (release) |summary_row| summary_row.title else "-")});
         }
         try context.stdout.print("albums\t{d}\n", .{try runtime.libraryArtworkProblemReleaseCount(library_handle)});
         return;
@@ -2051,8 +2053,8 @@ fn listHealthIssues(context: Context) !void {
         try runtime.libraryHealthIssuePage(library_handle, 256, offset orelse 0);
     defer page.deinit();
     for (page.items) |issue| try context.stdout.print(
-        "{d}\t{s}\t{s}\t{s}\t{s}\t{s}\n",
-        .{ issue.file_id, @tagName(issue.severity), @tagName(issue.kind), @tagName(issue.action), issue.path, issue.details },
+        "{d}\t{s}\t{s}\t{s}\t{f}\t{f}\n",
+        .{ issue.file_id, @tagName(issue.severity), @tagName(issue.kind), @tagName(issue.action), printable(issue.path), printable(issue.details) },
     );
 }
 
@@ -2200,8 +2202,8 @@ fn downloadEmbeddingModel(context: Context) !void {
             .succeeded => break,
             .failed, .cancelled => {
                 const reason = snapshot.detail.slice();
-                try stderr.print("orca-cli: the audio-embedding model was not downloaded: {s}\n", .{
-                    if (reason.len == 0) "the download was cancelled" else reason,
+                try stderr.print("orca-cli: the audio-embedding model was not downloaded: {f}\n", .{
+                    printable(if (reason.len == 0) "the download was cancelled" else reason),
                 });
                 try stderr.flush();
                 return error.ModelDownloadFailed;
@@ -2211,7 +2213,7 @@ fn downloadEmbeddingModel(context: Context) !void {
         sleepMilliseconds(20);
         since_printed_ms += 20;
     }
-    try context.stdout.print("{s}\n", .{destination});
+    try context.stdout.print("{f}\n", .{printable(destination)});
 }
 
 fn listSupportedFormats(context: Context) !void {
@@ -2257,15 +2259,15 @@ fn listRoots(context: Context) !void {
 
 fn printRoot(stdout: *std.Io.Writer, root: liborca.LibraryRoot) !void {
     try stdout.print(
-        "{d}\t{s}\t{s}\tavailable={s}\ttracks={d}\tunavailable={d}\tvolume={s}\tlast_seen_at=",
+        "{d}\t{s}\t{f}\tavailable={s}\ttracks={d}\tunavailable={d}\tvolume={f}\tlast_seen_at=",
         .{
             root.id,
             if (root.enabled) "enabled" else "disabled",
-            root.path,
+            printable(root.path),
             if (root.available) "yes" else "no",
             root.track_count,
             root.unavailable_tracks,
-            if (root.volume.len != 0) root.volume else "-",
+            printable(if (root.volume.len != 0) root.volume else "-"),
         },
     );
     if (root.last_seen_at) |seen| try stdout.print("{d}\n", .{seen}) else try stdout.writeAll("-\n");
@@ -2330,7 +2332,7 @@ fn listFolders(context: Context) !void {
                 tracks,
             });
             try writeDuration(stdout, duration_ms);
-            try stdout.print("\t{s}\n", .{root.path});
+            try stdout.print("\t{f}\n", .{printable(root.path)});
         }
         return;
     }
@@ -2372,9 +2374,9 @@ fn listFolders(context: Context) !void {
                         try stdout.writeAll("file\ttrack=-\t");
                     try writeDuration(stdout, entry.total_duration_ms);
                 },
-                .image => try stdout.print("image\t{s}\t-", .{entry.mime orelse "-"}),
+                .image => try stdout.print("image\t{f}\t-", .{printable(entry.mime orelse "-")}),
             }
-            try stdout.print("\t{s}\tkind={t}\tstatus={t}", .{ entry.name, entry.kind, entry.status });
+            try stdout.print("\t{f}\tkind={t}\tstatus={t}", .{ printable(entry.name), entry.kind, entry.status });
             if (entry.artwork_role) |role| try stdout.print("\trole={t}", .{role});
             try stdout.writeAll("\n");
         }
@@ -2420,10 +2422,10 @@ fn playFolder(context: Context) !void {
         for (refs[0..count]) |ref| {
             const details = try runtime.libraryTrackDetails(library, ref.track_id);
             defer if (details) |value| value.deinit();
-            try stdout.print("queue position={d} track={d} title={s}\n", .{
+            try stdout.print("queue position={d} track={d} title={f}\n", .{
                 position,
                 ref.track_id,
-                if (details) |value| value.title else "",
+                printable(if (details) |value| value.title else ""),
             });
             position += 1;
         }
@@ -2475,7 +2477,7 @@ fn relocateRoot(context: Context) !void {
     const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const path = try absolutePath(context, context.arguments[2]);
     const job_handle = try runtime.libraryRelocateRoot(library_handle, context.io, root_id, path);
-    try context.stdout.print("relocated root {d} to {s}\n", .{ root_id, path });
+    try context.stdout.print("relocated root {d} to {f}\n", .{ root_id, printable(path) });
     try awaitJob(&runtime, context.stdout, job_handle, null);
     try printScanStats(context.stdout, try runtime.jobScanStats(job_handle));
 }
@@ -2545,22 +2547,34 @@ fn showChanges(context: Context) !void {
     const page = try runtime.libraryTagWriteGroupPage(library, context.allocator, limit, offset);
     defer page.deinit();
     for (page.items) |*group| {
-        try group.writeLine(context.stdout, null);
+        try writeChangeLine(context.allocator, context.stdout, group, null);
         try context.stdout.writeByte('\n');
     }
+}
+
+fn writeChangeLine(
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    group: *const liborca.TagWriteGroup,
+    shown: ?*const liborca.TagWriteGroupDetail,
+) !void {
+    var line: std.Io.Writer.Allocating = .init(allocator);
+    defer line.deinit();
+    try group.writeLine(&line.writer, shown);
+    try stdout.print("{f}", .{printable(line.written())});
 }
 
 fn printChangeDetail(context: Context, runtime: *liborca.Runtime, library: liborca.LibraryHandle, group_id: u64) !void {
     const detail = try runtime.libraryTagWriteGroup(library, context.allocator, context.io, group_id);
     defer detail.deinit();
     const stdout = context.stdout;
-    try detail.group.writeLine(stdout, &detail);
+    try writeChangeLine(context.allocator, stdout, &detail.group, &detail);
     try stdout.writeByte('\n');
     for (detail.diffs) |diff| {
-        try stdout.print("{s}\t", .{diff.file});
+        try stdout.print("{f}\t", .{printable(diff.file)});
         switch (diff.subject) {
-            .field => |field| try stdout.print("{t}\t{s}\t{s}\n", .{ field, noneIfEmpty(diff.restores), noneIfEmpty(diff.current) }),
-            .genres => try stdout.print("genres\t{s}\t{s}\n", .{ noneIfEmpty(diff.restores), noneIfEmpty(diff.current) }),
+            .field => |field| try stdout.print("{t}\t{f}\t{f}\n", .{ field, printable(noneIfEmpty(diff.restores)), printable(noneIfEmpty(diff.current)) }),
+            .genres => try stdout.print("genres\t{f}\t{f}\n", .{ printable(noneIfEmpty(diff.restores)), printable(noneIfEmpty(diff.current)) }),
             .unknown => try stdout.writeAll("unknown\t-\t-\n"),
         }
     }
@@ -2581,7 +2595,7 @@ fn listDevices(context: Context) !void {
     var devices: [32]liborca.Device = undefined;
     const count = try runtime.enumerateOutputDevices(&devices, .capabilities);
     for (devices[0..count]) |device| {
-        try context.stdout.print("{d}\t{s}\t{t}\t", .{ device.id, device.nameSlice(), device.kind });
+        try context.stdout.print("{d}\t{f}\t{t}\t", .{ device.id, printable(device.nameSlice()), device.kind });
         try writeDeviceCapabilities(context.stdout, device.capabilities);
         try context.stdout.writeAll("\n");
     }
@@ -2684,8 +2698,8 @@ fn applyMatchedRelease(context: Context) !void {
     const fields = try parseReleaseFields(context.arguments[2]);
     const outcome = try runtime.libraryApplyRelease(library, context.allocator, release_id, fields);
     defer outcome.deinit();
-    try context.stdout.print("release={s}\tvalues_written={d}\ttrack_values={d}\trelease_values_only={d}\tartist_ids={s}", .{
-        outcome.release_mbid,
+    try context.stdout.print("release={f}\tvalues_written={d}\ttrack_values={d}\trelease_values_only={d}\tartist_ids={s}", .{
+        printable(outcome.release_mbid),
         outcome.values_written,
         outcome.track_values,
         outcome.release_values_only,
@@ -2695,7 +2709,7 @@ fn applyMatchedRelease(context: Context) !void {
         try context.stdout.print("\treviewed={d}\n", .{reviewed});
     } else try context.stdout.writeAll("\treviewed=-\n");
     for (outcome.left_alone) |track| {
-        try context.stdout.print("left_alone\ttrack={d}\treason={s}\ttitle={s}\n", .{ track.track_id, @tagName(track.reason), track.title });
+        try context.stdout.print("left_alone\ttrack={d}\treason={s}\ttitle={f}\n", .{ track.track_id, @tagName(track.reason), printable(track.title) });
     }
 }
 
@@ -2727,8 +2741,8 @@ fn printReleaseAlignment(context: Context) !void {
     const release_mbid: ?[]const u8 = if (context.arguments.len == 3) context.arguments[2] else null;
     const alignment = try runtime.libraryReleaseAlignment(library, context.allocator, release_id, release_mbid);
     defer alignment.deinit();
-    try stdout.print("release={s}\tmedia={d}\ttracks={d}\tfetched_at={d}\ttitle={s}\tartist={s}\n", .{
-        alignment.release_mbid, alignment.medium_count, alignment.rows.len, alignment.fetched_at, alignment.title, alignment.artist_credit,
+    try stdout.print("release={f}\tmedia={d}\ttracks={d}\tfetched_at={d}\ttitle={f}\tartist={f}\n", .{
+        printable(alignment.release_mbid), alignment.medium_count, alignment.rows.len, alignment.fetched_at, printable(alignment.title), printable(alignment.artist_credit),
     });
     for (alignment.rows) |row| {
         try stdout.print("{d}-{d}\t{s}\ttrack=", .{ row.disc, row.position, @tagName(row.status) });
@@ -2741,21 +2755,21 @@ fn printReleaseAlignment(context: Context) !void {
             flag(evidence.position_equal),
         });
         if (evidence.length_delta_ms) |delta| try stdout.print("{d}", .{delta}) else try stdout.writeAll("-");
-        try stdout.print("\trecording={s}\trelease_title={s}\tlocal_title={s}\n", .{
-            row.recording_mbid,
-            row.title,
-            if (row.track) |track| track.title else "",
+        try stdout.print("\trecording={f}\trelease_title={f}\tlocal_title={f}\n", .{
+            printable(row.recording_mbid),
+            printable(row.title),
+            printable(if (row.track) |track| track.title else ""),
         });
     }
     for (alignment.not_on_release) |track| {
-        try stdout.print("not_on_release\ttrack={d}\tlocal_title={s}\n", .{ track.track_id, track.title });
+        try stdout.print("not_on_release\ttrack={d}\tlocal_title={f}\n", .{ track.track_id, printable(track.title) });
     }
     var pairings = try runtime.libraryReleaseTrackPairings(library, context.allocator, release_id);
     defer pairings.deinit();
     for (pairings.items) |pairing| {
         if (pairing.in_snapshot or !std.mem.eql(u8, pairing.release_mbid, alignment.release_mbid)) continue;
-        try stdout.print("unlisted_pairing\ttrack={d}\trelease_track={s}\trecording={s}\n", .{
-            pairing.track_id, pairing.release_track_mbid, pairing.recording_mbid,
+        try stdout.print("unlisted_pairing\ttrack={d}\trelease_track={f}\trecording={f}\n", .{
+            pairing.track_id, printable(pairing.release_track_mbid), printable(pairing.recording_mbid),
         });
     }
 }
@@ -3026,7 +3040,7 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
         if (path.codec) |codec| {
             var upper: [16]u8 = undefined;
             const name = if (codec.len <= upper.len) std.ascii.upperString(&upper, codec) else codec;
-            try stdout.print("{s} ", .{name});
+            try stdout.print("{f} ", .{printable(name)});
         }
         if (path.source_declared) try stdout.print("{d}-bit ", .{source.bits_per_sample});
         try stdout.print("{d} Hz {d} ch", .{ source.sample_rate, source.channels });
@@ -3370,10 +3384,10 @@ fn resumePlayback(context: Context) !void {
         for (refs[0..count]) |ref| {
             const details = try runtime.libraryTrackDetails(library, ref.track_id);
             defer if (details) |value| value.deinit();
-            try stdout.print("queue position={d} track={d} title={s}\n", .{
+            try stdout.print("queue position={d} track={d} title={f}\n", .{
                 position,
                 ref.track_id,
-                if (details) |value| value.title else "",
+                printable(if (details) |value| value.title else ""),
             });
             position += 1;
         }
@@ -3423,11 +3437,11 @@ fn printQueueHistory(
     for (entries[0..count]) |entry| {
         const details = try runtime.libraryTrackDetails(library, entry.track.track_id);
         defer if (details) |value| value.deinit();
-        try stdout.print("history ended_at={d} reason={t} track={d} title={s}\n", .{
+        try stdout.print("history ended_at={d} reason={t} track={d} title={f}\n", .{
             entry.ended_at_ms,
             entry.reason,
             entry.track.track_id,
-            if (details) |value| value.title else "",
+            printable(if (details) |value| value.title else ""),
         });
     }
 }
@@ -3497,11 +3511,11 @@ const LyricsFollower = struct {
         if (line == self.line) return;
         self.line = line;
         const index = line orelse return;
-        try stdout.print("lyric at={d}ms track={?d} line={d} text={s}\n", .{
+        try stdout.print("lyric at={d}ms track={?d} line={d} text={f}\n", .{
             elapsed_ms,
             self.track_id,
             index,
-            found.lines[index].text,
+            printable(found.lines[index].text),
         });
         try stdout.flush();
     }
@@ -3746,8 +3760,8 @@ fn editTracks(context: Context) !void {
         var page = try runtime.libraryTrackEdits(library, track_id);
         defer page.deinit();
         for (page.items) |value| try stdout.print(
-            "{d}\t{t}\t{s}\t{t}{s}\n",
-            .{ track_id, value.field, value.text, value.provenance, if (value.locked) "\tlocked" else "" },
+            "{d}\t{t}\t{f}\t{t}{s}\n",
+            .{ track_id, value.field, printable(value.text), value.provenance, if (value.locked) "\tlocked" else "" },
         );
     }
 }
@@ -3765,18 +3779,18 @@ fn showTrackFields(context: Context) !void {
     defer states.deinit();
     for (std.enums.values(liborca.EditableTrackField)) |field| {
         const state = states.fields.get(field);
-        try stdout.print("{t}\tvalue={s}\tmixed={s}\tedited={s}\n", .{
+        try stdout.print("{t}\tvalue={f}\tmixed={s}\tedited={s}\n", .{
             field,
-            state.value orelse "-",
+            printable(state.value orelse "-"),
             if (state.mixed) "yes" else "no",
             if (state.edited) "yes" else "no",
         });
     }
     if (states.disc_total) |total| try stdout.print("disc_total={d}\n", .{total}) else try stdout.writeAll("disc_total=-\n");
-    try stdout.print("cover\tsource={t}\tfile={s}\tmime={s}\ttracks={d}/{d}\n", .{
+    try stdout.print("cover\tsource={t}\tfile={f}\tmime={f}\ttracks={d}/{d}\n", .{
         states.cover.source,
-        states.cover.file_name orelse "-",
-        states.cover.mime_type orelse "-",
+        printable(states.cover.file_name orelse "-"),
+        printable(states.cover.mime_type orelse "-"),
         states.cover.tracks,
         states.track_count,
     });
@@ -3808,12 +3822,12 @@ fn writeTags(context: Context) !void {
     const library = try runtime.openLibrary(io, database_path);
     const plan = try runtime.planTagWrite(library, io, ids.items);
     defer plan.deinit();
-    for (plan.skipped) |skip| try stdout.print("skip\t{d}\t{t}\t{s}\n", .{ skip.file_id, skip.reason, skip.path });
+    for (plan.skipped) |skip| try stdout.print("skip\t{d}\t{t}\t{f}\n", .{ skip.file_id, skip.reason, printable(skip.path) });
     for (plan.files) |file| {
-        try stdout.print("file\t{d}\t{s}\n", .{ file.file_id, file.path });
+        try stdout.print("file\t{d}\t{f}\n", .{ file.file_id, printable(file.path) });
         for (file.changes) |change| try stdout.print(
-            "\t{t}\t{s} -> {s}\t{s}\n",
-            .{ change.field, change.before orelse "(none)", change.after orelse "(none)", provenanceLabel(change.provenance) },
+            "\t{t}\t{f} -> {f}\t{s}\n",
+            .{ change.field, printable(change.before orelse "(none)"), printable(change.after orelse "(none)"), provenanceLabel(change.provenance) },
         );
         if (file.genres) |genres| {
             try stdout.writeAll("\tgenres\t");
@@ -3824,8 +3838,8 @@ fn writeTags(context: Context) !void {
         }
     }
     for (plan.conflicts) |conflict| try stdout.print(
-        "conflict\t{d}\t{t}\tfile {s}\torca {s}\t{s}\t{s}\n",
-        .{ conflict.file_id, conflict.field, conflict.file_value, conflict.orca_value, provenanceLabel(conflict.provenance), conflict.path },
+        "conflict\t{d}\t{t}\tfile {f}\torca {f}\t{s}\t{f}\n",
+        .{ conflict.file_id, conflict.field, printable(conflict.file_value), printable(conflict.orca_value), provenanceLabel(conflict.provenance), printable(conflict.path) },
     );
     if (plan.files.len == 0) {
         try stdout.print("nothing to write\n", .{});
@@ -3839,7 +3853,7 @@ fn writeTags(context: Context) !void {
     awaitJob(&runtime, stdout, job_handle, null) catch |err| {
         if (err == error.JobFailed) if (try runtime.jobTagWriteFailure(job_handle)) |failure| {
             if (failure.file) |file| {
-                try stdout.print("failed\t{d}\t{t}\t{s}\n", .{ file.file_id, failure.reason, plan.files[file.action_index].path });
+                try stdout.print("failed\t{d}\t{t}\t{f}\n", .{ file.file_id, failure.reason, printable(plan.files[file.action_index].path) });
             } else {
                 try stdout.print("failed\t-\t{t}\t-\n", .{failure.reason});
             }
@@ -3853,7 +3867,7 @@ fn writeTags(context: Context) !void {
 
 fn writeGenreList(stdout: *std.Io.Writer, genres: []const []const u8) !void {
     if (genres.len == 0) return stdout.writeAll("(none)");
-    for (genres, 0..) |genre, index| try stdout.print("{s}{s}", .{ if (index == 0) "" else "; ", genre });
+    for (genres, 0..) |genre, index| try stdout.print("{s}{f}", .{ if (index == 0) "" else "; ", printable(genre) });
 }
 
 fn provenanceLabel(provenance: liborca.Provenance) []const u8 {
@@ -3879,15 +3893,15 @@ fn showTrack(context: Context) !void {
         return error.TrackNotFound;
     defer details.deinit();
 
-    try printDetail(stdout, "title", "{s}", .{details.title});
-    try printDetail(stdout, "artist", "{s}", .{details.artist});
-    try printDetail(stdout, "album", "{s}", .{details.album});
-    try printDetail(stdout, "album artist", "{s}", .{details.album_artist});
-    try printOptionalDetail(stdout, "date", "{s}", details.date);
-    try printOptionalDetail(stdout, "composer", "{s}", details.composer);
-    try printOptionalDetail(stdout, "comment", "{s}", details.comment);
+    try printDetail(stdout, "title", "{f}", .{printable(details.title)});
+    try printDetail(stdout, "artist", "{f}", .{printable(details.artist)});
+    try printDetail(stdout, "album", "{f}", .{printable(details.album)});
+    try printDetail(stdout, "album artist", "{f}", .{printable(details.album_artist)});
+    try printOptionalText(stdout, "date", details.date);
+    try printOptionalText(stdout, "composer", details.composer);
+    try printOptionalText(stdout, "comment", details.comment);
     try writeDetailKey(stdout, "genres");
-    for (details.genres, 0..) |genre, index| try stdout.print("{s}{s}", .{ if (index == 0) "" else "; ", genre });
+    for (details.genres, 0..) |genre, index| try stdout.print("{s}{f}", .{ if (index == 0) "" else "; ", printable(genre) });
     if (details.genres.len == 0) try stdout.writeAll("-\n") else {
         const genres = try runtime.libraryTrackGenres(library, track_id);
         defer genres.deinit();
@@ -3900,7 +3914,7 @@ fn showTrack(context: Context) !void {
     try writeOfTotal(stdout, details.disc_number, details.disc_total);
     try stdout.writeAll("\n");
     try printDetail(stdout, "explicit", "{s}", .{explicitName(details.explicit)});
-    try printDetail(stdout, "codec", "{s}", .{if (details.codec.len == 0) "-" else details.codec});
+    try printDetail(stdout, "codec", "{f}", .{printable(if (details.codec.len == 0) "-" else details.codec)});
     try printOptionalDetail(stdout, "sample rate", "{d} Hz", details.sample_rate);
     if (!details.lossy) try printOptionalDetail(stdout, "bit depth", "{d}-bit", details.bit_depth);
     try printOptionalDetail(stdout, "channels", "{d}", details.channels);
@@ -3910,7 +3924,7 @@ fn showTrack(context: Context) !void {
     try stdout.writeAll("\n");
     try printOptionalDetail(stdout, "size", "{d} bytes", details.size_bytes);
     if (details.path) |path| {
-        try printDetail(stdout, "path", "{s}", .{path});
+        try printDetail(stdout, "path", "{f}", .{printable(path)});
     } else try printDetail(stdout, "path", "{s}", .{"(file missing)"});
     try writeDetailKey(stdout, "added");
     if (details.added_at) |seconds| try writeIsoUtc(stdout, seconds) else try stdout.writeAll("-");
@@ -3968,7 +3982,7 @@ fn printVerification(stdout: *std.Io.Writer, stored: ?liborca.TrackVerification)
     try writeDetailKey(stdout, "heard");
     for (verification.heard, 0..) |recording, index| {
         if (index != 0) try stdout.writeAll(", ");
-        try stdout.print("{s} ({d:.2})", .{ recording.mbid, recording.score });
+        try stdout.print("{f} ({d:.2})", .{ printable(recording.mbid), recording.score });
     }
     try stdout.writeAll("\n");
     if (verification.dismissed) try printDetail(stdout, "proposal", "{s}", .{"dismissed"});
@@ -3981,7 +3995,7 @@ fn printMusicBrainzId(
     source: ?liborca.RecordingIdSource,
 ) !void {
     const present = id orelse return printDetail(stdout, key, "{s}", .{"-"});
-    try printDetail(stdout, key, "{s} ({s})", .{ present, @tagName(source.?) });
+    try printDetail(stdout, key, "{f} ({s})", .{ printable(present), @tagName(source.?) });
 }
 
 fn writeIsoUtc(stdout: *std.Io.Writer, unix_seconds: i64) !void {
@@ -4063,9 +4077,9 @@ fn printScrobbleLine(
         "scrobble: state={s} delivered={d} pending={d} feedback_pending={d}",
         .{ @tagName(state), delivered, pending, feedback_pending },
     );
-    if (user_name.len != 0) try stdout.print(" user={s}", .{user_name});
+    if (user_name.len != 0) try stdout.print(" user={f}", .{printable(user_name)});
     try writeBlockedUntil(stdout, blocked_until);
-    try stdout.print(" last_error={s}\n", .{if (last_error.len == 0) "-" else last_error});
+    try stdout.print(" last_error={f}\n", .{printable(if (last_error.len == 0) "-" else last_error)});
 }
 
 const latest_iso_utc_seconds: i64 = 253_402_300_799;
@@ -4323,7 +4337,7 @@ fn parsePlaylistSort(value: []const u8) !liborca.PlaylistSort {
 }
 
 fn writePlaylistLine(stdout: *std.Io.Writer, playlist: liborca.PlaylistSummary) !void {
-    try stdout.print("{d}\t{s}\t{d}\t{d}\t", .{ playlist.id, playlist.name, playlist.entries, playlist.available });
+    try stdout.print("{d}\t{f}\t{d}\t{d}\t", .{ playlist.id, printable(playlist.name), playlist.entries, playlist.available });
     try writeDuration(stdout, playlist.duration_ms);
     try stdout.print("\t{t}", .{playlist.kind});
     if (playlist.creator == .imported) try stdout.writeAll("\timported");
@@ -4339,7 +4353,7 @@ fn writePlaylistLine(stdout: *std.Io.Writer, playlist: liborca.PlaylistSummary) 
 fn writeJoined(stdout: *std.Io.Writer, values: []const []const u8, separator: []const u8) !void {
     for (values, 0..) |value, index| {
         if (index != 0) try stdout.writeAll(separator);
-        try stdout.writeAll(value);
+        try stdout.print("{f}", .{printable(value)});
     }
 }
 
@@ -4355,7 +4369,7 @@ fn showPlaylist(context: Context) !void {
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const playlist = try runtime.libraryPlaylist(library, playlist_id);
     defer playlist.deinit(runtime.allocator);
-    try stdout.print("playlist\t{d}\t{s}\t{t}\tdescription={s}\ttags=", .{ playlist.id, playlist.name, playlist.kind, playlist.description });
+    try stdout.print("playlist\t{d}\t{f}\t{t}\tdescription={f}\ttags=", .{ playlist.id, printable(playlist.name), playlist.kind, printable(playlist.description) });
     try writeJoined(stdout, playlist.tags, ",");
     try stdout.writeAll("\tgenres=");
     try writeJoined(stdout, playlist.top_genres, "; ");
@@ -4365,7 +4379,7 @@ fn showPlaylist(context: Context) !void {
     try stdout.writeAll("formats:");
     for (formats.codecs) |item| {
         try stdout.writeByte(' ');
-        for (item.codec) |byte| try stdout.writeByte(std.ascii.toUpper(byte));
+        for (item.codec) |byte| try stdout.print("{f}", .{printable(&.{std.ascii.toUpper(byte)})});
         try stdout.print("={d}", .{item.count});
     }
     try stdout.print(" analyzed={d} unanalyzed={d}\n", .{ formats.analyzed, formats.unanalyzed });
@@ -4376,7 +4390,7 @@ fn showPlaylist(context: Context) !void {
             try stdout.print("{d}\tunavailable\trecording={d}\n", .{ entry.position, entry.recording_id });
             continue;
         };
-        try stdout.print("{d}\t{d}\t{s}\t{s}\t{s}\t", .{ entry.position, track.id, track.title, track.artist, track.album });
+        try stdout.print("{d}\t{d}\t{f}\t{f}\t{f}\t", .{ entry.position, track.id, printable(track.title), printable(track.artist), printable(track.album) });
         try writeDuration(stdout, track.duration_ms);
         try stdout.writeAll("\n");
     }
@@ -4468,7 +4482,7 @@ fn smartPlaylistCount(context: Context) !void {
     defer preview.deinit(allocator);
     try context.stdout.print("count={d}\tduration_ms={d}\n", .{ preview.count, preview.duration_ms });
     for (preview.sample) |track| {
-        try context.stdout.print("{d}\t{s}\t{s}\t", .{ track.id, track.title, track.artist });
+        try context.stdout.print("{d}\t{f}\t{f}\t", .{ track.id, printable(track.title), printable(track.artist) });
         try writeDuration(context.stdout, track.duration_ms);
         try context.stdout.writeAll("\n");
     }
@@ -4567,7 +4581,7 @@ fn importPlaylist(context: Context) !void {
         imported.matched_by_info,
         imported.unmatched,
     });
-    for (imported.unmatched_lines) |line| try stdout.print("unmatched: {s}\n", .{line});
+    for (imported.unmatched_lines) |line| try stdout.print("unmatched: {f}\n", .{printable(line)});
 }
 
 fn exportPlaylist(context: Context) !void {
@@ -4808,11 +4822,11 @@ fn printCoverArtCandidate(stdout: *std.Io.Writer, candidate: liborca.CoverArtCan
         try stdout.print("{d}x{d}", .{ candidate.width.?, candidate.height.? })
     else
         try stdout.writeAll("-");
-    try stdout.print(" mime={s} approved={s} thumbnail_bytes={d} release={s}\n", .{
-        candidate.mime orelse "-",
+    try stdout.print(" mime={f} approved={s} thumbnail_bytes={d} release={f}\n", .{
+        printable(candidate.mime orelse "-"),
         if (candidate.approved) "yes" else "no",
         if (candidate.thumbnail) |thumbnail| thumbnail.len else 0,
-        &candidate.musicbrainz_release_id,
+        printable(&candidate.musicbrainz_release_id),
     });
 }
 
@@ -4888,18 +4902,18 @@ fn showArtistInfo(context: Context) !void {
         const photo = try runtime.libraryArtistPhoto(library, artist_id);
         defer if (photo) |image| image.deinit();
         try stdout.print("photo={s} bytes={d}", .{ @tagName(source), if (photo) |image| image.bytes.len else 0 });
-        if (record.photo_licence) |licence| try stdout.print(" licence=\"{s}\"", .{licence});
-        if (record.photo_credit) |credit| try stdout.print(" credit=\"{s}\"", .{credit});
+        if (record.photo_licence) |licence| try stdout.print(" licence=\"{f}\"", .{printable(licence)});
+        if (record.photo_credit) |credit| try stdout.print(" credit=\"{f}\"", .{printable(credit)});
         try stdout.writeAll("\n");
-        if (record.photo_url) |url| try stdout.print("photo-url={s}\n", .{url});
-        if (record.photo_licence_url) |url| try stdout.print("photo-licence-url={s}\n", .{url});
+        if (record.photo_url) |url| try stdout.print("photo-url={f}\n", .{printable(url)});
+        if (record.photo_licence_url) |url| try stdout.print("photo-licence-url={f}\n", .{printable(url)});
     } else try stdout.writeAll("photo=none\n");
     if (record.biography_source) |source| {
-        try stdout.print("biography={s} url={s} language={s} licence=\"{s}\"\n", .{
+        try stdout.print("biography={s} url={f} language={f} licence=\"{f}\"\n", .{
             @tagName(source),
-            record.biography_url orelse "-",
-            record.biography_language orelse "-",
-            record.biography_licence orelse "",
+            printable(record.biography_url orelse "-"),
+            printable(record.biography_language orelse "-"),
+            printable(record.biography_licence orelse ""),
         });
     } else try stdout.writeAll("biography=none\n");
     if (record.begin_year) |begin| {
@@ -4909,14 +4923,14 @@ fn showArtistInfo(context: Context) !void {
         else
             try stdout.writeAll(if (record.ended) "?\n" else "present\n");
     }
-    if (record.artist_type) |kind| try stdout.print("type={s}\n", .{kind});
-    if (record.origin) |origin| try stdout.print("origin={s}\n", .{origin});
-    if (record.musicbrainz_artist_id) |id| try stdout.print("musicbrainz={s}\n", .{id});
-    if (record.wikidata_id) |id| try stdout.print("wikidata={s}\n", .{id});
+    if (record.artist_type) |kind| try stdout.print("type={f}\n", .{printable(kind)});
+    if (record.origin) |origin| try stdout.print("origin={f}\n", .{printable(origin)});
+    if (record.musicbrainz_artist_id) |id| try stdout.print("musicbrainz={f}\n", .{printable(id)});
+    if (record.wikidata_id) |id| try stdout.print("wikidata={f}\n", .{printable(id)});
     var links = try runtime.libraryArtistLinks(library, artist_id);
     defer links.deinit();
     try stdout.print("links: {d}\n", .{links.items.len});
-    for (links.items) |link| try stdout.print("{s}\t{s}\n", .{ @tagName(link.kind), link.url });
+    for (links.items) |link| try stdout.print("{s}\t{f}\n", .{ @tagName(link.kind), printable(link.url) });
     if (record.listeners) |count| try stdout.print("listeners={d} (ListenBrainz)\n", .{count});
     try writeRelatedArtists(&runtime, stdout, library, artist_id);
     if (options.include_releases) {
@@ -4926,19 +4940,19 @@ fn showArtistInfo(context: Context) !void {
             allocator.free(elsewhere);
         }
         for (elsewhere) |group| {
-            try stdout.print("elsewhere: {s}\t{s}\t", .{ group.mbid, group.title });
+            try stdout.print("elsewhere: {f}\t{f}\t", .{ printable(group.mbid), printable(group.title) });
             if (group.year) |year| try stdout.print("{d}", .{year}) else try stdout.writeAll("-");
-            try stdout.print("\t{s}", .{group.primary_type orelse "-"});
+            try stdout.print("\t{f}", .{printable(group.primary_type orelse "-")});
             try stdout.print("\tcover={s}", .{switch (group.cover) {
                 .kept => "yes",
                 .none => "no",
                 .not_fetched => "-",
             }});
-            if (group.credited_with) |names| try stdout.print("\twith {s}", .{names});
+            if (group.credited_with) |names| try stdout.print("\twith {f}", .{printable(names)});
             try stdout.writeAll("\n");
         }
     }
-    if (record.biography) |text| try stdout.print("{s}\n", .{text});
+    if (record.biography) |text| try stdout.print("{f}\n", .{printableText(text)});
     const reported: liborca.ArtistInfoOutcome = outcome orelse
         std.enums.fromInt(liborca.ArtistInfoOutcome, record.outcome) orelse .not_requested;
     try stdout.print("outcome={s}\n", .{@tagName(reported)});
@@ -4949,7 +4963,7 @@ fn writeRelatedArtists(runtime: *liborca.Runtime, stdout: *std.Io.Writer, librar
     defer related.deinit();
     try stdout.print("related: {d}\n", .{related.items.len});
     for (related.items) |artist| {
-        try stdout.print("{d}\t{s}\t{s}\t", .{ artist.score, artist.name, artist.mbid });
+        try stdout.print("{d}\t{f}\t{f}\t", .{ artist.score, printable(artist.name), printable(artist.mbid) });
         if (artist.library_artist_id) |id| try stdout.print("library={d}", .{id}) else try stdout.writeAll("library=-");
         try stdout.print("\tphoto={s}\n", .{if (artist.has_photo) "yes" else "no"});
     }
@@ -5003,16 +5017,16 @@ fn showReleaseInfo(context: Context) !void {
     defer info.deinit();
     const record = &info.record;
     if (record.description_source) |source| {
-        try stdout.print("description={s} url={s} language={s} licence=\"{s}\"\n", .{
+        try stdout.print("description={s} url={f} language={f} licence=\"{f}\"\n", .{
             @tagName(source),
-            record.description_url orelse "-",
-            record.description_language orelse "-",
-            record.description_licence orelse "",
+            printable(record.description_url orelse "-"),
+            printable(record.description_language orelse "-"),
+            printable(record.description_licence orelse ""),
         });
     } else try stdout.writeAll("description=none\n");
-    if (record.musicbrainz_release_id) |id| try stdout.print("musicbrainz={s}\n", .{id});
-    if (record.musicbrainz_release_group_id) |id| try stdout.print("release-group={s}\n", .{id});
-    if (record.description) |text| try stdout.print("{s}\n", .{text});
+    if (record.musicbrainz_release_id) |id| try stdout.print("musicbrainz={f}\n", .{printable(id)});
+    if (record.musicbrainz_release_group_id) |id| try stdout.print("release-group={f}\n", .{printable(id)});
+    if (record.description) |text| try stdout.print("{f}\n", .{printableText(text)});
     const reported: liborca.ReleaseInfoOutcome = outcome orelse
         std.enums.fromInt(liborca.ReleaseInfoOutcome, record.outcome) orelse .not_requested;
     try stdout.print("outcome={s}\n", .{@tagName(reported)});
@@ -5080,7 +5094,7 @@ fn saveArtistPhoto(context: Context) !void {
     const photo = (try runtime.libraryArtistPhoto(library, artist_id)) orelse return error.NoArtistPhoto;
     defer photo.deinit();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = photo.bytes });
-    try context.stdout.print("{s}\t{d} bytes\twrote {s}\n", .{ photo.mime_type, photo.bytes.len, path });
+    try context.stdout.print("{f}\t{d} bytes\twrote {f}\n", .{ printable(photo.mime_type), photo.bytes.len, printable(path) });
 }
 
 /// `orca-cli related-photo DATABASE MBID --out=PATH`: the photo an
@@ -5098,15 +5112,15 @@ fn saveRelatedArtistPhoto(context: Context) !void {
     defer photo.deinit();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = photo.bytes });
     const stdout = context.stdout;
-    try stdout.print("{s}\t{d} bytes\twrote {s}\n", .{ photo.mime_type, photo.bytes.len, path });
+    try stdout.print("{f}\t{d} bytes\twrote {f}\n", .{ printable(photo.mime_type), photo.bytes.len, printable(path) });
     var info = (try runtime.libraryRelatedArtistPhotoInfo(library, context.arguments[1])) orelse return;
     defer info.deinit();
     const record = &info.record;
     try stdout.print("source={s}\n", .{@tagName(record.source)});
-    if (record.licence) |licence| try stdout.print("licence=\"{s}\"\n", .{licence});
-    if (record.credit) |credit| try stdout.print("credit=\"{s}\"\n", .{credit});
-    if (record.url) |url| try stdout.print("photo-url={s}\n", .{url});
-    if (record.licence_url) |url| try stdout.print("photo-licence-url={s}\n", .{url});
+    if (record.licence) |licence| try stdout.print("licence=\"{f}\"\n", .{printable(licence)});
+    if (record.credit) |credit| try stdout.print("credit=\"{f}\"\n", .{printable(credit)});
+    if (record.url) |url| try stdout.print("photo-url={f}\n", .{printable(url)});
+    if (record.licence_url) |url| try stdout.print("photo-licence-url={f}\n", .{printable(url)});
 }
 
 /// `orca-cli release-group-cover DATABASE MBID --out=PATH`: the cover an
@@ -5130,7 +5144,7 @@ fn saveReleaseGroupCover(context: Context) !void {
     const image = result.image orelse return error.NoReleaseGroupCover;
     defer image.deinit();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = image.bytes });
-    try context.stdout.print("source=coverartarchive\t{s}\t{d} bytes\twrote {s}\n", .{ image.mime_type, image.bytes.len, path });
+    try context.stdout.print("source=coverartarchive\t{f}\t{d} bytes\twrote {f}\n", .{ printable(image.mime_type), image.bytes.len, printable(path) });
 }
 
 /// `orca-cli lyrics DATABASE TRACK_ID`: the Track's lyrics, read on a job.
@@ -5155,12 +5169,12 @@ fn showLyrics(context: Context) !void {
         return;
     };
     defer lyrics.deinit();
-    try stdout.print("lyrics: source={s} kind={s} lines={d} outcome={s} source_name={s} offset_ms={d}\n", .{
+    try stdout.print("lyrics: source={s} kind={s} lines={d} outcome={s} source_name={f} offset_ms={d}\n", .{
         @tagName(lyrics.source),
         @tagName(lyrics.kind),
         lyrics.lines.len,
         @tagName(outcome),
-        lyrics.source_name orelse "-",
+        printable(lyrics.source_name orelse "-"),
         lyrics.offset_ms,
     });
     for (lyrics.lines) |line| {
@@ -5168,7 +5182,7 @@ fn showLyrics(context: Context) !void {
             const centiseconds: u64 = start / 10;
             try stdout.print("[{d:0>2}:{d:0>2}.{d:0>2}] ", .{ centiseconds / 6000, centiseconds / 100 % 60, centiseconds % 100 });
         }
-        try stdout.print("{s}\n", .{line.text});
+        try stdout.print("{f}\n", .{printableText(line.text)});
     }
 }
 
@@ -5261,15 +5275,15 @@ fn listCorrections(context: Context) !void {
     const page = try runtime.libraryCorrectionGroups(library, context.allocator, options.limit, options.offset);
     defer page.deinit();
     for (page.items) |group| {
-        try stdout.print("{d}\t{s}\t{s}\n", .{ group.group_id, group.album, group.album_artist });
+        try stdout.print("{d}\t{f}\t{f}\n", .{ group.group_id, printable(group.album), printable(group.album_artist) });
         for (group.proposals) |member| {
             try stdout.writeAll("\t");
             if (member.track_id) |track_id| try stdout.print("{d}", .{track_id}) else try stdout.writeAll("-");
-            try stdout.print("\tcurrent \"{s}\" (", .{member.title});
+            try stdout.print("\tcurrent \"{f}\" (", .{printable(member.title)});
             try writePosition(stdout, member.disc_number, member.track_number);
-            try stdout.print(") -> proposed \"{s}\" (", .{member.proposed_title});
+            try stdout.print(") -> proposed \"{f}\" (", .{printable(member.proposed_title)});
             try writePosition(stdout, member.proposed_disc_number, member.proposed_track_number);
-            try stdout.print(")\t{s}\t{s}\n", .{ member.recording_mbid, member.corrects orelse "-" });
+            try stdout.print(")\t{f}\t{f}\n", .{ printable(member.recording_mbid), printable(member.corrects orelse "-") });
         }
     }
 }
@@ -5355,11 +5369,11 @@ fn showSimilarTracks(context: Context) !void {
     for (similar.items, 1..) |track, rank| {
         const summary = try runtime.libraryTrackSummary(library, track.track_id);
         defer if (summary) |found| found.deinit(runtime.allocator);
-        try stdout.print("{d}\t{d}\t{s} - {s}\t{d:.3}\n", .{
+        try stdout.print("{d}\t{d}\t{f} - {f}\t{d:.3}\n", .{
             rank,
             track.track_id,
-            if (summary) |found| found.artist else "",
-            if (summary) |found| found.title else "",
+            printable(if (summary) |found| found.artist else ""),
+            printable(if (summary) |found| found.title else ""),
             track.similarity,
         });
     }
@@ -5443,11 +5457,11 @@ fn previewRadio(context: Context) !void {
         const summary: ?liborca.TrackSummary = for (summaries.items) |summary| {
             if (summary.id == pick.track_id) break summary;
         } else null;
-        try stdout.print("{d}\t{d}\t{s} - {s}\t", .{
+        try stdout.print("{d}\t{d}\t{f} - {f}\t", .{
             rank + 1,
             pick.track_id,
-            if (summary) |found| found.artist else "",
-            if (summary) |found| found.title else "",
+            printable(if (summary) |found| found.artist else ""),
+            printable(if (summary) |found| found.title else ""),
         });
         var written = false;
         for ([_]?liborca.ReasonPart{ pick.reason.first, pick.reason.second }) |maybe| {
@@ -5487,7 +5501,7 @@ fn showHome(context: Context) !void {
     for (week.day_listened_ms) |ms| try stdout.print(" {d}", .{ms / 60_000});
     try stdout.writeAll("\n");
     if (week.top_artist) |*artist| {
-        try stdout.print("\ttop artist: {s} ({d} plays)\n", .{ artist.name.slice(), artist.plays });
+        try stdout.print("\ttop artist: {f} ({d} plays)\n", .{ printable(artist.name.slice()), artist.plays });
     }
 
     var releases: [liborca.home_max_items]liborca.HomePlayedRelease = undefined;
@@ -5504,7 +5518,7 @@ fn showHome(context: Context) !void {
     try writeHomeTracks(stdout, "deep cuts", tracks[0..deep]);
     const top = try runtime.libraryTopArtists(library, time, 30, &artists);
     try stdout.print("top artists, 30 days ({d})\n", .{top});
-    for (artists[0..top], 1..) |*artist, rank| try stdout.print("\t{d}\t{s}\t{d} plays\n", .{ rank, artist.name.slice(), artist.plays });
+    for (artists[0..top], 1..) |*artist, rank| try stdout.print("\t{d}\t{f}\t{d} plays\n", .{ rank, printable(artist.name.slice()), artist.plays });
 
     const formats = try runtime.libraryFormats(library);
     try stdout.print("formats: {d} releases, {d} tracks, {d} min; flac={d} alac={d} mp3={d} other={d}\n", .{
@@ -5516,7 +5530,7 @@ fn showHome(context: Context) !void {
         day.added_this_week, day.added_this_year, day.never_played_percent, day.tracks,
     });
     if (day.top_release) |*release| {
-        try stdout.print("\ta year ago: {s} - {s} ({d} plays)\n", .{ release.artist.slice(), release.title.slice(), release.plays });
+        try stdout.print("\ta year ago: {f} - {f} ({d} plays)\n", .{ printable(release.artist.slice()), printable(release.title.slice()), release.plays });
     }
 
     const age = try runtime.libraryHistoryAge(library, time);
@@ -5531,7 +5545,7 @@ fn showHome(context: Context) !void {
 fn writeHomeReleases(stdout: *std.Io.Writer, title: []const u8, releases: []const liborca.HomePlayedRelease) !void {
     try stdout.print("{s} ({d})\n", .{ title, releases.len });
     for (releases, 1..) |*release, rank| {
-        try stdout.print("\t{d}\t{s} - {s}\t{d} plays, last ", .{ rank, release.artist.slice(), release.title.slice(), release.plays });
+        try stdout.print("\t{d}\t{f} - {f}\t{d} plays, last ", .{ rank, printable(release.artist.slice()), printable(release.title.slice()), release.plays });
         try writeIsoUtc(stdout, release.last_played_at);
         try stdout.writeAll("\n");
     }
@@ -5540,8 +5554,8 @@ fn writeHomeReleases(stdout: *std.Io.Writer, title: []const u8, releases: []cons
 fn writeHomeTracks(stdout: *std.Io.Writer, title: []const u8, tracks: []const liborca.HomeTrack) !void {
     try stdout.print("{s} ({d})\n", .{ title, tracks.len });
     for (tracks, 1..) |*track, rank| {
-        try stdout.print("\t{d}\t{d}\t{s} - {s}\t{s}\t{d} plays\n", .{
-            rank, track.track_id, track.artist.slice(), track.title.slice(), track.release.slice(), track.plays,
+        try stdout.print("\t{d}\t{d}\t{f} - {f}\t{f}\t{d} plays\n", .{
+            rank, track.track_id, printable(track.artist.slice()), printable(track.title.slice()), printable(track.release.slice()), track.plays,
         });
     }
 }
@@ -5586,17 +5600,17 @@ fn showDailyMixes(context: Context) !void {
     if (shown) |number| {
         if (number == 0 or number > mixes.count) return error.UnknownDailyMix;
         const mix = &mixes.items()[number - 1];
-        try stdout.print("{s}\n", .{mix.name()});
+        try stdout.print("{f}\n", .{printable(mix.name())});
         var entries: [liborca.max_daily_mix_entries]liborca.DailyMixEntry = undefined;
         const count = try runtime.libraryDailyMixEntries(library, mix.id, &entries);
         for (entries[0..count], 0..) |entry, position| {
             const summary = try runtime.libraryTrackSummary(library, entry.track_id);
             defer if (summary) |found| found.deinit(runtime.allocator);
-            try stdout.print("{d}\t{d}\t{s} - {s}\t", .{
+            try stdout.print("{d}\t{d}\t{f} - {f}\t", .{
                 position + 1,
                 entry.track_id,
-                if (summary) |found| found.artist else "",
-                if (summary) |found| found.title else "",
+                printable(if (summary) |found| found.artist else ""),
+                printable(if (summary) |found| found.title else ""),
             });
             var written = false;
             for ([_]?liborca.ReasonPart{ entry.reason.first, entry.reason.second }) |maybe| {
@@ -5617,10 +5631,10 @@ fn showDailyMixes(context: Context) !void {
     }
     try stdout.writeAll("\n");
     for (mixes.items(), 1..) |*mix, number| {
-        try stdout.print("{d}\t{s}\t{d} tracks\t{d} min\t", .{ number, mix.name(), mix.entry_count, mix.duration_ms / 60_000 });
+        try stdout.print("{d}\t{f}\t{d} tracks\t{d} min\t", .{ number, printable(mix.name()), mix.entry_count, mix.duration_ms / 60_000 });
         for (mix.mixArtists(), 0..) |*artist, artist_index| {
             if (artist_index != 0) try stdout.writeAll(", ");
-            try stdout.writeAll(artist.name());
+            try stdout.print("{f}", .{printable(artist.name())});
         }
         try stdout.print("\n\tfavorites={d} rarely played={d} never played={d}\n", .{ mix.makeup.favorite, mix.makeup.rarely_played, mix.makeup.never_played });
         const left_out = mix.left_out;
@@ -5650,7 +5664,7 @@ fn writeRadioReason(
         .shared_genre => {
             const genre = try runtime.libraryGenre(library, part.a);
             defer if (genre) |found| found.deinit(runtime.allocator);
-            try stdout.print("Also tagged {s}", .{if (genre) |found| found.name else "a shared genre"});
+            try stdout.print("Also tagged {f}", .{printable(if (genre) |found| found.name else "a shared genre")});
         },
         .often_after => if (part.b == 1)
             try writeArtistReason(stdout, runtime, library, "Often played after ", part.a)
@@ -5692,8 +5706,8 @@ fn writeRecordingReason(
     const recording = try runtime.libraryRecordingSummary(library, recording_id);
     defer if (recording) |found| found.deinit(runtime.allocator);
     const found = recording orelse return stdout.writeAll(prefix ++ "a Recording");
-    if (found.artist.len == 0) return stdout.print(prefix ++ "{s}", .{found.title});
-    try stdout.print(prefix ++ "{s} - {s}", .{ found.artist, found.title });
+    if (found.artist.len == 0) return stdout.print(prefix ++ "{f}", .{printable(found.title)});
+    try stdout.print(prefix ++ "{f} - {f}", .{ printable(found.artist), printable(found.title) });
 }
 
 fn writeArtistReason(
@@ -5705,7 +5719,7 @@ fn writeArtistReason(
 ) !void {
     const artist = try runtime.libraryArtist(library, artist_id);
     defer if (artist) |found| found.deinit(runtime.allocator);
-    try stdout.print(prefix ++ "{s}", .{if (artist) |found| found.name else "an Artist"});
+    try stdout.print(prefix ++ "{f}", .{printable(if (artist) |found| found.name else "an Artist")});
 }
 
 fn submitAcoustId(context: Context) !void {
@@ -5772,13 +5786,13 @@ fn listSubmittable(runtime: *liborca.Runtime, library: liborca.LibraryHandle, st
         for (page.items) |item| {
             cursor = item.file_id;
             const length: ?u64 = if (item.duration_ms) |milliseconds| std.math.cast(u64, milliseconds) else null;
-            try stdout.print("{d}\t{d}\t{s}\t{s}\t{s}\t{s}\n", .{
+            try stdout.print("{d}\t{d}\t{s}\t{f}\t{f}\t{f}\n", .{
                 item.file_id,
                 item.track_id,
                 if (item.sendsRecordingId(length)) "recording_id" else "metadata",
-                item.recording_mbid,
-                item.title,
-                item.artist,
+                printable(item.recording_mbid),
+                printable(item.title),
+                printable(item.artist),
             });
         }
     }
@@ -5822,11 +5836,11 @@ fn listReleaseMatches(context: Context) !void {
         const page = try runtime.libraryReleaseMatchPage(library, context.allocator, each, confident_at, filter, limit, offset);
         defer page.deinit();
         for (page.items) |item| {
-            try stdout.print("{d}\t{s}\t{s}\t{s}\ttracks={d}", .{ item.release_id, @tagName(item.bucket), item.title, item.artist, item.track_count });
+            try stdout.print("{d}\t{s}\t{f}\t{f}\ttracks={d}", .{ item.release_id, @tagName(item.bucket), printable(item.title), printable(item.artist), item.track_count });
             if (item.best) |best| {
-                try stdout.print("\tcandidate={s} confidence=", .{best.release_mbid});
+                try stdout.print("\tcandidate={f} confidence=", .{printable(best.release_mbid)});
                 if (best.confidence) |confidence| try stdout.print("{d:.2}", .{confidence}) else try stdout.writeAll("unread");
-                try stdout.print(" title={s} date={s} candidate_tracks=", .{ best.title, best.date orelse "-" });
+                try stdout.print(" title={f} date={f} candidate_tracks=", .{ printable(best.title), printable(best.date orelse "-") });
                 if (best.track_count) |count| try stdout.print("{d}", .{count}) else try stdout.writeAll("-");
             } else try stdout.writeAll("\tcandidate=-");
             if (item.placement) |placement| {
@@ -5864,37 +5878,37 @@ fn reviewReleaseMatch(context: Context) !void {
     switch (action orelse return error.MissingReleaseAction) {
         .evidence => {
             const evidence = try runtime.libraryReleaseMatchEvidence(library, release_id, candidate);
-            try stdout.print("fingerprints={d}/{d} durations_within_1s={s} date_agrees={s} artist_agrees={s} title_agrees={s}\nnote={s}\n", .{
+            try stdout.print("fingerprints={d}/{d} durations_within_1s={s} date_agrees={s} artist_agrees={s} title_agrees={s}\nnote={f}\n", .{
                 evidence.fingerprints_matched,
                 evidence.tracks,
                 flag(evidence.durations_within_1s),
                 flag(evidence.date_agrees),
                 flag(evidence.artist_agrees),
                 flag(evidence.title_agrees),
-                evidence.note.slice(),
+                printable(evidence.note.slice()),
             });
         },
         .diff => {
             const diff = try runtime.libraryReleaseMatchDiff(library, context.allocator, release_id, candidate);
             defer diff.deinit();
-            try stdout.print("candidate={s} aligned={d}/{d}\n", .{ diff.release_mbid, diff.aligned, diff.tracks.len });
+            try stdout.print("candidate={f} aligned={d}/{d}\n", .{ printable(diff.release_mbid), diff.aligned, diff.tracks.len });
             for (diff.fields) |field| {
-                try stdout.print("{s}\tdiffers={s}\tlocal={s}\tcandidate={s}\n", .{
-                    @tagName(field.field), flag(field.differs), field.local, field.candidate,
+                try stdout.print("{s}\tdiffers={s}\tlocal={f}\tcandidate={f}\n", .{
+                    @tagName(field.field), flag(field.differs), printable(field.local), printable(field.candidate),
                 });
             }
             for (diff.tracks) |track| {
                 try stdout.print("track={d}\tposition={d}\tfingerprint={s}\tdelta_ms=", .{ track.track_id, track.position, flag(track.fingerprint) });
                 if (track.delta_ms) |delta| try stdout.print("{d}", .{delta}) else try stdout.writeAll("-");
-                try stdout.print("\tlocal={s}\tcandidate={s}\tlocal_artist={s}\tcandidate_artist={s}\n", .{
-                    track.local_title, track.candidate_title, track.local_artist, track.candidate_artist,
+                try stdout.print("\tlocal={f}\tcandidate={f}\tlocal_artist={f}\tcandidate_artist={f}\n", .{
+                    printable(track.local_title), printable(track.candidate_title), printable(track.local_artist), printable(track.candidate_artist),
                 });
             }
         },
         .dismiss => {
             const mbid = candidate orelse unreachable;
             try runtime.libraryDismissReleaseCandidate(library, release_id, mbid);
-            try stdout.print("dismissed release={d} candidate={s}\n", .{ release_id, mbid });
+            try stdout.print("dismissed release={d} candidate={f}\n", .{ release_id, printable(mbid) });
         },
     }
 }
@@ -5914,24 +5928,24 @@ fn listTrackMatches(context: Context) !void {
     for (page.items) |proposal| {
         try stdout.print("{d}\t{d:.2}\t", .{ proposal.id, proposal.confidence });
         if (proposal.musicbrainz_score) |score| try stdout.print("{d}", .{score}) else try stdout.writeAll("-");
-        try stdout.print("\t{s}\t", .{proposal.provider});
+        try stdout.print("\t{f}\t", .{printable(proposal.provider)});
         if (proposal.acoustid_score) |score| try stdout.print("{d:.2}", .{score}) else try stdout.writeAll("-");
-        try stdout.print("\t{s}\t{s}\t{s}\t{s}\t", .{ proposal.recording_mbid, proposal.title, proposal.artist, proposal.album });
+        try stdout.print("\t{f}\t{f}\t{f}\t{f}\t", .{ printable(proposal.recording_mbid), printable(proposal.title), printable(proposal.artist), printable(proposal.album) });
         if (proposal.track_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
         try stdout.writeAll("\t");
         try writeDuration(stdout, if (proposal.duration_ms) |milliseconds| std.math.cast(i64, milliseconds) else null);
-        try stdout.print("\t{s}\t{s}\t{s}\t{s}\t", .{
-            proposal.release_mbid orelse "-",
-            proposal.release_title orelse "-",
-            proposal.release_artist orelse "-",
-            proposal.release_date orelse "-",
+        try stdout.print("\t{f}\t{f}\t{f}\t{f}\t", .{
+            printable(proposal.release_mbid orelse "-"),
+            printable(proposal.release_title orelse "-"),
+            printable(proposal.release_artist orelse "-"),
+            printable(proposal.release_date orelse "-"),
         });
         if (proposal.disc_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
-        try stdout.print("\t{s}\t{s}\t{s}\t{s}\n", .{
-            proposal.track_title orelse "-",
-            proposal.track_artist orelse "-",
-            proposal.release_track_mbid orelse "-",
-            proposal.corrects orelse "-",
+        try stdout.print("\t{f}\t{f}\t{f}\t{f}\n", .{
+            printable(proposal.track_title orelse "-"),
+            printable(proposal.track_artist orelse "-"),
+            printable(proposal.release_track_mbid orelse "-"),
+            printable(proposal.corrects orelse "-"),
         });
     }
 }
@@ -5952,6 +5966,10 @@ fn printDetail(
 ) !void {
     try writeDetailKey(stdout, key);
     try stdout.print(format ++ "\n", arguments);
+}
+
+fn printOptionalText(stdout: *std.Io.Writer, comptime key: []const u8, value: ?[]const u8) !void {
+    return printDetail(stdout, key, "{f}", .{printable(value orelse "-")});
 }
 
 fn printOptionalDetail(
@@ -6034,14 +6052,14 @@ fn showArtwork(context: Context) !void {
         return;
     };
     defer present.deinit();
-    try stdout.print("{s}\t{d} bytes\t{s}\n", .{
-        present.mime_type,
+    try stdout.print("{f}\t{d} bytes\t{s}\n", .{
+        printable(present.mime_type),
         present.bytes.len,
         @tagName(present.kind),
     });
     if (out_path) |path| {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = present.bytes });
-        try stdout.print("wrote {s}\n", .{path});
+        try stdout.print("wrote {f}\n", .{printable(path)});
     }
 }
 
@@ -6076,9 +6094,9 @@ fn listGenres(context: Context) !void {
 }
 
 fn writeGenre(stdout: *std.Io.Writer, genre: liborca.GenreSummary) !void {
-    try stdout.print("{d}\t{s}\t{d} tracks\t{d} releases\t{d} artists\t", .{
+    try stdout.print("{d}\t{f}\t{d} tracks\t{d} releases\t{d} artists\t", .{
         genre.id,
-        genre.name,
+        printable(genre.name),
         genre.track_count,
         genre.release_count,
         genre.artist_count,
@@ -6101,14 +6119,14 @@ fn showGenre(context: Context) !void {
 
     var artists = try runtime.libraryArtistPage(library, .{ .genre_id = genre_id, .sort = .track_count, .limit = 5 });
     defer artists.deinit();
-    for (artists.items) |artist| try stdout.print("artist\t{d}\t{s}\t{d} tracks\n", .{ artist.id, artist.name, artist.track_count });
+    for (artists.items) |artist| try stdout.print("artist\t{d}\t{f}\t{d} tracks\n", .{ artist.id, printable(artist.name), artist.track_count });
 
     const releases = try runtime.libraryGenreArtwork(library, genre_id, 5);
     defer releases.deinit();
     for (releases.ids) |release_id| {
         const release = (try runtime.libraryRelease(library, release_id)) orelse continue;
         defer release.deinit(allocator);
-        try stdout.print("release\t{d}\t{s}\t{s}\n", .{ release.id, release.title, release.album_artist });
+        try stdout.print("release\t{d}\t{f}\t{f}\n", .{ release.id, printable(release.title), printable(release.album_artist) });
     }
 }
 
@@ -6162,13 +6180,13 @@ fn listArtists(context: Context) !void {
         },
     );
     for (page.items) |artist| try stdout.print(
-        "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]{s}{s}\n",
+        "{d}\t{f}\t{d} releases\t{d} tracks\t[{f}]{s}{s}\n",
         .{
             artist.id,
-            artist.name,
+            printable(artist.name),
             artist.release_count,
             artist.track_count,
-            artist.sort_name,
+            printable(artist.sort_name),
             if (artist.loved) "\tloved" else "",
             if (artist.has_photo) "\tphoto" else "",
         },
@@ -6212,7 +6230,7 @@ fn loadCovers(context: Context) !void {
         defer image.deinit();
         covered += 1;
         bytes += image.bytes.len;
-        try stdout.print("{d}\t{s}\t{d} bytes\n", .{ result.subject.release, image.mime_type, image.bytes.len });
+        try stdout.print("{d}\t{f}\t{d} bytes\n", .{ result.subject.release, printable(image.mime_type), image.bytes.len });
     }
     const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
     try stdout.print("{d} of {d} releases have covers, {d} bytes, in {d} ms\n", .{
@@ -6370,14 +6388,14 @@ fn listReleases(context: Context) !void {
             try runtime.libraryReleaseCountMatching(library, query),
     });
     for (page.items) |release| {
-        try stdout.print("{d}\t{s}\t{s}\t", .{ release.id, release.title, release.album_artist });
+        try stdout.print("{d}\t{f}\t{f}\t", .{ release.id, printable(release.title), printable(release.album_artist) });
         try writeDuration(stdout, release.total_duration_ms);
         try stdout.print(
-            "\t{d} tracks\t{d} disc(s)\t{s}{s}{s}\t",
+            "\t{d} tracks\t{d} disc(s)\t{f}{s}{s}\t",
             .{
                 release.track_count,
                 release.disc_count orelse 1,
-                release.release_date orelse "-",
+                printable(release.release_date orelse "-"),
                 if (release.is_compilation) "\tcompilation" else "",
                 if (release.loved) "\tloved" else "",
             },
@@ -6412,15 +6430,15 @@ fn searchLibrary(context: Context) !void {
     var results = try runtime.librarySearch(library, context.arguments[1], limits);
     defer results.deinit();
     for (results.hits) |hit| {
-        try stdout.print("{s}\t{d}\t{s}\t{s}\treleases={d}\ttracks={d}\tyear=", .{
-            @tagName(hit.kind), hit.id, hit.title, hit.subtitle, hit.release_count, hit.track_count,
+        try stdout.print("{s}\t{d}\t{f}\t{f}\treleases={d}\ttracks={d}\tyear=", .{
+            @tagName(hit.kind), hit.id, printable(hit.title), printable(hit.subtitle), hit.release_count, hit.track_count,
         });
         try writeOptionalNumber(stdout, hit.year);
         try stdout.writeAll("\tduration_ms=");
         try writeOptionalNumber(stdout, hit.duration_ms);
-        try stdout.print("\tartist={s}\treason={s}\tcount={d}\n", .{ hit.artist, @tagName(hit.reason), hit.reason_count });
+        try stdout.print("\tartist={f}\treason={s}\tcount={d}\n", .{ printable(hit.artist), @tagName(hit.reason), hit.reason_count });
     }
-    if (results.top) |top| try stdout.print("top\t{s}\t{d}\t{s}\n", .{ @tagName(top.kind), top.id, top.title });
+    if (results.top) |top| try stdout.print("top\t{s}\t{d}\t{f}\n", .{ @tagName(top.kind), top.id, printable(top.title) });
 }
 
 /// `format=FLAC 24/96`: codec, then bits per sample over kilohertz, either
@@ -6429,7 +6447,7 @@ fn writeReleaseFormat(writer: *std.Io.Writer, release: liborca.ReleaseSummary) !
     try writer.writeAll("format=");
     if (release.codec.len == 0) {
         try writer.writeAll("-");
-    } else for (release.codec) |byte| try writer.writeByte(std.ascii.toUpper(byte));
+    } else for (release.codec) |byte| try writer.print("{f}", .{printable(&.{std.ascii.toUpper(byte)})});
     const rate = release.max_sample_rate orelse {
         if (release.max_bit_depth) |bits| try writer.print(" {d}-bit", .{bits});
         return;
@@ -6561,11 +6579,11 @@ fn listTracks(context: Context) !void {
         const disc: u64 = @intCast(@max(track.disc_number orelse 1, 0));
         const number: u64 = @intCast(@max(track.track_number orelse 0, 0));
         try stdout.print(
-            "{d}\t{d}-{d:0>2}\t{s}\t{s}\t{s}\t",
-            .{ track.id, disc, number, track.title, track.artist, track.album },
+            "{d}\t{d}-{d:0>2}\t{f}\t{f}\t{f}\t",
+            .{ track.id, disc, number, printable(track.title), printable(track.artist), printable(track.album) },
         );
         try writeDuration(stdout, track.duration_ms);
-        try stdout.print("\tcodec={s} rate=", .{if (track.codec.len == 0) "unknown" else track.codec});
+        try stdout.print("\tcodec={f} rate=", .{printable(if (track.codec.len == 0) "unknown" else track.codec)});
         try writeOptionalNumber(stdout, track.sample_rate);
         try stdout.writeAll(" bits=");
         try writeOptionalNumber(stdout, track.bit_depth);
@@ -6583,7 +6601,7 @@ fn listTracks(context: Context) !void {
         if (track.integrated_lufs) |lufs| try stdout.print("{d:.2}", .{lufs}) else try stdout.writeAll("?");
         try stdout.writeAll(" kbps=");
         try writeOptionalNumber(stdout, track.bitrate_kbps);
-        try stdout.print(" path={s}", .{if (track.path.len == 0) "?" else track.path});
+        try stdout.print(" path={f}", .{printable(if (track.path.len == 0) "?" else track.path)});
         try stdout.print("{s}\n", .{if (track.has_playable_file) "" else "\tunreachable"});
     }
 }

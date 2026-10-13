@@ -205,3 +205,29 @@ test "orca-cli analyze then scan shows the analyzed file's tags, and a second sc
     defer std.testing.allocator.free(second_scan);
     try expectContains(second_scan, "seen=1 changed=0 unchanged=1");
 }
+
+test "orca-cli prints control and invalid bytes of a path as escapes and leaves valid UTF-8 alone" {
+    const io = std.testing.io;
+    var scratch = try Scratch.init(io);
+    defer scratch.deinit();
+    const directory = "music/\x1b]0;x\x07\nend\xc2\x85\x85 Björk 日本語";
+    try scratch.copyFixture(io, "fixtures/audio/tagged-reference.flac", directory ++ "/song.flac");
+    const music = try scratch.child("music", .{});
+    defer std.testing.allocator.free(music);
+
+    try cliDiscard(io, &.{ "add-root", scratch.database_path, music });
+    const scan = try cli(io, null, &.{ "scan", scratch.database_path, music });
+    defer std.testing.allocator.free(scan);
+    const roots = try cli(io, null, &.{ "roots", scratch.database_path });
+    defer std.testing.allocator.free(roots);
+    const tracks = try cli(io, null, &.{ "tracks", scratch.database_path });
+    defer std.testing.allocator.free(tracks);
+
+    const escaped = "\\x1B]0;x\\x07\\x0Aend\\xC2\\x85\\x85 Björk 日本語";
+    try expectContains(tracks, escaped ++ "/song.flac");
+    try expectContains(tracks, "Reference Tone");
+    for ([_][]const u8{ scan, roots, tracks }) |output| {
+        for (output) |byte| try std.testing.expect(byte != 0x1b and byte != 0x07 and byte != 0x85);
+        try std.testing.expect(std.mem.indexOf(u8, output, "\xc2\x85") == null);
+    }
+}
