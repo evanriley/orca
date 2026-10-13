@@ -1290,7 +1290,7 @@ fn differsFromFile(panel: *Panel, track_id: i64) error{TooManyPendingTagWrites}!
         else => return false,
     };
     defer plan.deinit();
-    if (plan.plan_id != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch {};
+    if (plan.plan_id != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch |err| std.log.warn("A prepared tag write was not discarded ({t})", .{err});
     return plan.files.len != 0 or plan.conflicts.len != 0;
 }
 
@@ -1313,7 +1313,7 @@ fn newComparison(panel: *Panel) *gtk.Widget {
     const id = panel.shown orelse return grid;
     const plan = self.runtime.planTagWrite(library, self.io, &.{id}) catch return grid;
     defer plan.deinit();
-    if (plan.plan_id != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch {};
+    if (plan.plan_id != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch |err| std.log.warn("A prepared tag write was not discarded ({t})", .{err});
     var buffer: [1024]u8 = undefined;
     for (plan.files) |file| {
         if (plan.files.len > 1) {

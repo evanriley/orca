@@ -1711,7 +1711,7 @@ fn listenBrainzControls(self: *App) *app.CredentialControls {
 }
 
 fn listenBrainzTokenChanged(self: *App) void {
-    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
+    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch |err| std.log.warn("The scrobbler was not told the ListenBrainz token changed ({t})", .{err});
     self.requestTick();
 }
 
@@ -2712,6 +2712,10 @@ fn rebuildClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     );
 }
 
+fn resetFailed(setting: []const u8, err: anyerror) void {
+    std.log.warn("{s} was not reset ({t})", .{ setting, err });
+}
+
 fn resetSettings(self: *App) void {
     const reorder = self.general.name_order != (app.General{}).name_order;
     if (self.general.launch_at_login) _ = autostart.set(false);
@@ -2719,18 +2723,18 @@ fn resetSettings(self: *App) void {
     self.appearance = .{};
     self.playback = .{};
     const replay_gain: liborca.ReplayGainSettings = .{};
-    self.runtime.playerSetReplayGainMode(self.player, replay_gain.mode) catch {};
-    self.runtime.playerSetReplayGainPreamp(self.player, replay_gain.preamp_db) catch {};
-    self.runtime.playerSetReplayGainFallback(self.player, .minus_6_db) catch {};
-    self.runtime.playerSetPeakProtection(self.player, replay_gain.peak_protection) catch {};
-    self.runtime.playerSetCrossfeed(self.player, null) catch {};
+    self.runtime.playerSetReplayGainMode(self.player, replay_gain.mode) catch |err| resetFailed("The ReplayGain mode", err);
+    self.runtime.playerSetReplayGainPreamp(self.player, replay_gain.preamp_db) catch |err| resetFailed("The ReplayGain preamp", err);
+    self.runtime.playerSetReplayGainFallback(self.player, .minus_6_db) catch |err| resetFailed("The ReplayGain fallback", err);
+    self.runtime.playerSetPeakProtection(self.player, replay_gain.peak_protection) catch |err| resetFailed("Peak protection", err);
+    self.runtime.playerSetCrossfeed(self.player, null) catch |err| resetFailed("Crossfeed", err);
     self.crossfeed_amount = app.crossfeed_amounts[1];
     if (self.library) |library| {
-        self.runtime.librarySetScrobbling(library, false, false, false) catch {};
-        self.runtime.setGenreFill(library, .{}) catch {};
-        self.runtime.librarySetListenPolicy(library, .half_or_four_minutes) catch {};
-        self.runtime.librarySetListenRecording(library, true) catch {};
-        self.runtime.setLibraryDiscoverySettings(library, .{}) catch {};
+        self.runtime.librarySetScrobbling(library, false, false, false) catch |err| resetFailed("Scrobbling", err);
+        self.runtime.setGenreFill(library, .{}) catch |err| resetFailed("Genre fill", err);
+        self.runtime.librarySetListenPolicy(library, .half_or_four_minutes) catch |err| resetFailed("The listen policy", err);
+        self.runtime.librarySetListenRecording(library, true) catch |err| resetFailed("Listen recording", err);
+        self.runtime.setLibraryDiscoverySettings(library, .{}) catch |err| resetFailed("The discovery settings", err);
         radio.invalidate(self);
         home_page.startMixes(self, true);
     }
@@ -2751,7 +2755,7 @@ fn resetSettings(self: *App) void {
     lyrics.setFetch(self, false);
     parametric.setMode(self, .off, self.equalizer_curve);
     _ = watching.apply(self);
-    maintenance.apply(self) catch {};
+    maintenance.apply(self) catch |err| resetFailed("Idle maintenance", err);
     matches.invalidate(self);
     appearance.applyChoices(self);
     albums.resizeGrid(self);

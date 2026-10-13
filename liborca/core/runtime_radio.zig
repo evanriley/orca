@@ -730,7 +730,7 @@ pub fn pumpRadio(self: *OrcaRuntime) void {
                 .index = @intCast(index),
                 .generation = self.players.slots.items[index].generation,
             };
-            startSession(self, player, opener.library, .recent, .{}, true) catch {};
+            startSession(self, player, opener.library, .recent, .{}, true) catch |err| std.log.warn("Radio did not continue after the queue ended ({t})", .{err});
             continue;
         };
         if (session.worker) |top_up| {

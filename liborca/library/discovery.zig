@@ -506,8 +506,8 @@ pub fn pickRadio(
     var filter: Filter = .{
         .now_s = session.now_s,
         .include_live = options.include_live,
-        .focus_genres = try jsonIds(arena, focusValues(arena, options, .genre)),
-        .focus_decades = try jsonIds(arena, focusValues(arena, options, .decade)),
+        .focus_genres = try jsonIds(arena, try focusValues(arena, options, .genre)),
+        .focus_decades = try jsonIds(arena, try focusValues(arena, options, .decade)),
         .avoid_after = if (avoid_days > 0) session.now_s - avoid_days * 86_400 else null,
         .require_played = !include_unplayed,
         .excluded = try jsonIds(arena, excluded.items),
@@ -956,14 +956,14 @@ fn validDecade(year: i64) bool {
     return year >= 0 and year <= 9990 and @mod(year, 10) == 0;
 }
 
-fn focusValues(arena: std.mem.Allocator, options: RadioOptions, comptime kind: std.meta.Tag(Focus)) []const i64 {
+fn focusValues(arena: std.mem.Allocator, options: RadioOptions, comptime kind: std.meta.Tag(Focus)) ![]const i64 {
     var values: [max_focus]i64 = undefined;
     var count: usize = 0;
     for (options.focus) |focus| if (focus) |f| if (f == kind) {
         values[count] = @field(f, @tagName(kind));
         count += 1;
     };
-    return arena.dupe(i64, values[0..count]) catch &.{};
+    return arena.dupe(i64, values[0..count]);
 }
 
 const EnergyFocus = struct { low: bool = false, high: bool = false };
@@ -2394,6 +2394,17 @@ test "focus filters keep only their genre, decade or energy" {
         const f = (try library.audio_features.trackFeatures(pick.track_id)).?;
         try testing.expect(f.energy.? >= 2.0 / 3.0);
     }
+}
+
+test "focus values return an error instead of dropping the focus when allocation fails" {
+    const options: RadioOptions = .{ .focus = .{ .{ .decade = 2000 }, .{ .genre = 7 }, null, null } };
+    var failing_decade: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, focusValues(failing_decade.allocator(), options, .decade));
+    var failing_genre: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, focusValues(failing_genre.allocator(), options, .genre));
+    const values = try focusValues(testing.allocator, options, .decade);
+    defer testing.allocator.free(values);
+    try testing.expectEqualSlices(i64, &.{2000}, values);
 }
 
 test "every reason is true of its pick" {

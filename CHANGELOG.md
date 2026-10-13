@@ -274,6 +274,15 @@
   also returns `ORCA_STATUS_UNSUPPORTED`, not `ORCA_STATUS_INTERNAL`, for a
   Library a newer Orca wrote.
 
+- **A focused Radio no longer loses its focus silently when memory runs out,
+  and discarded engine and GTK errors now leave a log line.** `focusValues` in
+  `liborca/library/discovery.zig` returns the allocation error to `pickRadio`
+  instead of an empty filter. A prepared tag write that cannot be discarded, a
+  shuffle setting that fails before playback, a setting that fails to reset, a
+  job or model download whose completion cannot be recorded or published, and a
+  Radio that cannot continue after the queue ends each log a warning with the
+  error name.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

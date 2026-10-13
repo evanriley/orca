@@ -409,7 +409,7 @@ fn tileMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 pub fn playRelease(self: *App, release_id: i64) void {
     if (!setAlbumContext(self, release_id)) return;
-    self.runtime.playerSetShuffle(self.player, false) catch {};
+    self.runtime.playerSetShuffle(self.player, false) catch |err| std.log.warn("Shuffle was not set before playing ({t})", .{err});
     menu.play(self);
 }
 
@@ -2736,13 +2736,13 @@ fn artistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn playClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
-    page.self.runtime.playerSetShuffle(page.self.player, false) catch {};
+    page.self.runtime.playerSetShuffle(page.self.player, false) catch |err| std.log.warn("Shuffle was not set before playing ({t})", .{err});
     transport.playIds(page.self, page.ids, 0);
 }
 
 fn shuffleClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
-    page.self.runtime.playerSetShuffle(page.self.player, true) catch {};
+    page.self.runtime.playerSetShuffle(page.self.player, true) catch |err| std.log.warn("Shuffle was not set before playing ({t})", .{err});
     transport.playIds(page.self, page.ids, 0);
 }
 

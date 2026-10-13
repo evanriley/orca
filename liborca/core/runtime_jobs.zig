@@ -511,7 +511,7 @@ fn startWaitingJob(self: *OrcaRuntime, entry: WaitingJob) !void {
 }
 
 fn finishWaitingJob(self: *OrcaRuntime, entry: WaitingJob, state: job.State, publish: bool) void {
-    self.jobs.finish(entry.job, state) catch {};
+    self.jobs.finish(entry.job, state) catch |err| std.log.warn("A queued job was not marked finished ({t})", .{err});
     if (self.libraries.get(entry.library)) |object_value| {
         if (object_value.database) |library_database| recordWaitingHistory(self, library_database, entry, state);
     } else |_| {}
@@ -520,7 +520,7 @@ fn finishWaitingJob(self: *OrcaRuntime, entry: WaitingJob, state: job.State, pub
     self.events.publish(.{
         .request_id = 0,
         .outcome = .{ .job_finished = .{ .job = entry.job, .state = state } },
-    }) catch {};
+    }) catch |err| std.log.warn("A queued job's completion event was not published ({t})", .{err});
 }
 
 fn destroyRequest(self: *OrcaRuntime, request: job_worker.Request) void {
@@ -741,7 +741,7 @@ fn recordHistory(
     defer if (encoded) |text| self.allocator.free(text);
     row.request = encoded;
     row.retryable = encoded != null and !std.mem.eql(u8, input.state, "succeeded");
-    _ = library_database.job_history.insert(row) catch {};
+    _ = library_database.job_history.insert(row) catch |err| std.log.warn("A finished job was not recorded in the job history ({t})", .{err});
 }
 
 pub fn jobOrigin(self: *const OrcaRuntime, job_handle: JobHandle) !job_worker.Origin {
@@ -1150,7 +1150,7 @@ pub fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) 
     const completed = worker.filesProcessed();
     if (worker.totalUnits(completed)) |total| self.jobs.observeTotal(worker.job, total) catch {};
     self.jobs.observeProgress(worker.job, completed) catch {};
-    self.jobs.finish(worker.job, state) catch {};
+    self.jobs.finish(worker.job, state) catch |err| std.log.warn("A job was not marked finished ({t})", .{err});
     recordWorkerHistory(self, worker, state);
     if (worker.matchStats().accepted != 0) runtime_listens.recordingIdsChanged(self, worker.library);
     runtime_watch.jobFinalized(self, worker, state);
@@ -1159,7 +1159,7 @@ pub fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) 
     self.events.publish(.{
         .request_id = 0,
         .outcome = .{ .job_finished = .{ .job = worker.job, .state = state } },
-    }) catch {};
+    }) catch |err| std.log.warn("A job's completion event was not published ({t})", .{err});
 }
 
 /// Control lane. Cancels every job worker's cooperative token. The registry

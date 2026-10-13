@@ -109,10 +109,10 @@ fn finalize(self: *OrcaRuntime, download: *Download, announce: bool) void {
     const outcome = download.outcome;
     self.jobs.observeProgress(download.job, download.received.load(.acquire)) catch {};
     switch (outcome) {
-        .failed => |failure| self.jobs.setDetail(download.job, failure.reason().slice()) catch {},
+        .failed => |failure| self.jobs.setDetail(download.job, failure.reason().slice()) catch |err| std.log.warn("The model download's failure reason was not recorded ({t})", .{err}),
         .succeeded, .cancelled => {},
     }
-    self.jobs.finish(download.job, outcome.state()) catch {};
+    self.jobs.finish(download.job, outcome.state()) catch |err| std.log.warn("The model download job was not marked finished ({t})", .{err});
     if (!announce) return;
     if (outcome == .succeeded) self.embedding_model.setVerified(
         download.destination,
@@ -121,5 +121,5 @@ fn finalize(self: *OrcaRuntime, download: *Download, announce: bool) void {
     self.events.publish(.{
         .request_id = 0,
         .outcome = .{ .job_finished = .{ .job = download.job, .state = outcome.state() } },
-    }) catch {};
+    }) catch |err| std.log.warn("The model download's completion event was not published ({t})", .{err});
 }
