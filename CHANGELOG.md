@@ -319,6 +319,13 @@
   `scripts/alac-sanitize.sh` replays crafted seeds under AddressSanitizer and
   UndefinedBehaviorSanitizer. Valid files decode to identical samples.
 
+- **Sorted and filtered track listings are now fast at any scroll depth.**
+  Paging a library by play count, last played, rating, loved, year, date added,
+  or within a genre past the first pages no longer rebuilds a full sort for
+  every page; the first page of a given sort fills a per-connection snapshot
+  and every later page reads from it, so a deep scroll costs a few milliseconds
+  instead of hundreds.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
