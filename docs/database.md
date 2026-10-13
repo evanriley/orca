@@ -306,6 +306,26 @@ Invariants of a run:
   saved player state, lyrics, user genres, a pending proposal or a frontend
   holding the id still resolve. Ratings, feedback, playlist entries and listens
   follow the Recording.
+- A Recording whose last file joins another Recording is absorbed by it in the
+  same transaction: two files landing on one position, or a file re-resolved to
+  the Recording its Track presents. `FileRepository.setRecordingLocked` is the
+  only writer of `files.recording_id` and calls
+  `repository.recordings.absorbLocked`, which moves every row keyed on the
+  absorbed Recording to the survivor:
+  - `ratings`: the higher rating and the later `updated_at`.
+  - `feedback`: the survivor's row when its `score` is not 0. Otherwise the
+    survivor takes an absorbed `score` that is not 0, with the later
+    `updated_at`. The absorbed row's sync columns are not carried, so the
+    score is sent to ListenBrainz again under the survivor's MBID, as it is
+    when a duplicate group is resolved.
+  - `recommendation_feedback`: the survivor's row, else the absorbed one.
+  - `playlist_entries` and `player_queue_entries`: re-pointed in place. A
+    playlist that held both Recordings holds the survivor twice.
+  - `listens` still naming the absorbed Recording (those of files since
+    removed): re-pointed, and both `recording_play_stats` rows recomputed.
+
+  `daily_mix_entries` are not moved; the next day's mixes replace them. The
+  absorbed `recordings` row stays, with nothing attached.
 - A row at a target position no file claimed is pruned (`Result.tracks_pruned`),
   handing its user genres to the Track its file backs, and a Release or Artist
   left unreferenced goes with it. Pruned ids do not come back: clients holding a
@@ -609,8 +629,10 @@ hold after every write: the table equals a `GROUP BY recording_id` over
 the Recording from the file and updates the row in the same transaction. The
 trigger `files_recording_moves_listens` sits on `files.recording_id`, so any
 writer is covered: when a file with listens changes Recording, the listens move
-and both Recordings' rows are recomputed in the same statement. A path that
-deletes listens must subtract them here.
+and both Recordings' rows are recomputed in the same statement. Listens whose
+file is gone move when their Recording is
+[absorbed](#observation-orca-metadata-and-projection). A path that deletes
+listens must subtract them here.
 
 `ListenRepository.recordAndQueue` inserts the listen and its `scrobble_queue`
 row (`event_key = "listen:<listens.id>"`) in one transaction; the payload is a
@@ -647,8 +669,10 @@ Tracks without a Recording.
 a `recording_id`, and has contiguous positions from 0. A shift parks the moved
 range on negative positions before landing it, because SQLite checks the primary
 key row by row. Entries and ratings go with their Recording, entries with their
-playlist. `playlists.kind` is 0 manual or 1 smart; a smart playlist stores
-`rules` JSON and no entries, and its entries are the Tracks the rules match when
+playlist; a Recording absorbed by another hands both over
+([projection invariants](#observation-orca-metadata-and-projection)).
+`playlists.kind` is 0 manual or 1 smart; a smart playlist stores `rules` JSON
+and no entries, and its entries are the Tracks the rules match when
 read, under the caller's `now`. `creator` is 0 for the user and 1 for
 `libraryImportPlaylist`. See [cli.md](cli.md#playlists-and-ratings).
 

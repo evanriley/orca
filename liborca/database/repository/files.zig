@@ -22,6 +22,7 @@ const ArtworkRole = @import("locations.zig").ArtworkRole;
 const settleReleaseArtworkLocked = @import("artwork_problems.zig").settleReleaseLocked;
 const available_location = @import("roots.zig").available_location;
 const HealthIssueKind = @import("health.zig").HealthIssueKind;
+const absorbRecordingLocked = @import("recordings.zig").absorbLocked;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
 pub const FileUpsert = struct {
@@ -1241,6 +1242,7 @@ pub const FileRepository = struct {
         file_id: i64,
         recording_id: ?i64,
     ) !void {
+        const previous = try self.recordingOfLocked(file_id);
         var statement = try self.db.prepare(
             "UPDATE files SET recording_id=?1 WHERE id=?2 AND recording_id IS NOT ?1;",
         );
@@ -1248,6 +1250,27 @@ pub const FileRepository = struct {
         try statement.bindOptionalInt64(1, recording_id);
         try statement.bindInt64(2, file_id);
         if (try statement.step() != .done) return error.SqlFailed;
+
+        const survivor = recording_id orelse return;
+        const left = previous orelse return;
+        if (left == survivor or try self.encodesLocked(left)) return;
+        try absorbRecordingLocked(self.db, survivor, left);
+    }
+
+    fn recordingOfLocked(self: *FileRepository, file_id: i64) !?i64 {
+        var statement = try self.db.prepare("SELECT recording_id FROM files WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return null;
+        return columns.optionalInt64(statement, 0);
+    }
+
+    fn encodesLocked(self: *FileRepository, recording_id: i64) !bool {
+        var statement = try self.db.prepare("SELECT EXISTS (SELECT 1 FROM files WHERE recording_id=?1);");
+        defer statement.deinit();
+        try statement.bindInt64(1, recording_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0) != 0;
     }
 
     pub fn count(self: *const FileRepository) !u64 {
