@@ -1,0 +1,19 @@
+lieff's minimp3 decoder, vendored for Orca.
+
+Upstream: https://github.com/lieff/minimp3
+Commit:   ea99364f61c14656440e8d77e9c233ccf3124633 (2022-06-25, head of master)
+Licence:  CC0 1.0 (LICENSE)
+
+Files taken from the repository at that commit:
+  minimp3.h
+and LICENSE from the repository root.
+
+minimp3.h is compiled once, as the implementation, by liborca/codec/mp3_shim.c
+with MINIMP3_IMPLEMENTATION and MINIMP3_FLOAT_OUTPUT defined. The high-level
+minimp3_ex.h and the project's other files are not taken.
+
+sha256 of minimp3.h:
+  57e437c5c1f0e8b243885d3929c8973b5e6c778451e0100ab4251d19915cb3ad
+
+Vendored unmodified. Upstream is unmaintained; this file records the exact
+commit so a future advisory can be matched to Orca's copy.

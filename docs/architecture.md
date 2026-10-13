@@ -188,7 +188,8 @@ build` installs the licence texts of vendored and source-built code under
 | Chromaprint | MIT | built from source by `build/chromaprint.zig` |
 | KissFFT (in Chromaprint) | BSD-3-Clause | built from source with Chromaprint |
 
-`build.zig.zon` pins the sources `build.zig` builds: libxaac (v0.1.13) and
+`build.zig.zon` pins the sources `build.zig` builds: libxaac (`main`, commit
+2fbadd5, which carries decoder security fixes released after v0.1.13) and
 Chromaprint (v1.6.1). System libraries come from
 `pkg-config`, supplied by the dev shell and the Nix package.
 

@@ -4,8 +4,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .libxaac = .{
-            .url = "git+https://github.com/ittiam-systems/libxaac?ref=v0.1.13#55af74f9ce7cadb99fbd7870c6487c8a12d75689",
-            .hash = "N-V-__8AADdaEgEjrBn3etD0SrajY3dLtLZFN45mpMYLPNsW",
+            .url = "git+https://github.com/ittiam-systems/libxaac?ref=main#2fbadd57bca46693b7a077bcf1513131106d960c",
+            .hash = "N-V-__8AAOFlEgF67n3Gg8qlLl43FopDl9Uo6PkyQHCccHc_",
         },
         .chromaprint = .{
             .url = "git+https://github.com/acoustid/chromaprint?ref=v1.6.1#aed8eba2202dd9d7b3b0a56c77904cc805490d72",
