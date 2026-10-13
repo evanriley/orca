@@ -232,6 +232,13 @@
   `ORCA_STATUS_UNSUPPORTED`, and a directory or a file that is not an SQLite
   database as `ORCA_STATUS_INVALID_ARGUMENT`.
 
+- **A listen is no longer lost when the database is busy or full for a
+  moment.** The listen worker keeps a listen whose write failed and tries it
+  again at most every 5 s, in order, instead of dropping it. A listen that
+  fails 12 tries in a row, or that is still failing when the Library closes, is
+  dropped and counted in `dropped`, as are listens pushed while the 64-entry
+  queue is full.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre

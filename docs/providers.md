@@ -217,6 +217,15 @@ transport stops, or the Player drains (the last entry has decoded to its end and
 every Zone has played it out, with the transport still `playing`). Playing the
 same entry again after a drain is a new listen.
 
+A listen whose database write fails because the database was busy or full stays
+at the head of the worker's queue and is tried again at most every 5 s, in
+order, ahead of the listens heard after it. A listen that fails 12 tries in a
+row is dropped and counted in `dropped`, so a write that can never succeed
+cannot hold the queue. The queue holds 64 entries; a listen pushed while it is
+full is dropped and counted. When the Library closes, the queue gets one last
+pass that does not wait for the retry time, and a listen that still fails is
+dropped and counted.
+
 ### Local play history
 
 Listens are always recorded in the `listens` table, whether or not anything is
