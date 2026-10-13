@@ -18,6 +18,8 @@
  * @APPLE_APACHE_LICENSE_HEADER_END@
  */
 
+/* Modified by Orca; see ORCA-CHANGES. */
+
 /*
 	File:		ALACDecoder.cpp
 */
@@ -99,14 +101,14 @@ int32_t ALACDecoder::Init( void * inMagicCookie, uint32_t inMagicCookieSize )
     // See ALACMagicCookieDescription.txt for additional documentation concerning the 'magic cookie'
     
     // skip format ('frma') atom if present
-    if (theActualCookie[4] == 'f' && theActualCookie[5] == 'r' && theActualCookie[6] == 'm' && theActualCookie[7] == 'a')
+    if (theCookieBytesRemaining >= 12 && theActualCookie[4] == 'f' && theActualCookie[5] == 'r' && theActualCookie[6] == 'm' && theActualCookie[7] == 'a')
     {
         theActualCookie += 12;
         theCookieBytesRemaining -= 12;
     }
-    
+
     // skip 'alac' atom header if present
-    if (theActualCookie[4] == 'a' && theActualCookie[5] == 'l' && theActualCookie[6] == 'a' && theActualCookie[7] == 'c')
+    if (theCookieBytesRemaining >= 12 && theActualCookie[4] == 'a' && theActualCookie[5] == 'l' && theActualCookie[6] == 'a' && theActualCookie[7] == 'c')
     {
         theActualCookie += 12;
         theCookieBytesRemaining -= 12;
@@ -245,12 +247,14 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 				escapeFlag = headerByte & 0x1;
 
 				chanBits = mConfig.bitDepth - (bytesShifted * 8);
-				
+				RequireAction( chanBits >= 1 && chanBits <= 32, status = kALAC_ParamError; goto Exit; );
+
 				// check for partial frame to override requested numSamples
 				if ( partialFrame != 0 )
 				{
 					numSamples  = BitBufferRead( bits, 16 ) << 16;
 					numSamples |= BitBufferRead( bits, 16 );
+					RequireAction( numSamples >= 1 && numSamples <= mConfig.frameLength, status = kALAC_ParamError; goto Exit; );
 				}
 
 				if ( escapeFlag == 0 )
@@ -263,19 +267,21 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 					headerByte	= (uint8_t) BitBufferRead( bits, 8 );
 					modeU		= headerByte >> 4;
 					denShiftU	= headerByte & 0xfu;
-					
+
 					headerByte	= (uint8_t) BitBufferRead( bits, 8 );
 					pbFactorU	= headerByte >> 5;
 					numU		= headerByte & 0x1fu;
 
 					for ( i = 0; i < numU; i++ )
 						coefsU[i] = (int16_t) BitBufferRead( bits, 16 );
-					
+					RequireAction( bits->cur <= bits->end, status = kALAC_ParamError; goto Exit; );
+
 					// if shift active, skip the the shift buffer but remember where it starts
 					if ( bytesShifted != 0 )
 					{
 						shiftBits = *bits;
-						BitBufferAdvance( bits, (bytesShifted * 8) * numSamples ); 
+						BitBufferAdvance( bits, (bytesShifted * 8) * numSamples );
+						RequireAction( bits->cur <= bits->end, status = kALAC_ParamError; goto Exit; );
 					}
 
 					// decompress
@@ -300,6 +306,10 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 
 					// uncompressed frame, copy data into the mix buffer to use common output code
 					shift = 32 - chanBits;
+					{
+						uint64_t availBits = ( bits->cur < bits->end ) ? ( (uint64_t)( bits->end - bits->cur ) * 8 ) - bits->bitIndex : 0;
+						RequireAction( (uint64_t) numSamples * chanBits <= availBits, status = kALAC_ParamError; goto Exit; );
+					}
 					if ( chanBits <= 16 )
 					{
 						for ( i = 0; i < numSamples; i++ )
@@ -396,12 +406,14 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 				escapeFlag = headerByte & 0x1;
 
 				chanBits = mConfig.bitDepth - (bytesShifted * 8) + 1;
-				
+				RequireAction( chanBits >= 1 && chanBits <= 32, status = kALAC_ParamError; goto Exit; );
+
 				// check for partial frame length to override requested numSamples
 				if ( partialFrame != 0 )
 				{
 					numSamples  = BitBufferRead( bits, 16 ) << 16;
 					numSamples |= BitBufferRead( bits, 16 );
+					RequireAction( numSamples >= 1 && numSamples <= mConfig.frameLength, status = kALAC_ParamError; goto Exit; );
 				}
 
 				if ( escapeFlag == 0 )
@@ -409,6 +421,7 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 					// compressed frame, read rest of parameters
 					mixBits		= (uint8_t) BitBufferRead( bits, 8 );
 					mixRes		= (int8_t) BitBufferRead( bits, 8 );
+					RequireAction( mixBits <= 31, status = kALAC_ParamError; goto Exit; );
 
 					headerByte	= (uint8_t) BitBufferRead( bits, 8 );
 					modeU		= headerByte >> 4;
@@ -429,12 +442,14 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 					numV		= headerByte & 0x1fu;
 					for ( i = 0; i < numV; i++ )
 						coefsV[i] = (int16_t) BitBufferRead( bits, 16 );
+					RequireAction( bits->cur <= bits->end, status = kALAC_ParamError; goto Exit; );
 
 					// if shift active, skip the interleaved shifted values but remember where they start
 					if ( bytesShifted != 0 )
 					{
 						shiftBits = *bits;
 						BitBufferAdvance( bits, (bytesShifted * 8) * 2 * numSamples );
+						RequireAction( bits->cur <= bits->end, status = kALAC_ParamError; goto Exit; );
 					}
 
 					// decompress and run predictor for "left" channel
@@ -476,6 +491,10 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 					// uncompressed frame, copy data into the mix buffers to use common output code
 					chanBits = mConfig.bitDepth;
 					shift = 32 - chanBits;
+					{
+						uint64_t availBits = ( bits->cur < bits->end ) ? ( (uint64_t)( bits->end - bits->cur ) * 8 ) - bits->bitIndex : 0;
+						RequireAction( (uint64_t) numSamples * 2 * chanBits <= availBits, status = kALAC_ParamError; goto Exit; );
+					}
 					if ( chanBits <= 16 )
 					{
 						for ( i = 0; i < numSamples; i++ )
@@ -581,16 +600,15 @@ int32_t ALACDecoder::Decode( BitBuffer * bits, uint8_t * sampleBuffer, uint32_t 
 				// frame end, all done so byte align the frame and check for overruns
 				BitBufferByteAlign( bits, false );
 				//Assert( bits->cur == bits->end );
+				RequireAction( bits->cur <= bits->end, status = kALAC_ParamError; );
 				goto Exit;
 			}
 		}
 
-#if ! DEBUG
-		// if we've decoded all of our channels, bail (but not in debug b/c we want to know if we're seeing bad bits)
+		// if we've decoded all of our channels, bail
 		// - this also protects us if the config does not match the bitstream or crap data bits follow the audio bits
 		if ( channelIndex >= numChannels )
 			break;
-#endif
 	}
 
 NoMoreChannels:
@@ -604,6 +622,12 @@ NoMoreChannels:
 			{
 				int16_t *	fill16 = &((int16_t *)sampleBuffer)[channelIndex];
 				Zero16( fill16, numSamples, numChannels );
+				break;
+			}
+			case 20:
+			{
+				uint8_t *	fill20 = (uint8_t *)sampleBuffer + (channelIndex * 3);
+				Zero24( fill20, numSamples, numChannels );
 				break;
 			}
 			case 24:

@@ -32,6 +32,11 @@ nix build
 A plain `zig build` replaces `zig-out/bin` with Debug artifacts; rebuild with
 `-Doptimize=ReleaseFast` immediately before benchmarks.
 
+`scripts/alac-sanitize.sh` builds the vendored ALAC decoder and `alac_shim.cpp`
+with AddressSanitizer and UndefinedBehaviorSanitizer and decodes the
+`fixtures/fuzz/alac` seeds. Run it inside the dev shell after changing the
+decoder or its bounds checks.
+
 ## Audio in tests
 
 Tests never use real audio hardware. Run the suite with the private PipeWire

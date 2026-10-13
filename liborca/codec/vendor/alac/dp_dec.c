@@ -18,6 +18,8 @@
  * @APPLE_APACHE_LICENSE_HEADER_END@
  */
 
+/* Modified by Orca; see ORCA-CHANGES. */
+
 /*
 	File:		dp_dec.c
 
@@ -61,7 +63,7 @@ void unpc_block( int32_t * pc1, int32_t * out, int32_t num, int16_t * coefs, int
 	int32_t *			pout;
 	int32_t				del, del0;
 	uint32_t			chanshift = 32 - chanbits;
-	int32_t				denhalf = 1<<(denshift-1);
+	int32_t				denhalf = denshift ? (1 << (denshift - 1)) : 0;
 
 	out[0] = pc1[0];
 	if ( numactive == 0 )
@@ -94,7 +96,7 @@ void unpc_block( int32_t * pc1, int32_t * out, int32_t num, int16_t * coefs, int
 		return;
 	}
 
-	for ( j = 1; j <= numactive; j++ )
+	for ( j = 1; j <= numactive && j < num; j++ )
 	{
 		del = pc1[j] + out[j-1];
 		out[j] = (del << chanshift) >> chanshift;
