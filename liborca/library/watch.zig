@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const control = @import("../core/control.zig");
 const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
 const mutation_executor = @import("../metadata/executor.zig");
+const upgrade_copy = @import("../database/upgrade_copy.zig");
 const volume_marker = @import("../platform/volume_linux.zig").marker_name;
 const work = @import("../core/work.zig");
 const hints = @import("watch_hints.zig");
@@ -60,7 +61,8 @@ pub const Ignore = struct {
             std.mem.eql(u8, suffix, "-shm") or
             std.mem.eql(u8, suffix, "-journal") or
             std.mem.eql(u8, suffix, ".orca-journal.lock") or
-            std.mem.eql(u8, suffix, ".orca-scan.lock");
+            std.mem.eql(u8, suffix, ".orca-scan.lock") or
+            upgrade_copy.ownsSuffix(suffix);
     }
 };
 
@@ -139,13 +141,16 @@ test "the database's own files, Orca's temporaries and the backup directory are 
         "library.db.orca-journal.lock",
         "library.db.orca-scan.lock",
         "library.db.orca-backups",
+        "library.db.pre-v4.sqlite",
+        "library.db.pre-v4.sqlite.tmp",
+        "library.db.pre-v4.sqlite.tmp-journal",
         ".orca-volume-id",
         ".one.flac.orca-stage-3-0",
         ".one.flac.orca-restore-3-0",
         "one.flac.orca-backup-3",
         "one.flac.recovery-displaced",
     }) |name| try std.testing.expect(ignore.matches(name));
-    for ([_][]const u8{ "one.flac", "library.dbx", "library.db-old", "Album" }) |name| {
+    for ([_][]const u8{ "one.flac", "library.dbx", "library.db-old", "library.db.pre-v4.flac", "Album" }) |name| {
         try std.testing.expect(!ignore.matches(name));
     }
     try std.testing.expect(!(Ignore{}).matches("library.db"));

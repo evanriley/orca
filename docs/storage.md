@@ -67,7 +67,9 @@ The walk and the watcher skip Orca's own files by name anywhere under the root:
   containing `.orca-restore-`. Recording one would list a second Track with the
   old tags;
 - the database and its `-wal`, `-shm`, `-journal`, `.orca-journal.lock` and
-  `.orca-scan.lock` files;
+  `.orca-scan.lock` files, and its `.pre-v<N>.sqlite` copy with the `.tmp` and
+  `.tmp-journal` files that exist while one is written
+  ([database.md](database.md#the-copy-before-an-upgrade));
 - the volume marker `.orca-volume-id`;
 - the backup directory `<database>.orca-backups`, which is not walked into
   ([Tag-write files](metadata.md#tag-write-files)).

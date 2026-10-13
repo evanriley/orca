@@ -1510,19 +1510,40 @@ comptime {
     std.debug.assert(steps.len == current_version);
 }
 
+const commit_at = commits: {
+    var statements: [current_version + 1][:0]const u8 = undefined;
+    for (&statements, 0..) |*statement, version|
+        statement.* = std.fmt.comptimePrint("PRAGMA user_version={d}; COMMIT;", .{version});
+    break :commits statements;
+};
+
+const NoCopy = struct {
+    fn write(_: NoCopy, _: sqlite.Database, _: usize) error{}!void {}
+};
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
-    if (try pendingFrom(db) == null) return;
-    try db.exec("BEGIN IMMEDIATE;");
-    errdefer db.exec("ROLLBACK;") catch {};
-    const version = try pendingFrom(db) orelse return db.exec("COMMIT;");
-    for (steps[version..]) |step| try db.exec(step);
-    try db.exec(std.fmt.comptimePrint("PRAGMA user_version={d}; COMMIT;", .{current_version}));
+    _ = try upgrade(db, current_version, NoCopy{});
 }
 
-fn pendingFrom(db: sqlite.Database) sqlite.Error!?usize {
+pub fn upgrade(db: sqlite.Database, target: usize, copier: anytype) !?usize {
+    std.debug.assert(target <= current_version);
+    if (try pendingFrom(db, target) == null) return null;
+    try db.exec("BEGIN IMMEDIATE;");
+    errdefer db.exec("ROLLBACK;") catch {};
+    const version = try pendingFrom(db, target) orelse {
+        try db.exec("COMMIT;");
+        return null;
+    };
+    if (version > 0) try copier.write(db, version);
+    for (steps[version..target]) |step| try db.exec(step);
+    try db.exec(commit_at[target]);
+    return version;
+}
+
+fn pendingFrom(db: sqlite.Database, target: usize) sqlite.Error!?usize {
     const version = try userVersion(db);
-    if (version == current_version) return null;
-    if (version < 0 or version > current_version) return error.SchemaVersionTooNew;
+    if (version == target) return null;
+    if (version < 0 or version > target) return error.SchemaVersionTooNew;
     return @intCast(version);
 }
 

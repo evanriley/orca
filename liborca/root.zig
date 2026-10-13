@@ -163,6 +163,7 @@ pub const SearchLimits = database.SearchLimits;
 pub const SearchResults = database.SearchResults;
 pub const max_search_text = database.max_search_text;
 pub const max_search_hits_per_kind = database.max_search_hits_per_kind;
+pub const libraryUpgradeCopyPath = database.upgrade_copy.newest;
 pub const HealthIssuePage = database.HealthIssuePage;
 pub const HealthIssue = database.HealthIssue;
 pub const HealthIssueKind = database.HealthIssueKind;

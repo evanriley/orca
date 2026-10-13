@@ -20,9 +20,10 @@ closes it.
 
 Files beside the database, named from its path: `-wal` and `-shm` (SQLite WAL
 state), `.orca-journal.lock` (mutation-journal ownership), `.orca-scan.lock`
-(one walk at a time) and `.orca-backups/` (tag-write backups,
-[metadata.md](metadata.md#tag-write-files)). A Library with no file (in-memory)
-has none of them.
+(one walk at a time), `.orca-backups/` (tag-write backups,
+[metadata.md](metadata.md#tag-write-files)) and `.pre-v<N>.sqlite`
+([the copy made before an upgrade](#the-copy-before-an-upgrade)). A Library
+with no file (in-memory) has none of them.
 
 `PRAGMA user_version` selects the schema. The current version is 6. Each
 version has one step in `migrations.steps`: `baseline` creates version 1, `v2`
@@ -43,6 +44,45 @@ and left untouched. A Library at version 6 cannot be opened by an Orca whose
 schema version is lower.
 `LibraryDatabase.open` then runs mutation-journal recovery under the journal
 lock; when another process holds it, recovery is deferred to the next holder.
+
+### The copy before an upgrade
+
+`LibraryDatabase.open` copies a Library's database before it upgrades a
+released schema in place, so the Orca that last opened the Library can still
+open what it wrote.
+
+- A copy is made when the database has a file and its `user_version` is at
+  least 1 and below the current version. A new database (version 0), an
+  in-memory Library and a database already at the current version are not
+  copied, and opening them reads no directory.
+- The copy is `<database>.pre-v<N>.sqlite` beside the database, `<N>` being
+  the `user_version` copied. It is a complete SQLite database in rollback
+  journal mode with no `-wal` file of its own, and holds every committed row,
+  including rows still in the Library's WAL.
+- It is written inside the upgrade's `BEGIN IMMEDIATE` transaction, before the
+  first step, with SQLite's online backup API through a read-only connection
+  of its own, because SQLite refuses a backup from the connection that holds
+  the write transaction. The write lock keeps every other connection and
+  process from changing the database between the copy and the upgrade, so no
+  other lock is taken; a second process that opens the Library meanwhile waits
+  for the transaction and then finds the schema current.
+- The copy is written as `<database>.pre-v<N>.sqlite.tmp`, fsynced, renamed
+  to its name and the directory fsynced before the first step runs. An
+  interrupted copy leaves at most the `.tmp` file and its `-journal`, which the
+  next attempt deletes; a copy of the same version is replaced only by the
+  rename of a complete new one.
+- When the copy cannot be written (no space, or no permission to write beside
+  the database), the open fails with `error.PreUpgradeCopyFailed`, the
+  transaction rolls back and the database stays at its version.
+- One copy is kept. Once the upgrade has committed, copies of lower versions
+  and their leftover `.tmp` files are deleted; a failure to delete one is
+  logged and does not fail the open.
+- `liborca.libraryUpgradeCopyPath` returns the path of the copy with the
+  highest version beside a database, or null.
+
+To go back to the Orca that made the copy, close Orca, move the Library file
+and its `-wal` and `-shm` files aside, and rename the copy to the Library's
+name. Changes made after the upgrade are not in the copy.
 
 ## Concurrency
 
@@ -801,7 +841,8 @@ position of zero or a gone Track deletes the row ([api.md](api.md)).
 The Library file holds state that exists nowhere else: Orca values and locks,
 listens, ratings, feedback, "Not for me", playlists and loves. Everything
 derived (projection, analysis results, fetched provider data) is rebuilt by a
-scan, the analysis pass and provider jobs. Tag-write backups under
+scan, the analysis pass and provider jobs. Orca copies the file only
+[before a schema upgrade](#the-copy-before-an-upgrade). Tag-write backups under
 `<database>.orca-backups` are pruned through `prunableBackups` and
 `clearBackupPath` ([metadata.md](metadata.md#pruning-backups)).
 

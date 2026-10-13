@@ -185,6 +185,17 @@
   `error.SinkFailed`. `network.testing.ScriptedTransport` delivers scripted
   bodies to a sink in chunks.
 
+- **Orca copies a Library before it upgrades it.** When a Library made by an
+  earlier release is opened, the engine first writes a complete copy of the
+  database as `<database>.pre-v<N>.sqlite` beside it, where `N` is the schema
+  version the Library had, and only then upgrades. One copy is kept; a later
+  upgrade replaces it. The copy needs free space equal to the database. If it
+  cannot be written the Library is not upgraded and the open fails with
+  `error.PreUpgradeCopyFailed`, which `orca-cli` and `orca-gtk` report with the
+  reason. A Library last opened by a newer Orca is now reported as such by both
+  instead of as a generic failure. `liborca.libraryUpgradeCopyPath` returns the
+  copy's path. The scanner and the folder watcher ignore the copy.
+
 ### Fixed
 
 - **Pull-request CI no longer skips building after a docs-only follow-up push.**
