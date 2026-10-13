@@ -989,7 +989,6 @@ test "a runtime Player and Zone form one object graph that actually renders" {
     // playback lives on a caller frame any more.
     var deadline: TestDeadline = .init(5_000);
     while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
-    var waited: usize = 0;
     try std.testing.expectEqual(
         audio.zone.OutputState.active,
         try runtime.zoneOutputState(zone),
@@ -1000,24 +999,20 @@ test "a runtime Player and Zone form one object graph that actually renders" {
     // real-time thread would.
     var samples: [512]f32 = @splat(0);
     var rendered: usize = 0;
-    waited = 0;
-    while (rendered == 0 and waited < 4000) : (waited += 1) {
+    deadline = .init(5_000);
+    while (rendered == 0 and deadline.tick()) {
         stream.pump(&samples, 256);
         for (samples) |sample| {
             if (sample != 0) rendered += 1;
         }
-        if (rendered == 0) std.Thread.yield() catch {};
     }
     try std.testing.expect(rendered > 0);
 
     // Position telemetry is derived from the clock Zone and published through
     // the coalescing channel, not reconstructed by the caller.
-    waited = 0;
-    while (waited < 4000) : (waited += 1) {
-        if ((try runtime.playerSnapshot(player)).position_frames > 0) break;
+    deadline = .init(5_000);
+    while ((try runtime.playerSnapshot(player)).position_frames == 0 and deadline.tick())
         stream.pump(&samples, 256);
-        std.Thread.yield() catch {};
-    }
     try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
 
     try runtime.destroyZone(zone);

@@ -406,17 +406,19 @@ test "a WAVE_FORMAT_EXTENSIBLE file decodes as the format its SubFormat names" {
 }
 
 fn stereo16Wav(comptime data: []const u8) []const u8 {
-    const size: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, data.len));
-    const riff: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, 36 + data.len + (data.len & 1)));
-    return "RIFF" ++ riff ++ "WAVE" ++
-        "fmt " ++ "\x10\x00\x00\x00" ++
-        "\x01\x00\x02\x00" ++ "\x44\xac\x00\x00" ++
-        "\x10\xb1\x02\x00" ++ "\x04\x00\x10\x00" ++
-        "data" ++ size ++ data ++ (if (data.len & 1 == 1) "\x00" else "");
+    comptime {
+        const size: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, data.len));
+        const riff: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, 36 + data.len + (data.len & 1)));
+        return "RIFF" ++ riff ++ "WAVE" ++
+            "fmt " ++ "\x10\x00\x00\x00" ++
+            "\x01\x00\x02\x00" ++ "\x44\xac\x00\x00" ++
+            "\x10\xb1\x02\x00" ++ "\x04\x00\x10\x00" ++
+            "data" ++ size ++ data ++ (if (data.len & 1 == 1) "\x00" else "");
+    }
 }
 
 test "a WAV data chunk that ends inside a frame plays its whole frames and reports the partial one" {
-    var source: storage.MemorySource = .{ .bytes = stereo16Wav("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00") };
+    var source: storage.MemorySource = .{ .bytes = comptime stereo16Wav("\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00") };
     var decoder = try openDecoder(std.testing.allocator, source.readable());
     defer decoder.deinit();
     try std.testing.expectEqual(@as(?u64, 2), decoder.frame_count);
@@ -427,7 +429,7 @@ test "a WAV data chunk that ends inside a frame plays its whole frames and repor
 }
 
 test "a WAV data chunk of whole frames reports no damage" {
-    var source: storage.MemorySource = .{ .bytes = stereo16Wav("\x01\x00\x02\x00\x03\x00\x04\x00") };
+    var source: storage.MemorySource = .{ .bytes = comptime stereo16Wav("\x01\x00\x02\x00\x03\x00\x04\x00") };
     var decoder = try openDecoder(std.testing.allocator, source.readable());
     defer decoder.deinit();
     try std.testing.expectEqual(@as(?decoder_api.Damage, null), decoder.damage());
