@@ -338,6 +338,12 @@
   cut the analysis of a 5-minute stereo WAV without audio features from 554 ms
   to 433 ms. Hash values are unchanged.
 
+- **The `bench` step measures the audio-similarity search.** `zig build
+  -Doptimize=ReleaseFast bench` ends with a section that, for each embedding
+  model, seeds a vector for up to 100,000 files and times the search one Radio
+  top-up runs (the nearest 300 Recordings with the similarities map) five
+  times.
+
 ## 0.4.0 - 2026-10-11
 
 Ships Library schema version 4; opening a 0.3.0 Library upgrades it in

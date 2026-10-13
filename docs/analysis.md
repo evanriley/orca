@@ -311,6 +311,11 @@ for every Recording it reads, the similarity of its nearest vector in
 `similarities`: one `f32` per Recording. Radio and Daily Mixes rank by it
 ([discovery.md](discovery.md#scoring)).
 
+`zig build -Doptimize=ReleaseFast bench -- TRACKS [DATABASE]` ends with an
+audio-similarity section. For each model it seeds a vector for up to 100,000
+files and times `nearestRecordingsWithSimilarities` with 300 neighbours five
+times, the search one Radio top-up runs.
+
 `Query.ofStored` turns a stored vector into a query and `Query.ofFile` reads
 a file's vector of one model as a query.
 `similarTracks(allocator, connection, model, track_id, limit)` searches with

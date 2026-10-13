@@ -183,6 +183,64 @@ pub fn main(init: std.process.Init) !void {
     try timeFolders(&library, allocator, init.io);
     try timeLibraryStats(&library, allocator, init.io);
     try timeFileSorts(&library, allocator, init.io);
+    try timeAudioSimilarity(&library, allocator, init.io);
+}
+
+const audio_similarity = liborca.internal.library.audio_similarity;
+const similarity_vectors = 100_000;
+const similarity_neighbours = 300;
+const similarity_runs = 5;
+
+fn timeAudioSimilarity(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
+    for (std.enums.values(audio_similarity.Model)) |model| {
+        const seed_start = std.Io.Clock.awake.now(io);
+        var sql: [512]u8 = undefined;
+        try library.database.exec(try std.fmt.bufPrintSentinel(&sql,
+            \\INSERT OR REPLACE INTO file_audio_embeddings(model, file_id, source_identity, vector)
+            \\    SELECT {d}, id, CASE WHEN id % 97 = 0 THEN x'00' ELSE content_hash END, randomblob({d})
+            \\    FROM files ORDER BY id LIMIT {d};
+        , .{ @backingInt(model), model.spec().embedding_size, similarity_vectors }, 0));
+        std.debug.print("audio similarity {t}: {d} vectors of {d} values seeded in {d} ms\n", .{
+            model,
+            library.database.changes(),
+            model.spec().embedding_size,
+            millisecondsSince(io, seed_start),
+        });
+
+        const query = try firstStoredQuery(library, model) orelse return error.NoEmbeddingForTheBenchmark;
+        std.debug.print("  nearest {d} with similarities:", .{similarity_neighbours});
+        var fastest: i96 = std.math.maxInt(i96);
+        for (0..similarity_runs) |_| {
+            const run_ns = try timeSimilaritySearch(library, allocator, io, &query);
+            fastest = @min(fastest, run_ns);
+            std.debug.print(" {d}", .{@divTrunc(run_ns, std.time.ns_per_us)});
+        }
+        std.debug.print(" us, fastest {d} us\n", .{@divTrunc(fastest, std.time.ns_per_us)});
+    }
+}
+
+fn firstStoredQuery(library: *liborca.internal.database.LibraryDatabase, model: audio_similarity.Model) !?audio_similarity.Query {
+    var files = try library.database.prepare("SELECT id FROM files ORDER BY id LIMIT 64;");
+    defer files.deinit();
+    while (try files.step() == .row) {
+        if (try audio_similarity.Query.ofFile(&library.audio_embeddings, model, files.columnInt64(0))) |query| return query;
+    }
+    return null;
+}
+
+fn timeSimilaritySearch(
+    library: *liborca.internal.database.LibraryDatabase,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    query: *const audio_similarity.Query,
+) !i96 {
+    var arena_state: std.heap.ArenaAllocator = .init(allocator);
+    defer arena_state.deinit();
+    var nearest: [similarity_neighbours]audio_similarity.Neighbour = undefined;
+    var similarities: audio_similarity.RecordingSimilarities = .empty;
+    const start = std.Io.Clock.awake.now(io);
+    _ = try audio_similarity.nearestRecordingsWithSimilarities(arena_state.allocator(), &library.audio_embeddings, query, &nearest, &similarities);
+    return start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
 }
 
 fn timeFileSorts(library: *liborca.internal.database.LibraryDatabase, allocator: std.mem.Allocator, io: std.Io) !void {
