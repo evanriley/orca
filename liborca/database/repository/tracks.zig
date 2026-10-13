@@ -484,6 +484,8 @@ pub const TrackRepository = struct {
         filter: TrackFilter,
         form: PageForm,
     ) !TrackPage {
+        if (form == .scan and snapshotApplies(query) and self.db.readOnly())
+            return self.pageFromSnapshot(allocator, query, filter);
         var statement = try self.db.prepare(
             trackQueryText(filter, query.loved_only, query.genre_id != null, query.sort, query.direction, form),
         );
@@ -492,6 +494,78 @@ pub const TrackRepository = struct {
         try statement.bindInt64(2, query.offset);
         try bindPage(statement, query, form);
         return collectTrackPage(allocator, statement);
+    }
+
+    /// A page served from the per-connection sorted snapshot: the snapshot is
+    /// refilled only when the query or the Library changed, so a scrollbar
+    /// drag pays the full sort once and every later page is a bounded `ord`
+    /// range.
+    fn pageFromSnapshot(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        query: TrackQuery,
+        filter: TrackFilter,
+    ) !TrackPage {
+        try self.refreshSnapshot(query, filter);
+        var statement = try self.db.prepare(snapshot_page_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, query.offset);
+        try statement.bindInt64(2, @as(i64, query.offset) + @as(i64, query.limit) - 1);
+        return collectTrackPage(allocator, statement);
+    }
+
+    /// Materialises the current (filter, sort) into `track_page_snapshot` when
+    /// it does not already hold it. The `pageAs` guard builds a snapshot only
+    /// on a read-only connection, so every write is on another connection and
+    /// `PRAGMA data_version` — which moves whenever another connection commits
+    /// but not for this connection's own writes — is a complete invalidation
+    /// signal: a Library mutation always forces a refill and no stale snapshot
+    /// outlives it.
+    fn refreshSnapshot(self: *const TrackRepository, query: TrackQuery, filter: TrackFilter) !void {
+        try self.db.exec(snapshot_schema);
+        var fingerprint_buffer: [96]u8 = undefined;
+        const fingerprint = try snapshotFingerprint(&fingerprint_buffer, query);
+        const data_version = try self.dataVersion();
+        if (try self.snapshotIsCurrent(fingerprint, data_version)) return;
+        // Drop the key before the contents so a fill that fails midway leaves
+        // the snapshot not-current and the next page refills it, rather than
+        // leaving a key that vouches for an empty table.
+        try self.db.exec("DELETE FROM track_page_snapshot_key;\nDELETE FROM track_page_snapshot;");
+        var fill = try self.db.prepare(
+            snapshotFillText(filter, query.loved_only, query.genre_id != null, query.sort, query.direction),
+        );
+        defer fill.deinit();
+        try bindPage(fill, query, .scan);
+        if (try fill.step() != .done) return error.SqlFailed;
+        try self.storeSnapshotKey(fingerprint, data_version);
+    }
+
+    fn dataVersion(self: *const TrackRepository) !i64 {
+        var statement = try self.db.prepare("PRAGMA data_version;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    fn snapshotIsCurrent(self: *const TrackRepository, fingerprint: []const u8, data_version: i64) !bool {
+        var statement = try self.db.prepare(
+            "SELECT fingerprint, data_version FROM track_page_snapshot_key WHERE id = 0;",
+        );
+        defer statement.deinit();
+        if (try statement.step() != .row) return false;
+        return statement.columnInt64(1) == data_version and
+            std.mem.eql(u8, statement.columnText(0), fingerprint);
+    }
+
+    fn storeSnapshotKey(self: *const TrackRepository, fingerprint: []const u8, data_version: i64) !void {
+        var statement = try self.db.prepare(
+            "INSERT INTO track_page_snapshot_key(id, fingerprint, data_version) VALUES (0, ?1, ?2)\n" ++
+                "ON CONFLICT(id) DO UPDATE SET fingerprint = excluded.fingerprint, data_version = excluded.data_version;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, fingerprint);
+        try statement.bindInt64(2, data_version);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 
     /// How many Tracks a filtered listing has to page through, so a host can
@@ -1238,6 +1312,53 @@ const PageForm = enum { scan, candidates, bounded, from_files };
 
 const candidate_offset_max = 50_000;
 
+/// Whether a `scan`-form page is served from the sorted snapshot instead of a
+/// fresh ORDER BY per page. The sorts whose value lives outside the Track
+/// indexes grow with the offset, and a genre listing re-sorts its whole match
+/// set each page; both are the cases the snapshot pays for once. An index-walk
+/// sort stays on its index, and the shallow `candidates` form keeps serving a
+/// value sort's first pages without a full materialisation.
+fn snapshotApplies(query: TrackQuery) bool {
+    if (query.genre_id != null) return true;
+    return switch (query.sort) {
+        .play_count, .last_played, .rating, .loved, .year, .date_added => true,
+        .id, .artist, .album, .title, .track_number, .duration, .album_artist, .loudness, .bitrate, .path, .genre => false,
+    };
+}
+
+/// The two per-connection TEMP tables the snapshot needs: the sorted ids and
+/// the single row recording which (filter, sort) and `data_version` they hold.
+/// They are TEMP so they never reach the schema version or a migration, and
+/// per-connection so a reader's snapshot is private to it.
+const snapshot_schema =
+    "CREATE TEMP TABLE IF NOT EXISTS track_page_snapshot(ord INTEGER PRIMARY KEY, track_id INTEGER NOT NULL);\n" ++
+    "CREATE TEMP TABLE IF NOT EXISTS track_page_snapshot_key(\n" ++
+    "    id INTEGER PRIMARY KEY CHECK (id = 0), fingerprint TEXT NOT NULL, data_version INTEGER NOT NULL);";
+
+/// Reads one page out of the snapshot by its `ord` range, then joins the Track
+/// columns exactly as a fresh page does. `ord` is a 0-based dense sequence, so
+/// the range is `offset` to `offset + limit - 1`.
+const snapshot_page_sql = track_columns ++
+    "FROM track_page_snapshot\n" ++
+    "JOIN tracks ON tracks.id = track_page_snapshot.track_id\n" ++
+    recording_joins ++
+    "WHERE track_page_snapshot.ord BETWEEN ?1 AND ?2\n" ++
+    "ORDER BY track_page_snapshot.ord;";
+
+/// Everything that decides the snapshot's id set and order, and nothing that
+/// does not: `limit` and `offset` page within one snapshot and are left out. A
+/// `scan`-form page never carries a bound filter, so none appear here.
+fn snapshotFingerprint(buffer: []u8, query: TrackQuery) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{?d}:{?d}:{?d}:{d}:{d}:{d}", .{
+        query.artist_id,
+        query.release_id,
+        query.genre_id,
+        @intFromBool(query.loved_only),
+        @backingInt(query.sort),
+        @backingInt(query.direction),
+    });
+}
+
 /// For a whole-library page sorted by a value that lives outside `tracks`,
 /// the ids that can reach it: the first `limit + offset` of each part of the
 /// library the sort orders differently, each part walked from an index on
@@ -1354,9 +1475,10 @@ fn sortJoin(comptime sort: TrackSort) []const u8 {
 /// Every (filter, loved filter, genre filter, sort, direction, form)
 /// combination as its own prepared-once statement text, the `bounded` form
 /// once for every loved and genre filter and `from_files` once per sort and
-/// direction. There are 734 distinct ones; concatenating SQL at runtime
-/// instead would mean an allocation and a string the caller could influence,
-/// and this boundary refuses both on principle.
+/// direction, plus one `snapshot` fill text per (filter, loved, genre, sort,
+/// direction). Concatenating SQL at runtime instead would mean an allocation
+/// and a string the caller could influence, and this boundary refuses both on
+/// principle.
 fn trackQueryText(
     filter: TrackFilter,
     loved_only: bool,
@@ -1407,6 +1529,64 @@ fn trackQueryText(
                                 resolved_form,
                             ),
                         },
+                    },
+                },
+            },
+        },
+    };
+}
+
+/// The statement that fills `track_page_snapshot` for one `scan`-form
+/// (filter, sort): the same id selection as the `scan` form's inner query —
+/// only the join the sort needs and the relational filters — numbered into a
+/// dense 0-based `ord` by `ROW_NUMBER`, so a page is a bounded `ord` range.
+fn buildSnapshotFill(
+    comptime filter: TrackFilter,
+    comptime loved_only: bool,
+    comptime genre: bool,
+    comptime sort: TrackSort,
+    comptime direction: SortDirection,
+) [:0]const u8 {
+    @setEvalBranchQuota(20_000);
+    const filter_terms = switch (filter) {
+        .none => "",
+        .artist => by_artist,
+        .release => "tracks.release_id = ?4",
+        .artist_and_release => by_artist ++ " AND tracks.release_id = ?4",
+    };
+    comptime var terms: []const u8 = "";
+    inline for ([_][]const u8{
+        filter_terms,
+        if (loved_only) by_loved_recording else "",
+        if (genre) by_genre else "",
+    }) |term| {
+        if (term.len != 0) terms = terms ++ (if (terms.len == 0) "WHERE " else " AND ") ++ term;
+    }
+    const where = if (terms.len == 0) "" else terms ++ "\n";
+    return "INSERT INTO track_page_snapshot(ord, track_id)\n" ++
+        "SELECT ROW_NUMBER() OVER (ORDER BY " ++ orderTerms(sort, direction) ++ ") - 1, tracks.id\n" ++
+        "FROM tracks\n" ++ sortJoin(sort) ++ where ++ ";";
+}
+
+fn snapshotFillText(
+    filter: TrackFilter,
+    loved_only: bool,
+    genre: bool,
+    sort: TrackSort,
+    direction: SortDirection,
+) [:0]const u8 {
+    return switch (filter) {
+        inline else => |resolved_filter| switch (loved_only) {
+            inline else => |resolved_loved_only| switch (genre) {
+                inline else => |resolved_genre| switch (sort) {
+                    inline else => |resolved_sort| switch (direction) {
+                        inline else => |resolved_direction| comptime buildSnapshotFill(
+                            resolved_filter,
+                            resolved_loved_only,
+                            resolved_genre,
+                            resolved_sort,
+                            resolved_direction,
+                        ),
                     },
                 },
             },
@@ -1646,6 +1826,125 @@ test "every page of a whole-library sort, in either form, and of a genre's sort 
             }
         }
     }
+}
+
+test "the sorted snapshot serves a deep page like a full sort and refills after the Library changes" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-snapshot-pages?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\CREATE TEMP TABLE numbers AS
+        \\    WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM n WHERE v < 12) SELECT v FROM n;
+        \\INSERT INTO recordings(id, title) SELECT v, 'Song' FROM numbers;
+        \\INSERT INTO tracks(id, recording_id, title, track_number) SELECT v, v, 'Song', v FROM numbers;
+        \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+        \\    SELECT v, v, 1700000000 + v FROM numbers WHERE v % 2 = 0;
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Rock', 'rock');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
+        \\    SELECT v, 1, 0, 0 FROM numbers WHERE v % 3 <> 0;
+    );
+
+    // Pages run on a dedicated read-only connection, as every browsing surface
+    // does: its `PRAGMA data_version` moves only when the writer commits, so a
+    // snapshot stays valid until the Library actually changes.
+    const reader = try library.openReader();
+    defer reader.close();
+    const read_repository = TrackRepository{ .db = reader, .write_lane = library.write_lane };
+
+    // A genre listing is served by the snapshot; a page past its start holds
+    // the rows a single ORDER BY puts there.
+    const query: TrackQuery = .{ .genre_id = 1, .sort = .play_count, .direction = .descending, .limit = 3, .offset = 2 };
+    var expected = try library.database.prepare("SELECT tracks.id FROM tracks\n" ++
+        recording_joins ++ "WHERE " ++ by_genre ++ "\nORDER BY " ++
+        comptime orderTerms(.play_count, .descending) ++ "\nLIMIT ?1 OFFSET ?2;");
+    defer expected.deinit();
+    {
+        var page = try read_repository.page(std.testing.allocator, query);
+        defer page.deinit();
+        try expected.bindInt64(1, query.limit);
+        try expected.bindInt64(2, query.offset);
+        try expected.bindInt64(6, 1);
+        var count: usize = 0;
+        while (try expected.step() == .row) : (count += 1) {
+            try std.testing.expect(count < page.items.len);
+            try std.testing.expectEqual(expected.columnInt64(0), page.items[count].id);
+        }
+        try std.testing.expectEqual(count, page.items.len);
+        try expected.reset();
+    }
+
+    // The top of the listing before the mutation is the most-played genre
+    // track, which is not track 1. Paging once fills the snapshot.
+    const top_before = blk: {
+        var page = try read_repository.page(std.testing.allocator, .{
+            .genre_id = 1,
+            .sort = .play_count,
+            .direction = .descending,
+            .limit = 1,
+        });
+        defer page.deinit();
+        break :blk page.items[0].id;
+    };
+    try std.testing.expect(top_before != 1);
+
+    // The writer commits a higher play count; the reader's next page must
+    // refill the snapshot and put track 1 on top. Without invalidation it
+    // would keep returning the stale `top_before`.
+    try library.database.exec("INSERT INTO recording_play_stats(recording_id, play_count, last_played_at) VALUES (1, 1000, 1700000100);");
+    var after = try read_repository.page(std.testing.allocator, .{
+        .genre_id = 1,
+        .sort = .play_count,
+        .direction = .descending,
+        .limit = 1,
+    });
+    defer after.deinit();
+    try std.testing.expectEqual(@as(i64, 1), after.items[0].id);
+}
+
+test "a read-write connection never serves a page from the snapshot, so a write-then-page on one connection is never stale" {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-snapshot-rw?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\CREATE TEMP TABLE numbers AS
+        \\    WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM n WHERE v < 12) SELECT v FROM n;
+        \\INSERT INTO recordings(id, title) SELECT v, 'Song' FROM numbers;
+        \\INSERT INTO tracks(id, recording_id, title, track_number) SELECT v, v, 'Song', v FROM numbers;
+        \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+        \\    SELECT v, v, 1700000000 + v FROM numbers WHERE v % 2 = 0;
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Rock', 'rock');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
+        \\    SELECT v, 1, 0, 0 FROM numbers WHERE v % 3 <> 0;
+    );
+
+    // `library.database` is the writer: a read-write connection whose own
+    // commits do not move `PRAGMA data_version`, so a snapshot built here
+    // could not tell it had gone stale. The `pageAs` guard keeps it off the
+    // snapshot path entirely.
+    const write_repository = TrackRepository{ .db = library.database, .write_lane = library.write_lane };
+    const query: TrackQuery = .{ .genre_id = 1, .sort = .play_count, .direction = .descending, .limit = 1 };
+
+    const top_before = blk: {
+        var page = try write_repository.page(std.testing.allocator, query);
+        defer page.deinit();
+        break :blk page.items[0].id;
+    };
+    try std.testing.expect(top_before != 1);
+
+    // The mutation commits on the same connection that will serve the next
+    // page. The page must still reflect it; without the read-only guard the
+    // page would be served from the stale snapshot and keep returning
+    // `top_before`.
+    try library.database.exec("INSERT INTO recording_play_stats(recording_id, play_count, last_played_at) VALUES (1, 1000, 1700000100);");
+    var after = try write_repository.page(std.testing.allocator, query);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(i64, 1), after.items[0].id);
 }
 
 test "a Track reads loudness, bitrate and path from the file it plays and its first genre, and sorts by them and album artist with unknowns last" {
