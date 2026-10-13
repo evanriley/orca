@@ -165,6 +165,15 @@ display-only defect, and removes its entry.
 - MP1 and MP2 decoding (`liborca/codec/mp3.zig`) has no fixture or test.
 - NaN and Inf samples in float WAV and AIFF are untested through decoding,
   analysis and DSP.
+- The ALAC zero-run shift guard (`ag_dec.c`, rejecting a Golomb parameter of
+  32 or more) has no crafted regression seed under `fixtures/fuzz/alac/`. The
+  guard rests on a static analysis of the mean-estimator wrap arithmetic; a
+  worker's attempt to synthesise a packet that reaches it was stopped by
+  Claude's real-time cyber safeguard, so the input was never produced. The
+  decoder's other bounds and the undefined-shift class are covered by seeds.
+- ALAC fixtures cover only FFmpeg-encoded 16- and 24-bit stereo. Valid mono,
+  20-bit and 32-bit streams are unexercised under the sanitizers, where an
+  undefined operation would now abort a release build.
 
 ### Before 1.0
 

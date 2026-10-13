@@ -155,8 +155,17 @@ decoder that skips restoring the low bit of `mid` is wrong on every sample.
 
 ### Sanitizers
 
-ALAC and libxaac compile with `-fno-sanitize=undefined`: they rely on
-two's-complement shifts that every supported target defines.
+The vendored ALAC decoder (`liborca/codec/vendor/alac`) is patched to bound
+every packet- and cookie-declared size against its buffers; `ORCA-CHANGES`
+beside it lists each change by file and function. It compiles with
+UndefinedBehaviorSanitizer on except `-fno-sanitize=shift-base`, plus `-fwrapv`,
+because the reference masks fields with shifts whose base UBSan's shift-base
+check would flag and relies on two's-complement wraparound. `alac_shim.cpp`
+copies each packet into a zero-padded buffer and validates the cookie before
+decoding; `scripts/alac-sanitize.sh` replays the `fixtures/fuzz/alac` seeds
+under AddressSanitizer and UndefinedBehaviorSanitizer. libxaac still compiles
+with `-fno-sanitize=undefined`: it relies on two's-complement shifts that every
+supported target defines.
 
 ## Dependencies and licences
 

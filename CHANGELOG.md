@@ -304,6 +304,15 @@
   `tests/abi/compat.zig`, and fails when the C smoke test does not call an
   export. The smoke test no longer exits 0 for a failed check numbered 256.
 
+- **A crafted ALAC file can no longer make the decoder read or write outside
+  its buffers or execute an undefined shift.** The vendored decoder bounds
+  every packet- and cookie-declared size against its buffers, rejects a
+  zero-run Golomb parameter that would shift by 32 or more, and validates the
+  magic cookie before decoding; `alac_shim.cpp` zero-pads each packet. The ALAC
+  files compile with UndefinedBehaviorSanitizer enabled, and
+  `scripts/alac-sanitize.sh` replays crafted seeds under AddressSanitizer and
+  UndefinedBehaviorSanitizer. Valid files decode to identical samples.
+
 ### Changed
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
@@ -350,9 +359,10 @@
 
 - **The ALAC decoder is vendored in the source tree.** Apple's reference
   decoder sources (Apache-2.0, `macosforge/alac` at `c38887c`) live in
-  `liborca/codec/vendor/alac/`, byte-identical to upstream, instead of being
-  fetched through `build.zig.zon`. `ORCA-CHANGES` beside them records the
-  upstream commit. Decoding is unchanged.
+  `liborca/codec/vendor/alac/` instead of being fetched through
+  `build.zig.zon`. `ORCA-CHANGES` beside them records the upstream commit and
+  the bounds and undefined-behaviour patches Orca applies; valid files decode
+  to identical samples.
 
 - **Library analysis hashes decoded audio faster.** The audio-content hash
   gives Blake3 each decoded chunk whole instead of 256 samples at a time, which

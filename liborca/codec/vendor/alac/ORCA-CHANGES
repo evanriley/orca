@@ -14,4 +14,59 @@ and LICENSE from the repository root.
 Not taken: the encoders, makefile, convert-utility, APPLE_LICENSE.txt and the
 repository's Markdown and text files.
 
-No file is modified.
+Modifications
+-------------
+The decoder parses untrusted files. Apple's reference leaves packet- and
+cookie-declared sizes unchecked, so a crafted stream can read or write past the
+decoder's buffers or execute an undefined shift. Orca adds bounds and value
+checks in the file's own RequireAction style. Every valid stream decodes to the
+same samples. Each modified file carries "Modified by Orca; see ORCA-CHANGES."
+after Apple's licence header. Line numbers below are the upstream originals.
+
+ALACDecoder.cpp
+  Init (frma/alac atom skips, :102, :109): require >= 12 cookie bytes remain
+    before reading cookie[4..7] and subtracting 12, so a short cookie cannot
+    over-read or underflow theCookieBytesRemaining.
+  Decode, SCE/LFE and CPE:
+    - after computing chanBits: require 1 <= chanBits <= 32, so the dynamic
+      predictor and bit reader never shift by 0 or >= 32.
+    - after a partial-frame numSamples read: require 1 <= numSamples <=
+      frameLength, so a frame cannot claim more samples than the buffers hold.
+    - after the last coefficient table read: require cur <= end.
+    - after advancing past the shift-off region: require cur <= end.
+    - before an uncompressed (escape) frame's sample reads: require the frame's
+      sample bits (numSamples*chanBits, doubled for a pair) fit the bytes left.
+  Decode, CPE only: after reading mixBits, require mixBits <= 31 (unmix shifts
+    right by mixBits).
+  Decode, ID_END: after the closing byte-align, require cur <= end.
+  Decode: the "decoded all channels" break was compiled only when !DEBUG; make
+    it unconditional so a bitstream with extra elements cannot run on.
+  Decode, NoMoreChannels: add the missing bit-depth 20 case so unfilled 20-bit
+    channels are zeroed like 16/24/32.
+
+ag_dec.c
+  dyn_decomp (:290): measure maxPos from the current read position (end - cur)
+    rather than the whole packet (byteSize), so the "ran off the end" check
+    stops the Golomb reader at the real packet end.
+  dyn_decomp (:337): require the zero-run Golomb parameter k <= 31 before it is
+    used as a right-shift amount in dyn_get, so a crafted packet that drives the
+    mean estimator's wrap arithmetic cannot shift by 32 or more (undefined, and
+    a sanitizer abort in release builds). A valid stream keeps k in 1..9.
+
+dp_dec.c
+  unpc_block (:64): compute denhalf as 0 when denshift is 0 instead of shifting
+    by -1 (undefined). denhalf is the round-to-nearest addend applied before the
+    predictor's right shift of denshift, so 0 is the correct addend when no
+    shift is applied; the value is unchanged for denshift >= 1.
+  unpc_block (:97): clamp the warm-up loop to j < num so a frame shorter than
+    the predictor order cannot write past the output buffer; unchanged when
+    num > numactive, which holds for every full frame.
+
+Shim (liborca/codec/alac_shim.cpp)
+  Reads a few bytes past the packet end remain in the reference bit reader
+  (ALACBitUtilities.c, ag_dec.c); the shim copies each packet into a buffer
+  padded and zero-filled past its end so those reads stay in allocated memory.
+  It also validates the ALACSpecificConfig before Init (frameLength 1..65536,
+  bitDepth in {16,20,24,32}, numChannels 1..kALACMaxChannels, kb 1..31,
+  compatibleVersion 0), so no oversized cookie reaches Init and the Golomb
+  reader's shifts by kb and 32-k stay defined (kb 0 would shift by 32).

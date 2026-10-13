@@ -682,10 +682,13 @@ fn pkgConfigIncludeDir(b: *std.Build, package: []const u8) std.Build.LazyPath {
     return .{ .cwd_relative = std.mem.trim(u8, output, " \n") };
 }
 
-/// Apple's reference ALAC decoder, built from source. Only the decoding half
-/// is compiled, and only `alac_shim.cpp` sees its C++ interface. The
-/// reference left-shifts negative values, which two's-complement targets
-/// define, so the undefined-behaviour sanitizer is off for its files only.
+/// Apple's reference ALAC decoder, built from source with Orca's bounds
+/// patches (see the vendored `ORCA-CHANGES`). Only the decoding half is
+/// compiled, and only `alac_shim.cpp` sees its C++ interface. The decoder
+/// relies on two's-complement signed wraps and left shifts of negative values,
+/// so it is built with `-fwrapv` and `-fno-sanitize=shift-base`; the rest of
+/// the undefined-behaviour sanitizer, including shift-exponent, stays on so a
+/// Debug build still traps any out-of-range shift the patches miss.
 fn addAlac(b: *std.Build, module: *std.Build.Module) void {
     const codec = b.path("liborca/codec/vendor/alac");
     module.addIncludePath(codec);
@@ -699,12 +702,12 @@ fn addAlac(b: *std.Build, module: *std.Build.Module) void {
             "EndianPortable.c",
             "matrix_dec.c",
         },
-        .flags = &.{ "-std=c99", "-DNDEBUG", "-w", "-fno-sanitize=undefined" },
+        .flags = &.{ "-std=c99", "-DNDEBUG", "-w", "-fno-sanitize=shift-base", "-fwrapv" },
     });
     module.addCSourceFiles(.{
         .root = codec,
         .files = &.{"ALACDecoder.cpp"},
-        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti", "-w", "-fno-sanitize=undefined" },
+        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti", "-w", "-fno-sanitize=shift-base", "-fwrapv" },
     });
     module.addCSourceFile(.{
         .file = b.path("liborca/codec/alac_shim.cpp"),

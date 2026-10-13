@@ -11,12 +11,22 @@ struct orca_alac_decoder {
     ALACDecoder native;
     /* One packet of interleaved integer samples at the stream's width. */
     uint8_t *scratch;
+    uint8_t *padded;
+    size_t padded_capacity;
     uint32_t frame_length;
     uint32_t channels;
     uint32_t bit_depth;
 };
 
 static const uint32_t max_frame_length = 65536;
+
+/* The reference decoder's bit reader fetches a few bytes past the position it
+ * has bounds-checked before the decoder's next check catches the overrun; the
+ * largest such look-ahead, reading a frame's coefficient tables, is about 140
+ * bytes. Each packet is copied into a buffer this many bytes larger with the
+ * tail zeroed, so every such fetch lands in allocated, defined memory.
+ * Shrinking this below that look-ahead reintroduces an out-of-bounds read. */
+static const uint32_t alac_packet_padding = 256;
 
 static uint32_t bytes_per_sample(uint32_t bit_depth)
 {
@@ -33,7 +43,30 @@ extern "C" struct orca_alac_decoder *orca_alac_decoder_create(const uint8_t *con
     if (config_size > sizeof(aligned)) {
         return NULL;
     }
+    memset(aligned, 0, sizeof(aligned));
     memcpy(aligned, config, config_size);
+
+    /* Validate the ALACSpecificConfig before Init runs, because Init allocates
+     * frameLength*4-byte buffers and reads these fields unchecked. The 24-byte
+     * layout is frameLength(BE u32), compatibleVersion, bitDepth, pb, mb, kb,
+     * numChannels. kb must be 1..31: the Golomb reader shifts by kb and by
+     * 32-k (k <= kb), both undefined outside that range. */
+    if (config_size < 24) {
+        return NULL;
+    }
+    {
+        uint32_t frame_length = ((uint32_t)config[0] << 24) | ((uint32_t)config[1] << 16) |
+                                ((uint32_t)config[2] << 8) | (uint32_t)config[3];
+        uint8_t compatible_version = config[4];
+        uint8_t bit_depth = config[5];
+        uint8_t kb = config[8];
+        uint8_t num_channels = config[9];
+        if (compatible_version != 0 || frame_length == 0 || frame_length > max_frame_length ||
+            (bit_depth != 16 && bit_depth != 20 && bit_depth != 24 && bit_depth != 32) ||
+            num_channels == 0 || num_channels > kALACMaxChannels || kb == 0 || kb > 31) {
+            return NULL;
+        }
+    }
 
     void *memory = calloc(1, sizeof(orca_alac_decoder));
     if (memory == NULL) {
@@ -50,7 +83,7 @@ extern "C" struct orca_alac_decoder *orca_alac_decoder_create(const uint8_t *con
     self->channels = stream.numChannels;
     self->bit_depth = stream.bitDepth;
     if (self->channels == 0 || self->channels > kALACMaxChannels || self->frame_length == 0 ||
-        self->frame_length > max_frame_length ||
+        self->frame_length > max_frame_length || stream.kb == 0 || stream.kb > 31 ||
         (self->bit_depth != 16 && self->bit_depth != 20 && self->bit_depth != 24 &&
          self->bit_depth != 32)) {
         self->~orca_alac_decoder();
@@ -77,6 +110,7 @@ extern "C" void orca_alac_decoder_destroy(struct orca_alac_decoder *decoder)
         return;
     }
     free(decoder->scratch);
+    free(decoder->padded);
     decoder->~orca_alac_decoder();
     free(decoder);
 }
@@ -93,7 +127,21 @@ static int32_t decode_packet(struct orca_alac_decoder *decoder, const uint8_t *p
     BitBuffer bits;
 
     *frames = 0;
-    BitBufferInit(&bits, const_cast<uint8_t *>(packet), packet_size);
+    if (packet_size == 0) {
+        return -1;
+    }
+    size_t needed = (size_t)packet_size + alac_packet_padding;
+    if (decoder->padded_capacity < needed) {
+        uint8_t *grown = static_cast<uint8_t *>(realloc(decoder->padded, needed));
+        if (grown == NULL) {
+            return -1;
+        }
+        decoder->padded = grown;
+        decoder->padded_capacity = needed;
+    }
+    memcpy(decoder->padded, packet, packet_size);
+    memset(decoder->padded + packet_size, 0, alac_packet_padding);
+    BitBufferInit(&bits, decoder->padded, packet_size);
     if (decoder->native.Decode(&bits, decoder->scratch, decoder->frame_length,
                                decoder->channels, frames) != 0 ||
         *frames > decoder->frame_length) {

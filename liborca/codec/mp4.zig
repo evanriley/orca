@@ -1033,15 +1033,19 @@ const TestMovie = struct {
     time_runs: []const [2]u32 = &.{.{ 3, 4096 }},
     chunk_offsets: []const u8 = testBox("stco", &@as([4]u8, @splat(0)) ++ be32(1) ++ be32(0)),
     edits: []const u8 = "",
+    frame_length: u32 = 4096,
+    bit_depth: u8 = 16,
+    channels: u8 = 2,
+    kb: u8 = 14,
 
     fn bytes(comptime self: TestMovie) []const u8 {
         comptime {
             const full_box = &@as([4]u8, @splat(0));
-            const alac_config = be32(4096) ++ [_]u8{ 0, 16, 40, 10, 14, 2 } ++ be32(255 << 16)[0..2].* ++
-                be32(0) ++ be32(0) ++ be32(44_100);
+            const alac_config = be32(self.frame_length) ++ [_]u8{ 0, self.bit_depth, 40, 10, self.kb, self.channels } ++
+                be32(255 << 16)[0..2].* ++ be32(0) ++ be32(0) ++ be32(44_100);
             const sample_entry = testBox(
                 "alac",
-                &@as([6]u8, @splat(0)) ++ "\x00\x01" ++ &@as([8]u8, @splat(0)) ++ "\x00\x02\x00\x10" ++ &@as([4]u8, @splat(0)) ++
+                &@as([6]u8, @splat(0)) ++ "\x00\x01" ++ &@as([8]u8, @splat(0)) ++ [_]u8{ 0, self.channels } ++ "\x00\x10" ++ &@as([4]u8, @splat(0)) ++
                     be32(44_100 << 16) ++ testBox("alac", full_box ++ alac_config),
             );
             var runs: []const u8 = "";
@@ -1115,4 +1119,136 @@ test "time runs whose total overflows a u64 are invalid" {
     };
     try std.testing.expectError(error.InvalidMp4, track.mediaTime());
     try std.testing.expectError(error.InvalidMp4, track.packetAt(std.math.maxInt(u64)));
+}
+
+/// A one-packet ALAC movie: the packet sits in an `mdat` at file offset 8 and
+/// the sample table points one sample there, so a crafted packet can be driven
+/// through the real container-and-decoder path.
+fn alacPacketStream(comptime cookie: TestMovie, comptime packet: []const u8) []const u8 {
+    comptime {
+        var movie = cookie;
+        movie.sample_count = 1;
+        movie.sample_size = @intCast(packet.len);
+        movie.time_runs = &.{.{ 1, cookie.frame_length }};
+        movie.chunk_offsets = testBox("stco", &@as([4]u8, @splat(0)) ++ be32(1) ++ be32(8));
+        return testBox("mdat", packet) ++ movie.bytes();
+    }
+}
+
+fn expectAlacPacketRejected(comptime cookie: TestMovie, comptime packet: []const u8) !void {
+    var memory = storage.MemorySource{ .bytes = comptime alacPacketStream(cookie, packet) };
+    var decoder = try openDecoder(std.testing.allocator, memory.readable());
+    defer decoder.deinit();
+    const output = try std.testing.allocator.alloc(f32, @as(usize, cookie.frame_length) * cookie.channels);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectError(error.AlacDecodeFailed, decodeAll(&decoder, output));
+}
+
+test "ALAC rejects a partial frame claiming more samples than the stream holds" {
+    const mono: TestMovie = .{ .channels = 1 };
+    const stereo: TestMovie = .{};
+    // partialFrame set, numSamples 4097 and 65536, both past frameLength 4096.
+    try expectAlacPacketRejected(mono, "\x00\x00\x12\x00\x00\x20\x03\xc0");
+    try expectAlacPacketRejected(mono, "\x00\x00\x12\x00\x02\x00\x01\xc0");
+    try expectAlacPacketRejected(stereo, "\x20\x00\x12\x00\x00\x20\x03\xc0");
+    try expectAlacPacketRejected(stereo, "\x20\x00\x12\x00\x02\x00\x01\xc0");
+}
+
+test "ALAC rejects an uncompressed frame whose samples run past the packet" {
+    const mono: TestMovie = .{ .channels = 1 };
+    const stereo: TestMovie = .{};
+    // escape set, no partial frame: the full frameLength of samples would be
+    // read from a three-byte packet.
+    try expectAlacPacketRejected(mono, "\x00\x00\x02");
+    try expectAlacPacketRejected(stereo, "\x20\x00\x02");
+}
+
+test "ALAC rejects a shift-off region that advances past the packet" {
+    const mono24: TestMovie = .{ .channels = 1, .bit_depth = 24 };
+    const stereo: TestMovie = .{};
+    // bytesShifted 1, escape clear: the skip over the shift region advances the
+    // bit reader far past the nine- and seven-byte packets.
+    try expectAlacPacketRejected(stereo, "\x20\x00\x04\x00\x00\x00\x00\x00\x00");
+    try expectAlacPacketRejected(mono24, "\x00\x00\x04\x00\x00\x00\x00");
+}
+
+test "ALAC rejects a packet that ends inside the element header" {
+    const mono: TestMovie = .{ .channels = 1 };
+    const stereo: TestMovie = .{};
+    // The header and coefficient reads run past these one- and two-byte
+    // packets into the zero padding, leaving the bit reader past the end.
+    try expectAlacPacketRejected(mono, "\x00");
+    try expectAlacPacketRejected(stereo, "\x20\x00");
+}
+
+test "ALAC rejects a zero-length packet" {
+    var track = try openFixture("fixtures/audio/tagged-reference-alac.m4a");
+    defer track.deinit();
+    var engine = try @import("alac.zig").open(track.codec.alac);
+    defer engine.deinit();
+    const output = try std.testing.allocator.alloc(i32, @as(usize, engine.max_packet_frames) * engine.channels);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectError(error.AlacDecodeFailed, engine.decodeI32(&[_]u8{}, output));
+}
+
+test "ALAC decodes a frame shorter than its predictor order" {
+    // frameLength 16, 30 active predictor coefficients: the warm-up loop must
+    // stop at the frame length rather than writing past the output buffer.
+    const cookie: TestMovie = .{ .channels = 1, .frame_length = 16 };
+    const packet = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x7c } ++ @as([70]u8, @splat(0));
+    var memory = storage.MemorySource{ .bytes = comptime alacPacketStream(cookie, &packet) };
+    var decoder = try openDecoder(std.testing.allocator, memory.readable());
+    defer decoder.deinit();
+    const output = try std.testing.allocator.alloc(f32, 16);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqual(@as(usize, 16), try decodeAll(&decoder, output));
+}
+
+test "ALAC rejects a cookie with an out-of-range field" {
+    @setEvalBranchQuota(4000);
+    inline for (.{
+        TestMovie{ .frame_length = 0 },
+        TestMovie{ .bit_depth = 8 },
+        TestMovie{ .channels = 9 },
+        TestMovie{ .kb = 0 },
+        TestMovie{ .kb = 32 },
+    }) |cookie| {
+        var memory = storage.MemorySource{ .bytes = comptime cookie.bytes() };
+        try std.testing.expectError(error.InvalidAlac, openDecoder(std.testing.allocator, memory.readable()));
+    }
+}
+
+test "ALAC rejects a packet whose mix shift exceeds the sample width" {
+    var file = try storage.LocalFileSource.open(std.testing.io, "fixtures/audio/tagged-reference-alac.m4a");
+    defer file.close();
+    var track = try readTrack(std.testing.allocator, file.readable());
+    defer track.deinit();
+    const sample = track.samples[0];
+    const packet = try std.testing.allocator.alloc(u8, sample.size);
+    defer std.testing.allocator.free(packet);
+    try std.testing.expectEqual(@as(usize, sample.size), try file.readable().readAt(sample.offset, packet));
+
+    // mixBits is the 8-bit field at stream bit offset 23: its top bit is the
+    // low bit of packet[2], its low seven are the high seven of packet[3].
+    const mix_bits: u8 = 32;
+    packet[2] = (packet[2] & 0xfe) | (mix_bits >> 7);
+    packet[3] = (packet[3] & 0x01) | (mix_bits << 1);
+
+    var engine = try @import("alac.zig").open(track.codec.alac);
+    defer engine.deinit();
+    const output = try std.testing.allocator.alloc(i32, @as(usize, engine.max_packet_frames) * engine.channels);
+    defer std.testing.allocator.free(output);
+    try std.testing.expectError(error.AlacDecodeFailed, engine.decodeI32(packet, output));
+}
+
+test "24-bit ALAC in MP4 decodes bit-identically to the FLAC it was encoded from" {
+    const alac = try std.testing.allocator.alloc(f32, 4_096 * 2);
+    defer std.testing.allocator.free(alac);
+    const flac = try std.testing.allocator.alloc(f32, 4_096 * 2);
+    defer std.testing.allocator.free(flac);
+    const alac_frames = try decodeFixture("fixtures/audio/hires-reference-alac.m4a", alac);
+    const flac_frames = try decodeFixture("fixtures/audio/hires-reference.flac", flac);
+    try std.testing.expectEqual(@as(usize, 4_096), alac_frames);
+    try std.testing.expectEqual(flac_frames, alac_frames);
+    try std.testing.expectEqualSlices(f32, flac[0 .. flac_frames * 2], alac[0 .. alac_frames * 2]);
 }

@@ -154,6 +154,18 @@ flac --force-raw-format --endian=little --sign=signed --channels=2 --bps=24 \
   --sample-rate=192000 --no-padding -o hires-reference.flac hires-reference.raw
 ```
 
+`audio/hires-reference-alac.m4a` is `audio/hires-reference.flac` encoded as
+24-bit ALAC in MP4 by FFmpeg. Its packets use ALAC's shift-off path, storing the
+low byte of each sample outside the predicted stream, which the 16-bit fixtures
+do not exercise. The decoder test confirms its samples equal the FLAC's.
+`-map_metadata -1 -fflags +bitexact` drop the source tags and the encoder
+version so the file names neither host nor user and rebuilds byte-identically:
+
+```sh
+ffmpeg -i hires-reference.flac -map_metadata -1 -fflags +bitexact \
+  -c:a alac hires-reference-alac.m4a
+```
+
 `audio/lyrics-synced.flac` is `audio/generated-reference.flac` retagged with
 synced LRC in a `LYRICS` comment:
 
@@ -194,6 +206,13 @@ empty group.
 `fuzz/mp4/` an ALAC frame with an oversized declared length and `fuzz/lrc/` LRC
 files with extreme offsets, a byte order mark, comments and section tags. Each
 seeds the fuzz target of the same name.
+
+`fuzz/alac/*.bin` are a 24-byte ALACSpecificConfig cookie followed by one
+packet: the crafted packets that probe each decoder bounds check (a partial
+frame claiming too many samples, an uncompressed frame and a shift region
+running past the packet, a packet ending inside the header, an out-of-range
+`kb`), a valid 16-bit and a valid 24-bit packet from the reference fixtures, and
+a short frame. The same files seed `scripts/alac-sanitize.sh`.
 
 `eq/hd650.txt` is a hand-written EqualizerAPO file shaped like a headphone
 correction: a -3 dB preamp, a low shelf, two peaks and a high shelf. Its values

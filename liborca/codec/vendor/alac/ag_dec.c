@@ -18,6 +18,8 @@
  * @APPLE_APACHE_LICENSE_HEADER_END@
  */
 
+/* Modified by Orca; see ORCA-CHANGES. */
+
 /*
 	File:		ag_dec.c
 	
@@ -287,7 +289,7 @@ int32_t dyn_decomp( AGParamRecPtr params, BitBuffer * bitstream, int32_t * pc, i
 
 	in = bitstream->cur;
 	startPos = bitstream->bitIndex;
-	maxPos = bitstream->byteSize * 8;
+	maxPos = ( in < bitstream->end ) ? (uint32_t)( bitstream->end - in ) * 8 : 0;
 	bitPos = startPos;
 
     mb = params->mb0;
@@ -334,6 +336,7 @@ int32_t dyn_decomp( AGParamRecPtr params, BitBuffer * bitstream, int32_t * pc, i
         {
             zmode = 1;
             k = lead(mb) - BITOFF+((mb+MOFF)>>MDENSHIFT);
+            RequireAction( k <= 31, status = kALAC_ParamError; goto Exit; );
             mz = ((1<<k)-1) & wb_local;
 
             n = dyn_get(in, &bitPos, mz, k);

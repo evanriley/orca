@@ -69,7 +69,7 @@ const scanner_fixtures = id3v2_fixtures ++ mp4_fixtures ++ vorbis_comment_fixtur
     aiff_fixtures ++ adts_fixtures ++ mp3_stream_fixtures;
 const playlist_fixtures = [_][]const u8{ "relative.m3u8", "latin1.m3u", "bom.m3u8" };
 const lrc_fixtures = [_][]const u8{"fingerprint-reference.lrc"};
-const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner", "lrc" };
+const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner", "lrc", "alac" };
 const audio_fixture_dir = "fixtures/audio";
 
 test "fuzz: ID3v2 tags parse or fail cleanly" {
@@ -110,6 +110,10 @@ test "fuzz: M3U playlists parse and resolve or fail cleanly" {
 
 test "fuzz: LRC lyrics parse or fail cleanly" {
     try fuzzTarget(exerciseLrc, audio_fixture_dir, &lrc_fixtures, &.{"lrc"});
+}
+
+test "fuzz: ALAC packets decode or fail cleanly" {
+    try fuzzTarget(exerciseAlac, "fixtures/fuzz", &.{}, &.{"alac"});
 }
 
 test "fuzz: smart playlist rules parse and compile to bound parameters or fail cleanly" {
@@ -400,6 +404,17 @@ fn exerciseM3u(allocator: std.mem.Allocator, input: []const u8) void {
             .unsupported => {},
         }
     }
+}
+
+fn exerciseAlac(allocator: std.mem.Allocator, input: []const u8) void {
+    if (input.len < 24) return;
+    const engine = codec.alac.open(input[0..24]) catch return;
+    defer engine.deinit();
+    const samples = @as(usize, engine.max_packet_frames) * @as(usize, engine.channels);
+    if (samples == 0) return;
+    const output = allocator.alloc(f32, samples) catch return;
+    defer allocator.free(output);
+    _ = engine.decode(input[24..], output) catch return;
 }
 
 fn decodeSome(allocator: std.mem.Allocator, opened: codec.Decoder) void {
