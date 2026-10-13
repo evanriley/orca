@@ -92,6 +92,23 @@ name. Changes made after the upgrade are not in the copy.
   `user_version` for the check below. Every connection sets `foreign_keys=ON`,
   a five-second busy timeout and SQLite's full-mutex mode; the schema-check
   connection drops its busy timeout to zero after its first read.
+- Beyond those pragmas, every connection keeps the SQLite defaults: a 2 MiB
+  page cache per connection, temporary tables and sort spill files on disk,
+  and no memory-mapped I/O. Measured on a 500,000-track Library (3.2 GB,
+  `bench`, ReleaseFast, 3 to 5 runs per configuration):
+  - `cache_size=-65536` (64 MiB) changed no page class by 15 % or more. The
+    stored-embedding scan went from 35 to 37 ms to 31 to 33 ms (512 values)
+    and stayed at 43 to 44 ms (768 values); the page cache holds the file
+    either way.
+  - `temp_store=MEMORY` made the `date_added` sort at deep offsets 45 % faster
+    (570 to 315 ms at offset 250,000) and the scan/insert phase about 25 %
+    faster (72 to 54 s), but library stats 5 to 15 % slower (490 to 520 to 570
+    ms) and raised the benchmark's peak resident memory from 536 MB to
+    1,117 MB. Sort memory that grows with the Library is not accepted in an
+    embedded engine.
+  - `mmap_size=268435456` changed nothing measurable. A memory-mapped file
+    turns an I/O error or a truncated file on a removable or network volume
+    into `SIGBUS` in the host process, so it is not set.
 - Which connection a call uses is chosen inside the database layer, not at the
   call site. A thread that holds the write lane reads and writes through the
   primary connection, so a flow inside a write transaction sees its own
