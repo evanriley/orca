@@ -3,9 +3,10 @@
 # Fail when a public Runtime method has no C ABI path and is not listed below
 # with the reason it has none. A new Runtime method either gets an orca_*
 # function in liborca/c_api.zig or an entry here; an entry for a method that
-# is gone, or that c_api.zig now calls, fails as well. Only c_api.zig up to
-# its first test counts, so test rigs do not cover anything. It also fails when
-# an orca_* function that orca.h declares is never called by the C smoke test.
+# is gone, or that c_api.zig now calls, fails as well. c_api.zig holds no
+# tests (they live in c_api_tests.zig), so every method it calls is a real
+# ABI path. It also fails when an orca_* function that orca.h declares is
+# never called by the C smoke test.
 #
 # Usage:
 #   scripts/check-abi-coverage.sh liborca/core/runtime.zig liborca/c_api.zig \
@@ -76,8 +77,7 @@ declare -A reasons=(
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)
-called=$(awk '/^test "/ { exit } { print }' "$c_api" |
-    grep -oE '\.[A-Za-z0-9_]+\(' | tr -d '.(' | sort -u)
+called=$(grep -oE '\.[A-Za-z0-9_]+\(' "$c_api" | tr -d '.(' | sort -u)
 
 uncovered=()
 stale=()
