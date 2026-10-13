@@ -88,6 +88,60 @@ test "setEmbeddingModelPath_noFileAnotherFileAndTheModel_reportsMissingWrongFile
     try testing.expectEqual(EmbeddingModelState.missing, runtime.embeddingModelState());
 }
 
+test "setEmbeddingModelPath_fileOfAModelsSizeWithAnotherDigest_isReadyUntilAnAnalysisRefusesIt" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var models = testing.tmpDir(.{});
+    defer models.cleanup();
+    {
+        const file = try models.dir.createFile(testing.io, "model.onnx", .{});
+        defer file.close(testing.io);
+        try file.setLength(testing.io, audio_embedding.ModelId.clap_htsat_unfused.spec().size);
+    }
+    const impostor = try temporaryPath(&models, "model.onnx");
+    defer testing.allocator.free(impostor);
+    var runtime = OrcaRuntime.init(testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedLibrary(&runtime, &temporary, "file:orca-runtime-embedding-impostor?mode=memory&cache=shared");
+
+    try runtime.setEmbeddingModelPath(impostor);
+    try testing.expectEqual(EmbeddingModelState.ready, runtime.embeddingModelState());
+    try testing.expectEqual(@as(?audio_embedding.ModelId, .clap_htsat_unfused), runtime.embeddingModel());
+
+    const stats = try analyse(&runtime, library);
+    try testing.expectEqual(@as(u64, fixture_files), stats.files_seen);
+    try testing.expectEqual(@as(i64, 0), try storedEmbeddings(&runtime, library));
+    try testing.expectEqual(EmbeddingModelState.wrong_file, runtime.embeddingModelState());
+    try testing.expectEqual(@as(?audio_embedding.ModelId, null), runtime.embeddingModel());
+}
+
+test "libraryAnalyzeFile_fileOfAModelsSizeWithAnotherDigest_storesNoEmbeddingAndReportsWrongFile" {
+    if (!audio_embedding.enabled) return error.SkipZigTest;
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/fingerprint-reference.mp3", "song.mp3");
+    const song = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}/song.mp3", .{temporary.sub_path});
+    defer testing.allocator.free(song);
+    {
+        const file = try temporary.dir.createFile(testing.io, "model.onnx", .{});
+        defer file.close(testing.io);
+        try file.setLength(testing.io, audio_embedding.ModelId.discogs_maest.spec().size);
+    }
+    const impostor = try temporaryPath(&temporary, "model.onnx");
+    defer testing.allocator.free(impostor);
+    var runtime = OrcaRuntime.init(testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(testing.io, "file:orca-runtime-embedding-impostor-one-file?mode=memory&cache=shared");
+
+    try runtime.setEmbeddingModelPath(impostor);
+    const measured = try runtime.libraryAnalyzeFile(library, testing.io, song);
+    defer measured.deinit();
+    try testing.expect(measured.embedding == null);
+    try testing.expectEqual(@as(i64, 0), try storedEmbeddings(&runtime, library));
+    try testing.expectEqual(EmbeddingModelState.wrong_file, runtime.embeddingModelState());
+}
+
 test "setEmbeddingModelPath_builtWithoutEmbeddings_reportsBuiltWithout" {
     if (audio_embedding.enabled) return error.SkipZigTest;
     var runtime = OrcaRuntime.init(testing.allocator);

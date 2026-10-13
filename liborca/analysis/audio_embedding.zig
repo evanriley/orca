@@ -184,7 +184,31 @@ pub const ModelId = enum(u8) {
         }
         return null;
     }
+
+    pub fn ofDigest(size: u64, sha256: *const [Sha256.digest_length]u8) ?ModelId {
+        const id = ofFileSize(size) orelse return null;
+        return if (std.mem.eql(u8, &id.spec().sha256, sha256)) id else null;
+    }
 };
+
+const digest_chunk_bytes = 64 * 1024;
+
+pub fn fileHolds(io: std.Io, file: std.Io.File, size: u64, sha256: *const [Sha256.digest_length]u8) !bool {
+    if ((try file.stat(io)).size != size) return false;
+    var hasher: Sha256 = .init(.{});
+    var chunk: [digest_chunk_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < size) {
+        const wanted: usize = @intCast(@min(chunk.len, size - offset));
+        const read = try file.readPositionalAll(io, chunk[0..wanted], offset);
+        if (read == 0) return false;
+        hasher.update(chunk[0..read]);
+        offset += read;
+    }
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    return std.mem.eql(u8, &digest, sha256);
+}
 
 fn largestOf(comptime measure: fn (*const ModelSpec) usize) usize {
     var largest: usize = 0;
@@ -419,40 +443,52 @@ pub const Model = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Model {
         if (!enabled) return error.EmbeddingsNotBuilt;
-        const verified = try readVerified(allocator, io, path);
-        defer allocator.free(verified.bytes);
+        const file = try openFile(io, path);
+        defer file.close(io);
+        const id = try sizedAs(io, file);
+        const spec = id.spec();
+        const bytes = try allocator.alloc(u8, spec.size);
+        defer allocator.free(bytes);
+        if (try file.readPositionalAll(io, bytes, 0) != bytes.len) return error.EmbeddingModelMismatch;
+        // Hash the buffer the session is built from: a path hashed and then
+        // reopened could be swapped in between.
+        var digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(bytes, &digest, .{});
+        if (!std.mem.eql(u8, &digest, &spec.sha256)) return error.EmbeddingModelMismatch;
         var shim: ?*ShimModel = null;
-        return switch (orca_embedding_model_create(verified.bytes.ptr, verified.bytes.len, &shim)) {
-            shim_ok => .{ .shim = shim.?, .id = verified.id },
+        return switch (orca_embedding_model_create(bytes.ptr, bytes.len, &shim)) {
+            shim_ok => .{ .shim = shim.?, .id = id },
             shim_runtime_too_old => error.EmbeddingRuntimeTooOld,
             else => error.EmbeddingSessionFailed,
         };
     }
 
-    pub fn verify(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ModelId {
-        const verified = try readVerified(allocator, io, path);
-        allocator.free(verified.bytes);
-        return verified.id;
+    pub fn verify(io: std.Io, path: []const u8) !ModelId {
+        if (!enabled) return error.EmbeddingsNotBuilt;
+        const file = try openFile(io, path);
+        defer file.close(io);
+        const id = try sizedAs(io, file);
+        const spec = id.spec();
+        if (!try fileHolds(io, file, spec.size, &spec.sha256)) return error.EmbeddingModelMismatch;
+        return id;
     }
 
-    const Verified = struct { bytes: []u8, id: ModelId };
-
-    fn readVerified(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Verified {
+    pub fn recognise(io: std.Io, path: []const u8) !ModelId {
         if (!enabled) return error.EmbeddingsNotBuilt;
-        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return error.EmbeddingModelMissing,
-            else => return err,
-        };
+        const file = try openFile(io, path);
         defer file.close(io);
-        const id = ModelId.ofFileSize((try file.stat(io)).size) orelse return error.EmbeddingModelMismatch;
-        const spec = id.spec();
-        const bytes = try allocator.alloc(u8, spec.size);
-        errdefer allocator.free(bytes);
-        if (try file.readPositionalAll(io, bytes, 0) != bytes.len) return error.EmbeddingModelMismatch;
-        var digest: [Sha256.digest_length]u8 = undefined;
-        Sha256.hash(bytes, &digest, .{});
-        if (!std.mem.eql(u8, &digest, &spec.sha256)) return error.EmbeddingModelMismatch;
-        return .{ .bytes = bytes, .id = id };
+        return sizedAs(io, file);
+    }
+
+    fn openFile(io: std.Io, path: []const u8) !std.Io.File {
+        return std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => error.EmbeddingModelMissing,
+            else => err,
+        };
+    }
+
+    fn sizedAs(io: std.Io, file: std.Io.File) !ModelId {
+        return ModelId.ofFileSize((try file.stat(io)).size) orelse error.EmbeddingModelMismatch;
     }
 
     pub fn deinit(self: *Model) void {
@@ -1189,6 +1225,89 @@ test "open_fileOfAnotherSize_reportsMismatch" {
     try testing.expectError(error.EmbeddingModelMismatch, Model.open(testing.allocator, testing.io, path));
 }
 
+const DigestFile = struct {
+    const length = 3 * digest_chunk_bytes + 17;
+
+    temporary: testing.TmpDir,
+    bytes: []u8,
+    sha256: [Sha256.digest_length]u8,
+
+    fn init() !DigestFile {
+        const bytes = try testing.allocator.alloc(u8, length);
+        for (bytes, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+        var sha256: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(bytes, &sha256, .{});
+        return .{ .temporary = testing.tmpDir(.{}), .bytes = bytes, .sha256 = sha256 };
+    }
+
+    fn deinit(self: *DigestFile) void {
+        testing.allocator.free(self.bytes);
+        self.temporary.cleanup();
+    }
+
+    fn holds(self: *DigestFile, written: []const u8) !bool {
+        try self.temporary.dir.writeFile(testing.io, .{ .sub_path = "file", .data = written });
+        const file = try self.temporary.dir.openFile(testing.io, "file", .{});
+        defer file.close(testing.io);
+        return fileHolds(testing.io, file, length, &self.sha256);
+    }
+};
+
+test "fileHolds_fileOfSeveralChunksWithTheDigest_isHeld" {
+    var rig: DigestFile = try .init();
+    defer rig.deinit();
+    try testing.expect(try rig.holds(rig.bytes));
+}
+
+test "fileHolds_oneByteChangedInAnyChunk_isNotHeld" {
+    var rig: DigestFile = try .init();
+    defer rig.deinit();
+    for ([_]usize{ 0, digest_chunk_bytes, DigestFile.length - 1 }) |index| {
+        rig.bytes[index] ^= 1;
+        try testing.expect(!try rig.holds(rig.bytes));
+        rig.bytes[index] ^= 1;
+    }
+}
+
+test "fileHolds_shorterLongerOrEmptyFile_isNotHeld" {
+    var rig: DigestFile = try .init();
+    defer rig.deinit();
+    try testing.expect(!try rig.holds(rig.bytes[0 .. DigestFile.length - 1]));
+    try testing.expect(!try rig.holds(""));
+    const longer = try std.mem.concat(testing.allocator, u8, &.{ rig.bytes, "x" });
+    defer testing.allocator.free(longer);
+    try testing.expect(!try rig.holds(longer));
+}
+
+test "ofDigest_sizeAndDigestOfAModel_namesItAndAnythingElseNamesNone" {
+    for (std.enums.values(ModelId)) |id| {
+        const spec = id.spec();
+        try testing.expectEqual(@as(?ModelId, id), ModelId.ofDigest(spec.size, &spec.sha256));
+        try testing.expectEqual(@as(?ModelId, null), ModelId.ofDigest(spec.size + 1, &spec.sha256));
+        var other = spec.sha256;
+        other[0] ^= 1;
+        try testing.expectEqual(@as(?ModelId, null), ModelId.ofDigest(spec.size, &other));
+    }
+    try testing.expectEqual(@as(?ModelId, null), ModelId.ofDigest(clap_spec.size, &maest_spec.sha256));
+}
+
+test "verify_missingFileAndFileOfAnotherSize_reportsMissingAndMismatch" {
+    if (!enabled) return error.SkipZigTest;
+    var temporary = testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(testing.io, .{ .sub_path = "short.onnx", .data = "not the model" });
+    const directory = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer testing.allocator.free(directory);
+    const short = try std.fs.path.join(testing.allocator, &.{ directory, "short.onnx" });
+    defer testing.allocator.free(short);
+    const absent = try std.fs.path.join(testing.allocator, &.{ directory, "absent.onnx" });
+    defer testing.allocator.free(absent);
+    inline for (.{ Model.verify, Model.recognise }) |check| {
+        try testing.expectError(error.EmbeddingModelMissing, check(testing.io, absent));
+        try testing.expectError(error.EmbeddingModelMismatch, check(testing.io, short));
+    }
+}
+
 fn expectFlippedByteMismatch(model: ModelId) !void {
     const model_path = try testModelPath(model);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, model_path, testing.allocator, .limited(model.spec().size + 1));
@@ -1200,7 +1319,7 @@ fn expectFlippedByteMismatch(model: ModelId) !void {
     const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/model.onnx", .{temporary.sub_path});
     defer testing.allocator.free(path);
     try testing.expectError(error.EmbeddingModelMismatch, Model.open(testing.allocator, testing.io, path));
-    try testing.expectError(error.EmbeddingModelMismatch, Model.verify(testing.allocator, testing.io, path));
+    try testing.expectError(error.EmbeddingModelMismatch, Model.verify(testing.io, path));
 }
 
 test "open_modelWithOneByteFlipped_reportsMismatch" {
@@ -1213,7 +1332,7 @@ test "open_maestModelWithOneByteFlipped_reportsMismatch" {
 
 fn expectRecognised(expected: ModelId) !void {
     const model_path = try testModelPath(expected);
-    try testing.expectEqual(expected, try Model.verify(testing.allocator, testing.io, model_path));
+    try testing.expectEqual(expected, try Model.verify(testing.io, model_path));
     var model = try Model.open(testing.allocator, testing.io, model_path);
     defer model.deinit();
     try testing.expectEqual(expected, model.id);
