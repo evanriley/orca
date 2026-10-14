@@ -110,7 +110,9 @@ On pushes to `main` the `nix` job uploads the package to the
 
 The `test` job restores `.zig-cache`, `~/.cache/zig` and
 `examples/embed/.zig-cache` from the newest cache whose key starts with
-`zig-debug-` and the hash of `build.zig.zon` and `flake.lock`. Only pushes to
+`zig-debug-` and the hash of `build.zig.zon` and `flake.lock`. A pull request
+that changes either file falls back to the newest `zig-debug-` cache; a push
+to `main` starts cold instead, which drops stale entries. Only pushes to
 `main` save the cache, and only when the three directories total at most
 4 GiB.
 
