@@ -20,7 +20,7 @@ core, several native frontends, no frontend owning behaviour.
                                          |
    library · database · storage · codec · metadata · audio · analysis · jobs
                                          |
-  SQLite · libFLAC · minimp3 · ALAC · libxaac · Xiph libraries · PipeWire
+  SQLite · libFLAC · mpg123 · ALAC · libxaac · Xiph libraries · PipeWire
   Chromaprint · KissFFT · libsamplerate · ONNX Runtime
 ```
 
@@ -69,7 +69,7 @@ codec error, and a property the container does not state is null, not zero.
 | --- | --- | --- | --- |
 | WAV, AIFF, AIFC | Zig (`wav.zig`, `aiff.zig`) | none needed | exact frame counts |
 | FLAC | libFLAC | BSD-3-Clause | STREAMINFO total |
-| MPEG audio | Zig framing, vendored minimp3 | CC0 | Xing/Info and LAME delay and padding |
+| MPEG audio | mpg123 | LGPL-2.1 | Xing/Info and LAME delay and padding |
 | AAC, HE-AAC, xHE-AAC | libxaac | Apache-2.0 | MP4 edit list; ADTS has no priming |
 | ALAC | Apple reference decoder | Apache-2.0 | MP4 edit list, then `iTunSMPB` |
 | Ogg Opus | opusfile | BSD-3-Clause | libraries trim pre-skip and end |
@@ -77,9 +77,10 @@ codec error, and a property the container does not state is null, not zero.
 | QOA | `qoa.h` from `phoboslab/qoa` | MIT | frame counts |
 
 Each C or C++ library sits behind one shim file in `liborca/codec/`
-(`flac_shim.c`, `mp3_shim.c`, `aac_shim.c`, `alac_shim.cpp`, `opus_shim.c`,
-`vorbis_shim.c`, `qoa_shim.c`). No library type, and no C type beyond
-fixed-width integers, is visible above its shim.
+(`flac_shim.c`, `aac_shim.c`, `alac_shim.cpp`, `opus_shim.c`, `vorbis_shim.c`,
+`qoa_shim.c`), or, for mpg123, behind the Zig declarations in `mp3.zig`. No
+library type, and no C type beyond fixed-width integers, is visible above its
+shim or outside `mp3.zig`.
 
 A new format uses an existing Zig decoder that is correct first, then the
 format's reference C library behind one shim, and Orca writes its own decoder
@@ -98,9 +99,8 @@ package that did not decode losslessly was replaced by libFLAC.
   seek to or past it succeeds, the next read returns zero frames and
   `Decoder.damage` reports nothing for it. A later seek inside the stream
   resumes decoding. A stream that declares no length (Ogg, Opus and FLAC with
-  an unknown total, MP3 without a length header) cannot be clamped, and a
-  target past its end is whatever the underlying library does with it, usually
-  a seek error.
+  an unknown total) cannot be clamped, and a target past its end is whatever
+  the underlying library does with it, usually a seek error.
 - A probe reports the encoding as a stable lowercase `decoder.codec_id`: `pcm`,
   `pcm_float`, `flac`, `qoa`, `mp1`, `mp2`, `mp3`, `alac`, `aac`, `opus`,
   `vorbis`. The scanner stores it in `files.codec`. `codec` names the encoding
@@ -108,14 +108,19 @@ package that did not decode losslessly was replaced by libFLAC.
   while `audio_format` names the container and decides who opens it.
   `codec_id.isLossless` derives lossy from lossless, so no second column can
   disagree.
-- MP3 length and trimming come from the stream, never the decoder: reported
-  length is `frames * samples_per_frame - delay - padding` from the Xing or Info
-  header and LAME extension, and the head is trimmed by `delay + 529`. Without a
-  header the length is estimated and `StreamInfo.exact_length` is false.
-  Trailing ID3v1, APEv2 and Lyrics3 tags are excluded from the audio region, and
-  a synthesized silent frame terminates streams of exact length; without both,
-  the final frame is lost. Seeks back off far enough for the Layer III bit
-  reservoir to refill.
+- mpg123 decodes MPEG audio Layers I, II and III through Orca's
+  `ReadableSource`, so it never sees a path or a descriptor. It reads the
+  length from the Xing or Info header and trims the LAME encoder delay and
+  padding. Without such a header the length is estimated from the file size
+  and the first frame's bit rate; mpg123 does not read Fraunhofer VBRI headers,
+  so a VBRI-only stream gets the estimate too. Opening skips the ID3v2 tag,
+  reads the first frame and checks the end of the file for an ID3v1 tag; it
+  never scans the stream.
+- An MPEG seek is sample-exact: mpg123 finds the frame in a frame index of at
+  most 1,000 entries, which halves its resolution instead of growing, then
+  walks forward and decodes up to 18 frames ahead of the target so the Layer
+  III bit reservoir is full. Junk between frames is skipped for at most 128 KiB
+  before the stream is refused.
 - MP4 (`codec/mp4.zig`) reads the first sound track whose sample entry is `alac`
   or `mp4a`. The movie box is bounded at 64 MiB and the packet table at 4 Mi
   packets. A decoder that withholds the start of a packet shifts every later
@@ -174,9 +179,9 @@ copyleft dependency that can reasonably be optional gets a build option so a
 build without it stays possible. A frontend may dynamically link its platform
 toolkit or keyring. Third-party source that Orca changes lives in a fork at
 `github.com/evanriley/<name>`, with each change as a commit, pinned by commit
-in `build.zig.zon`; the repository holds no third-party source other than
-minimp3. `zig build` installs the licence texts of vendored and source-built
-code under `share/doc/orca/licenses`.
+in `build.zig.zon`; the repository holds no third-party source. `zig build`
+installs the licence texts of source-built code under
+`share/doc/orca/licenses`.
 
 | Dependency | Licence | How it is used |
 | --- | --- | --- |
@@ -185,7 +190,7 @@ code under `share/doc/orca/licenses`.
 | libsamplerate | BSD-2-Clause | system library, behind `samplerate_shim.c` |
 | PipeWire | MIT | system library on Linux, behind `pipewire_shim.c` |
 | ONNX Runtime | MIT | system library, behind `embedding_shim.c` |
-| minimp3 | CC0 | vendored in `liborca/codec/vendor/minimp3` |
+| mpg123 | LGPL-2.1 | dynamically linked system library, declared in `mp3.zig` |
 | QOA | MIT | built from source by `build.zig`, pinned in `build.zig.zon` |
 | ALAC | Apache-2.0 | built from the `evanriley/alac` fork by `build/alac.zig` |
 | libxaac | Apache-2.0 | built from source by `build.zig` |

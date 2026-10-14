@@ -11,6 +11,7 @@
   libopus,
   opusfile,
   libvorbis,
+  libmpg123,
   libsamplerate,
   onnxruntime,
   pipewire,
@@ -56,6 +57,7 @@ stdenv.mkDerivation (finalAttrs: {
     libopus
     opusfile
     libvorbis
+    libmpg123
     libsamplerate
     onnxruntime
     pipewire

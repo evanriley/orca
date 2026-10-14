@@ -196,12 +196,6 @@
   instead of as a generic failure. `liborca.libraryUpgradeCopyPath` returns the
   copy's path. The scanner and the folder watcher ignore the copy.
 
-- **Every vendored decoder records its exact upstream commit.** New
-  `ORCA-CHANGES` files beside the vendored minimp3 (lieff/minimp3 `ea99364f`,
-  CC0) and QOA (phoboslab/qoa `bc058971`, MIT) sources record the upstream
-  repository, commit, licence, compiled files and header SHA-256, both vendored
-  unmodified, so a future advisory can be matched to Orca's copy.
-
 - **The fuzz suite and CI now cover more untrusted-byte paths.** New fuzz
   targets feed bytes through the ID3v1, image-header, fingerprint, job-history
   retry and provider-response parsers; an AAC decoder sanitizer harness joins
@@ -363,6 +357,9 @@
   from the `evanriley/alac` fork, which carries the bounds hardening as
   commits, and the QOA decoder from `phoboslab/qoa`, both pinned in
   `build.zig.zon`.
+
+- **MPEG decoding uses the system mpg123 library**, which now handles gapless
+  trimming and seeking.
 
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
   on few Tracks in the Library now weighs more than one on many: a rarity from
