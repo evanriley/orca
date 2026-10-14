@@ -32,7 +32,7 @@ pub const version = @import("version.zig").value;
 
 pub const SupportedFormat = struct {
     name: []const u8,
-    /// Recognized but not yet decoded; see docs/roadmap.md, Deferred formats.
+    /// Recognized but not yet decoded; see docs/roadmap.md, More formats.
     planned: bool = false,
 };
 
