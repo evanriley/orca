@@ -49,6 +49,7 @@
 - `orca-gtk` reads Library stats and the health summary off the main thread.
 - libxaac is pinned to an upstream commit with AAC decoder security fixes.
 - **Breaking:** a Library opened by this version upgrades to schema v7 and cannot then be opened by an older Orca.
+- `zig build test` no longer builds the benchmarks or `examples/embed`; `zig build bench-build` and `embed-example` do, and `zig build test-liborca` runs only liborca's unit and integration tests.
 
 ## 0.4.0 - 2026-10-11
 

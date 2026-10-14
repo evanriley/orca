@@ -28,8 +28,8 @@ exe.root_module.addImport("liborca", orca.module("liborca"));
 The module links its codec libraries and SQLite through the host's pkg-config
 and compiles in the rest; see
 [architecture.md](architecture.md#dependencies-and-licences).
-[`examples/embed`](../examples/embed) is a complete project; `zig build test`
-builds it.
+[`examples/embed`](../examples/embed) is a complete project;
+`zig build embed-example` builds it.
 
 The process rules in [the C ABI's Embedding section](c-abi.md#embedding) apply
 to Zig hosts too. On Linux, the first `Runtime.init` replaces SQLite's `fcntl`
