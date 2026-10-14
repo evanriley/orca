@@ -133,6 +133,7 @@ jobs:
           key: zig-debug-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'flake.lock') }}-${{ github.sha }}
           restore-keys: |
             zig-debug-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'flake.lock') }}-
+            ${{ github.event_name == 'pull_request' && format('zig-debug-{0}-', runner.os) || '' }}
       - run: nix develop -c zig build
       - run: nix develop -c scripts/headless-audio.sh zig build test
       - run: nix develop -c zig build fuzz
