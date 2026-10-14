@@ -254,4 +254,4 @@ output, watcher or app.
 | Command-line interface | [cli.md](cli.md) |
 | Outbound network traffic | [privacy.md](privacy.md) |
 
-What exists, what is next and what is deferred: [roadmap.md](roadmap.md).
+Planned work and ideas: [roadmap.md](roadmap.md).

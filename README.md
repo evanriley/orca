@@ -6,9 +6,10 @@ playback, metadata, analysis and online identification; `orca-gtk` and
 `orca-cli` are thin clients of it, and other applications can embed it through
 its Zig API or C ABI.
 
-Orca is pre-1.0. A release before 1.0 bumps the minor version when it breaks
-the Zig API, the C ABI or the Library schema. Orca builds and plays on
-x86_64 Linux with PipeWire; other platforms are on the roadmap.
+Orca is pre-1.0 ([1.0 readiness](https://github.com/evanriley/orca/issues/43)). A
+release before 1.0 bumps the minor version when it breaks the Zig API, the
+C ABI or the Library schema. Orca builds and plays on x86_64 Linux with
+PipeWire; other platforms are on the roadmap.
 
 Orca changes music files only through a plan the user approves, journaled so
 that an interrupted write is recovered and a finished one can be undone. It
@@ -16,24 +17,38 @@ contacts outside services only for features the user starts or switches on,
 and sends no telemetry; [Privacy](docs/privacy.md) lists each service and what
 it receives.
 
-## Roadmap and status
+## Features
 
-| # | Feature | Status |
-| --- | --- | --- |
-| 1 | Local library, gapless playback, journaled tag writes, identification | ✅ 0.1.0 |
-| 2 | Stable Zig API, C ABI and Library schema (1.0) | ⚠️ [1.0 gates](docs/roadmap.md#before-10) open |
-| 3 | Library radio and mixes | ✅ 0.3.0 |
-| 4 | Tag writing for M4A, Ogg, WAV and AIFF | ❌ |
-| 5 | Full multichannel playback | ❌ |
-| 6 | Fixed output rate with a band-limited resampler | ❌ |
-| 7 | Crossfade, and convolution DSP for room correction | ❌ |
-| 8 | Synchronized multi-zone playback | ❌ |
-| 9 | Conversion and encoding | ❌ |
-| 10 | Secure CD ripping | ❌ |
-| 11 | Terminal client, macOS and Windows apps | ❌ |
+- **Library:** incremental, resumable scanning; files bound to their volume,
+  so an unmounted drive's files are never marked missing; folder watching;
+  browsing by artist, album, track, genre and folder, with one search.
+- **Formats:** FLAC, MP3, AAC and ALAC in MP4, AAC in ADTS, Ogg Opus, Ogg
+  Vorbis, WAV, AIFF and AIFC, and QOA, with gapless trimming.
+- **Tags:** reading ID3, Vorbis comments, MP4 atoms and WAV `INFO`; writing
+  FLAC, MP3 and ADTS tags from an approved plan with undo.
+- **Playback:** gapless output through PipeWire at each source's own sample
+  rate, ReplayGain from Orca's own analysis, a ten-band and a parametric
+  equalizer, crossfeed, and a signal path that says whether playback is
+  bit-perfect.
+- **Listening:** local play history, star ratings, love and hate, playlists
+  with M3U import and export, smart playlists, plain and synced lyrics, and
+  opt-in ListenBrainz scrobbling.
+- **Discovery:** Home, Daily Mixes, and Library Radio from any track, album,
+  artist, genre or decade, scored from local data with a reason for each pick;
+  tempo, key, energy and, with a model installed, sound similarity.
+- **Identification:** MusicBrainz and AcoustID matching that proposes changes
+  for review, Cover Art Archive covers, AcoustID verification and opt-in
+  submission.
+- **Analysis:** loudness, peaks, clipping, silence, waveforms, fingerprints and
+  duplicate detection on a thread pool, with Health issues that each name
+  their fix.
+- **Clients:** `orca-gtk`, a libadwaita player; `orca-cli`; and `liborca` as a
+  Zig API and a C ABI (`liborca.so.0`, `orca.pc`).
+- **Platforms:** x86_64 Linux with PipeWire. `liborca` builds for aarch64
+  macOS without audio output or folder watching.
 
-[The roadmap](docs/roadmap.md) lists releases, what works, known issues, what
-is next, what is planned, ideas and what is not planned.
+[The roadmap](docs/roadmap.md) lists planned work and ideas; defects and
+smaller enhancements are [GitHub issues](https://github.com/evanriley/orca/issues).
 
 ## Install with Nix
 
@@ -354,7 +369,7 @@ output.
 
 - [Architecture](docs/architecture.md): subsystems, dependencies and licences,
   supported formats.
-- [Roadmap](docs/roadmap.md): releases, feature status and the 1.0 gates.
+- [Roadmap](docs/roadmap.md): planned work, ideas and what is not planned.
 - [Releasing](docs/releasing.md): versioning and the release procedure.
 - [Privacy](docs/privacy.md): what each outside service receives.
 - [CLI](docs/cli.md), [Zig API](docs/api.md) and

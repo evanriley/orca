@@ -1,7 +1,9 @@
 # Contributing
 
-Orca is a 0.x preview. The [roadmap](docs/roadmap.md) lists its known issues
-and planned work. Open an issue before starting anything larger than a fix.
+Orca is a 0.x preview. Known issues are
+[GitHub issues](https://github.com/evanriley/orca/issues), and the
+[roadmap](docs/roadmap.md) lists planned work. Open an issue before starting
+anything larger than a fix.
 
 ## Development environment
 

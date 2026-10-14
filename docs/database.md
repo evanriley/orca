@@ -209,7 +209,7 @@ An OFD lock belongs to the open file and survives other closes.
 - An embedder's own multi-connection SQLite use in rollback-journal mode in the
   same process can see spurious `SQLITE_BUSY`.
 - macOS has no OFD locks and keeps POSIX locks
-  ([roadmap.md](roadmap.md#known-issues)).
+  ([#40](https://github.com/evanriley/orca/issues/40)).
 
 ## Bounds
 

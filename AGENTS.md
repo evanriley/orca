@@ -10,8 +10,10 @@ Orca is a local-files-first music player and library-maintenance application
 written in Zig. `liborca/` is the reusable headless engine and the product;
 `apps/` contains thin native clients of its public API.
 
-Feature status belongs only in [docs/roadmap.md](docs/roadmap.md). Subsystem
-behavior and contracts belong in `docs/*.md`. Change an `AGENTS.md` file only
+Direction (Planned, Ideas, Not planned) belongs in
+[docs/roadmap.md](docs/roadmap.md), and what works today in the README's
+Features list. Defects, test gaps and small enhancements are GitHub issues.
+Subsystem behavior and contracts belong in `docs/*.md`. Change an `AGENTS.md` file only
 when an agent working rule changes.
 
 ## Dependencies and licences
@@ -121,7 +123,7 @@ Every implementation change updates the Unreleased section of `CHANGELOG.md`.
 ## Documentation index
 
 - [Architecture and subsystem index](docs/architecture.md)
-- [Feature status](docs/roadmap.md)
+- [Roadmap](docs/roadmap.md)
 - [Release process](docs/releasing.md)
 - [CLI command catalogue](docs/cli.md)
 - [Public Zig API](docs/api.md)
