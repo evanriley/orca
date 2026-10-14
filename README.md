@@ -99,6 +99,8 @@ output.
 - [Install](docs/install.md): Nix, building from source and runtime
   requirements.
 - [Sound similarity](docs/sound-similarity.md): the audio-embedding models.
+- [The Library](docs/library.md): the database file, upgrades, roots and
+  tag writing.
 - [CLI](docs/cli.md): every `orca-cli` command.
 - [Privacy](docs/privacy.md): what each outside service receives.
 - [Zig API](docs/api.md) and [C ABI](docs/c-abi.md): embedding `liborca`.

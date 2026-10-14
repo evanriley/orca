@@ -1237,8 +1237,7 @@ pub const OrcaRuntime = struct {
     ///
     /// Caller-owned bytes plus the media type those bytes actually are; free
     /// with `EmbeddedImage.deinit`. An embedded cover is read from the file on
-    /// every call, and deliberately not cached and deliberately not stored:
-    /// see `docs/metadata.md` for the measurements behind both decisions.
+    /// every call, and deliberately not cached and deliberately not stored.
     ///
     /// A Track with no file, a file that has since gone, and a file with no
     /// cover are all the same answer — null. None of them is a failure a host

@@ -284,9 +284,8 @@ pub const HealthIssueRepository = struct {
 
     /// Record one derived issue without disturbing the others.
     ///
-    /// Each pass owns only the kinds it decides (see `docs/analysis.md`), so
-    /// the projection must not be able to erase a loudness or corruption
-    /// finding on its way past.
+    /// Each pass owns only the kinds it decides, so the projection must not be
+    /// able to erase a loudness or corruption finding on its way past.
     pub fn recordLocked(
         self: *HealthIssueRepository,
         file_id: i64,

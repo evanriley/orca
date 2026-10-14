@@ -1,5 +1,5 @@
 //! Home page data: bounded read-only queries over the Library's listening
-//! history and collection. See docs/discovery.md.
+//! history and collection.
 const std = @import("std");
 const database = @import("../database/root.zig");
 const optionalInt64 = @import("../database/columns.zig").optionalInt64;

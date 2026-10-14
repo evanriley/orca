@@ -10,11 +10,14 @@ Orca is a local-files-first music player and library-maintenance application
 written in Zig. `liborca/` is the reusable headless engine and the product;
 `apps/` contains thin native clients of its public API.
 
-Direction (Planned, Ideas, Not planned) belongs in
-[docs/roadmap.md](docs/roadmap.md), and what works today in the README's
-Features list. Defects, test gaps and small enhancements are GitHub issues.
-Subsystem behavior and contracts belong in `docs/*.md`. Change an `AGENTS.md` file only
-when an agent working rule changes.
+Docs are for users, embedders and contributors: what something is, how to use
+it, and the rules a contributor must keep. They hold no measurements, decision
+history, session notes or implementation narrative; those belong in commit
+messages. Direction (Planned, Ideas, Not planned) belongs in
+[docs/roadmap.md](docs/roadmap.md), what works today in the README's Features
+list, and defects, test gaps and small enhancements in GitHub issues. Rules an
+agent must not break belong in the `AGENTS.md` of the tree they govern. Change
+an `AGENTS.md` file only when an agent working rule changes.
 
 ## Dependencies and licences
 
@@ -43,7 +46,7 @@ package bundles only permissively licensed models. See
 ## Toolchain
 
 - Use Zig 0.17.0, from `nix develop` or direnv, or installed as
-  [the README's requirements](README.md#requirements) describe for a build
+  [the install requirements](docs/install.md#requirements) describe for a build
   outside Nix. This codebase uses `std.Io`, not the older `std.fs` and
   `std.io` APIs.
 - The dev shell supplies SQLite, the codec libraries, PipeWire, GTK4, and
@@ -118,20 +121,19 @@ default output. `scripts/headless-audio.sh zig build test` supplies the private
 PipeWire and WirePlumber setup used by CI. `zig build pipewire-live-smoke` is a
 host-dependent check and is not part of the normal suite.
 
-Every implementation change updates the Unreleased section of `CHANGELOG.md`.
+Every implementation change adds a one-line entry to the Unreleased section of
+`CHANGELOG.md`, as [releasing.md](docs/releasing.md#changelog) describes.
 
 ## Documentation index
 
-- [Architecture and subsystem index](docs/architecture.md)
+- [Install and build](docs/install.md)
+- [The Library, upgrades and tag writing](docs/library.md)
+- [Command-line interface](docs/cli.md)
+- [Sound similarity models](docs/sound-similarity.md)
+- [Privacy](docs/privacy.md)
+- [Zig API](docs/api.md)
+- [Runtime ownership and shutdown](docs/api.md#runtime-ownership-and-shutdown)
+- [C ABI](docs/c-abi.md)
+- [Architecture, formats and dependencies](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
 - [Release process](docs/releasing.md)
-- [CLI command catalogue](docs/cli.md)
-- [Public Zig API](docs/api.md)
-- [Runtime ownership and shutdown](docs/api.md#runtime-ownership-and-shutdown)
-- [Control plane and jobs](docs/control-plane.md)
-- [Audio engine](docs/audio-engine.md)
-- [Database and schema](docs/database.md)
-- [Storage and scanning](docs/storage.md)
-- [Metadata and file mutation](docs/metadata.md)
-- [Providers and listening history](docs/providers.md)
-- [Frontend and C ABI contracts](docs/frontends.md)

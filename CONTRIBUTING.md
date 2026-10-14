@@ -185,17 +185,21 @@ is there and why.
 ## Architecture
 
 Read [docs/architecture.md](docs/architecture.md) before changing code across
-subsystem boundaries. It states the rules that hold everywhere and links each
-subsystem's contract.
+subsystem boundaries. It states the rules that hold everywhere. The rules for
+each tree are in [liborca/AGENTS.md](liborca/AGENTS.md) and
+[apps/linux/AGENTS.md](apps/linux/AGENTS.md).
 
 ## Changes
 
 - Commit messages follow
   [Conventional Commits](https://www.conventionalcommits.org):
   `<type>(<scope>): <description>`, with an optional body and footer.
-- Every change adds an entry to the Unreleased section of `CHANGELOG.md` in the
-  same commit: features, fixes, refactors, removals and breaking changes alike.
-- Behavior and contracts are documented in `docs/*.md`; update the page that
-  owns what you change.
+- Every change adds a one-line entry to the Unreleased section of
+  `CHANGELOG.md` in the same commit, as
+  [releasing.md](docs/releasing.md#changelog) describes. Changes to CI alone
+  need none.
+- Docs are for users, embedders and contributors. Update the page a user,
+  embedder or contributor reads when a change alters what it states; put
+  measurements and the reasons behind a change in the commit message.
 - Provider requests go through `network.Gateway`. Tests use injected
   transports, clocks and local mocks, never live services.

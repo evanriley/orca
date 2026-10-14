@@ -72,7 +72,7 @@ pub const Options = struct {
 /// immutable `[]*ZoneRuntime` into an unclaimed slot and the engine adopts it at
 /// a pass boundary and acknowledges it; the control lane only frees a Zone once
 /// it has observed that acknowledgement. This is the same acknowledged
-/// double-buffering `docs/audio-engine.md` describes for processing chains.
+/// double-buffering the processing chains use.
 pub const PlayerEngine = struct {
     allocator: std.mem.Allocator,
     player: *player_api.Player,

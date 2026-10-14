@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .force });
     // libFLAC behind a narrow shim: the reference decoder is the one that
-    // keeps FLAC's bit-exactness guarantee; see `docs/architecture.md`.
+    // keeps FLAC's bit-exactness guarantee.
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/flac_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },

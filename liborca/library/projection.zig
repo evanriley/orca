@@ -8,7 +8,7 @@
 //! resolution policy, with a user lock outranking everything — and writes
 //! `artists`, `releases`, `recordings` and `tracks` from that. It is therefore
 //! re-runnable after a user edit or a provider acceptance, not only after a
-//! scan. See `docs/database.md`.
+//! scan.
 //!
 //! The unit of work is a `(containing folder, album key)` group: whether a
 //! Release is a compilation is a statement about that set, not one file.
@@ -580,8 +580,8 @@ pub const Projection = struct {
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,
     found_releases: ?*FoundReleases = null,
-    /// Explicit, per `docs/metadata.md`: the projection resolves under a stated
-    /// policy rather than an implied one. A user lock outranks it either way.
+    /// Explicit: the projection resolves under a stated policy rather than an
+    /// implied one. A user lock outranks it either way.
     policy: metadata.ResolutionPolicy = .prefer_file,
 
     /// Resolve every affected group and write the Tracks it implies.
