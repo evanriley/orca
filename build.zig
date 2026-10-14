@@ -394,62 +394,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(cli_printable_tests).step);
 
     if (target.result.os.tag == .linux) {
-        const signal_path_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/signal_path.zig"),
+        const gtk_logic_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/tests.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         }) });
-        test_step.dependOn(&b.addRunArtifact(signal_path_tests).step);
-        const match_outcome_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/match_outcome.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
-        }) });
-        test_step.dependOn(&b.addRunArtifact(match_outcome_tests).step);
-        const radio_reason_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/radio_reason.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
-        }) });
-        test_step.dependOn(&b.addRunArtifact(radio_reason_tests).step);
-        const release_identity_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/release_identity.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
-        }) });
-        test_step.dependOn(&b.addRunArtifact(release_identity_tests).step);
-        const analysis_title_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/analysis_title.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
-        }) });
-        test_step.dependOn(&b.addRunArtifact(analysis_title_tests).step);
-        const embedding_model_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/embedding_model.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
-        }) });
-        test_step.dependOn(&b.addRunArtifact(embedding_model_tests).step);
+        test_step.dependOn(&b.addRunArtifact(gtk_logic_tests).step);
         const queue_menu_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("apps/linux/queue_menu.zig"),
             .target = target,
             .optimize = optimize,
         }) });
         test_step.dependOn(&b.addRunArtifact(queue_menu_tests).step);
-        const browse_model_tests = b.addTest(.{ .root_module = b.createModule(.{
-            .root_source_file = b.path("apps/linux/browse_model.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
-        }) });
-        test_step.dependOn(&b.addRunArtifact(browse_model_tests).step);
         if (gtk) {
             // The GTK4 frontend is Zig and consumes liborca's Zig-facing API
             // directly. GTK itself is bound with hand-written `extern fn`
