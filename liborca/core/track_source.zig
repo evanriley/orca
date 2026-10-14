@@ -24,8 +24,8 @@ pub const OpenTrackError = error{
 
 /// Resolves `library track id -> decodable audio`.
 ///
-/// It holds its own **independent read-only connection**, per `docs/database.md`,
-/// so the engine thread opens tracks without waiting on the Library's single
+/// It holds its own **independent read-only connection**, so the engine thread
+/// opens tracks without waiting on the Library's single
 /// write lane. It does reach for that lane in one place — recording that a file
 /// it could not open is missing — and there it declines rather than waits, for
 /// the reason `markMissingIfLaneFree` gives. The connection and the codec registry are the only state, so the

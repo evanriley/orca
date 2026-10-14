@@ -1,5 +1,5 @@
 //! Daily Mixes: up to six mixes a local day made from the Library's listening
-//! history with the discovery scoring. See docs/discovery.md.
+//! history with the discovery scoring.
 const std = @import("std");
 const database = @import("../database/root.zig");
 const discovery = @import("discovery.zig");

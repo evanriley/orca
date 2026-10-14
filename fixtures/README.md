@@ -148,7 +148,7 @@ ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=
 integer sequence of `midSideProbeSample` in `liborca/codec/flac.zig`, with two
 near-opposite channels whose side signal is odd in every frame, so the encoder
 chooses mid-side stereo and a decoder that skips the low-bit restoration is
-wrong on every sample (see [FLAC](../docs/architecture.md#flac)). The decoder
+wrong on every sample. The decoder
 test regenerates the expected samples from the same sequence.
 
 `audio/hires-reference.flac` is 4,096 frames of 24-bit stereo at 192 kHz built
@@ -238,6 +238,4 @@ that the parser rejects.
 `library/upgrade/v1.sqlite` to `v7.sqlite` are libraries at each released
 schema version, with rows in every user table. `zig build
 regenerate-upgrade-fixtures` rebuilds them from `tests/upgrade_fixtures/`
-and writes identical bytes. [The database
-document](../docs/database.md#upgrade-fixtures)
-describes the seeds and what the upgrade test compares.
+and writes identical bytes.

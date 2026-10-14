@@ -1,5 +1,5 @@
 //! Discovery scoring: ranks the Library's Recordings against a seed for Radio
-//! and Daily Mixes. Every signal is local; see docs/discovery.md.
+//! and Daily Mixes. Every signal is local.
 const std = @import("std");
 const database = @import("../database/root.zig");
 const sqlite = database.sqlite;

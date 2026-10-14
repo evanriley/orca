@@ -39,10 +39,10 @@ fn discoverDeviceKind(factory: output_api.Factory, device_id: u64) contract.Devi
 
 /// A runtime Zone: policy plus the whole private render path.
 ///
-/// `docs/audio-engine.md` requires each Zone to own its buffering so one Zone's
-/// backpressure or failure cannot consume another's render capacity. That is
-/// why the pool, pipe, render context and output session live here rather than
-/// on a stack frame or on the Player.
+/// Each Zone owns its buffering so one Zone's backpressure or failure cannot
+/// consume another's render capacity. That is why the pool, pipe, render
+/// context and output session live here rather than on a stack frame or on the
+/// Player.
 ///
 /// Threading:
 /// * `pool`, `pipe`, `output`, `zone` and `channels` belong to whichever
@@ -123,7 +123,7 @@ pub const ZoneRuntime = struct {
     /// Canonical format the open stream was negotiated for. `RenderContext`
     /// channel count and the negotiated rate are fixed when a stream opens, so
     /// a queue entry in a different format needs the output reopened rather
-    /// than resampled — see `docs/audio-engine.md` on the resampler.
+    /// than resampled.
     open_format: ?pcm.Format = null,
     open_device_id: u64 = 0,
     open_device_kind: contract.DeviceKind = .unknown,

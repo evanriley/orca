@@ -25,7 +25,15 @@ destroyed. Cancel or discard asynchronous work when its bound row, page, or
 Library is no longer current. Artwork stays on the bounded request, decode,
 and cache path in `art.zig`; do not decode full-size images on the main thread.
 
-Read [the Linux frontend contract](../../docs/frontends.md#orca-gtk).
+- Credentials go through `secret.zig` (libsecret) only; they never reach
+  `settings.ini`, the Library or a log.
+- liborca threads wake the GTK loop only through `App.waker` writing the
+  eventfd in `main.zig`; the eventfd closes only after liborca has joined its
+  threads.
+- "Bit-perfect" is shown only when `liborca.SignalPath.bit_perfect_eligible`
+  is set; the frontend never decides it from other fields.
+- An unusable embedding model path warns and leaves Radio and mixes without
+  sound similarity; it never fails startup.
 
 ## Rendering and verification
 
@@ -45,6 +53,18 @@ Verify affected pages at 1440x900 (the default), 1920x1080, 2560x1440 and
 3440x1440, set through `ORCA_HEADLESS_SIZE` as `WIDTHxHEIGHT`, and check
 interaction state, keyboard path, and focus behavior. Compare screenshots
 visually and inspect the captured log for warnings. Do not run the GUI on the
-host's desktop session or play through a real output device. The complete
-driver syntax and isolation guarantees are in
-[the screenshot contract](../../docs/frontends.md#screenshots).
+host's desktop session or play through a real output device. The step syntax
+and isolation guarantees are in the header of `scripts/headless-gui.sh`.
+
+When changing `scripts/headless-gui.sh`, keep its isolation:
+
+- Every process runs under a private `XDG_RUNTIME_DIR` outside the user's,
+  short enough for a Wayland socket. Never run a bare Wayland client against
+  the user's session.
+- Output is pinned to `scripts/silent-sink.sh 1`, and the run aborts when the
+  sink cannot be made.
+- Only PIDs the script recorded, whose environment carries this run's
+  `XDG_RUNTIME_DIR`, are ever signalled.
+- The app opens a copy of the fixture Library, never the source.
+- Providers point at a closed port unless an `ORCA_HEADLESS_*_URL` names a
+  local mock, and the caller's `ORCA_EMBEDDING_MODEL` is never passed through.

@@ -11,8 +11,7 @@ pub const key_buffer_size = 512;
 /// forms are folded to ASCII, and case is folded across ASCII, Latin-1, Latin
 /// Extended-A, Greek and Cyrillic. Canonical composition is *not* performed, so
 /// a precomposed `é` and a decomposed `e`+U+0301 remain distinct keys. That is
-/// a deliberate, documented shortfall rather than an oversight — see the module
-/// note in `docs/database.md` if it ever needs closing.
+/// a deliberate shortfall rather than an oversight.
 pub fn normalizeKey(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.ensureTotalCapacity(allocator, text.len);

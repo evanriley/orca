@@ -9,8 +9,7 @@
 //! Nothing here caches. An embedded cover is read from the file each time it is
 //! asked for, which is the only answer that can never be stale and the only one
 //! that keeps the Library database the size of a library rather than the size
-//! of a picture collection. See `docs/metadata.md` for why a cache is not here
-//! yet.
+//! of a picture collection.
 
 const std = @import("std");
 const model = @import("model.zig");
