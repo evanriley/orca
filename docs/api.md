@@ -1,12 +1,12 @@
-# liborca Zig API
+# Zig API
 
-This file covers the public Zig API of liborca: embedding, the `Runtime`
-operations, ownership and shutdown, the smart playlist rule format, client
-identity and stability. The API is everything declared at the top level of the
-`liborca` module (`liborca/root.zig`); `liborca.internal` is not part of it.
+The public Zig API of liborca is everything declared at the top level of the
+`liborca` module (`liborca/root.zig`). `liborca.internal` is not part of it.
+This page covers embedding, an index of the `Runtime` operations, the smart
+playlist rule format, client identity, ownership and shutdown, and stability.
 
-Non-Zig clients use the C ABI in `liborca/orca.h` instead; see
-[frontends.md](frontends.md#c-abi).
+Behavior, errors and limits of each operation are in its doc comment in
+`liborca/core/runtime.zig`. Non-Zig clients use the [C ABI](c-abi.md).
 
 ## Embedding
 
@@ -31,10 +31,10 @@ and compiles in the rest; see
 [`examples/embed`](../examples/embed) is a complete project; `zig build test`
 builds it.
 
-The process rules in [frontends.md](frontends.md#embedding) apply to Zig hosts
-too. On Linux, the first `Runtime.init` replaces SQLite's `fcntl` with OFD
-locks for the whole process, once; a host creates it before it opens any SQLite
-connection of its own, or every `openLibrary` fails with
+The process rules in [the C ABI's Embedding section](c-abi.md#embedding) apply
+to Zig hosts too. On Linux, the first `Runtime.init` replaces SQLite's `fcntl`
+with OFD locks for the whole process, once. A host creates the runtime before it
+opens any SQLite connection of its own, or every `openLibrary` fails with
 `error.SqliteLocksNotInstalled`. Every call on one `Runtime`, `deinit`
 included, comes from the thread that created it.
 
@@ -54,740 +54,278 @@ defer page.deinit();
 dependency order in `deinit`. Its methods are the operations, and every type
 they take or return is exported beside it. Handles (`LibraryHandle`,
 `PlayerHandle`, `ZoneHandle`, `JobHandle`) are generational. Pages and returned
-values are owned by the caller and released with their `deinit`. Threading and
-ordering rules are in
-[Runtime ownership and shutdown](#runtime-ownership-and-shutdown) and
-[control-plane.md](control-plane.md).
+values are owned by the caller and released with their `deinit`.
 
-`setWaker(HostWaker)` installs the function liborca calls when a host's event
-loop should pump. Call it right after `init`; it returns `error.WorkersRunning`
-once a worker thread exists. `pump` executes the submitted commands and
-publishes finished jobs. `nextPumpTimeoutMs` returns how long the loop may
-sleep: 0 to pump now, null to wait for the waker alone. See
-[control-plane.md](control-plane.md#waking-the-host).
+The index below groups the methods by area. A method named `library*` takes a
+Library handle, `player*` a Player handle, `zone*` a Zone handle, `job*` a Job
+handle, and `start*` returns a Job.
+
+### Event loop
+
+- `setWaker` installs the function liborca calls when the host's event loop
+  should pump; call it right after `init`.
+- `pump` runs submitted commands and publishes finished jobs.
+- `nextPumpTimeoutMs` returns how long the loop may sleep.
+- `processNextCommand` runs one queued command, and samples Players for
+  listens.
+- `shutdown` and `deinit` end the runtime; see
+  [Runtime ownership and shutdown](#runtime-ownership-and-shutdown).
 
 ### Roots, availability and watching
 
-- `libraryRootPage` fills each `LibraryRoot` with `available` and track counts.
-  `libraryRelocateRoot(library, io, root_id, path)` moves a root, keeping its id
-  and every file and Track id, binds it to the new path's volume, rewrites the
-  tag write journal's paths and returns the reconcile job it starts. Errors:
-  `error.InvalidLibraryRoot`, `error.RootPathOverlaps`, `error.UnknownRoot`,
-  `error.LibraryJobRunning`, `error.LibraryScanRunning`,
-  `error.MutationInProgress` and `error.MutationNeedsReconciliation`.
-- `libraryMissingFileCount` counts Tracks whose preferred file has no present
-  location. `libraryAvailability(library, io)` re-checks every enabled root and
-  returns a caller-owned `LibraryAvailability` (offline roots and the Tracks and
-  Releases they leave unable to play); it can block on a hung mount, so a UI
-  host calls it off its event loop with that thread's own `io`.
-  `libraryReleasesAvailable` answers per Release. A scan or reconcile of a root
-  on another volume than the one recorded ends `failed`.
-- `libraryWatch(library, WatchOptions)` reconciles each directory that changes
-  under a root, from `pump`, one reconcile at a time and never beside a scan,
-  reconcile, projection or tag write of the Library (`error.AlreadyWatching`,
-  `error.WatchingUnsupported` off Linux). `libraryUnwatch` stops it and
-  `libraryWatchStatus` returns a `WatchStatus` (`WatchState`: `off`,
-  `watching`, `degraded`, `unsupported`). `WatchOptions.degraded_rescan_ms` sets
-  how often degraded roots are reconciled whole. A reconcile that recorded or
-  marked missing a file publishes `Telemetry.library_changed`.
-- `libraryFolderPage(library, root_id, relative_path, limit, offset)` returns a
-  `FolderPage` of `FolderEntry` values: subfolders, then files, then images.
-  The path is relative to the root, `""` for the root; a `.`, `..` or empty
-  component, a leading or trailing `/` or a NUL is `error.InvalidFolderPath`, a
-  limit outside 1 to 512 `error.InvalidLimit`. `playerPlayFolder` plays every
-  Track below a folder in path order, at most `max_playlist_entries`
-  (`error.FolderEmpty`). See [database.md](database.md#folder-browsing) and
-  [storage.md](storage.md#unavailable-and-relocated-roots).
-- `estimateAudioFiles(io, allocator, path, token, limit)` counts a folder's
-  audio files as a `FolderEstimate` on the caller's thread, `error.Cancelled`
-  once the `CancellationToken` is cancelled. See
-  [storage.md](storage.md#estimating-a-folder-before-it-is-a-root).
+- `libraryRootPage` lists roots with availability and track counts.
+- `libraryRelocateRoot` moves a root on disk, keeping ids.
+- `libraryMissingFileCount` counts Tracks with no present file.
+- `libraryAvailability` re-checks every root; it can block on a hung mount, so
+  a UI host calls it off its event loop.
+- `libraryReleasesAvailable` answers per Release.
+- `libraryWatch`, `libraryUnwatch` and `libraryWatchStatus` reconcile changed
+  directories as they change (Linux).
+- `libraryFolderPage` lists a root's subfolders, files and images.
+- `playerPlayFolder` plays every Track below a folder.
+- `estimateAudioFiles` counts a folder's audio files before it becomes a root.
 
 ### Jobs
 
-- A Library runs one host job at a time. A job started while another holds the
-  slot, or while the Library is paused, is returned `waiting` and started by
-  `pump` in order. At most `max_waiting_jobs` (32) wait in the runtime, else
-  `error.JobQueueFull`. Lyrics, artist and Release info fetches never wait.
-- `jobQueuePage` returns the running and waiting `QueuedJob`s. `pauseJob` holds
-  a running job at its next cancellation poll and `resumeJob` lets it carry on
-  (`error.JobNotPausable` for a projection or tag write,
-  `error.JobAlreadyFinished`). `pauseAll` also holds waiting jobs, watcher
-  reconciles and idle maintenance until `resumeAll`; `libraryJobsPaused`
-  reports it. `cancelJob` wakes a paused job within one 50 ms poll.
-- `JobSnapshot` carries `started_at`, `paused`, `estimated_remaining_ms` (null
-  until 10 s of progress, while paused and without a total), `current_item` and
-  `detail`; `pump` publishes `Telemetry.job_progress` whenever they move.
-  `jobScanStats` reports the `ScanStage`, `current_path`, `albums_found` and
-  `symlinks_skipped`, the symbolic links the walk did not follow.
-  `ScanRequest.reprobe_all` reads every file again. See
-  [storage.md](storage.md#incremental-scanning).
-- `jobHistoryPage(library, allocator, filter, limit, offset)` returns finished
-  jobs newest first, filtered by `JobHistoryFilter` (`all`, `scans`, `analysis`,
-  `file_changes`, `problems`). `jobRetry(library, history_id)` starts a failed
-  or cancelled job's request again (`error.JobNotRetryable`,
-  `error.UnknownJobHistory`). See
-  [control-plane.md](control-plane.md#history).
-- `libraryMaintenance(library, MaintenanceOptions)` turns idle maintenance on or
-  off (off by default). While every Player is idle and no other job runs,
-  `pump` verifies one Release's recording IDs every `interval_ms`; a
-  disagreement lands in Health as `recording_mismatch`. An interval of 0 is
-  `error.InvalidMaintenanceOptions`. `libraryMaintenanceStatus` returns a
-  `MaintenanceStatus`; `jobOrigin` returns a job's `JobOrigin` (`host`,
-  `watcher`, `maintenance`) and `jobReconcileRoot` the root a reconcile walks.
-  `startLibraryMatching`, `startReleaseCoverArtFetch` and
-  `startAcoustIdSubmission` called while a unit runs cancel it and return a
-  `waiting` job. See [control-plane.md](control-plane.md#idle-maintenance).
+- `jobQueuePage` lists running and waiting jobs.
+- `pauseJob`, `resumeJob`, `cancelJob`, `pauseAll`, `resumeAll` and
+  `libraryJobsPaused` control them.
+- `jobScanStats` reports scan progress; `ScanRequest.reprobe_all` reads every
+  file again.
+- `jobHistoryPage` lists finished jobs and `jobRetry` starts a failed one again.
+- `libraryMaintenance` and `libraryMaintenanceStatus` configure idle
+  maintenance; `jobOrigin` and `jobReconcileRoot` describe a job.
+- `startLibraryScan`, `startLibraryAnalysis`, `startLibraryProjection`,
+  `startLibraryPropertyBackfill` and `startLibraryConsistencyPass` start
+  library work.
 
 ### Library facts
 
-- `openLibrary` upgrades a Library written by an earlier release in place,
-  after writing a copy of it beside the database; it fails with
-  `error.PreUpgradeCopyFailed` when the copy cannot be written and with
-  `error.SchemaVersionTooNew` when a newer Orca wrote the Library. A call
-  that writes to an open Library fails with the same error once another
-  process has upgraded the file; see
-  [database.md](database.md#concurrency).
-  `libraryUpgradeCopyPath(io, database_path, buffer)` returns the path of that
-  copy, or null. See
-  [database.md](database.md#the-copy-before-an-upgrade).
-- `libraryStats(library)` returns `LibraryStats` (counts, files, bytes,
-  duration, last scan, analysis and duplicate scan, `listens`); see
-  [database.md](database.md#library-stats). `libraryCacheSize` returns a
-  `CacheSize` of fetched artwork, photo, lyrics and info bytes and
-  `libraryClearCache` deletes them; embedded and folder artwork and local
-  lyrics are never touched. See [database.md](database.md#fetched-cache).
-- `providerSources()` returns the `ProviderSource`s Orca takes data from, with
-  their licences, and `supported_formats` the `SupportedFormat`s it reads;
-  both are constants for a credits page.
-- `libraryHealthSummary` returns a `HealthSummary` of `HealthKindSummary`s;
-  `libraryHealthIssuePageOfKind` pages one kind. See
-  [analysis.md](analysis.md#by-kind). Duplicates are groups:
-  `libraryDuplicateGroupPage`, `libraryDuplicateGroupTotals`,
-  `libraryDuplicateGroup` (the `DuplicateCopy`s, suggested copy first),
-  `libraryKeepBoth`, `libraryIgnoreDuplicateGroup`,
-  `libraryMergeDuplicateMetadata` and `libraryDuplicateCopyPlaylists` write no
-  file; see [analysis.md](analysis.md#groups).
-- `libraryUnanalyzedCount` counts the files a `startLibraryAnalysis` Job would
-  measure. `libraryAnalysisCoverage` splits them into an `AnalysisCoverage`:
-  `never_analyzed` files hold no measurement of their current bytes, and
-  `outdated` files hold at least one but lack another, as after an update adds
-  a measurement or changes one's version or parameters. A file whose bytes
-  changed since it was measured counts as never analyzed. The two sum to
-  `libraryUnanalyzedCount`. `missing` (`MissingMeasurements`) flags what the
-  outdated files lack: `loudness_and_checks`, `fingerprint`, `features` or
-  `embedding`. The audio embedding counts only while `embeddingModelState` is
-  `ready`, and then as the embedding of the model `embeddingModel` returns.
-  `measurement_set` identifies the current set of measurements and changes
-  only when a measurement is added or its version or parameters change, so a
-  host can remember that the user dismissed a prompt to analyze again.
-- `libraryBackfillPending` takes a `LibraryAvailability` and returns the `files`
-  and `covers` that `startLibraryPropertyBackfill` can repair; a host starts the
-  Job when either is non-zero, outside a scan.
-- `startLibraryConsistencyPass` stores each Release's disagreements as open
-  issues. `libraryMetadataIssueCount`, `libraryMetadataIssuePage`,
-  `libraryApplyMetadataIssue`, `libraryApplyMetadataIssues` (checks all issues
-  first), `librarySkipMetadataIssue` and `libraryMetadataIssueStatus` act on
-  them, writing locked Orca values and no file. The C ABI has the Job kind and
-  none of these calls. See [analysis.md](analysis.md#metadata-consistency).
+- `openLibrary` opens a Library, upgrading an older one in place after writing
+  a copy; `libraryUpgradeCopyPath` returns that copy's path.
+- `libraryStats`, `libraryCacheSize` and `libraryClearCache` report and clear
+  counts and fetched data.
+- `providerSources` and `supported_formats` are constants for a credits page.
+- `libraryHealthSummary` and `libraryHealthIssuePageOfKind` list Health issues.
+- `libraryDuplicateGroupPage`, `libraryDuplicateGroupTotals`,
+  `libraryDuplicateGroup`, `libraryKeepBoth`, `libraryIgnoreDuplicateGroup`,
+  `libraryMergeDuplicateMetadata` and `libraryDuplicateCopyPlaylists` manage
+  duplicate groups; none writes a file.
+- `libraryUnanalyzedCount` and `libraryAnalysisCoverage` report what analysis
+  would measure; `libraryBackfillPending` reports what a backfill would repair.
+- `libraryMetadataIssueCount`, `libraryMetadataIssuePage`,
+  `libraryApplyMetadataIssue`, `libraryApplyMetadataIssues`,
+  `librarySkipMetadataIssue` and `libraryMetadataIssueStatus` act on
+  consistency issues, writing locked Orca values and no file.
 
 ### Browsing
 
-- `TrackSummary` carries the ids (`release_id`, `artist_id`,
-  `album_artist_id`, `recording_id`) and the facts a song list shows: `codec`,
-  `sample_rate`, `bit_depth`, `lossy`, `added_at`, `play_count`,
-  `last_played_at`, `explicit`, `track_total`, `disc_total`, `year`,
-  `integrated_lufs` (null before an analysis), `bitrate_kbps` (null when size
-  or duration is unknown), `feedback`, `rating` and `path` (a present location
-  before an unverified one, empty when none).
-- `TrackQuery` filters combine with AND: `year_min`/`year_max` (undated Tracks
-  are left out), `lossless` (a Track with no probed codec matches neither
-  value), `min_sample_rate`, `max_sample_rate`, `explicit_only`, `codec`
-  (case-insensitive), `added_after`, `loved_only`, `genre_id` and `artist_id`.
-  A Track with no value for the `TrackSort` sorts last either way.
-  `libraryTrackMatchCount` and `libraryTrackQueryTotals` (`TrackTotals`) count
-  what a page lists; `libraryTrackQueryPlayableIds` returns the playable Track
-  ids among `limit` rows from `offset`, up to `max_track_id_window` (10,000), to
-  queue a listing from any row.
-- A `text` in `libraryTrackQuery` keeps every filter and orders by relevance,
-  so `sort` and `direction` do not apply and `libraryTrackMatchCount` does not
-  count a search. Each word must begin a word of the title, artist, album or
-  album artist; no character is FTS5 syntax and wordless text matches nothing.
-- `ReleaseSummary` carries `codec` (`mixed_codec` when Tracks differ),
-  `max_sample_rate`, `max_bit_depth`, `lossless`, `release_type`, `explicit`,
-  `loved` and `pending_reviews`. `ReleaseQuery` filters by
-  `high_resolution_only` (above 48 kHz or 16 bits), `needs_review_only`,
-  `lossless_only`, `year_min`/`year_max`, `has_artwork` (embedded, fetched or a
-  front image in the folder), `added_after`, `loved_only`, `genre_id` and `text`
-  (the word-prefix search of `librarySearch`). `ReleaseSort.most_played` and
-  `.loved` are the other sorts. `libraryReleasePage` returns a page for a
-  `ReleaseQuery` and `libraryReleaseCountMatching` counts what the query lists,
-  ignoring its `limit` and `offset`.
-- `release_type` is the lowercased primary type from the files' tags, else the
-  release group's, which a release-info fetch or genre fill writes only while
-  the Release has none. `ReleaseQuery.release_kind` (`album`, `ep_or_single`,
-  `other`) filters by it; a Release with no type, and a compilation, is an
-  `album`. `appearing_artist_id` keeps Releases with a Track credited to that
-  Artist and filed under another album artist; `own_releases_only` with
-  `album_artist_id` keeps only those filed under that Artist.
-- `name_order` (`ignore_articles`, the default; `as_written`) on `ReleaseQuery`
-  and `ArtistQuery` sets whether a sort by name skips a leading "The ", "A " or
-  "An ". Names that do not start with an ASCII letter sort first.
-- `libraryReleaseLetterIndex` returns `[]LetterBucket` (initial, `count`,
-  `first_offset`; `'#'` for non-ASCII-letter initials) for a `ReleaseQuery`
-  sorted by `title` or `artist` (`error.SortHasNoLetters` otherwise).
-  `libraryReleaseQueryTotals` returns `ReleaseTotals`.
-- `ArtistQuery` takes `ArtistSort` (`name`, `track_count`, `recently_loved`,
-  `recently_added`), `loved_only`, `genre_id` and `role` (`all` or
-  `album_artists`), applied to the page and `libraryArtistCountMatching`.
-  `ArtistSummary` carries `loved`, `has_photo` and `cover_release_id`.
-  `libraryArtistTotals` returns `ArtistTotals` or null for an unknown Artist.
-- `libraryTrackDetails` returns `TrackDetails`: the file's properties and path,
-  loudness, tags, the recording ID in effect with its `RecordingIdSource`
-  (`tag`, `match`, `edit`), the first five `genres`, `feedback`, `rating` and
-  `feedback_syncable`. The caller frees it with `deinit`.
-- Genres: `libraryGenrePage` takes a `GenreQuery` and returns `GenreSummary`s;
-  `libraryGenreCount`, `libraryGenre`, `libraryTrackGenres` (with their
-  `Provenance`), `libraryReleaseGenres`, `libraryArtistGenres` and
-  `libraryGenreArtwork` read them. `librarySetTrackGenres` gives Tracks up to
-  `max_track_genres` (16) user genres, which outrank the files' tags until
-  cleared with no names, and splits a name that lists several. It writes no file
-  and returns `error.TooManyGenres`, `error.InvalidGenre` or
-  `error.TrackNotFound`. See [database.md](database.md#genres).
-- `librarySearch` returns `SearchResults`: `SearchHit`s grouped in `SearchKind`
-  order (Artists, Releases, Tracks, Playlists, genres), most relevant first
-  (lower `rank` is better), capped by `SearchLimits` (default 5, 5, 8, 4, 3;
-  above `max_search_hits_per_kind`, 50, is `error.InvalidSearchLimits`). Each
-  word must begin a word of the hit's title or subtitle, ignoring case and
-  diacritics; quotes, operators and column filters match as text. Text over
-  `max_search_text` (256 bytes) is `error.SearchTextTooLong`. The first Artist
-  hit adds reason hits within its kind's cap (`tracks_by`, `main_genre_of`).
-  `SearchResults.top` is the hit to feature, a copy not freed separately.
-- `libraryRequestBrowse` queues a `BrowseRequest` (`track_page`, `track_totals`,
-  `release_page`, `release_count`, `library_stats`, `health_summary`; the last
-  two carry no query and answer `libraryStats` and `libraryHealthSummary`
-  without blocking the caller) on the Library's browse loader and returns
-  its id; `libraryTakeBrowse` collects a finished `BrowseResult` (its `payload`
-  is the synchronous method's result or error; `deinit` frees a page) and
-  `libraryCancelBrowse` skips a request not started. Text and codec are copied
-  (`error.SearchTextTooLong`, `error.CodecNameTooLong` over 32 bytes). At most 8
-  requests are outstanding, else `error.BrowseQueueFull`. Results come in
-  request order, read on a read-only connection and can predate a host's write;
-  reload on `library_changed`. Destroying any Library drops every loader's
-  requests and untaken results.
+- `libraryTrackQuery`, `libraryTrackMatchCount`, `libraryTrackQueryTotals` and
+  `libraryTrackQueryPlayableIds` page and count Tracks for a `TrackQuery`. A
+  `text` query orders by relevance.
+- `libraryReleasePage`, `libraryReleaseCountMatching`,
+  `libraryReleaseQueryTotals` and `libraryReleaseLetterIndex` do the same for
+  Releases.
+- `libraryArtistPage`, `libraryArtistCountMatching` and `libraryArtistTotals`
+  do the same for Artists.
+- `libraryTrackDetails` returns one Track's file properties, tags, loudness,
+  genres, feedback and rating.
+- `libraryGenrePage`, `libraryGenreCount`, `libraryGenre`,
+  `libraryTrackGenres`, `libraryReleaseGenres`, `libraryArtistGenres` and
+  `libraryGenreArtwork` read genres; `librarySetTrackGenres` sets a Track's
+  user genres.
+- `librarySearch` returns hits grouped by kind, most relevant first.
+- `libraryRequestBrowse`, `libraryTakeBrowse` and `libraryCancelBrowse` run
+  browse queries on the Library's browse loader instead of the caller.
 
 ### Artwork
 
-- `libraryTrackArtwork` and `libraryReleaseArtwork` read on the caller's thread
-  and return, in order: the front cover a person chose, the front cover embedded
-  in a file, a front image in the folder holding most of the Release's Tracks
-  (stems `cover`, `front`, `folder`, then the largest), then the cover the Cover
-  Art Archive fetch kept. A missing or non-image folder file falls through.
-- `libraryRequestArtwork` queues a lookup on the Library's artwork loader (at
-  most 64 outstanding), `libraryTakeArtwork` collects finished ones and
-  `libraryCancelArtwork` skips one not started. `ArtworkSubject.artist` asks for
-  the Artist's stored photo; `ArtworkSubject.release_group` (a lowercase
-  MusicBrainz ID as `[36]u8`) asks for the cover an Artist fetch kept, with no
-  image when none is. The C ABI has no such subject.
-- A Release keeps at most one cover of each `ReleaseArtworkKind` (`front`,
-  `back`, `booklet`); media files are never written.
-  `librarySetReleaseArtwork` keeps bytes a person chose (the MIME type must be
-  what the bytes sniff as; over `max_image_bytes` is `error.ArtworkTooLarge`),
-  `libraryClearReleaseArtwork` returns false when none was kept and
-  `libraryStoredReleaseArtwork` reads it without looking at files.
-  `startReleaseCoverArtFetch` sends no request for a Release with a chosen,
-  embedded or folder cover; see [providers.md](providers.md#cover-art-archive).
-- `startCoverArtCandidates` lists the Cover Art Archive's images for a Release
-  (and its release group's when its files name one), capped at
-  `max_cover_art_candidates` (8); only the 250-pixel thumbnail is kept, and an
-  unmeasurable image has a null size. When the release group's index will not
-  come the Job succeeds with `CoverArtOutcome.partial`.
-  `libraryCoverArtCandidates` reads the `CoverArtCandidate`s and
-  `libraryUseCoverArtCandidate` fetches one again and keeps it as the chosen
-  cover (`error.UnknownCoverArtCandidate`).
-- The `artwork_problem` health issue names what is wrong with a front cover, in
-  the order checked: `missing_front`, `conflicting` (embedded and folder covers
-  differ by content hash) and `undersized` (the front in effect is under
-  `minimum_cover_pixels`, 500, on a side). An unmeasured size or hash raises
-  nothing. `libraryArtworkProblem` returns an `ArtworkFinding`.
+- `libraryTrackArtwork` and `libraryReleaseArtwork` read a cover on the
+  caller's thread.
+- `libraryRequestArtwork`, `libraryTakeArtwork` and `libraryCancelArtwork` do
+  it on the artwork loader.
+- `librarySetReleaseArtwork`, `libraryClearReleaseArtwork` and
+  `libraryStoredReleaseArtwork` manage a chosen cover; no media file is
+  written.
+- `startReleaseCoverArtFetch` fetches a cover from the Cover Art Archive.
+- `startCoverArtCandidates`, `libraryCoverArtCandidates` and
+  `libraryUseCoverArtCandidate` list and choose archive images.
+- `libraryArtworkProblem` returns the `artwork_problem` Health finding.
 
 ### Tag edits and write-back
 
-- `libraryEditTracks` sets Orca's own values as the user's locked values and
-  returns `EditedTracks`. An edit that moves a track to another album or
-  position keeps its id, even onto a position another Track held; that Track is
-  pruned unless its own file moved in the same edit.
-- `libraryTrackFieldStates` returns `TrackFieldStates` for up to 512 Tracks: per
-  `EditableTrackField` the shared value and whether it is `mixed` or `edited`.
-  It reads the database only.
-- `planTagWrite` returns a `TagWritePlan`: each file's `TagWriteChange`s with
-  the `Provenance` of Orca's value and `TagWriteFormat`, its `TagWriteGenres`,
-  the `TagWriteConflict`s it leaves out because an unlocked value disagrees with
-  the file's tag, and the files it skips. `tagWriteGenres` returns one file's
-  `TagWriteGenres` from a held plan. `isMusicBrainzId` is the check
-  `libraryEditTracks` applies to a recording ID.
-- `libraryTagWriteGroupPage` returns finished tag writes newest first
-  (`TagWriteGroup`: files, `TagWriteGroupState`, `can_undo`, `expired`) and
-  `libraryTagWriteGroup(library, allocator, io, group_id)` a
-  `TagWriteGroupDetail` of `TagWriteDiff`s, at most 512 rows with `more_files`.
-  Both only read; see [metadata.md](metadata.md#change-history).
-  `exportTagWriteHistory` writes every group's `orca-cli changes` line to a file
-  atomically and refuses an existing file unless `replace` is set.
-- Lyrics are read on a job: `startTrackLyrics`, with `LyricsOptions.fetch` also
-  asking LRCLIB (needs the client identity). `jobLyricsOutcome` reports a
-  `LyricsOutcome`, `jobTakeLyrics` moves the `Lyrics` to the caller once and
-  `Lyrics.lineAt` gives the synced line at a position. See
-  [metadata.md](metadata.md#lyrics) and [providers.md](providers.md#lrclib).
+- `libraryEditTracks` sets Orca's own values as the user's locked values.
+- `libraryTrackFieldStates` reports the shared value of each field across
+  Tracks.
+- `planTagWrite` and `tagWriteGenres` build a reviewable plan of file tag
+  changes; `isMusicBrainzId` validates a recording ID.
+- `libraryTagWriteGroupPage` and `libraryTagWriteGroup` read the change
+  history; `exportTagWriteHistory` writes it to a file.
+- `startTrackLyrics`, `jobLyricsOutcome` and `jobTakeLyrics` read lyrics, with
+  `LyricsOptions.fetch` also asking LRCLIB; `Lyrics.lineAt` finds the synced
+  line at a position.
 
 ### Matching and Release review
 
-Rules for scoring, accepting and applying live in
-[metadata.md](metadata.md) and [providers.md](providers.md#matching); this
-section lists the entry points, errors and limits.
-
-- `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup` Job
-  that searches MusicBrainz, and AcoustID by fingerprint, for Tracks without a
-  recording ID and stores proposals. `MatchRequest.fingerprints` (default true)
-  includes AcoustID when an application key is set; `track_id` and `release_id`
-  narrow it. `jobMatchStats` returns `MatchStats`: `matched` counts Tracks
-  that gained a recording proposal, and `releases_to_review` the Releases
-  holding them that, when the searches ended and before anything was
-  accepted, were in the `confident` or `needs_review` bucket. A proposal that
-  lists no release forms no release candidate, so `matched` can be nonzero
-  with nothing to review. One runs per runtime
-  (`error.MatchingAlreadyRunning`), none beside an AcoustID submission
-  (`error.AcoustIdBusy`). `jobMatchRelease(job)` returns the Release that holds
-  most of an album's files once a Job started with `release_id` has finished, so
-  a host can follow the album to its new id; null otherwise.
-- Proposals: `libraryMatchReviewPage` (at most 512 `MatchReviewItem`s),
-  `libraryMatchReviewCount`, `libraryUnidentifiedCount`,
-  `libraryMatchProposals`, `libraryAcceptMatch` (a `MatchAcceptance`),
+- `startLibraryMatching` searches MusicBrainz and AcoustID for Tracks without
+  a recording ID; `jobMatchStats` and `jobMatchRelease` report the result.
+- `libraryMatchReviewPage`, `libraryMatchReviewCount`,
+  `libraryUnidentifiedCount`, `libraryMatchProposals`, `libraryAcceptMatch`,
   `libraryDismissMatch`, `libraryConfidentMatchCount` and
-  `libraryAcceptConfidentMatches`. Accepts reproject, so Track and Release ids
-  can change; see [metadata.md](metadata.md#accepting-a-match).
-- `libraryApplyRelease(library, allocator, release_id, fields)` stores the
-  `ReleaseFieldSet` of the best candidate's tracklist snapshot as locked
-  values and returns a `ReleaseApplyOutcome` (free with `deinit`):
-  `values_written`, `track_values`, `release_values_only`, `artist_ids_unknown`,
-  a `LeftAloneTrack` (`not_placed`, `no_play_file`) per Track given no
-  release-track values and `reviewed_release_id`, set when nothing was left
-  alone. Errors: `error.NoReleaseCandidate`, `error.NoReleaseTracklist`,
-  `error.ReleaseTooLarge` (over 512 Tracks). `libraryApplyMatchedRelease`
-  returns how many values it stored. See
-  [metadata.md](metadata.md#applying-a-release).
-- `libraryMarkReleaseReviewed(library, release_id, release_mbid)` marks a
-  Release reviewed against `release_mbid` or the best candidate when null,
-  whatever values differ (`error.ReleaseNotPlaced`), and
-  `libraryUnmarkReleaseReviewed` forgets it (`error.UnknownRelease`,
-  `error.ReleaseNotReviewed`); see
-  [metadata.md](metadata.md#marking-a-release-as-reviewed).
-  `libraryDismissReleaseCandidate` marks a release as not the Release.
-- `libraryReleaseMatchPage(library, allocator, bucket, confident_at, filter,
-  limit, offset)` returns at most 512 `ReleaseMatchItem`s of one
-  `ReleaseMatchBucket` (`confident`, `needs_review`, `unmatched`, `reviewed`).
-  `confident_at` is in (0, 1], else `error.InvalidMinimumConfidence`; a
-  non-null `filter` is the word-prefix search of `librarySearch`
-  (`error.SearchTextTooLong`). Each item with a candidate costs a Release view,
-  snapshot and alignment. An item in the `reviewed` bucket that only its
-  tags identify has `from_tags` set. `ReleaseCandidate.confidence` is null
-  (`ReleaseCandidate.unread`) while a Track's release ID names the candidate
-  and Orca holds no snapshot of it; such an item is in `needs_review` (see
-  [metadata.md](metadata.md#release-candidates-and-confidence)).
-  `libraryReleaseMatchCounts` counts the buckets, and
-  `libraryReleaseMatchBucket(library, release_id, confident_at)` gives the
-  one bucket that lists a Release (`error.UnknownRelease`), so a host can say
-  where a finished search left an album.
-- `libraryReleaseMatchEvidence` returns a `MatchEvidence` and
-  `libraryReleaseMatchDiff` a `ReleaseMatchDiff`, against `release_mbid` or the
-  best candidate (`error.NoReleaseCandidate`); with a snapshot a field differs
-  exactly when an Apply would change a value. See
-  [metadata.md](metadata.md#match-review-diff).
-- `libraryReleaseAlignment(library, allocator, release_id, release_mbid)`
-  returns a `ReleaseAlignment` (free with `deinit`): the Release laid against
-  the snapshot's tracklist as `ReleaseTrackPlacement`s with a `PlacementStatus`
-  (`paired`, `automatic`, `suggested`, `not_in_files`), plus `not_on_release`.
-  Errors: `error.NoReleaseTracklist` (Match Album writes one),
-  `error.ReleaseTooLarge`, `error.NoReleaseCandidate`,
-  `error.InvalidMusicBrainzId`. It reads only. See
-  [metadata.md](metadata.md#release-alignment).
-- `libraryPairReleaseTrack(library, release_id, release_mbid, track_id,
-  release_track_mbid)` pairs a Track with a release track, replacing its earlier
-  pairing, and returns a `PairingOrigin`; the files take its IDs as locked
-  values. Errors: `error.TrackNotOnRelease`, `error.UnknownReleaseTrack`,
-  `error.ReleaseTrackAlreadyPaired` and those of `libraryReleaseAlignment`.
-  `libraryUnpairReleaseTrack` restores the replaced values
-  (`error.TrackNotPaired`); `libraryReleaseTrackPairings` returns at most 512.
-  See [metadata.md](metadata.md#pairing-a-track).
-- `librarySimilarTracks(library, allocator, track_id, limit)` returns the
-  `SimilarTracks` whose audio embeddings are nearest the Track's, each with
-  its `track_id` and `similarity`, nearest first. The caller calls `deinit`.
-  `limit` is at most `max_similar_tracks`, 1,000
-  (`error.SimilarLimitTooLarge`). `error.TrackNotFound` names an unknown
-  Track and `error.NoAudioEmbedding` one whose file has no embedding of the
-  model in use for the bytes it holds now. See [analysis.md](analysis.md#similar-tracks).
-- `libraryTrackAudioFeatures(library, track_id)` returns the `AudioFeatures`
-  of the file a Track plays: optional `tempo` (`bpm`, `confidence`), `key`
-  (`pitch` 0–11 with C as 0, `mode` `major` or `minor`, `confidence`),
-  `onset_rate`, `centroid_hz` and `energy`, 0 to 1 and relative to the Library.
-  Null when the Track does not exist or its file's bytes have not been
-  measured. Every value is approximate; see
-  [analysis.md](analysis.md#audio-features).
-- `libraryTrackFingerprint(library, io, track_id)` returns a `TrackFingerprint`
-  of the file a Track plays, decoding up to two minutes on the caller's thread
-  when uncached; null without a present file.
-- `startAcoustIdSubmission(library)` starts an `acoustid_submission` Job that
-  sends fingerprints of files whose recording ID came from an accepted match or
-  an edit, as the user whose key the `CredentialStore` holds under
-  `acoustid_credential_service` / `acoustid_user_key_account`.
-  `jobSubmissionStats` returns `SubmissionStats` and a `SubmissionOutcome`;
-  `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
-  `AcoustIdSubmittable`s; `libraryAcoustIdSubmittedCount` counts the files
-  and recording IDs AcoustID has accepted. See [providers.md](providers.md#acoustid-submission).
+  `libraryAcceptConfidentMatches` review and accept proposals.
+- `libraryApplyRelease` and `libraryApplyMatchedRelease` store a candidate
+  release's values as locked values.
+- `libraryMarkReleaseReviewed`, `libraryUnmarkReleaseReviewed` and
+  `libraryDismissReleaseCandidate` record review decisions.
+- `libraryReleaseMatchPage`, `libraryReleaseMatchCounts` and
+  `libraryReleaseMatchBucket` list Releases by match bucket.
+- `libraryReleaseMatchEvidence` and `libraryReleaseMatchDiff` explain a
+  candidate.
+- `libraryReleaseAlignment`, `libraryPairReleaseTrack`,
+  `libraryUnpairReleaseTrack` and `libraryReleaseTrackPairings` align and pair
+  Tracks with a release's tracklist.
+- `librarySimilarTracks` returns the Tracks whose audio embeddings are nearest.
+- `libraryTrackAudioFeatures` returns tempo, key and energy estimates.
+- `libraryTrackFingerprint` returns a Track's Chromaprint fingerprint.
+- `startAcoustIdSubmission`, `jobSubmissionStats`,
+  `libraryAcoustIdSubmittableCount`, `libraryAcoustIdSubmittablePage` and
+  `libraryAcoustIdSubmittedCount` submit fingerprints to AcoustID.
 
 ### Providers
 
-- Server setters (`setListenBrainzServer`, `setMusicBrainzServer`,
-  `setAcoustIdServer`, `setLrclibServer`, `setWikidataServer`,
-  `setWikimediaCommonsServer`, `setWikipediaServer`,
-  `setListenBrainzLabsServer`) take `https`, or `http` only to `127.0.0.1` or
-  `localhost` (`error.InvalidServerUrl`), apply from the next job or pass and
-  may be called at any time. A null Wikipedia server asks each language's own
-  wiki. `setAcoustIdClientKey(key)` copies the application key, or clears it
-  when null; a `CredentialStore` value under `acoustid_credential_service` /
-  `acoustid_client_key_account` overrides it. A job resolves its key once, when
-  its AcoustID work begins, from the store or else the key as it was when the
-  job was started or queued; a change applies from the next job.
-  `setEmbeddingModelPath(path)` copies the path of the audio-embedding model
-  file, or clears it when null, and reads the file's size, not its contents;
-  it fails only when the runtime is not running or the path is longer than a
-  path can be. `embeddingModelState` reports the result, and analysis
-  measures the embedding only when it is `ready` and the file's SHA-256
-  matches as the analysis opens it. `embeddingModel` returns which
-  `EmbeddingModel` the file is, `clap_htsat_unfused` or `discogs_maest`, or
-  null unless the state is `ready`; analysis measures and counts that model's
-  embedding. An analysis takes the path as it was when its worker started; see
-  [analysis.md](analysis.md#audio-embedding). `librarySimilarTracks`,
-  `libraryRadioPreview`, Radio sessions and `startDailyMixes` read the stored
-  vectors of that model only, or of `clap_htsat_unfused` when `embeddingModel`
-  is null ([analysis.md](analysis.md#similar-tracks)).
-- `startEmbeddingModelDownload(model, destination)` starts a `model_download`
-  Job that fetches the audio-embedding `model`, an `EmbeddingModel`
-  (`clap_htsat_unfused` or `discogs_maest`), from the `url` of its `spec()` in
-  `liborca/analysis/audio_embedding.zig` and installs it at `destination`,
-  creating the directory. It needs no Library, takes no Library's slot and
-  never waits. Its units are bytes and its total is the model's size. A file
-  is renamed onto `destination` only when its size and SHA-256 are the
-  compiled-in ones; a `destination` that already holds the model succeeds
-  with no request. Any other end leaves `destination` as it was. When the
-  pump reaps a succeeded download, the runtime names `destination` as
-  `setEmbeddingModelPath` does and records the model the worker's SHA-256
-  check found, without reading the file again, so `embeddingModelState`
-  reads `ready` once the host sees `job_finished`. A failed Job's snapshot
-  holds the reason as its `detail`. Errors: `error.EmbeddingsNotBuilt` in a
-  build with `-Dembeddings=false`, `error.ClientIdentityRequired` before
-  `setClientIdentity`, `error.ModelDownloadAlreadyRunning` while a download
-  has not been reaped, `error.InvalidArgument` for an empty path, and
-  `error.NameTooLong` for one longer than a path can be. `pauseJob` refuses
-  the Job with `error.JobNotPausable`. See
-  [control-plane.md](control-plane.md#model-download).
-- `startArtistInfoFetch(library, artist_id, ArtistInfoOptions)` starts an
-  `artist_info` Job that gathers an Artist's photo, biography, years active and
-  links, listeners and related artists, and fills genres. Options: `language`
-  (default `en`), `force`, `offline`, `include_releases`. Errors:
-  `error.ClientIdentityRequired`, `error.UnknownArtist`,
-  `error.InvalidLanguage`. `jobArtistInfoOutcome` returns an
-  `ArtistInfoOutcome` (`error.NotAnArtistInfoJob`); `jobArtistInfoStores`
-  counts how often the running job stored part of what it found.
-- `libraryArtistInfo` returns the stored `ArtistInfo` (null when none),
-  `libraryArtistPhoto` an `EmbeddedImage`, `libraryArtistLinks` the links and
-  `libraryRelatedArtists` at most `related_artists_max` `RelatedArtist`s. A
-  fetch keeps photos of related artists outside the Library by MusicBrainz ID,
-  at most `artist_info.related_photos_per_fetch` (8) per fetch, skipping those
-  kept within 30 days unless `force`; `libraryRelatedArtistPhoto` and
-  `libraryRelatedArtistPhotoInfo` read them.
-- `libraryArtistElsewhere` returns the Artist's stored release groups of type
-  Album or EP that the Library does not hold, newest first, as caller-owned
-  `ElsewhereRelease`s (free each with `deinit`, then the slice). Request a kept
-  cover with `libraryRequestArtwork` and `.{ .release_group = mbid }`. A group
-  is held when its release-group MBID, without case, is in the `release_info`,
-  file tags or Orca values of a Release filed under the Artist or one they
-  appear on.
-- `startReleaseInfoFetch(library, release_id, ReleaseInfoOptions)` keeps a
-  Release's Wikipedia description and fills genres from its release group
-  (errors as for artist info, with `error.UnknownRelease`).
-  `jobReleaseInfoOutcome` (`error.NotAReleaseInfoJob`), `libraryReleaseInfo`.
-- `setGenreFill(library, GenreFill)` turns automatic genre fill from MusicBrainz
-  on or off (default on); `libraryGenreFill` reads it. `startGenreFill(library,
-  GenreFillOptions)` fills the genres of up to `limit` Releases (1 to 512, else
-  `error.InvalidLimit`) whatever the setting. See
-  [providers.md](providers.md#release-info).
+- `setListenBrainzServer`, `setMusicBrainzServer`, `setAcoustIdServer`,
+  `setLrclibServer`, `setWikidataServer`, `setWikimediaCommonsServer`,
+  `setWikipediaServer` and `setListenBrainzLabsServer` select another server:
+  `https`, or `http` only to `127.0.0.1` or `localhost`.
+- `setAcoustIdClientKey` sets the AcoustID application key.
+- `setEmbeddingModelPath`, `embeddingModelState` and `embeddingModel` name the
+  audio-embedding model file and report its state and which model it is.
+- `startEmbeddingModelDownload` fetches a model to a path.
+- `startArtistInfoFetch`, `jobArtistInfoOutcome` and `jobArtistInfoStores` run
+  and report an artist-info fetch.
+- `libraryArtistInfo`, `libraryArtistPhoto`, `libraryArtistLinks`,
+  `libraryRelatedArtists`, `libraryRelatedArtistPhoto`,
+  `libraryRelatedArtistPhotoInfo` and `libraryArtistElsewhere` read the stored
+  result.
+- `startReleaseInfoFetch`, `jobReleaseInfoOutcome` and `libraryReleaseInfo` do
+  the same for a Release.
+- `setGenreFill`, `libraryGenreFill` and `startGenreFill` control genre fill
+  from MusicBrainz.
 
 ### Listening, love and ratings
 
-- `processNextCommand` samples every Player bound to a Library at most every
-  100 ms and records a play heard for half its length or four minutes on that
-  Library's listen worker. `libraryTrackPlayStats` and `TrackDetails` report a
-  recording's play count and last play through any of its files.
-- `librarySetListenPolicy(library, ListenPolicy)` (`half_or_four_minutes`,
-  `thirty_seconds`, `full_track`) sets how long a play must be heard;
-  `libraryListenPolicy` reads it. A listen under a looser policy that falls
-  short of ListenBrainz's rule is never sent.
-  `librarySetListenRecording(library, false)` keeps none and
-  `libraryListenRecording` reads it. `libraryClearListens`
-  deletes the history, unsent listens and play counts, returns how many listens
-  went and keeps ratings and loves.
-- `librarySetScrobbling(library, enabled, offline, now_playing)` sends a
-  Library's listens to ListenBrainz, for at most one Library per runtime. The
-  token comes from the `CredentialStore` under `listenbrainz_token_service` /
-  `listenbrainz_token_account`; `libraryScrobblerCredentialsChanged` has it
-  validated once and `libraryScrobblerStatus` returns a `ScrobblerStatus`. See
-  [providers.md](providers.md#listens) and
-  [Listening from a host](frontends.md#listening-from-a-host).
-- `librarySetFeedback(library, track_ids, Feedback)` (`none`, `loved`, `hated`)
-  sets the feedback of the song behind each Track and returns a
-  `FeedbackChange`. Feedback belongs to the Recording, shows on every Track of
-  the song and is sent to ListenBrainz while the Library scrobbles when the song
-  has a recording ID (`TrackDetails.feedback_syncable`). `libraryTrackFeedback`
-  reads one Track's feedback. `librarySetReleaseLove` and `librarySetArtistLove`
-  love Releases and Artists in the Library only, never sent;
-  `libraryArtistLoved` reads an Artist's. `librarySetRating(library, track_ids,
-  ?u8)` rates the song behind each Track from 1 to 100, or clears it.
+- `librarySetListenPolicy`, `libraryListenPolicy`, `librarySetListenRecording`,
+  `libraryListenRecording` and `libraryClearListens` control the play history.
+- `libraryTrackPlayStats` reports a recording's play count and last play.
+- `librarySetScrobbling`, `libraryScrobblerCredentialsChanged` and
+  `libraryScrobblerStatus` control ListenBrainz submission; see
+  [Listening from a host](#listening-from-a-host).
+- `librarySetFeedback` and `libraryTrackFeedback` love and hate songs;
+  `librarySetReleaseLove`, `librarySetArtistLove` and `libraryArtistLoved` love
+  Releases and Artists, in the Library only.
+- `librarySetRating` rates songs from 1 to 100, or clears the rating.
 
 ### Radio and discovery
 
-- `libraryRadioPreview(library, allocator, seed, options, limit, session)`
-  ranks up to `limit` (at most 512, else `error.RadioLimitTooLarge`)
-  Recordings a Radio from a `RadioSeed` would play, without a Player. Each
-  `RadioPick` carries its Track, Recording, Artist and Release, `score`, the
-  `RadioComponents` values and a `PickReason` of up to two `ReasonPart`s;
-  `RadioPicks.weights` holds the weights used and `relaxed_recent` reports a
-  relaxed avoid window. The caller frees the result with `deinit`.
-  `RadioOptions` sets `explore` (0 to 100, default 35, else
-  `error.InvalidExplore`), up to 4 `RadioFocus` filters, `include_unplayed`,
-  `avoid_recent`, `include_live`, `familiarity` (0 to 100, else
-  `error.InvalidFamiliarity`; null reads `radio.familiarity`) and
-  `artist_variety` (`ArtistVariety`: `relaxed`, `balanced` or `strict`; null
-  reads `discovery.artist_variety`).
-  `RadioPreviewSession` fixes `now_s` and
-  the jitter seed; null reads the clock. An unknown Track, Release, Artist or
-  genre fails with `error.UnknownRadioSeed`, a decade that is not a multiple
-  of 10 with `error.InvalidDecade`. Reads the database alone. See
-  [discovery.md](discovery.md).
-- `libraryDiscoverySettings(library)` returns the `DiscoverySettings`:
-  `radio_continue`, `include_unplayed`, `avoid_days` (`DiscoveryAvoidDays`:
-  0, 1, 3 or 7), `mix_count` (`DailyMixCount`: 0, 4 or 6), `familiarity`
-  (0 to 100, the play-history dial for Radio and Daily Mixes) and
-  `artist_variety` (`ArtistVariety`, default `balanced`: how often one Artist
-  repeats in Radio and in a Daily Mix).
-  `setLibraryDiscoverySettings` stores all six. See
-  [discovery.md](discovery.md#settings).
-- `libraryRecordingSummary(library, recording_id)` returns a
-  `RecordingSummary` with the Recording's title, artist credit and Artist, or
-  null when it does not exist, for naming an `often_after` reason; the caller
-  frees it with `deinit(allocator)`.
-- `playerStartRadio(player, library, seed, options)` starts a Library Radio
-  session on a Player bound to `library`, replacing any it had and the entries
-  queued after the playing entry. The playing entry stays and the picks follow
-  it; an idle Player's queue is emptied, then a Track seed plays at once, or
-  another seed's first pick when it arrives. Picks are ranked on a
-  worker and kept `max_radio_pending` (8) ahead, topped up from `pump`; an
-  enqueue lands before the first pick not yet committed to. Seed and options
-  fail as for the preview. `playerStopRadio` ends the session and removes its
-  pending picks; `playerSetRadioOptions` replaces them under new options
-  (`error.RadioNotActive` without a session).
-- `playerRadioLessLikeThis(player, entry_id)` removes a pick, skipping it when
-  it plays, and steers the session from its Recording, Artist and first genre
-  (`error.NotARadioPick` for an entry that is not a pick still queued,
-  `error.QueueEntryInUse` for one lined up next). A pick skipped within 30
-  seconds is excluded and its Artist weighed down.
-  `playerRadioUndoFeedback` forgets that feedback; removed entries stay
-  removed.
-- `playerRadio(player)` returns a `RadioStatus` (seed, `title()`, options,
-  `RadioState`, `RadioCounts`, pending picks, `continued`) or null without a
-  session. `playerRadioPicks(player, output)` fills up to
-  `max_radio_reported_picks` (32) `RadioQueuePick`s, each with its queue entry
-  id, position, Track, Recording and reason, in playback order.
-- Replacing the queue, clearing it, restoring state, loading a file, binding
-  another Library, closing the Library and destroying the Player end a
-  session; it is never saved. With `radio_continue` on, a Player that starts
-  the last entry of a queue that does not repeat starts a `recent` session.
-  See [discovery.md](discovery.md#library-radio).
-- `startDailyMixes(library, DailyMixesRequest{ now_s, utc_offset_s, force,
-  artist_variety })` starts a `daily_mixes` Job that makes the mix day's Daily
-  Mixes unless they exist and `force` is false. `artist_variety` replaces
-  `discovery.artist_variety` for the mixes this Job makes; null reads the
-  setting. It takes no Library slot, is not pausable and
-  keeps no history; its progress counts the mixes made, and it succeeds when
-  mixes are off or history is too short.
-- `libraryDailyMixes(library, now_s, utc_offset_s)` returns `DailyMixes`: a
-  `DailyMixesState` (`ready`, `not_enough_history`, `off`, `not_generated`),
-  `generated_at`, `local_day` and `items()`, up to `max_daily_mixes` (6)
-  `DailyMix`es. Each has its id, `ordinal`, `DailyMixKind` (`genre`,
-  `rarely_played`, `decade`, `new_to_you`, `deep_cuts`, `upbeat`,
-  `wind_down`), `name()`, `genre_id`, `decade` (the first year of a decade
-  mix's decade), `mixArtists()` (up to 4
-  `DailyMixArtist`s), `entry_count`, `duration_ms`, `signals`,
-  `DailyMixLeftOut`, `DailyMixMakeup` and `coverReleases()` (up to 4 Release
-  ids).
-- `libraryDailyMixEntries(library, mix_id, output)` fills up to
-  `max_daily_mix_entries` (25) `DailyMixEntry`s (Track, Recording, duration,
-  reason) in order and returns how many; `error.UnknownDailyMix` for an
-  unknown mix.
-- `libraryNotForMe(library, track_id, now_s)` hides the Track's Recording from
-  Radio and Daily Mixes for `daily_mix_not_for_me_days` (90) days
-  (`error.TrackNotFound` for an unknown or Recording-less Track);
-  `libraryClearNotForMe(library, track_id)` undoes it and
-  `libraryResetRecommendations(library)` clears every mark.
-- `librarySaveDailyMix(library, mix_id, name)` saves the mix's shown entries
-  as a manual playlist and returns its id.
-  See [discovery.md](discovery.md#daily-mixes).
+- `libraryRadioPreview` ranks the Recordings a Radio would play, without a
+  Player.
+- `libraryDiscoverySettings` and `setLibraryDiscoverySettings` read and store
+  the discovery settings.
+- `libraryRecordingSummary` names a Recording.
+- `playerStartRadio`, `playerStopRadio`, `playerSetRadioOptions`,
+  `playerRadioLessLikeThis`, `playerRadioUndoFeedback`, `playerRadio` and
+  `playerRadioPicks` run and report a Library Radio session.
+- `startDailyMixes`, `libraryDailyMixes`, `libraryDailyMixEntries` and
+  `librarySaveDailyMix` make, read and save Daily Mixes.
+- `libraryNotForMe`, `libraryClearNotForMe` and `libraryResetRecommendations`
+  hide Tracks from recommendations.
 
-#### Home
+### Home
 
-Each query takes the Library and a `HomeLocalTime{ now_s, utc_offset_s }`,
-reads the database alone, and is bounded: lists fill a caller-supplied slice
-of at most `home_max_items` (24) entries and return the count, strings are
-`HomeText` values cut at `home_max_text_bytes` (256). An empty Library or an
-empty history gives empty lists and zero numbers. See
-[discovery.md](discovery.md#home).
+Each query reads the database alone and takes a `HomeLocalTime`.
 
-- `libraryListeningWeek(library, time)`: `HomeListeningWeek` with the time
-  listened on each of the last `home_week_days` (7) local days (today last),
-  the week's total, plays, distinct Artists and Releases, the most played
-  Artist, and the previous 7 days' total and plays.
-- `libraryRecentReleases`, `libraryRediscover(library, time, out)`:
-  `HomePlayedRelease` lists.
-- `libraryNeverPlayed(library, out)`, `libraryDeepCuts(library, time, out)`:
-  `HomeTrack` lists.
-- `libraryUnplayedReleases(library, time, out)`: `HomeRelease` list of Releases
-  with no listen, one per album Artist, ordered by `HomeReleaseClass` (album,
-  unknown, EP or single) and then a shuffle that holds for one local day.
-- `libraryReleaseAnniversaries(library, time, out)`: `HomeAnniversary` list of
-  Releases whose full release date falls within 3 days of today's month and
-  day, with `years_ago`, `day_offset` (-3 to 3) and `round`.
-- `libraryTopArtists(library, time, days, out)`: `HomeTopArtist` list.
-- `libraryFormats(library)`: `HomeFormats` with the Release, Track and
-  duration totals and Tracks by FLAC, ALAC, MP3 and other, summing to the
-  Track count.
-- `libraryOnThisDay(library, time)`: `HomeOnThisDay`.
-- `libraryHistoryAge(library, time)`: `HomeHistoryAge`.
+- `libraryListeningWeek`, `libraryRecentReleases`, `libraryRediscover`,
+  `libraryNeverPlayed`, `libraryDeepCuts`, `libraryUnplayedReleases`,
+  `libraryReleaseAnniversaries`, `libraryTopArtists`, `libraryFormats`,
+  `libraryOnThisDay` and `libraryHistoryAge` return the sections of the Home
+  page.
 
 ### Playlists
 
-`libraryPlaylists`, `libraryCreatePlaylist`, `libraryRenamePlaylist`,
-`libraryDeletePlaylist`, `libraryPlaylistEntries`, `libraryPlaylistInsert`,
-`libraryPlaylistRemove` and `libraryPlaylistMove` manage playlists;
-`playerPlayPlaylist` plays one, `libraryImportPlaylist` and
-`libraryExportPlaylist` read and write M3U files and `playerSaveQueueAsPlaylist`
-saves the queue from the current entry. The limits, errors and M3U rules are
-in [cli.md](cli.md#playlists-and-ratings).
+- `libraryPlaylists`, `libraryPlaylistPage`, `libraryPlaylistCount` and
+  `libraryPlaylist` list playlists.
+- `libraryCreatePlaylist`, `libraryRenamePlaylist`, `libraryDeletePlaylist`,
+  `libraryUpdatePlaylist`, `libraryPlaylistTags` and `libraryPlaylistFormats`
+  manage a playlist.
+- `libraryPlaylistEntries`, `libraryPlaylistInsert`, `libraryPlaylistRemove`
+  and `libraryPlaylistMove` manage its entries.
+- `libraryImportPlaylist` and `libraryExportPlaylist` read and write M3U files.
+- `playerPlayPlaylist` plays a playlist and `playerSaveQueueAsPlaylist` saves
+  the queue from the current entry.
+- `libraryCreateSmartPlaylist`, `librarySetSmartPlaylistRules`,
+  `librarySmartPlaylistRules`, `librarySmartPlaylistCount` and
+  `librarySmartPlaylistPreview` manage smart playlists; the rule format is
+  below. `libraryReshufflePlaylists` draws a new random seed.
 
-- `libraryPlaylistPage(library, PlaylistQuery)` returns at most 512
-  `PlaylistSummary`s; `libraryPlaylistCount` counts the query and
-  `libraryPlaylist` returns one summary.
-- `libraryPlaylistFormats` returns `PlaylistFormats` (up to 32 `CodecCount`s,
-  free with `deinit(allocator)`); `libraryUpdatePlaylist` sets the description,
-  pin, love or tags (at most `max_playlist_tags`); `libraryPlaylistTags` returns
-  the tags alone.
-- `libraryCreateSmartPlaylist(library, name, rules_json)`,
-  `librarySetSmartPlaylistRules` and `librarySmartPlaylistRules` (null for a
-  manual playlist) manage smart playlists. `librarySmartPlaylistCount` counts
-  the Tracks rules match without storing anything and
-  `librarySmartPlaylistPreview(library, allocator, rules_json, sample_limit)`
-  returns a `SmartPlaylistPreview` from one evaluation: the count, `duration_ms`
-  and the first `sample_limit` Tracks (at most 512, else
-  `error.PageOutOfRange`). Rules are at most `max_smart_playlist_rules_bytes`,
-  in the format under [Smart playlist rules](#smart-playlist-rules).
+The limits, errors and M3U rules are in
+[the CLI reference](cli.md#playlists-and-ratings).
 
 ### Playback
 
-- `playerDrained` turns true once the Player has decoded its queue and every
-  Zone taking part in the drain has played what it held. When every requested
-  output has failed with its recovery attempts used, the engine pauses the
-  Player at its position and wakes the host instead: `PlayerSnapshot.state` is
-  `paused`, `playerDrained` stays false and `zoneStats` reports `failed`. A host
-  waiting for a drain also stops on that state. `zoneCloseOutput`, then
-  `zoneRequestOutput` once the Zone reports `closed`, then `playPlayer` resumes
-  from that position. See [audio-engine.md](audio-engine.md#zones).
-- `PlayerStatus.last_failure` is the last queue entry that could not be opened,
-  a `PlaybackFailure` with `track_id` and a `Reason`, cleared once an entry
-  opened after it is heard. A Track whose root is unavailable fails with
-  `error.TrackFolderUnavailable` and marks nothing missing. See
-  [audio-engine.md](audio-engine.md#playback-failures).
-- `playerNext` and `playerPrevious` open the target entry before moving the
-  queue. An entry that fails to open is counted in `QueueStats.open_failures`
-  and stepped over in the same direction, at most 8 entries and never onto the
-  playing one; repeat and shuffle order apply. The last entry stepped over
-  stays in `last_failure` after the skip lands. They
-  return false only at the end of a queue that does not repeat. When every
-  candidate fails they return the last open error, and the cursor, audio,
-  epoch, transport and queue history are unchanged. `playerQueueJump` does not
-  step: a target that fails to open returns its error and changes nothing.
-- Queue edits: `playerQueueJump`, `playerQueueInsertNext`, `playerQueueRemove`
-  and `playerQueueMove(player, from, to)`. The entry playing, and one already
-  lined up after it, are refused with `error.QueueEntryInUse`, as is a move
-  landing between them. Under shuffle a move changes only the shuffled order.
-- `playerQueueTracks(player, allocator, offset, limit)` returns a
-  `QueueTrackPage` of `QueueTrack { position, id, track }` in play order. Row
-  `n` is queue position `offset + n`, and the page is shorter only past the end
-  of the queue. Each entry is read from the Library its `TrackRef` names: a
-  queue keeps the entries of a Library the Player was bound to before
-  `playerBindLibrary` or an enqueue bound it to another. `track` is null when
-  the entry's Track was removed from its Library or that Library is closed;
-  the entry keeps its place and `id` until it is removed from the queue.
-- `playerQueueHistory(player, offset, output)` fills `QueueHistoryEntry` values,
-  newest first, with a `QueueHistoryReason` (`finished`, `skipped`,
-  `replaced`). `playerQueueHistoryTracks(player, allocator, offset, limit)`
-  returns a `QueueHistoryTrackPage` of `QueueHistoryTrack { position, id,
-  ended_at_ms, reason, track }` in the same order: row `n` is history entry
-  `offset + n`, and `track` is null under the same conditions as a queue row.
-  `playerClearQueueHistory` empties it. The history holds
-  `queue_history_capacity` (100) entries in memory and records no listen. See
-  [audio-engine.md](audio-engine.md#queue-history).
-- `playerSaveState(player, library)` saves the queue (at most 10,000 entries,
-  those of other Libraries left out), the playing entry, its position, repeat
-  and shuffle into the Player's Library. `playerRestoreState(player, library,
-  mode)` replaces the queue with the saved one and, by `RestoreMode`, leaves it
-  `paused`, starts `playing` or (`none`) changes nothing; it returns a
-  `RestoreOutcome`. After either call the runtime saves the state every 30 s
-  from `pump` while it plays, once on the tick after it pauses or stops, when
-  the Player is destroyed or rebound or its Library destroyed, and in
-  `shutdown`. A host calls `playerRestoreState` once at launch.
-- `playerSetLongTrackMemory(player, threshold_ms)` sets how long a Track must be
-  for the Player to remember where it was left (on pause, seek, stop or a skip
-  away) and resume there; a Track that plays to its end forgets it. The default
-  is 20 minutes; null turns it off. `PlayerStatus.resumed_from_ms` is where the
-  audible entry resumed. See [database.md](database.md#saved-playback).
-- `playerSetEqualizer` and `playerSetCrossfeed` set the ten-band `Equalizer` and
-  stereo crossfeed. `playerSetParametricEqualizer` sets a `ParametricEqualizer`
-  of up to `max_parametric_filters` (16) `ParametricFilter`s and a preamp
-  (`validate` states the ranges); it and the ten-band equalizer are exclusive,
-  turning one on turns the other off, and an invalid setting is rejected.
-  `playerEqualizer` returns null while the parametric one runs and
-  `playerParametricEqualizer` null while the ten-band one does.
-  `ParametricEqualizer.response`, `parseEqualizerApo` and
+- `playPlayer`, `playerNext`, `playerPrevious` and `playerDrained` drive the
+  transport; `zoneCloseOutput` and `zoneRequestOutput` reopen a failed output.
+- `playerQueueJump`, `playerQueueInsertNext`, `playerQueueRemove` and
+  `playerQueueMove` edit the queue.
+- `playerQueueTracks`, `playerQueueHistory`, `playerQueueHistoryTracks` and
+  `playerClearQueueHistory` read the queue and its history.
+- `playerSaveState` and `playerRestoreState` save and restore the queue and
+  position; `playerSetLongTrackMemory` sets when a long Track remembers its
+  position.
+- `playerSetEqualizer`, `playerSetParametricEqualizer`, `playerSetCrossfeed`,
+  `playerEqualizer` and `playerParametricEqualizer` set and read the sound
+  processing. `ParametricEqualizer.response`, `parseEqualizerApo` and
   `writeEqualizerApo` need no Player.
-- `playerSetReplayGainMode` takes a `ReplayGainMode` (`off`, `track`, `album`,
-  `smart`: album while a neighbour in playback order shares the Release).
-  `playerSetReplayGainPreamp` (dB, clamped to ±15),
-  `playerSetReplayGainFallback` (`minus_6_db` or `as_is`, the default) and
-  `playerSetPeakProtection` (default on) set the rest and
-  `playerReplayGainSettings` reads them. `playerSetStopAfterCurrent` arms a
-  one-shot stop after the entry heard; `playerStopAfterCurrent` reads it, false
-  once it fired.
-- `playerSignalPath` returns a `SignalPath`: the stages from source to output
-  stream, `output_kind`, `device_format` (null when unknown) and why the path is
-  or is not bit-perfect. `bit_perfect_eligible` needs a declared source format,
-  an open output and a device that reported its rate and format; otherwise the
-  reasons include `path_unknown`. The settings fields are the current
-  settings, while `sample_processing` also stands until audio processed under
-  earlier settings has played. `enumerateOutputDevices` fills `Device` snapshots with
-  `capabilities`, null when the audio server did not report them within 500 ms;
-  its `detail` parameter sets the cost: `.identity` asks no device for its
-  formats, `.capabilities` waits up to 500 ms and belongs where they are shown.
-  See [audio-engine.md](audio-engine.md).
+- `playerSetReplayGainMode`, `playerSetReplayGainPreamp`,
+  `playerSetReplayGainFallback`, `playerSetPeakProtection` and
+  `playerReplayGainSettings` set and read ReplayGain.
+- `playerSetStopAfterCurrent` and `playerStopAfterCurrent` arm and read a
+  one-shot stop.
+- `playerSignalPath` describes the path from source to output and whether it is
+  bit-perfect.
+- `enumerateOutputDevices` lists output devices.
 
-### Smart playlist rules
+## Listening from a host
+
+A host that wants listening history and scrobbling calls:
+
+- `Runtime.setCredentialStore` with a `CredentialStore` over the platform's
+  secure storage. `get` receives the service and account
+  (`listenbrainz_token_service`, `listenbrainz_token_account`) and returns an
+  owned copy of the token, or null. It runs on a listen worker's thread and
+  never prompts or blocks on user interaction: a locked keyring reads as no
+  token.
+- `Runtime.setClientIdentity` to name the host in submissions; see
+  [Client identity](#client-identity).
+- `Runtime.setListenBrainzServer` only to select a self-hosted or compatible
+  server.
+- `Runtime.librarySetScrobbling` (its last argument turns Now Playing on),
+  `libraryScrobblerCredentialsChanged` after the token changes, and
+  `libraryScrobblerStatus` for presentation.
+- `Runtime.librarySetFeedback` and `libraryTrackFeedback` for love and hate;
+  `librarySetReleaseLove` for album love, which is never sent.
+
+The identity and the server are copied. The store's context is borrowed and
+outlives the runtime. The setters may be called at any time and reach each
+listen worker on its next pass; a host that sets them before binding a Player to
+a Library avoids a first pass with the defaults. Listens are sampled inside
+`processNextCommand`, so a host pumps it as it already does. The C ABI covers
+the same steps with the credential callback, `orca_runtime_set_client_identity`,
+`orca_runtime_set_provider_server`, `orca_library_set_scrobbling`,
+`orca_library_scrobbler_credentials_changed`,
+`orca_library_scrobbler_status`, `orca_library_set_feedback` and
+`orca_library_set_release_love`; see [Credentials](c-abi.md#credentials).
+
+## Smart playlist rules
 
 A smart playlist stores a JSON document, version 1, and lists the Tracks it
 matches each time it is read, one Track per Recording (the lowest id).
@@ -861,9 +399,9 @@ try runtime.setClientIdentity(.{
 ```
 
 - Until it is set, `startLibraryMatching`, `startAcoustIdSubmission`,
-  `startArtistInfoFetch`, `startReleaseInfoFetch` and
-  `librarySetScrobbling(library, true, ...)` return
-  `error.ClientIdentityRequired`; turning scrobbling off and
+  `startArtistInfoFetch`, `startReleaseInfoFetch`,
+  `startEmbeddingModelDownload` and `librarySetScrobbling(library, true, ...)`
+  return `error.ClientIdentityRequired`; turning scrobbling off and
   `libraryTrackFingerprint` need none.
 - A later call replaces the identity; workers adopt it on their next pass.
 - Each field must be non-empty, free of control characters and parentheses, and
@@ -884,14 +422,12 @@ increments the slot generation, so a stale handle never resolves.
   its render path, device and output session. Zones reach their Player's engine
   only through an acknowledged published snapshot, never by resolving a handle,
   so a worker never touches a handle pool. Moving a Zone to another Player waits
-  for the previous engine's acknowledgement and closes the output first; see
-  [audio-engine.md](audio-engine.md).
+  for the previous engine's acknowledgement and closes the output first.
 - A Library a Player has been bound to, or that scrobbles, has a listen worker.
   Its ring, configuration and status belong to the Library and outlive the
   worker: a drain joins it, after it records everything in its ring, and the
   next listen, bind or scrobbling enable starts a new one.
-- A watched Library has a watcher thread
-  ([storage.md](storage.md#watching-roots)); the Library keeps its
+- A watched Library has a watcher thread; the Library keeps its
   `WatchOptions`, and the watcher and its queued changes go on a drain.
 - `destroyLibrary` drains every worker in the process, then restarts the
   scrobbling Library's listen worker, so its queue keeps its retry times, and a
@@ -900,8 +436,7 @@ increments the slot generation, so a stale handle never resolves.
 - Idle maintenance keeps its schedule on the Library's record, which survives a
   drain; a drain finalizes its unit and the next starts one interval later. A
   waiting host job holds a Library handle and a request, not a worker, and
-  `destroyLibrary` finishes its Library's waiting jobs `cancelled`. See
-  [control-plane.md](control-plane.md#idle-maintenance).
+  `destroyLibrary` finishes its Library's waiting jobs `cancelled`.
 - The `CredentialStore` given to `setCredentialStore` is borrowed: its context
   must outlive the runtime, and `get` runs on a listen worker's thread.
   `setClientIdentity`, the server setters, `setAcoustIdClientKey` and
@@ -939,7 +474,7 @@ does when it switches libraries, follows this order:
    loader's read-only connection before its Library's database closes; discard
    tag write plans awaiting approval; finish every waiting host job
    `cancelled`; cancel and drain Jobs; save each Player's state and long Track
-   position (see [Playback](#playback)).
+   position.
 3. Destroy Zones, closing their output sessions.
 4. Free Players.
 5. Close each Library's database and release its listen state.
