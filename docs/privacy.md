@@ -1,16 +1,15 @@
 # Privacy
 
-This file lists what Orca sends to outside services, when it sends it, and what
-identifies the user. The rules that govern every request (identification,
-pacing, back-off, credentials) are in [providers.md](providers.md).
+This page lists what Orca sends to outside services, when it sends it, and what
+identifies the user.
 
 ## Summary
 
 - Orca sends nothing to any other destination: no telemetry, no crash reports,
   no update checks, no analytics.
 - Every outbound request goes through one gateway, `network.Gateway`, to one of
-  the services below. [How this is checked](#how-this-is-checked) describes the
-  verification.
+  the services below. [How this is checked](#how-this-is-checked) states the
+  basis.
 - Music files and paths never leave the machine. What leaves is tag text,
   MusicBrainz IDs, audio fingerprints, durations and listen records, as listed
   per service.
@@ -170,8 +169,7 @@ artists and release groups, and an album's description.
   start it by command.
 - It contacts MusicBrainz, Wikidata, Wikimedia Commons, Wikipedia, ListenBrainz
   (popularity), ListenBrainz Labs (similar artists) and the Cover Art Archive
-  (release-group covers); [providers.md](providers.md#artist-info) gives the
-  order.
+  (release-group covers).
 - What is sent is MusicBrainz IDs of the artist, its related artists, areas,
   releases and release groups, and the IDs and titles those services returned.
   No tag text, path or Library content. The answers are kept in the Library
@@ -209,14 +207,7 @@ token goes to whichever ListenBrainz server is set.
 
 ## How this is checked
 
-- The only HTTP client in the tree is `std.http.Client`, held by the gateway's
-  standard transport in `liborca/network/client.zig` and called only from the
-  gateway's request and redirect methods. The listen worker, the job worker
-  and the model download build it, each wrapping it in a gateway; no provider
-  holds a transport.
-- Searches of `liborca`, `apps`, `build`, `build.zig` and `examples` find no
-  other use of `std.http`, no `std.Io.net` connection outside tests, and no C
-  socket, `getaddrinfo` or `curl` call. The C sources' only connections are
-  PipeWire's local ones.
-- The apps' only other external addresses are the browser links above. No
-  telemetry, crash-reporting or update-check client exists in the source.
+The only HTTP client in the source is `std.http.Client`, used through
+`network.Gateway`. The source holds no other network client, no telemetry, no
+crash-reporting and no update-check code; the only other external addresses are
+the browser links above.

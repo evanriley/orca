@@ -14,8 +14,8 @@ nix develop
 ```
 
 With direnv, the shell loads on entering the directory. The
-[README](README.md#requirements) lists the requirements for a build outside
-Nix.
+[install page](docs/install.md#requirements) lists the requirements for a build
+outside Nix.
 
 ## Verification
 
@@ -33,6 +33,44 @@ nix build
 
 A plain `zig build` replaces `zig-out/bin` with Debug artifacts; rebuild with
 `-Doptimize=ReleaseFast` immediately before benchmarks.
+
+Other build and verification commands:
+
+```sh
+nix fmt                       # formats Nix files
+zig build -Dgtk=false         # the same without orca-gtk and its files
+zig build -Dembeddings=false  # liborca without audio embeddings and ONNX Runtime
+zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
+zig build abi-compat          # orca.h keeps the layouts, values and functions of tests/abi/orca-0.1.0.h
+zig build fuzz --fuzz[=N]     # fuzz the parser targets; N iterations per target, unlimited opens the web UI
+zig build package-check       # build examples/embed and an install from the fetched build.zig.zon package
+zig build run -- --version    # orca-cli
+zig build bench               # 500k-track persistence benchmark
+zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
+zig build -Doptimize=ReleaseFast analysis-bench -- FILE [ITERATIONS [EMBEDDING_MODEL]]   # one file's analysis with and without audio features; with a model, the audio embedding's stages
+zig build dependency-smoke    # Linux foreign-library linking pattern
+zig build pipewire-live-smoke -- ID   # opens a short stream on the silent sink ID
+```
+
+`zig build test` covers unit and integration tests, the C ABI smoke test and ABI
+checks, and the PipeWire link smoke. The C ABI smoke test opens an output, so
+on Linux the build creates the sink of `scripts/silent-sink.sh`, passes its
+device id to the test and fails rather than fall back to the default output.
+`dependency-smoke` and `pipewire-live-smoke` depend on the host and are not
+part of the normal run; `ID` is the device id printed by
+`scripts/silent-sink.sh`, and the smoke also reads `ORCA_TEST_DEVICE` and
+refuses a missing, unknown or non-virtual device.
+
+`build.zig` exposes no test filter; add `.filters` to the relevant `b.addTest`
+call when one is needed. A bare `zig test` invocation does not work: the test
+module needs its translated SQLite bindings, Zig packages, codec libraries,
+libc, libc++ and C shims. Tests run from the repository root and load fixtures
+by relative path.
+
+`scripts/headless-gui.sh PAGE OUT.png [STEP...]` runs `orca-gtk` in a private
+headless sway session, drives it and saves screenshots; it never opens a window
+on the desktop. `ORCA_LIBRARY=... ORCA_OUTPUT_DEVICE=$(scripts/silent-sink.sh 1)
+zig build run-linux` runs the GTK frontend on a silent output.
 
 `scripts/alac-sanitize.sh` builds the ALAC decoder and `alac_shim.cpp`
 with AddressSanitizer and UndefinedBehaviorSanitizer and decodes the
