@@ -169,11 +169,14 @@ supported target defines.
 
 ## Dependencies and licences
 
-Everything liborca compiles in or links is permissively licensed, so an embedder
-may keep its own code closed. GPL and LGPL dependencies are not permitted in the
-engine. A frontend may dynamically link its platform toolkit or keyring. `zig
-build` installs the licence texts of vendored and source-built code under
-`share/doc/orca/licenses`.
+Dependencies are chosen on technical merit; GPL, LGPL and AGPL are allowed. A
+copyleft dependency that can reasonably be optional gets a build option so a
+build without it stays possible. A frontend may dynamically link its platform
+toolkit or keyring. Third-party source that Orca changes lives in a fork at
+`github.com/evanriley/<name>`, with each change as a commit, pinned by commit
+in `build.zig.zon`; the repository holds no third-party source other than
+minimp3. `zig build` installs the licence texts of vendored and source-built
+code under `share/doc/orca/licenses`.
 
 | Dependency | Licence | How it is used |
 | --- | --- | --- |
@@ -214,12 +217,9 @@ only a file whose size and SHA-256 it was built with
   source. The engine downloads it only when a host asks, and packages bundle
   only the permissively licensed file.
 
-Chromaprint's repository also carries FFmpeg's LGPL resampler
-(`src/avresample`). It is not compiled: `config.h` leaves
-`USE_INTERNAL_AVRESAMPLE` undefined, and Orca resamples with libsamplerate. The
-build step `check Chromaprint licences`, which `zig build` and `zig build test`
-run, fails if any Chromaprint or KissFFT source it compiles contains a GPL or
-LGPL notice.
+Chromaprint's repository also carries FFmpeg's resampler (`src/avresample`). It
+is not compiled: `config.h` leaves `USE_INTERNAL_AVRESAMPLE` undefined, and Orca
+resamples with libsamplerate.
 
 ## Platforms
 

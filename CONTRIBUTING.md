@@ -129,14 +129,16 @@ constraints, architecture invariants and verification.
 [apps/linux/AGENTS.md](apps/linux/AGENTS.md) add rules for those trees. Point
 an agent that does not read `AGENTS.md` files by itself at them.
 
-## Licence boundary
+## Dependencies and licences
 
-Orca is MPL-2.0. Everything vendored, compiled into or statically linked by
-`liborca` must use a permissive licence such as BSD, MIT, Apache-2.0, zlib,
-CC0 or public domain. GPL and LGPL dependencies are not permitted in the
-engine. The
-[dependency table](docs/architecture.md#dependencies-and-licences) lists
-what is there and why.
+Orca is MPL-2.0. Dependencies are chosen on technical merit; GPL, LGPL and
+AGPL are allowed. A copyleft dependency that can reasonably be optional gets a
+build option so a build without it stays possible. Third-party source that Orca
+changes lives in a fork at `github.com/evanriley/<name>`, with each change as a
+commit, pinned by commit in `build.zig.zon`; the repository holds no
+third-party source. The
+[dependency table](docs/architecture.md#dependencies-and-licences) lists what
+is there and why.
 
 ## Architecture
 

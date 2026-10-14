@@ -368,7 +368,7 @@ output.
 ## Contributing and security
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the development environment, the
-checks a change must pass and the licence boundary. Report vulnerabilities as
+checks a change must pass and the dependency policy. Report vulnerabilities as
 [SECURITY.md](SECURITY.md) describes.
 
 ## License
@@ -377,12 +377,15 @@ Orca is licensed under the [Mozilla Public License 2.0](LICENSE). Applications
 under any licence may embed `liborca`; changes to Orca's own files are shared
 under the same terms.
 
-`liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac (Apache-2.0),
-Chromaprint (MIT) with KissFFT (BSD-3-Clause), minimp3 (CC0) and the reference
-QOA decoder (MIT). `zig build` installs their licence and notice files under
-`share/doc/orca/licenses`; distribute that directory with any binary. The
-system libraries Orca links are distributed under their own licences. The
-fonts `orca-gtk` bundles use the SIL Open Font License, installed beside them.
+Orca's dependencies are chosen on technical merit, and GPL, LGPL and AGPL
+dependencies are allowed; a binary that contains one carries that licence's
+terms. `liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac
+(Apache-2.0), Chromaprint (MIT) with KissFFT (BSD-3-Clause), minimp3 (CC0) and
+the reference QOA decoder (MIT). `zig build` installs their licence and notice
+files under `share/doc/orca/licenses`; distribute that directory with any
+binary. The system libraries Orca links are distributed under their own
+licences. The fonts `orca-gtk` bundles use the SIL Open Font License,
+installed beside them.
 
 ## Resources
 
