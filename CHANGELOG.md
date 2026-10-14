@@ -355,6 +355,10 @@
 
 ### Changed
 
+- **Copyleft dependencies are permitted.** Dependencies are chosen on
+  technical merit, and GPL, LGPL and AGPL are allowed. The build no longer
+  scans Chromaprint's sources for licence notices.
+
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
   on few Tracks in the Library now weighs more than one on many: a rarity from
   1 for a genre on at most a hundredth of the Tracks down to 0.5 for one on a

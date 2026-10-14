@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
     }
     addAlac(b, liborca_module);
     @import("build/libxaac.zig").addTo(b, liborca_module);
-    const chromaprint_licences = @import("build/chromaprint.zig").addTo(b, liborca_module);
+    @import("build/chromaprint.zig").addTo(b, liborca_module);
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/audio/samplerate_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
@@ -126,7 +126,6 @@ pub fn build(b: *std.Build) void {
     liborca.bundle_compiler_rt = true;
     liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
     installLicenses(b);
-    b.getInstallStep().dependOn(chromaprint_licences);
     b.installArtifact(liborca);
     const lib_step = b.step("lib", "Build the static liborca and orca.h");
     lib_step.dependOn(&b.addInstallArtifact(liborca, .{}).step);
@@ -293,7 +292,6 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run all unit and integration tests");
-    test_step.dependOn(chromaprint_licences);
     test_step.dependOn(&run_unit_tests.step);
     // Built as its own project, so the documented way to embed liborca as a
     // Zig package dependency is exercised rather than asserted.

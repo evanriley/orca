@@ -14,19 +14,21 @@ Feature status belongs only in [docs/roadmap.md](docs/roadmap.md). Subsystem
 behavior and contracts belong in `docs/*.md`. Change an `AGENTS.md` file only
 when an agent working rule changes.
 
-## Licence boundary
+## Dependencies and licences
 
-Orca is MPL-2.0. Everything vendored, compiled into, or statically linked by
-`liborca` must use a permissive licence such as BSD, MIT, Apache-2.0, zlib,
-CC0, or public domain. GPL and LGPL dependencies are not permitted in the
-engine because they would constrain embedders. A frontend may dynamically
-link its platform toolkit or keyring. Frontend-only fonts may use the SIL Open
-Font License and keep their licence texts beside them.
+Orca is MPL-2.0. Dependencies are chosen on technical merit; GPL, LGPL and AGPL
+are allowed. A copyleft dependency that can reasonably be optional gets a build
+option so a build without it stays possible, but that never blocks adopting it.
+Third-party source that Orca changes lives in a fork at
+`github.com/evanriley/<name>`, with each change as a commit, pinned by commit
+in `build.zig.zon`. The repository holds no third-party source. Frontend-only
+fonts may use the SIL Open Font License and keep their licence texts beside
+them.
 
-Chromaprint is built without its LGPL resampler and uses libsamplerate instead.
-Its build-time licence check must remain enabled. ONNX Runtime (MIT, with some
-MPL-2.0 files) is a dynamically linked system library that `-Dembeddings=false`
-removes; never vendor it or link it statically.
+Chromaprint is built without its resampler and uses libsamplerate instead.
+ONNX Runtime (MIT, with some MPL-2.0 files) is a dynamically linked system
+library that `-Dembeddings=false` removes; never vendor it or link it
+statically.
 
 An audio-embedding model is a data file, never committed or compiled in. The
 engine downloads one only when a host asks, to a path the host names, and
