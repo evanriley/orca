@@ -4,21 +4,32 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+  workflow_run:
+    workflows: [ci-images]
+    types: [completed]
 
 permissions:
   contents: read
   packages: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      full: ${{ steps.diff.outputs.full }}
       nix: ${{ steps.diff.outputs.nix }}
+      package: ${{ steps.diff.outputs.package }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,54 +39,67 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           EVENT: ${{ github.event_name }}
+          HAS_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          base=HEAD^1
-          if [ "$EVENT" = push ] && [ -n "$BEFORE" ]; then
-            base=$BEFORE
+
+          emit() {
+            {
+              echo "code=$1"
+              echo "full=$2"
+              echo "nix=$3"
+              echo "package=$4"
+            } >>"$GITHUB_OUTPUT"
+          }
+
+          if [ "$EVENT" = schedule ]; then
+            last_run=$(gh run list --workflow test.yml --commit "$GITHUB_SHA" --status success \
+              --json event,updatedAt \
+              --jq '[.[] | select(.event | IN("push", "workflow_dispatch", "workflow_run", "schedule")) | .updatedAt] | max // ""')
+            if [ -n "$last_run" ]; then
+              last_images=$(gh run list --workflow ci-images.yml --status success --limit 1 \
+                --json updatedAt --jq '.[0].updatedAt // ""')
+              if [ -z "$last_images" ] || [[ $last_images < $last_run ]]; then
+                echo "main at $GITHUB_SHA already passed at $last_run; skipping the nightly run"
+                emit false false false false
+                exit 0
+              fi
+            fi
           fi
+
+          full=false
+          case "$EVENT" in
+            push | workflow_dispatch | workflow_run | schedule) full=true ;;
+            pull_request) full=$HAS_FULL_LABEL ;;
+          esac
+
           code=true
           files=
-          if [ "$base" != 0000000000000000000000000000000000000000 ] &&
-            files=$(git diff --name-only "$base" HEAD) && [ -n "$files" ] &&
-            ! grep -Ev '^(docs|orca-design)/|\.md$' <<<"$files" >/dev/null; then
-            code=false
-          fi
-          nix=false
-          if [ "$EVENT" = push ] ||
-            grep -Eq '^(flake\.(nix|lock)|nix/|build/|build\.zig$|build\.zig\.zon$)' <<<"$files"; then
+          case "$EVENT" in
+            push | pull_request)
+              base=HEAD^1
+              if [ "$EVENT" = push ] && [ -n "$BEFORE" ]; then
+                base=$BEFORE
+              fi
+              if [ "$base" != 0000000000000000000000000000000000000000 ] &&
+                files=$(git diff --name-only "$base" HEAD) && [ -n "$files" ] &&
+                ! grep -Ev '^(docs|orca-design)/|\.md$' <<<"$files" >/dev/null; then
+                code=false
+              fi
+              ;;
+          esac
+
+          nix=$full
+          if grep -Eq '^(flake\.(nix|lock)|nix/|build/|build\.zig$|build\.zig\.zon$)' <<<"$files"; then
             nix=true
           fi
+          package=$full
+          if grep -Eq '^(build\.zig\.zon$|build/|build\.zig$|examples/|scripts/check-package\.sh$)' <<<"$files"; then
+            package=true
+          fi
           echo "$files"
-          echo "code=$code" >>"$GITHUB_OUTPUT"
-          echo "nix=$nix" >>"$GITHUB_OUTPUT"
-
-  test:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - run: nix develop -c zig build
-      - run: nix develop -c zig build bench-build -Doptimize=ReleaseFast
-      - run: nix develop -c scripts/headless-audio.sh zig build test
-      - run: nix develop -c scripts/headless-audio.sh zig build test -Doptimize=ReleaseSafe
-      - run: nix develop -c zig build fuzz
-
-  sanitize:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - run: nix develop -c scripts/alac-sanitize.sh
-      - run: nix develop -c scripts/aac-sanitize.sh
+          emit "$code" "$full" "$nix" "$package"
 
   lint:
     needs: changes
@@ -91,7 +115,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: nix run --inputs-from . nixpkgs#pinact -- run --check --verify
 
-  cross-macos:
+  test:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -100,7 +124,78 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            examples/embed/.zig-cache
+          key: zig-debug-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'flake.lock') }}-${{ github.sha }}
+          restore-keys: |
+            zig-debug-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'flake.lock') }}-
+      - run: nix develop -c zig build
+      - run: nix develop -c scripts/headless-audio.sh zig build test
+      - run: nix develop -c zig build fuzz
+      - id: cache-size
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          kib=$(du -sk .zig-cache ~/.cache/zig examples/embed/.zig-cache 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')
+          echo "cache size: $kib KiB"
+          echo "save=$([ "$kib" -le 4194304 ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name == 'push' && steps.cache-size.outputs.save == 'true'
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            examples/embed/.zig-cache
+          key: zig-debug-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'flake.lock') }}-${{ github.sha }}
+
+  release:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: nix develop -c scripts/headless-audio.sh zig build test -Doptimize=ReleaseSafe
+
+  sanitize:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: nix develop -c scripts/alac-sanitize.sh
+      - run: nix develop -c scripts/aac-sanitize.sh
+
+  cross-macos:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - run: nix develop -c zig build lib -Dtarget=aarch64-macos
+
+  package:
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - run: nix develop -c zig build package-check
 
   nix:
     needs: changes
@@ -118,20 +213,9 @@ jobs:
           skipPush: ${{ github.event_name != 'push' }}
       - run: nix flake check -L
 
-  package:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - run: nix develop -c zig build package-check
-
   distro:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -158,7 +242,7 @@ jobs:
 
   required:
     if: always()
-    needs: [changes, test, sanitize, lint, cross-macos, nix, package, distro]
+    needs: [changes, lint, test, release, sanitize, cross-macos, package, nix, distro]
     runs-on: ubuntu-24.04
     steps:
       - env:
