@@ -41,11 +41,14 @@ nix fmt                       # formats Nix files
 zig build -Dgtk=false         # the same without orca-gtk and its files
 zig build -Dembeddings=false  # liborca without audio embeddings and ONNX Runtime
 zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
+zig build test-liborca        # liborca's unit and integration tests only; CI runs them with -Doptimize=ReleaseSafe
 zig build abi-compat          # orca.h keeps the layouts, values and functions of tests/abi/orca-0.1.0.h
 zig build fuzz --fuzz[=N]     # fuzz the parser targets; N iterations per target, unlimited opens the web UI
+zig build embed-example       # build examples/embed against this checkout
 zig build package-check       # build examples/embed and an install from the fetched build.zig.zon package
 zig build run -- --version    # orca-cli
 zig build bench               # 500k-track persistence benchmark
+zig build bench-build         # compile the benchmark programs without running them
 zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
 zig build -Doptimize=ReleaseFast analysis-bench -- FILE [ITERATIONS [EMBEDDING_MODEL]]   # one file's analysis with and without audio features; with a model, the audio embedding's stages
 zig build dependency-smoke    # Linux foreign-library linking pattern
@@ -101,8 +104,8 @@ Markdown files runs:
 
 - `lint`: `zig fmt --check` and a pinact check that every action is pinned to
   the commit its version comment names;
-- `test`: `zig build`, `zig build test` under `scripts/headless-audio.sh`,
-  and `zig build fuzz`.
+- `test`: `zig build`, `zig build test bench-build embed-example` under
+  `scripts/headless-audio.sh`, and `zig build fuzz`.
 
 A pull request that touches only `docs/`, `orca-design/` or Markdown files
 skips every job.
@@ -122,7 +125,7 @@ These jobs run on a pull request only when it changes their inputs:
 
 The full tier runs every job: the fast and scoped jobs plus
 
-- `release`: `zig build test -Doptimize=ReleaseSafe` under
+- `release`: `zig build test-liborca -Doptimize=ReleaseSafe` under
   `scripts/headless-audio.sh`;
 - `sanitize`: the ALAC and AAC sanitizer scripts;
 - `cross-macos`: the static `liborca` cross-build for aarch64 macOS;

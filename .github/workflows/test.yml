@@ -135,7 +135,7 @@ jobs:
             zig-debug-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'flake.lock') }}-
             ${{ github.event_name == 'pull_request' && format('zig-debug-{0}-', runner.os) || '' }}
       - run: nix develop -c zig build
-      - run: nix develop -c scripts/headless-audio.sh zig build test
+      - run: nix develop -c scripts/headless-audio.sh zig build test bench-build embed-example
       - run: nix develop -c zig build fuzz
       - id: cache-size
         if: github.event_name == 'push'
@@ -162,7 +162,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      - run: nix develop -c scripts/headless-audio.sh zig build test -Doptimize=ReleaseSafe
+      - run: nix develop -c scripts/headless-audio.sh zig build test-liborca -Doptimize=ReleaseSafe
 
   sanitize:
     needs: changes

@@ -288,12 +288,16 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all unit and integration tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_integration_tests.step);
+    const test_liborca_step = b.step("test-liborca", "Run liborca's unit and integration tests");
+    test_liborca_step.dependOn(&run_unit_tests.step);
+    test_liborca_step.dependOn(&run_integration_tests.step);
     // Built as its own project, so the documented way to embed liborca as a
     // Zig package dependency is exercised rather than asserted.
     const embed_example = b.addSystemCommand(&.{ b.graph.zig_exe, "build", b.fmt("-Dembeddings={}", .{embeddings}) });
     embed_example.setCwd(b.path("examples/embed"));
-    test_step.dependOn(&embed_example.step);
-    test_step.dependOn(&run_integration_tests.step);
+    const embed_example_step = b.step("embed-example", "Build examples/embed against this checkout as a Zig package dependency");
+    embed_example_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_c_abi_smoke.step);
     const abi_compat_step = b.step("abi-compat", "Check orca.h keeps the layouts, values and functions of every released header");
     abi_compat_step.dependOn(&run_abi_compat_tests.step);
@@ -576,7 +580,6 @@ pub fn build(b: *std.Build) void {
     benchmark_build_step.dependOn(&benchmark.step);
     benchmark_build_step.dependOn(&dsp_benchmark.step);
     benchmark_build_step.dependOn(&analysis_benchmark.step);
-    test_step.dependOn(benchmark_build_step);
 }
 
 fn abiVersion(header: []const u8) u32 {
