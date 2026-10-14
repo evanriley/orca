@@ -74,7 +74,7 @@ codec error, and a property the container does not state is null, not zero.
 | ALAC | Apple reference decoder | Apache-2.0 | MP4 edit list, then `iTunSMPB` |
 | Ogg Opus | opusfile | BSD-3-Clause | libraries trim pre-skip and end |
 | Ogg Vorbis | vorbisfile | BSD-3-Clause | libraries trim end |
-| QOA | vendored `qoa.h` | MIT | frame counts |
+| QOA | `qoa.h` from `phoboslab/qoa` | MIT | frame counts |
 
 Each C or C++ library sits behind one shim file in `liborca/codec/`
 (`flac_shim.c`, `mp3_shim.c`, `aac_shim.c`, `alac_shim.cpp`, `opus_shim.c`,
@@ -155,9 +155,9 @@ decoder that skips restoring the low bit of `mid` is wrong on every sample.
 
 ### Sanitizers
 
-The vendored ALAC decoder (`liborca/codec/vendor/alac`) is patched to bound
-every packet- and cookie-declared size against its buffers; `ORCA-CHANGES`
-beside it lists each change by file and function. It compiles with
+The ALAC decoder, built from the `evanriley/alac` fork, bounds every packet-
+and cookie-declared size against its buffers; the fork carries each change as a
+commit and lists them in its `ORCA-CHANGES`. It compiles with
 UndefinedBehaviorSanitizer on except `-fno-sanitize=shift-base`, plus `-fwrapv`,
 because the reference masks fields with shifts whose base UBSan's shift-base
 check would flag and relies on two's-complement wraparound. `alac_shim.cpp`
@@ -185,15 +185,17 @@ code under `share/doc/orca/licenses`.
 | libsamplerate | BSD-2-Clause | system library, behind `samplerate_shim.c` |
 | PipeWire | MIT | system library on Linux, behind `pipewire_shim.c` |
 | ONNX Runtime | MIT | system library, behind `embedding_shim.c` |
-| minimp3, QOA | CC0, MIT | vendored in `liborca/codec/vendor` |
-| ALAC | Apache-2.0 | vendored in `liborca/codec/vendor/alac` |
+| minimp3 | CC0 | vendored in `liborca/codec/vendor/minimp3` |
+| QOA | MIT | built from source by `build.zig`, pinned in `build.zig.zon` |
+| ALAC | Apache-2.0 | built from the `evanriley/alac` fork by `build/alac.zig` |
 | libxaac | Apache-2.0 | built from source by `build.zig` |
 | Chromaprint | MIT | built from source by `build/chromaprint.zig` |
 | KissFFT (in Chromaprint) | BSD-3-Clause | built from source with Chromaprint |
 
 `build.zig.zon` pins the sources `build.zig` builds: libxaac (`main`, commit
-2fbadd5, which carries decoder security fixes released after v0.1.13) and
-Chromaprint (v1.6.1). System libraries come from
+2fbadd5, which carries decoder security fixes released after v0.1.13),
+Chromaprint (v1.6.1), the `evanriley/alac` fork (branch `orca`) and
+`phoboslab/qoa` (commit bc05897). System libraries come from
 `pkg-config`, supplied by the dev shell and the Nix package.
 
 ONNX Runtime runs the audio-embedding model. It is MIT and carries some

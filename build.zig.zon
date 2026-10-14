@@ -11,6 +11,14 @@
             .url = "git+https://github.com/acoustid/chromaprint?ref=v1.6.1#aed8eba2202dd9d7b3b0a56c77904cc805490d72",
             .hash = "N-V-__8AAAZTUQCJVueKPg7JZOJEWI6kjYDp41XxHF5Bt1Wu",
         },
+        .alac = .{
+            .url = "git+https://github.com/evanriley/alac#f735d5594a03c2fbbfe39c9c69c1135ba5f1faa6",
+            .hash = "N-V-__8AAMFqBAA4Plssq3QgbH1J6tuBg5sZUB2wrRqXl3TE",
+        },
+        .qoa = .{
+            .url = "git+https://github.com/phoboslab/qoa#bc0589710ff6aa2f50e08fb4d0a815d567bc0f3e",
+            .hash = "N-V-__8AAGO0AACoCemjlwcH7TUMZ6WjnoRa_wUARynGd4tD",
+        },
     },
     .paths = .{
         "build.zig",

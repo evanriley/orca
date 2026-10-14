@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .force });
-    // The reference QOA decoder, vendored like minimp3.
+    liborca_module.addIncludePath(b.dependency("qoa", .{}).path("."));
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/qoa_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "ogg", "opus" }) |package| {
         liborca_module.addSystemIncludePath(pkgConfigIncludeDir(b, package));
     }
-    addAlac(b, liborca_module);
+    @import("build/alac.zig").addTo(b, liborca_module);
     @import("build/libxaac.zig").addTo(b, liborca_module);
     @import("build/chromaprint.zig").addTo(b, liborca_module);
     liborca_module.addCSourceFile(.{
@@ -670,39 +670,6 @@ fn pkgConfigIncludeDir(b: *std.Build, package: []const u8) std.Build.LazyPath {
     return .{ .cwd_relative = std.mem.trim(u8, output, " \n") };
 }
 
-/// Apple's reference ALAC decoder, built from source with Orca's bounds
-/// patches (see the vendored `ORCA-CHANGES`). Only the decoding half is
-/// compiled, and only `alac_shim.cpp` sees its C++ interface. The decoder
-/// relies on two's-complement signed wraps and left shifts of negative values,
-/// so it is built with `-fwrapv` and `-fno-sanitize=shift-base`; the rest of
-/// the undefined-behaviour sanitizer, including shift-exponent, stays on so a
-/// Debug build still traps any out-of-range shift the patches miss.
-fn addAlac(b: *std.Build, module: *std.Build.Module) void {
-    const codec = b.path("liborca/codec/vendor/alac");
-    module.addIncludePath(codec);
-    module.link_libcpp = true;
-    module.addCSourceFiles(.{
-        .root = codec,
-        .files = &.{
-            "ag_dec.c",
-            "ALACBitUtilities.c",
-            "dp_dec.c",
-            "EndianPortable.c",
-            "matrix_dec.c",
-        },
-        .flags = &.{ "-std=c99", "-DNDEBUG", "-w", "-fno-sanitize=shift-base", "-fwrapv" },
-    });
-    module.addCSourceFiles(.{
-        .root = codec,
-        .files = &.{"ALACDecoder.cpp"},
-        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti", "-w", "-fno-sanitize=shift-base", "-fwrapv" },
-    });
-    module.addCSourceFile(.{
-        .file = b.path("liborca/codec/alac_shim.cpp"),
-        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti" },
-    });
-}
-
 /// Apache-2.0 requires its licence and any NOTICE to travel with binaries that
 /// contain the code, and ALAC and libxaac are compiled into liborca; so do the
 /// MIT and BSD licences of Chromaprint and KissFFT.
@@ -710,8 +677,10 @@ fn installLicenses(b: *std.Build) void {
     const directory = "share/doc/orca/licenses";
     b.installFile("LICENSE", directory ++ "/orca/LICENSE");
     b.installFile("liborca/codec/vendor/minimp3/LICENSE", directory ++ "/minimp3/LICENSE");
-    b.installFile("liborca/codec/vendor/qoa/LICENSE", directory ++ "/qoa/LICENSE");
-    b.installFile("liborca/codec/vendor/alac/LICENSE", directory ++ "/alac/LICENSE");
+    const qoa = b.dependency("qoa", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(qoa.path("LICENSE"), directory ++ "/qoa/LICENSE").step);
+    const alac = b.dependency("alac", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(alac.path("LICENSE"), directory ++ "/alac/LICENSE").step);
     const libxaac = b.dependency("libxaac", .{});
     b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("LICENSE"), directory ++ "/libxaac/LICENSE").step);
     b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("NOTICE"), directory ++ "/libxaac/NOTICE").step);
