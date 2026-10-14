@@ -14,7 +14,9 @@ Zig API, the C ABI or the Library schema, and the patch version otherwise.
 
 Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
 the same commit: features, fixes, refactors, removals and breaking changes
-alike.
+alike. An entry is one unwrapped line and one sentence, under Added, Fixed or
+Changed, naming the API, setting or command a user meets. A breaking change
+starts with `**Breaking:**`. Changes to CI alone need no entry.
 
 ## The audio-embedding model
 

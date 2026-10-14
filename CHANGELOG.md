@@ -4,445 +4,51 @@
 
 ### Added
 
-- **Radio and Daily Mixes limit how often one Artist repeats.** The new Library
-  setting `discovery.artist_variety` (`ArtistVariety`, in
-  `DiscoverySettings.artist_variety`) is `relaxed`, `balanced` (the default) or
-  `strict`. At `balanced` a Radio session picks an Artist at most twice in any
-  10 consecutive picks and never twice in a row, and a Daily Mix holds 1 entry
-  per Artist, or 2 when no Track by an Artist not yet in the mix qualifies,
-  with no two consecutive entries by the same Artist; at `strict` the limits
-  are 1 in 10 and 1 per mix; `relaxed` keeps the previous picks. Radio relaxes
-  the limit with the seed-Artist cap when nothing else fits, and a mix goes
-  above its per-Artist limit only while it is under 60 minutes. `orca-gtk` has
-  an Artist variety row in Settings › Listening that remakes the day's Daily
-  Mixes on a change. `RadioOptions.artist_variety` and
-  `DailyMixesRequest.artist_variety` replace the setting for one session or one
-  generation, as `--artist-variety` does for `orca-cli radio` and `orca-cli
-  mixes`. In the C ABI the field `artist_variety` of `orca_discovery_settings`
-  (the first of its former reserved bytes; the struct keeps its size and
-  `ORCA_ABI_VERSION`) reads the setting as an `orca_artist_variety` (1, 2 or
-  3), and a write of 0 keeps the stored value.
-- **`liborca` measures audio embeddings with either of two models.** The
-  model file a host names is recognised by its size and SHA-256 as
-  `clap_htsat_unfused` (512 values) or the new `discogs_maest`
-  (`maest_audio_int8.onnx`, 80.4 MB, 16 kHz input, 768 values), and
-  `Runtime.embeddingModel` returns which, or null unless
-  `embeddingModelState` is `ready`. Analysis, `libraryUnanalyzedCount` and
-  `libraryAnalysisCoverage` use that model: with `discogs_maest` named, every
-  file without its embedding is measured once and the 780-byte result is
-  stored in `analysis_results` under its own parameter hash, beside the
-  file's `clap_htsat_unfused` result, which is kept. Naming the first model
-  again measures nothing that is already stored. Radio, Daily Mixes and
-  `librarySimilarTracks` compare the stored vectors of that model only, and
-  those of `clap_htsat_unfused` when `embeddingModel` is null; vectors of two
-  models are never compared, and a file with no vector of the model in use
-  counts as one with no embedding. `orca-cli similar`, `radio`, `home` and
-  `mixes` take `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL` to name the
-  model. Daily Mixes already stored for the mix day are kept when the model
-  changes.
-  Library schema version 6 keys `file_audio_embeddings` by model and file:
-  opening a version 5 Library keeps every stored vector as
-  `clap_htsat_unfused` and adds the `discogs_maest` vectors of the results
-  already stored for unchanged files, and triggers keep both from then on.
-  `Runtime.startEmbeddingModelDownload(.discogs_maest, destination)` fetches
-  the new model in Zig, `orca-cli download-embedding-model PATH --model
-  discogs_maest` fetches it, and a C host passes
-  `ORCA_EMBEDDING_MODEL_DISCOGS_MAEST` (2) to
-  `orca_runtime_start_embedding_model_download` and reads the model in use
-  with `orca_runtime_embedding_model`, 0 unless the state is ready;
-  `orca-gtk` downloads the model chosen in Settings. The new build option
-  `-Dmaest-embedding-model=PATH` runs the tests that need the file.
-- **`orca-gtk` chooses between the two audio-embedding models.** Settings ›
-  Listening › Sound Similarity has a Model row with "Standard · 32.6 MB"
-  (`clap_htsat_unfused`) and "Large · 80.4 MB · non-commercial licence"
-  (`discogs_maest`). The choice is kept as `embedding_model` in the
-  `[listening]` group of `settings.ini`, decides which file is looked up and
-  named to liborca, and takes effect without a restart: the status row and
-  Download then name that model's file and size, and the analysis banner asks
-  for its embeddings. A file that is the other model is reported as that
-  model, with Download for the chosen one. The row cannot be changed while a
-  download runs, in a build without ONNX Runtime, or when
-  `ORCA_EMBEDDING_MODEL` is set, when it shows the model that file is. Reset
-  all settings returns the choice to Standard. `scripts/headless-gui.sh`
-  keeps the directory in `ORCA_HEADLESS_DATA` as the session's
-  `XDG_DATA_HOME`.
-- **liborca downloads the audio-embedding model when a host asks.**
-  `Runtime.startEmbeddingModelDownload(model, destination)` starts a
-  `model_download` Job (`ORCA_JOB_KIND_MODEL_DOWNLOAD`, 14) that belongs to no
-  Library, reports bytes, can be cancelled and cannot be paused. It writes
-  `destination.part`, renames it onto `destination` only when the size and
-  SHA-256 are the compiled-in ones, and then names the file to the runtime, so
-  `embeddingModelState` reads `ready`. A redirect is followed only to `https`
-  on `githubusercontent.com`; nothing is retried or resumed; a failed Job's
-  snapshot `detail` holds the reason. `orca-cli download-embedding-model PATH`
-  runs it, and a C host calls
-  `orca_runtime_start_embedding_model_download(runtime, model, path, &job)`.
-  `model` is an `EmbeddingModel` (`orca_embedding_model`):
-  `clap_htsat_unfused` (`ORCA_EMBEDDING_MODEL_CLAP_HTSAT_UNFUSED`, 1) or
-  `discogs_maest` (`ORCA_EMBEDDING_MODEL_DISCOGS_MAEST`, 2); any other value is
-  `ORCA_STATUS_INVALID_ARGUMENT`.
-- **`orca-gtk` downloads the audio-embedding model from Settings › Listening.**
-  Download in the Sound Similarity card fetches the chosen model (32.6 or
-  80.4 MB, from `github.com`) to the user data directory, shows the megabytes
-  received and can be cancelled; a failure shows the Job's reason. The row
-  names the size and the host before the button is pressed. Download is not
-  offered when `ORCA_EMBEDDING_MODEL` is set.
-- **Radio and Daily Mixes rank by how alike tracks sound.** A seed whose
-  tracks have a stored audio embedding scores each candidate's Audio component
-  by the cosine similarity of its vector to the seed's mean: 1 from the 10th
-  nearest Recording up, 0.5 at the 300th, 0.3 without a vector. The 300
-  nearest Recordings replace the tempo bucket among the candidates. A pick
-  with a score of at least 0.5 and a similarity of at least 0.9 can carry
-  `similar_sound` with the new flag `liborca.radio_sound_overall` (8) alone,
-  which `orca-cli radio` prints as `Similar sound`; `orca.h` names
-  it `ORCA_SOUND_OVERALL`. A seed without an embedding is ranked by tempo,
-  key and energy as before.
-- **`liborca` can run a pinned audio-embedding model through ONNX Runtime.**
-  The new build option `-Dembeddings` (default `true`) compiles the binding
-  and links `libonnxruntime`, 1.20 or newer, found through pkg-config;
-  `-Dembeddings=false` builds without it. The model is one file checked by
-  size and SHA-256 before it is loaded, and `scripts/embedding/` holds the
-  scripts that export it and its test references.
-- **One file's analysis can measure an audio embedding.** Given the model,
-  the analysis decode also keeps up to three 10 s windows, embeds each with
-  the CLAP audio model and stores their unit-length mean as 512 signed bytes
-  and a scale, as `analysis_results` kind 7 (`orca.audio-embedding`). A file
-  under 1 s or silent is stored as having none. `Runtime.libraryAnalyzeFile`
-  and `libraryReanalyzeFile` measure it when the runtime's model is ready, and
-  `orca-cli analyze` takes `--embedding-model PATH` or
-  `ORCA_EMBEDDING_MODEL`. Without a model an analysis stores what it did
-  before. `analysis-bench` takes a model to time the stages.
-- **The library-wide analysis pass can measure audio embeddings.**
-  `LibraryAnalysis.embedding_model` is null by default; with a model the pass
-  selects files on four measurements, gives each measuring thread its own
-  front end and stores the embedding beside the other results. A file that
-  lacks only the embedding is decoded once and only that row is written.
-  `AnalysisSelectors` carries the embedding as an optional fourth selector,
-  `analysisSelectors` takes a `SelectionForm`, and
-  `AnalysisCoverageCounts.missing` has a fourth entry. Without a model the
-  selection, the coverage counts and the measurement set identifier are
-  unchanged.
-- **A host names the audio-embedding model and reads whether it is usable.**
-  `Runtime.setEmbeddingModelPath` copies the model file's path and checks the
-  file by size and SHA-256; `Runtime.embeddingModelState` returns
-  `built_without`, `missing`, `wrong_file`, `unusable` or `ready`
-  (`EmbeddingModelState`). While it is `ready`, `startLibraryAnalysis`,
-  `libraryAnalyzeFile` and `libraryReanalyzeFile` measure the embedding,
-  `libraryUnanalyzedCount` and `libraryAnalysisCoverage` count it, and
-  `MissingMeasurements.embedding` flags it. A job that cannot load the model
-  records why in the state and measures without it. `orca-cli analyze-library`
-  and `stats` take `--embedding-model PATH` or `ORCA_EMBEDDING_MODEL`, and
-  exit 1 with the reason when the model cannot be used. C hosts call
-  `orca_runtime_set_embedding_model_path` and `orca_runtime_embedding_model_state`
-  (`orca_embedding_model_state`), and `orca_library_analysis_coverage` reports
-  the embedding as `ORCA_MEASUREMENT_EMBEDDING`.
-
-- **The Library keeps each file's audio embedding in a table.** Library schema
-  version 5 adds `file_audio_embeddings`, kept by triggers on
-  `analysis_results` as `file_audio_features` is, and fills it from the kind 7
-  results already stored for unchanged files. `AudioEmbeddingRepository`
-  reads a file's vector or a page of them, only for the bytes the file holds
-  now. A Library at version 5 cannot be opened by Orca 0.4.0 or earlier.
-- **Orca finds the tracks that sound most like one.**
-  `Runtime.librarySimilarTracks` returns up to 1,000 Tracks whose stored audio
-  embeddings are nearest a Track's by cosine similarity, one per Recording and
-  never the Track's own, nearest first. `orca-cli similar DATABASE TRACK_ID
-  [--limit N]` prints them, 15 by default, and needs no model file. A Track
-  whose file has no current embedding is `error.NoAudioEmbedding`. The search
-  reads the vectors a page at a time and builds no index;
-  `AudioEmbeddingRow` carries the file's Recording id. C hosts call
-  `orca_library_similar_tracks`, which fills an array of
-  `orca_similar_track_view` and answers `ORCA_STATUS_NOT_FOUND`,
-  `ORCA_STATUS_INVALID_STATE` for a Track without an embedding or
-  `ORCA_STATUS_INVALID_ARGUMENT` for a capacity above 1,000.
-
-- **`orca-gtk` gives liborca the audio-embedding model and shows its state.**
-  At startup it names the file `ORCA_EMBEDDING_MODEL` holds, else the chosen
-  model's file from `$XDG_DATA_HOME/orca/models`, else from
-  `share/orca/models` under the install prefix. Settings › Listening › Sound
-  Similarity says whether the model is installed, where a missing file goes,
-  and offers Check again, which looks the file up again without a restart; the
-  command palette lists it as Sound similarity. The analysis banner asks for
-  an analysis when the model is ready and files lack the embedding.
-  `scripts/headless-gui.sh` passes `ORCA_HEADLESS_EMBEDDING_MODEL` to the app
-  as `ORCA_EMBEDDING_MODEL`.
-
-- **The Nix package installs the audio-embedding model.** It fetches
-  `clap_audio_int8.onnx` by hash from the `model-clap-int8-1` release, links
-  it at `share/orca/models` and does not set `ORCA_EMBEDDING_MODEL`:
-  `orca-gtk` finds the file under its install prefix, and `orca-cli` takes
-  `--embedding-model PATH` or the variable. The README gives the download
-  command for other builds, [releasing.md](docs/releasing.md) the steps for a
-  different model, and the dependency table in
-  [architecture.md](docs/architecture.md#dependencies-and-licences) lists ONNX
-  Runtime and the model's licence.
-- **`network.Gateway` can stream a response body into a sink.**
-  `Gateway.fetchInto` follows redirects as `fetch` does and writes the final
-  `2xx` body to a `network.client.Sink` in pieces of at most 64 KiB instead of
-  buffering it. Such a request asks for the identity encoding, is made once,
-  is bounded by `max_response_bytes`, times out after `request_timeout_ms`
-  without progress or at the Gateway's deadline, and reports a failed sink as
-  `error.SinkFailed`. `network.testing.ScriptedTransport` delivers scripted
-  bodies to a sink in chunks.
-
-- **Orca copies a Library before it upgrades it.** When a Library made by an
-  earlier release is opened, the engine first writes a complete copy of the
-  database as `<database>.pre-v<N>.sqlite` beside it, where `N` is the schema
-  version the Library had, and only then upgrades. One copy is kept; a later
-  upgrade replaces it. The copy needs free space equal to the database. If it
-  cannot be written the Library is not upgraded and the open fails with
-  `error.PreUpgradeCopyFailed`, which `orca-cli` and `orca-gtk` report with the
-  reason. A Library last opened by a newer Orca is now reported as such by both
-  instead of as a generic failure. `liborca.libraryUpgradeCopyPath` returns the
-  copy's path. The scanner and the folder watcher ignore the copy.
-
-- **The fuzz suite and CI now cover more untrusted-byte paths.** New fuzz
-  targets feed bytes through the ID3v1, image-header, fingerprint, job-history
-  retry and provider-response parsers; an AAC decoder sanitizer harness joins
-  the ALAC one; and a CI job runs both decoders under AddressSanitizer and
-  UndefinedBehaviorSanitizer and the test suite once under ReleaseSafe.
-
-- **Upgrades are verified against real databases from each schema version, not
-  against re-run step text.** `fixtures/library/upgrade/` holds a binary
-  library for schema versions 1 to 7, with rows in every table, and the test
-  suite opens each through `LibraryDatabase.open` and compares it with a
-  database created at the current version from the same rows, table by table
-  and row by row, including the genre totals, loudness, feature, embedding and
-  sort columns that triggers maintain. Opening the current fixture leaves the
-  file byte-identical. `zig build regenerate-upgrade-fixtures` rebuilds the
-  fixtures deterministically from `tests/upgrade_fixtures`.
+- Radio and Daily Mixes limit how often one Artist repeats, set by `discovery.artist_variety` (`relaxed`, `balanced` by default, or `strict`), `--artist-variety` and `orca_discovery_settings.artist_variety`.
+- Audio embeddings measured with an ONNX Runtime model (`-Dembeddings`, on by default) let Radio and Daily Mixes rank tracks by how alike they sound.
+- A second, larger embedding model, `discogs_maest`, beside `clap_htsat_unfused`; each model's embeddings are stored separately and never compared (schema v6).
+- `Runtime.setEmbeddingModelPath`, `embeddingModelState` and `embeddingModel` (`orca_runtime_set_embedding_model_path`, `orca_runtime_embedding_model_state`, `orca_runtime_embedding_model`) name the model and report whether it is usable.
+- `Runtime.startEmbeddingModelDownload` (`orca_runtime_start_embedding_model_download`, `orca-cli download-embedding-model`) downloads a model and installs it only when its size and SHA-256 match.
+- Analysis, the library-wide pass and analysis coverage measure and count the embedding when a model is ready (`ORCA_MEASUREMENT_EMBEDDING`).
+- `Runtime.librarySimilarTracks` (`orca_library_similar_tracks`, `orca-cli similar`) lists the tracks that sound most like one.
+- `orca-gtk` Settings › Listening › Sound Similarity chooses, finds and downloads the model.
+- The Nix package installs the standard model at `share/orca/models`.
+- `Gateway.fetchInto` streams a response body into a sink.
+- Opening a Library from an earlier release first copies it to `<database>.pre-v<N>.sqlite` (`libraryUpgradeCopyPath`) and fails with `error.PreUpgradeCopyFailed` if the copy cannot be written.
+- Fuzz targets for the ID3v1, image-header, fingerprint, job-history and provider-response parsers, and an AAC decoder sanitizer harness.
+- Upgrade tests open a real database from each schema version and compare it row by row with a new one (`zig build regenerate-upgrade-fixtures`).
+- `zig build bench` measures the audio-similarity search.
 
 ### Fixed
 
-- **Pull-request CI no longer skips building after a docs-only follow-up push.**
-  The `changes` job diffs a pull request against its base (`HEAD^1` of the merge
-  commit) instead of the previous head, and treats the first push of a branch as
-  a code change. The benchmark programs compile again
-  (`library.health_issues.summary` takes an allocator), and the new `zig build
-  bench-build` step, which `zig build test` depends on, compiles them without
-  running them.
-
-- **Downloading an embedding model no longer writes through a symlink at
-  `<destination>.part`.** The download deletes whatever is at
-  `<destination>.part` and creates the file exclusively, so a link placed there
-  by another user of a shared model directory is replaced instead of followed;
-  when the path cannot be replaced the download fails with `write_failed`.
-  `liborca/core/model_download.zig` gains a test for each failure: short, long
-  and wrong-digest bodies, a non-200 status, a transport error, a timeout and a
-  cancellation mid-body, a refused redirect and an unwritable destination.
-
-- **Writing a date to an ID3v2.3 file no longer deletes its TIME and TRDA
-  frames.** A v2.3 date write now replaces only TYER and TDAT and keeps TIME
-  and TRDA byte for byte. A `YYYY-MM` value still stores the year only, since
-  TDAT is `DDMM`.
-
-- **Out-of-range host input no longer aborts the host process.** A large
-  `orca_player_seek_ms` value, a large `orca_player_seek` frame, a file that
-  declares an enormous length, and out-of-range host clock values (`now_s`,
-  `utc_offset_s`) are handled without an integer overflow. The clock values are
-  rejected with `ORCA_STATUS_INVALID_ARGUMENT`; `orca.h` documents the bounds
-  (`now_s` within 2^40 seconds of the epoch, `utc_offset_s` within 18 hours).
-  `orca_library_start_reconcile` rejects more than 4096 directories.
-  `orca_library_open` reports a missing file or directory as
-  `ORCA_STATUS_NOT_FOUND`, a database written by a newer Orca as
-  `ORCA_STATUS_UNSUPPORTED`, and a directory or a file that is not an SQLite
-  database as `ORCA_STATUS_INVALID_ARGUMENT`.
-
-- **A listen is no longer lost when the database is busy or full for a
-  moment.** The listen worker keeps a listen whose write failed and tries it
-  again at most every 5 s, in order, instead of dropping it. A listen that
-  fails 12 tries in a row, or that is still failing when the Library closes, is
-  dropped and counted in `dropped`, as are listens pushed while the 64-entry
-  queue is full.
-
-- **A song keeps its rating, love, Not for me and playlist entries when its
-  file joins another song's position.** When two Recordings became one (a retag
-  or move landing two files on one Release position), only listens and play
-  counts followed; the rest stayed on a Recording nothing showed. They now move
-  to the surviving Recording in the same transaction: the higher rating wins,
-  loved or hated on the surviving song wins over the other's, playlist and
-  saved-queue entries are re-pointed, and listens of files since removed follow
-  too. Rows orphaned by earlier merges are left as they are, because the
-  surviving Recording can no longer be identified.
-
-- **`orca-cli` no longer prints control bytes from tags, paths and provider
-  text.** A title holding an escape sequence could rewrite the terminal title.
-  Every CLI print of text from files, tags, paths, provider responses and
-  database rows now passes one filter that prints C0 controls, DEL, C1 controls
-  and invalid UTF-8 as `\xNN`, keeps valid UTF-8, and keeps tab and newline
-  only in lyrics, biographies and descriptions. Files the CLI writes (`changes
-  --export`, `playlist-export`) keep their raw form.
-
-- **Opening Orca with an audio-embedding model installed no longer reads and
-  hashes the 32 to 80 MB file on the calling thread.** `setEmbeddingModelPath`
-  and `orca_runtime_set_embedding_model_path` recognise the file by its size.
-  Its SHA-256 is checked when an analysis opens it, on the bytes given to ONNX
-  Runtime, so a file of a model's size with another SHA-256 reads `ready` until
-  an analysis refuses it and `wrong_file` afterwards. A finished model download
-  records the model its worker verified without reading the file again.
-
-- **An Orca left running no longer writes to a Library that a newer Orca has
-  upgraded.** Each write checks the Library's schema version under SQLite's
-  write lock and is refused with `error.SchemaVersionTooNew`
-  (`ORCA_STATUS_UNSUPPORTED` from C) when another process has migrated the
-  file; nothing is stored, the Library stays open for reading, and a queued
-  listen is dropped and counted instead of retried. `orca_library_open` now
-  also returns `ORCA_STATUS_UNSUPPORTED`, not `ORCA_STATUS_INTERNAL`, for a
-  Library a newer Orca wrote.
-
-- **A focused Radio no longer loses its focus silently when memory runs out,
-  and discarded engine and GTK errors now leave a log line.** `focusValues` in
-  `liborca/library/discovery.zig` returns the allocation error to `pickRadio`
-  instead of an empty filter. A prepared tag write that cannot be discarded, a
-  shuffle setting that fails before playback, a setting that fails to reset, a
-  job or model download whose completion cannot be recorded or published, and a
-  Radio that cannot continue after the queue ends each log a warning with the
-  error name.
-
-- **Opening a Library no longer fails when another connection closes at the
-  same instant, and a file Library that cannot use WAL is refused at open.**
-  The schema check added in this release made its first read of `user_version`
-  with no busy timeout; `SchemaGuard.install` now makes that read with the
-  normal five-second timeout and returns `SchemaVersionTooNew` when the file is
-  already at another version. `Library.open` checks that `PRAGMA
-  journal_mode=WAL` answered `wal` and otherwise fails with `OpenFailed` and
-  one logged line naming the mode, because in a rollback-journal mode the
-  schema check would refuse large commits.
-
-- **`orca.h` can be included from C++.** Three fields named `explicit`
-  (`orca_release_view`, `orca_track_facts_view`,
-  `orca_track_details_extra_view`) stopped a C++ compiler; under `__cplusplus`
-  they are named `explicit_`. C sources and the struct layouts are unchanged.
-  `zig build test` now compiles the header as C11 with `-Wall -Wextra -Werror
-  -pedantic` and as C++17, checks it against the header of every release from
-  0.1.0 to 0.4.0 (`tests/abi/orca-VERSION.h`), fails when a reserved field of a
-  released header loses its name without being listed in
-  `tests/abi/compat.zig`, and fails when the C smoke test does not call an
-  export. The smoke test no longer exits 0 for a failed check numbered 256.
-
-- **A crafted ALAC file can no longer make the decoder read or write outside
-  its buffers or execute an undefined shift.** The vendored decoder bounds
-  every packet- and cookie-declared size against its buffers, rejects a
-  zero-run Golomb parameter that would shift by 32 or more, and validates the
-  magic cookie before decoding; `alac_shim.cpp` zero-pads each packet. The ALAC
-  files compile with UndefinedBehaviorSanitizer enabled, and
-  `scripts/alac-sanitize.sh` replays crafted seeds under AddressSanitizer and
-  UndefinedBehaviorSanitizer. Valid files decode to identical samples.
-
-- **Sorted and filtered track listings are now fast at any scroll depth.**
-  Paging a library by play count, last played, rating, loved, year, date added,
-  or within a genre past the first pages no longer rebuilds a full sort for
-  every page; the first page of a given sort fills a per-connection snapshot
-  and every later page reads from it, so a deep scroll costs a few milliseconds
-  instead of hundreds.
-
-- **Sorting tracks by file path, loudness, or genre is now fast at any scroll
-  depth.** Loudness and genre read the version 7 columns `files.sort_lufs` and
-  `tracks.first_genre_id`, which triggers keep current, instead of running a
-  subquery per row, and their pages are chosen by walking the covering indexes
-  `files_by_sort_lufs` and `tracks_by_first_genre` (with their `_without_`
-  counterparts). File path keeps its per-row best-location subquery; its
-  shallow page reads the files without a held location only when the located
-  window leaves part of the page unfilled, so a library whose files all have a
-  location no longer scans the whole file table on every page. For all three,
-  deep offsets are served from the sorted snapshot like the other value sorts.
+- A model download no longer writes through a symlink at `<destination>.part`.
+- Writing a date to an ID3v2.3 file no longer deletes its TIME and TRDA frames.
+- Out-of-range seek positions, file lengths and host clock values no longer abort the host with an integer overflow.
+- `orca_library_open` reports a missing file as `ORCA_STATUS_NOT_FOUND`, a newer Library as `ORCA_STATUS_UNSUPPORTED` and a non-database as `ORCA_STATUS_INVALID_ARGUMENT`.
+- A listen whose write fails is retried instead of dropped.
+- A song keeps its rating, love, Not for me and playlist entries when two Recordings merge.
+- `orca-cli` escapes control bytes in tags, paths and provider text.
+- Naming an embedding model no longer hashes the file on the calling thread.
+- A running Orca no longer writes to a Library a newer Orca has upgraded (`error.SchemaVersionTooNew`).
+- A focused Radio no longer loses its focus when memory runs out, and discarded engine and GTK errors are logged.
+- Opening a Library no longer fails when another connection closes at the same moment, and a Library that cannot use WAL is refused at open.
+- `orca.h` compiles as C++.
+- A crafted ALAC file can no longer make the decoder read or write outside its buffers.
+- Sorted, filtered and path-, loudness- or genre-sorted track listings stay fast at any scroll depth.
 
 ### Changed
 
-- **Copyleft dependencies are permitted.** Dependencies are chosen on
-  technical merit, and GPL, LGPL and AGPL are allowed. The build no longer
-  scans Chromaprint's sources for licence notices.
-
-- **ALAC and QOA are fetched as pinned packages.** The ALAC decoder comes
-  from the `evanriley/alac` fork, which carries the bounds hardening as
-  commits, and the QOA decoder from `phoboslab/qoa`, both pinned in
-  `build.zig.zon`.
-
-- **MPEG decoding uses the system mpg123 library**, which now handles gapless
-  trimming and seeking.
-
-- **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
-  on few Tracks in the Library now weighs more than one on many: a rarity from
-  1 for a genre on at most a hundredth of the Tracks down to 0.5 for one on a
-  tenth or more scales both the Genre component, now a cosine over the
-  profile's and the candidate's genres, and the choice of the 8 genres that
-  draw candidates and of the genre a pick's `shared_genre` reason names; of
-  two genres that weigh the same, the rarer is chosen. A `genre` seed's own
-  genre and a Daily Mix cluster's genre always have rarity 1.
-
-- **`orca-gtk` describes Radio's sound signal as how tracks sound.** The Radio
-  panel's note, the Daily Mix signal line and the descriptions of Analyze no
-  longer name only tempo, key and energy.
-
-- **Radio's Stay close to Explore dial changes which tracks are picked.**
-  `RadioOptions.explore` sets how far down the closeness ranking Radio may
-  reach (12 candidates at 0, 600 of 2,000 at 100), how random the draw within
-  that reach is (the Explore weights lean on jitter), and how much of the
-  seed's own Artist is played (at most 6 in any 10 at 0–20 down to 1 at
-  71–100). In Radio a candidate needs 2 distinct seed listens before
-  co-listening counts. Daily Mixes rank as before. `orca-cli radio` takes
-  `--seed N`, and `orca-gtk` describes the dial in new words.
-
-- **A C host that passes `orca_radio_options.familiarity` must now add one to
-  the dial, or pass 0.** The field is 0 for the Library's `radio.familiarity`
-  setting and 1 to 101 for the dial at one less; any other value, including the
-  former 255, is `ORCA_STATUS_INVALID_ARGUMENT`. A host built against the 0.4.0
-  header that passed 0 to 100 or 255 must add one or pass 0. A host built
-  against 0.3.0 or earlier, which zeroed the then-reserved byte, forced the dial
-  to 0 under 0.4.0 and reads the setting again, as the header promises for a
-  reserved byte. `orca_radio_status_view.options.familiarity` reports the
-  options as given, 0 when the session reads the setting. `ORCA_ABI_VERSION`
-  stays 0, the struct layout is unchanged, and the Zig
-  `RadioOptions.familiarity` is unchanged.
-
-- **A provider's `Retry-After` can no longer disable a service for more than 24
-  hours.** Both the delay-seconds and HTTP-date forms are cut to 24 hours from
-  receipt in `network.Gateway`, and a longer block or next-request time already
-  stored in `provider_state` by an earlier version is cut to 24 hours from the
-  time it is loaded. This replaces the earlier rule that honoured any value.
-  Delays up to 24 hours, the 401/403/429 backoff schedule and the 1-hour
-  `X-RateLimit-Reset-In` bound are unchanged.
-
-- **The ALAC decoder is vendored in the source tree.** Apple's reference
-  decoder sources (Apache-2.0, `macosforge/alac` at `c38887c`) live in
-  `liborca/codec/vendor/alac/` instead of being fetched through
-  `build.zig.zon`. `ORCA-CHANGES` beside them records the upstream commit and
-  the bounds and undefined-behaviour patches Orca applies; valid files decode
-  to identical samples.
-
-- **Library analysis hashes decoded audio faster.** The audio-content hash
-  gives Blake3 each decoded chunk whole instead of 256 samples at a time, which
-  cut the analysis of a 5-minute stereo WAV without audio features from 554 ms
-  to 433 ms. Hash values are unchanged.
-
-- **The `bench` step measures the audio-similarity search.** `zig build
-  -Doptimize=ReleaseFast bench` ends with a section that, for each embedding
-  model, seeds a vector for up to 100,000 files and times the search one Radio
-  top-up runs (the nearest 300 Recordings with the similarities map) five
-  times.
-
-- **Opening a window, switching Library or finishing a job no longer freezes
-  orca-gtk while Library stats and the health summary are read.**
-  `BrowseRequest` gains `library_stats` and `health_summary`, answered on the
-  browse loader's reader thread. The sidebar counts, Library Health, Audio
-  Problems, the first-run screens, the Libraries list and the Settings About
-  and duplicate-scan rows keep their last numbers until the new ones arrive.
-  The C ABI still has only the synchronous calls.
-
-- **libxaac is pinned to a newer upstream commit for decoder security fixes.**
-  `build.zig.zon` moves libxaac from tag v0.1.13 to `main` commit
-  2fbadd57bca46693b7a077bcf1513131106d960c, which lands six AAC-decoder
-  hardening fixes, including OSV-2026-1043 in the loudness-levelling path Orca
-  builds with `-DLOUDNESS_LEVELING_SUPPORT`. The Nix `fetchDeps` hash is
-  updated to match. No encoder code is compiled, so the encoder-side advisories
-  do not apply.
-
-- **A Library opened by this version upgrades to schema v7 and cannot then be
-  opened by an older Orca.** v7 adds the trigger-maintained sort columns
-  `files.sort_lufs` and `tracks.first_genre_id` with their indexes, backfilled
-  during the one-transaction migration. The loudness trigger fires only when a
-  file's `content_hash`, `content_hash_algorithm` or `channels` changes value,
-  so a rescan that rewrites the same values does not churn the sort indexes.
+- Copyleft dependencies are permitted, and the Chromaprint licence scan is removed.
+- The ALAC decoder comes from the `evanriley/alac` fork and the QOA decoder from `phoboslab/qoa`, both pinned in `build.zig.zon`.
+- MPEG audio is decoded by the system mpg123 library, which handles gapless trimming and seeking.
+- Radio and Daily Mixes weigh a shared genre by how rare it is in the Library.
+- Radio's Stay close to Explore dial changes which tracks are picked, and `orca-cli radio` takes `--seed`.
+- **Breaking:** a C host must pass `orca_radio_options.familiarity` as the dial plus one, or 0 for the Library setting.
+- A provider's `Retry-After` disables a service for at most 24 hours.
+- Library analysis hashes decoded audio in whole chunks.
+- `orca-gtk` reads Library stats and the health summary off the main thread.
+- libxaac is pinned to an upstream commit with AAC decoder security fixes.
+- **Breaking:** a Library opened by this version upgrades to schema v7 and cannot then be opened by an older Orca.
 
 ## 0.4.0 - 2026-10-11
 
