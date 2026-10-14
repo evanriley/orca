@@ -4,7 +4,7 @@
 
 #define QOA_IMPLEMENTATION
 #define QOA_NO_STDIO
-#include "vendor/qoa/qoa.h"
+#include "qoa.h"
 
 struct orca_qoa_decoder {
     qoa_desc native;

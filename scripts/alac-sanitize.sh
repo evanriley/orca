@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Build the vendored ALAC decoder and shim with AddressSanitizer and
+# Build the ALAC decoder and shim with AddressSanitizer and
 # UndefinedBehaviorSanitizer, then decode every seed in fixtures/fuzz/alac/.
 # Run inside `nix develop` so cc/c++ are on PATH. A clean exit means no seed
 # produced a sanitizer report.
 #
+# The ALAC fork is a fetched zig dependency, so its sources are read from the
+# package tarball in the zig global cache.
+#
 # Overrides, used to compare against the unmodified upstream sources:
-#   ALAC_VENDOR_DIR  directory holding the vendored *.c and ALACDecoder.cpp
+#   ALAC_VENDOR_DIR  directory holding the *.c and ALACDecoder.cpp
 #   ALAC_SHIM        path to alac_shim.cpp
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-vendor="${ALAC_VENDOR_DIR:-$root/liborca/codec/vendor/alac}"
 shim="${ALAC_SHIM:-$root/liborca/codec/alac_shim.cpp}"
 header_dir="$root/liborca/codec"
 seeds="$root/fixtures/fuzz/alac"
@@ -18,6 +20,29 @@ harness="$root/tests/alac_sanitize_harness.c"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+
+if [ -z "${ALAC_VENDOR_DIR:-}" ]; then
+    hash="$(sed -n '/\.alac = \.{/,/}/ s/.*\.hash = "\([^"]*\)".*/\1/p' "$root/build.zig.zon")"
+    if [ -z "$hash" ]; then
+        echo "could not read alac hash from build.zig.zon" >&2
+        exit 2
+    fi
+    cache="$(zig env | sed -n 's/.*"global_cache_dir": "\([^"]*\)".*/\1/p')"
+    if [ -z "$cache" ]; then
+        cache="$(zig env | sed -n 's/.*\.global_cache_dir = "\([^"]*\)".*/\1/p')"
+    fi
+    tarball="$cache/p/$hash.tar.gz"
+    if [ ! -f "$tarball" ]; then
+        zig build --fetch >/dev/null 2>&1 || true
+    fi
+    if [ ! -f "$tarball" ]; then
+        echo "alac package tarball not found at $tarball" >&2
+        exit 2
+    fi
+    tar xzf "$tarball" -C "$work"
+    ALAC_VENDOR_DIR="$work/$hash/codec"
+fi
+vendor="$ALAC_VENDOR_DIR"
 
 san="-fsanitize=address,undefined -fno-sanitize=shift-base -fno-sanitize-recover=all"
 common="-g -O1 -DNDEBUG -fwrapv $san -I$vendor -I$header_dir"

@@ -359,6 +359,11 @@
   technical merit, and GPL, LGPL and AGPL are allowed. The build no longer
   scans Chromaprint's sources for licence notices.
 
+- **ALAC and QOA are fetched as pinned packages.** The ALAC decoder comes
+  from the `evanriley/alac` fork, which carries the bounds hardening as
+  commits, and the QOA decoder from `phoboslab/qoa`, both pinned in
+  `build.zig.zon`.
+
 - **Radio and Daily Mixes count a shared genre by how rare it is.** A genre
   on few Tracks in the Library now weighs more than one on many: a rarity from
   1 for a genre on at most a hundredth of the Tracks down to 0.5 for one on a
