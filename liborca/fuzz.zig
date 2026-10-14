@@ -63,19 +63,20 @@ const aiff_fixtures = [_][]const u8{
     "sowt-reference.aifc",
 };
 const adts_fixtures = [_][]const u8{"tagged-reference.aac"};
-const mp3_stream_fixtures = [_][]const u8{
+const mp3_fixtures = [_][]const u8{
     "tagged-reference.mp3",
     "covered-reference.mp3",
     "cbr-noxing-reference.mp3",
     "vbr-xing-reference.mp3",
     "truncated-reference.mp3",
+    "layer2-reference.mp2",
 };
 const scanner_fixtures = id3v2_fixtures ++ mp4_fixtures ++ vorbis_comment_fixtures ++ wav_fixtures ++
-    aiff_fixtures ++ adts_fixtures ++ mp3_stream_fixtures;
+    aiff_fixtures ++ adts_fixtures ++ mp3_fixtures;
 const playlist_fixtures = [_][]const u8{ "relative.m3u8", "latin1.m3u", "bom.m3u8" };
 const lrc_fixtures = [_][]const u8{"fingerprint-reference.lrc"};
-const id3v1_fixtures = mp3_stream_fixtures ++ id3v2_fixtures;
-const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner", "lrc", "alac" };
+const id3v1_fixtures = mp3_fixtures ++ id3v2_fixtures;
+const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3", "scanner", "lrc", "alac" };
 const audio_fixture_dir = "fixtures/audio";
 
 test "fuzz: ID3v2 tags parse or fail cleanly" {
@@ -102,8 +103,8 @@ test "fuzz: ADTS frame tables parse or fail cleanly" {
     try fuzzTarget(exerciseAdts, audio_fixture_dir, &adts_fixtures, &.{"adts"});
 }
 
-test "fuzz: MP3 stream framing parses or fails cleanly" {
-    try fuzzTarget(exerciseMp3Stream, audio_fixture_dir, &mp3_stream_fixtures, &.{"mp3-stream"});
+test "fuzz: MPEG audio decoding opens, reads and seeks or fails cleanly" {
+    try fuzzTarget(exerciseMp3, audio_fixture_dir, &mp3_fixtures, &.{"mp3"});
 }
 
 test "fuzz: the scanner's detect, probe and artwork path parses or fails cleanly" {
@@ -348,18 +349,9 @@ fn exerciseAdts(allocator: std.mem.Allocator, input: []const u8) void {
     ignore(codec.adts.probe(allocator, readable));
 }
 
-fn exerciseMp3Stream(allocator: std.mem.Allocator, input: []const u8) void {
-    const mp3_stream = codec.mp3_stream;
+fn exerciseMp3(allocator: std.mem.Allocator, input: []const u8) void {
     var memory: storage.MemorySource = .{ .bytes = input };
-    const readable = memory.readable();
-    if (mp3_stream.findFrame(readable, 0, input.len)) |located| {
-        if (located.offset < input.len) _ = mp3_stream.parseVbrHeader(located.header, input[@intCast(located.offset)..]);
-    } else |_| {}
-    const info = mp3_stream.readStreamInfo(readable) catch return;
-    var index: mp3_stream.FrameIndex = .init(info.audio_start);
-    defer index.deinit(allocator);
-    ignore(index.ensureCovers(allocator, readable, info.header, info.total_frames orelse std.math.maxInt(u64)));
-    _ = index.lookup((info.total_frames orelse 0) / 2);
+    if (codec.mp3.openDecoder(allocator, memory.readable())) |decoder| decodeSome(allocator, decoder) else |_| {}
 }
 
 fn exerciseScanner(allocator: std.mem.Allocator, input: []const u8) void {

@@ -56,12 +56,6 @@ pub fn build(b: *std.Build) void {
         },
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .force });
-    // Vendored minimp3 behind a narrow shim. Header-only and public domain,
-    // so this is a source addition on every target and not a system linkage.
-    liborca_module.addCSourceFile(.{
-        .file = b.path("liborca/codec/mp3_shim.c"),
-        .flags = &.{ "-std=c11", "-DNDEBUG" },
-    });
     // libFLAC behind a narrow shim: the reference decoder is the one that
     // keeps FLAC's bit-exactness guarantee; see `docs/architecture.md`.
     liborca_module.addCSourceFile(.{
@@ -84,6 +78,7 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .force });
+    liborca_module.linkSystemLibrary("libmpg123", .{ .use_pkg_config = .force });
     for ([_][]const u8{ "ogg", "opus" }) |package| {
         liborca_module.addSystemIncludePath(pkgConfigIncludeDir(b, package));
     }
@@ -676,7 +671,6 @@ fn pkgConfigIncludeDir(b: *std.Build, package: []const u8) std.Build.LazyPath {
 fn installLicenses(b: *std.Build) void {
     const directory = "share/doc/orca/licenses";
     b.installFile("LICENSE", directory ++ "/orca/LICENSE");
-    b.installFile("liborca/codec/vendor/minimp3/LICENSE", directory ++ "/minimp3/LICENSE");
     const qoa = b.dependency("qoa", .{});
     b.getInstallStep().dependOn(&b.addInstallFile(qoa.path("LICENSE"), directory ++ "/qoa/LICENSE").step);
     const alac = b.dependency("alac", .{});

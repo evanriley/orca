@@ -133,6 +133,17 @@ lines at 1, 3, 5.5 and 8 seconds.
 constant-bit-rate stream with no VBR header, a variable-bit-rate stream with
 Xing and LAME headers, and a stream cut mid-frame so decoding must fail cleanly.
 
+`audio/layer2-reference.mp2` is one second of a 440 Hz sine at 48 kHz in
+stereo, encoded as MPEG-1 Layer II at 192 kb/s: 42 frames, 48,384 samples per
+channel. It was generated with FFmpeg 9.0.1 (`nix shell nixpkgs#ffmpeg`; the
+dev shell's FFmpeg has no MP2 encoder):
+
+```sh
+ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" \
+  -ac 2 -c:a mp2 -b:a 192k -map_metadata -1 -fflags +bitexact -flags:a +bitexact \
+  -f mp2 layer2-reference.mp2
+```
+
 `audio/midside-reference.flac` is a FLAC stream built from the deterministic
 integer sequence of `midSideProbeSample` in `liborca/codec/flac.zig`, with two
 near-opposite channels whose side signal is odd in every frame, so the encoder

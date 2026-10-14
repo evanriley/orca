@@ -133,7 +133,7 @@
                 pkg-config --cflags --libs --static orca >/dev/null || fail "orca.pc does not resolve"
 
                 licenses=${orca}/share/doc/orca/licenses
-                expected="alac/LICENSE chromaprint/LICENSE.md kissfft/BSD-3-Clause libxaac/LICENSE libxaac/NOTICE minimp3/LICENSE orca/LICENSE qoa/LICENSE"
+                expected="alac/LICENSE chromaprint/LICENSE.md kissfft/BSD-3-Clause libxaac/LICENSE libxaac/NOTICE orca/LICENSE qoa/LICENSE"
                 for file in $expected; do
                   [ -s "$licenses/$file" ] || fail "share/doc/orca/licenses/$file is missing or empty"
                 done

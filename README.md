@@ -141,8 +141,8 @@ code change. The Arch Linux and Ubuntu 24.04 steps are not run by CI.
   ALAC, libxaac and Chromaprint), so no separate C or C++ compiler is needed.
 - pkg-config.
 - For `liborca` and `orca-cli`: development files for SQLite, libFLAC, libogg,
-  libvorbis, Opus, opusfile, libsamplerate, PipeWire and ONNX Runtime 1.20 or
-  newer.
+  libvorbis, Opus, opusfile, mpg123 1.32 or newer, libsamplerate, PipeWire
+  and ONNX Runtime 1.20 or newer.
 - For `orca-gtk`: development files for GTK 4.18 or newer, libadwaita 1.8 or
   newer, Pango 1.56 or newer and libsecret.
 
@@ -171,19 +171,19 @@ zig version
 Arch Linux:
 
 ```sh
-sudo pacman -S --needed curl pkgconf sqlite flac libogg libvorbis opus opusfile libsamplerate onnxruntime-cpu pipewire gtk4 libadwaita libsecret
+sudo pacman -S --needed curl pkgconf sqlite flac libogg libvorbis opus opusfile mpg123 libsamplerate onnxruntime-cpu pipewire gtk4 libadwaita libsecret
 ```
 
 Fedora:
 
 ```sh
-sudo dnf install curl xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel libvorbis-devel opus-devel opusfile-devel libsamplerate-devel onnxruntime-devel pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
+sudo dnf install curl xz pkgconf-pkg-config sqlite-devel flac-devel libogg-devel libvorbis-devel opus-devel opusfile-devel mpg123-devel libsamplerate-devel onnxruntime-devel pipewire-devel gtk4-devel libadwaita-devel libsecret-devel
 ```
 
 Debian and Ubuntu:
 
 ```sh
-sudo apt-get install --no-install-recommends ca-certificates curl xz-utils pkg-config libsqlite3-dev libflac-dev libogg-dev libvorbis-dev libopus-dev libopusfile-dev libsamplerate0-dev libonnxruntime-dev libpipewire-0.3-dev
+sudo apt-get install --no-install-recommends ca-certificates curl xz-utils pkg-config libsqlite3-dev libflac-dev libogg-dev libvorbis-dev libopus-dev libopusfile-dev libmpg123-dev libsamplerate0-dev libonnxruntime-dev libpipewire-0.3-dev
 ```
 
 Add `libgtk-4-dev libadwaita-1-dev libsecret-1-dev` on a release whose GTK and
@@ -380,12 +380,12 @@ under the same terms.
 Orca's dependencies are chosen on technical merit, and GPL, LGPL and AGPL
 dependencies are allowed; a binary that contains one carries that licence's
 terms. `liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac
-(Apache-2.0), Chromaprint (MIT) with KissFFT (BSD-3-Clause), minimp3 (CC0) and
-the reference QOA decoder (MIT). `zig build` installs their licence and notice
-files under `share/doc/orca/licenses`; distribute that directory with any
-binary. The system libraries Orca links are distributed under their own
-licences. The fonts `orca-gtk` bundles use the SIL Open Font License,
-installed beside them.
+(Apache-2.0), Chromaprint (MIT) with KissFFT (BSD-3-Clause) and the reference
+QOA decoder (MIT). `zig build` installs their licence and notice files under
+`share/doc/orca/licenses`; distribute that directory with any binary. The
+system libraries Orca links, mpg123 (LGPL-2.1) among them, are distributed
+under their own licences. The fonts `orca-gtk` bundles use the SIL Open Font
+License, installed beside them.
 
 ## Resources
 
