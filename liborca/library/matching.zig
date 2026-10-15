@@ -127,6 +127,11 @@ const SearchOutcome = union(enum) {
     busy,
 };
 
+const MusicBrainzSearch = union(enum) {
+    text: providers.Query,
+    recording_ids: struct { mbids: []const []const u8, album: ?[]const u8 },
+};
+
 const ReleaseStep = enum { done, uncached, cancelled, unavailable, busy };
 
 const ReleaseOutcome = union(enum) {
@@ -527,13 +532,16 @@ pub const LibraryMatching = struct {
             var answered: database.ProviderSet = .{ .acoustid = lookup != null };
             var musicbrainz: ?providers.CandidateList = null;
             defer if (musicbrainz) |list| list.deinit();
-            if (candidate.needs_musicbrainz) switch (try self.searchMusicBrainz(query)) {
+            var text_found_nothing = false;
+            if (candidate.needs_musicbrainz) switch (try self.searchMusicBrainz(.{ .text = query })) {
                 .answered => |list| {
                     musicbrainz = list;
                     answered.musicbrainz = true;
+                    text_found_nothing = list.items.len == 0;
                 },
-                .insufficient => if (lookup == null) {
-                    result.insufficient += 1;
+                .insufficient => {
+                    if (lookup == null) result.insufficient += 1;
+                    text_found_nothing = true;
                 },
                 .refused => if (lookup == null) {
                     result.refused += 1;
@@ -542,6 +550,21 @@ pub const LibraryMatching = struct {
                 .cancelled => return self.stop(result, .cancelled),
                 .unavailable => return self.stop(result, .unavailable),
                 .busy => return self.stop(result, .musicbrainz_busy),
+            };
+            if (text_found_nothing) if (lookup) |heard| {
+                var mbids_buffer: [providers.musicbrainz.max_searched_recording_ids][]const u8 = undefined;
+                const mbids = strongestHeardRecordings(heard.items, &mbids_buffer);
+                if (mbids.len != 0) switch (try self.searchMusicBrainz(.{ .recording_ids = .{ .mbids = mbids, .album = query.album } })) {
+                    .answered => |list| {
+                        if (musicbrainz) |previous| previous.deinit();
+                        musicbrainz = list;
+                    },
+                    .insufficient, .refused => {},
+                    .uncached => continue,
+                    .cancelled => return self.stop(result, .cancelled),
+                    .unavailable => return self.stop(result, .unavailable),
+                    .busy => return self.stop(result, .musicbrainz_busy),
+                };
             };
             if (!answered.isEmpty()) {
                 const evidence = try providers.workflow.collect(
@@ -967,10 +990,14 @@ pub const LibraryMatching = struct {
         return if (refused == 0) .answered else .{ .refused = refused };
     }
 
-    fn searchMusicBrainz(self: *LibraryMatching, query: providers.Query) !SearchOutcome {
+    fn searchMusicBrainz(self: *LibraryMatching, search: MusicBrainzSearch) !SearchOutcome {
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const list = self.musicbrainz.search(self.allocator, query) catch |err| switch (err) {
+            const asked = switch (search) {
+                .text => |query| self.musicbrainz.search(self.allocator, query),
+                .recording_ids => |ids| self.musicbrainz.searchRecordingIds(self.allocator, ids.mbids, ids.album),
+            };
+            const list = asked catch |err| switch (err) {
                 error.InsufficientIdentificationEvidence => return .insufficient,
                 error.ProviderRejectedRequest, error.InvalidProviderResponse => return .refused,
                 error.Canceled => return .cancelled,
@@ -1013,6 +1040,30 @@ fn addVote(allocator: std.mem.Allocator, votes: *std.ArrayList([36]u8), mbid: []
 fn addFact(allocator: std.mem.Allocator, facts: *std.ArrayList(database.ReleaseFact), fact: database.ReleaseFact) !void {
     for (facts.items) |known| if (std.mem.eql(u8, known.mbid, fact.mbid)) return;
     try facts.append(allocator, fact);
+}
+
+fn strongestHeardRecordings(
+    heard: []const providers.Candidate,
+    buffer: *[providers.musicbrainz.max_searched_recording_ids][]const u8,
+) []const []const u8 {
+    var count: usize = 0;
+    while (count < buffer.len) : (count += 1) {
+        var strongest: ?*const providers.Candidate = null;
+        for (heard) |*candidate| {
+            if (!metadata.isMusicBrainzId(candidate.provider_id)) continue;
+            const taken = for (buffer[0..count]) |mbid| {
+                if (std.mem.eql(u8, mbid, candidate.provider_id)) break true;
+            } else false;
+            if (taken) continue;
+            if (strongest == null or similarity(candidate) > similarity(strongest.?)) strongest = candidate;
+        }
+        buffer[count] = (strongest orelse break).provider_id;
+    }
+    return buffer[0..count];
+}
+
+fn similarity(candidate: *const providers.Candidate) f32 {
+    return candidate.fingerprint_similarity orelse 0;
 }
 
 fn withoutRecording(items: []database.ProposalEvidence, recording_mbid: ?[]const u8) []database.ProposalEvidence {

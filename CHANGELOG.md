@@ -36,6 +36,7 @@
 - A crafted ALAC file can no longer make the decoder read or write outside its buffers.
 - Sorted, filtered and path-, loudness- or genre-sorted track listings stay fast at any scroll depth.
 - MusicBrainz search retries an artist credit joined by semicolons with each artist, as it does for commas.
+- A file MusicBrainz text search cannot find but AcoustID hears is looked up on MusicBrainz by recording ID, so its album gets a release candidate.
 
 ### Changed
 

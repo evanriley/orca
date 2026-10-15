@@ -1583,6 +1583,7 @@ pub const FakeMusicBrainz = struct {
     /// What a release lookup answers, and with which status.
     release_status: u16 = 200,
     release_body: []const u8 = bryter_layter_release,
+    recording_id_searches: std.atomic.Value(u32) = .init(0),
 
     const Answer = struct { title: []const u8, body: []const u8 };
     const wall_base_ms: i64 = 1_800_000_000_000;
@@ -1609,6 +1610,8 @@ pub const FakeMusicBrainz = struct {
             return .{ .respond = .{ .status = self.refusals[exchange.index], .body = "" } };
         if (std.mem.indexOf(u8, exchange.request.url, "/ws/2/release/") != null)
             return .{ .respond = .{ .status = self.release_status, .body = self.release_body } };
+        if (std.mem.indexOf(u8, exchange.request.url, "query=rid%3A") != null)
+            _ = self.recording_id_searches.fetchAdd(1, .acq_rel);
         const body = for (self.answers) |answer| {
             if (std.mem.indexOf(u8, exchange.request.url, answer.title) != null) break answer.body;
         } else "{\"recordings\":[]}";
@@ -2735,10 +2738,22 @@ fn addAudioTrack(
     title: []const u8,
     artist: []const u8,
 ) !i64 {
+    return addAudioTrackOn(library_database, temporary, null, name, title, artist);
+}
+
+fn addAudioTrackOn(
+    library_database: *database.LibraryDatabase,
+    temporary: *std.testing.TmpDir,
+    release_id: ?i64,
+    name: []const u8,
+    title: []const u8,
+    artist: []const u8,
+) !i64 {
     const path = try runtime_tests.absoluteTestPath(".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
     defer std.testing.allocator.free(path);
     const binding = try library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:acoustid" });
     try library_database.tracks.upsertTracks(&.{.{
+        .release_id = release_id,
         .title = title,
         .artist = artist,
         .album = "Bryter Layter",
@@ -2820,6 +2835,47 @@ test "a matching job fingerprints each file, asks AcoustID about them in one req
     const details = (try runtime.libraryTrackDetails(library, reprojected[0])).?;
     defer details.deinit();
     try std.testing.expectEqualStrings(pink_moon_mbid, details.musicbrainz_recording_id.?);
+}
+
+const pink_moon_by_id = FakeMusicBrainz.Answer{ .title = "query=rid%3A%22" ++ pink_moon_mbid ++ "%22", .body = pink_moon_answer };
+const northern_sky_by_id = FakeMusicBrainz.Answer{ .title = "query=rid%3A%22" ++ northern_sky_mbid ++ "%22", .body = northern_sky_answer };
+
+test "a Track MusicBrainz finds nothing for is looked up by the recording AcoustID hears, and one it finds is not" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "northern.wav", 440);
+    try writeToneWave(temporary.dir, "pink.wav", 620);
+    var musicbrainz: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "query=recording%3A%22Northern%20Sky%22", .body = northern_sky_answer },
+        pink_moon_by_id,
+    } };
+    var acoustid: FakeAcoustId = .{ .lookup_body = two_fingerprint_answer };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("test-client");
+    try runtime.setAcoustIdServer("http://127.0.0.1:5002");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-recording-ids?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try addAudioTrack(library_database, &temporary, "northern.wav", "Northern Sky", "Nick Drake");
+    const pink_moon = try addAudioTrack(library_database, &temporary, "pink.wav", "Pink Moon", "Nick Drake");
+
+    const job_handle = try runtime.startLibraryMatching(library, .{});
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u32, 1), musicbrainz.recording_id_searches.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(job_handle)).matched);
+    const found_by_id = try runtime.libraryMatchProposals(library, pink_moon, 10);
+    defer found_by_id.deinit();
+    try std.testing.expectEqual(@as(usize, 1), found_by_id.items.len);
+    try std.testing.expectEqualStrings(pink_moon_mbid, found_by_id.items[0].recording_mbid);
+    try std.testing.expectEqualStrings("musicbrainz+acoustid", found_by_id.items[0].provider);
+    try std.testing.expectEqualStrings(bryter_layter_mbid, found_by_id.items[0].release_mbid.?);
+    const found_by_text = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer found_by_text.deinit();
+    try std.testing.expectEqualStrings(northern_sky_mbid, found_by_text.items[0].recording_mbid);
 }
 
 test "a matching job without a network answers each fingerprint its cache holds and skips the Track AcoustID was never asked about" {
@@ -3877,6 +3933,43 @@ test "an album search whose recordings name a release reports the album ready to
     try expectListedIn(&runtime, library, bucket, finished_on);
     try std.testing.expectError(error.UnknownRelease, runtime.libraryReleaseMatchBucket(library, 999_999, 0.9));
     try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryReleaseMatchBucket(library, finished_on, 0));
+}
+
+test "an album search MusicBrainz finds nothing for is ready to review once the recordings AcoustID hears are looked up by ID" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "northern.wav", 440);
+    try writeToneWave(temporary.dir, "pink.wav", 620);
+    var musicbrainz: FakeMusicBrainz = .{ .answers = &.{ northern_sky_by_id, pink_moon_by_id } };
+    var acoustid: FakeAcoustId = .{ .lookup_body = two_fingerprint_answer };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("test-client");
+    try runtime.setAcoustIdServer("http://127.0.0.1:5002");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-recording-ids?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", null);
+    _ = try addAudioTrackOn(library_database, &temporary, album, "northern.wav", "Northern Sky", "Nick Drake");
+    _ = try addAudioTrackOn(library_database, &temporary, album, "pink.wav", "Pink Moon", "Nick Drake");
+    try std.testing.expectEqual(database.ReleaseMatchBucket.unmatched, try runtime.libraryReleaseMatchBucket(library, album, 0.9));
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .mode = .reidentify, .release_id = album, .accept_minimum_confidence = null, .cover_art = false });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u32, 2), musicbrainz.recording_id_searches.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(job_handle)).releases_to_review);
+    const finished_on = (try runtime.jobMatchRelease(job_handle)).?;
+    const bucket = try runtime.libraryReleaseMatchBucket(library, finished_on, 0.9);
+    try std.testing.expect(bucket == .confident or bucket == .needs_review);
+    const page = try runtime.libraryReleaseMatchPage(library, std.testing.allocator, bucket, 0.9, null, 50, 0);
+    defer page.deinit();
+    const listed = for (page.items) |item| {
+        if (item.release_id == finished_on) break item;
+    } else return error.ReleaseNotListed;
+    try std.testing.expectEqualStrings(bryter_layter_mbid, listed.best.?.release_mbid);
 }
 
 test "a library search counts the albums its matches left ready to review, not the albums whose recordings name no release" {
