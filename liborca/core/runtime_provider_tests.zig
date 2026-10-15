@@ -8223,7 +8223,7 @@ test "release match pages and counts across many Releases agree with weighing ea
         while (try releases.step() == .row) {
             const view = try repository.releaseMatchView(std.testing.allocator, releases.columnInt64(0), false);
             defer view.deinit();
-            const bucket = @import("../database/repository/identification.zig").releaseMatchBucket(try view.best(std.testing.allocator), 0.9);
+            const bucket = @import("../database/repository/identification.zig").releaseMatchBucket(try view.best(std.testing.allocator), view.track_count, 0.9);
             try expected[@backingInt(bucket)].append(std.testing.allocator, view.release_id);
         }
     }

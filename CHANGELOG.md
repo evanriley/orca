@@ -38,6 +38,7 @@
 - MusicBrainz search retries an artist credit joined by semicolons with each artist, as it does for commas.
 - A file MusicBrainz text search cannot find but AcoustID hears is looked up on MusicBrainz by recording ID, so its album gets a release candidate.
 - `orca-gtk` Match Album reports where the album's match stands, not its cover, when it accepts nothing.
+- An album's best release candidate is the edition its Tracks name and whose track count fits, not a larger compilation, and a candidate with another track count needs review.
 
 ### Changed
 

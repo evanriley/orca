@@ -5646,11 +5646,15 @@ orca_status orca_library_apply_matched_release_fields(
 );
 
 /* Where a Release stands against MusicBrainz. CONFIDENT: its best candidate
- * is at least `confident_at` and is not dismissed. NEEDS_REVIEW: a candidate
- * exists below that. UNMATCHED: there is none. REVIEWED: a person's review of
- * its best candidate still holds, as orca_library_mark_release_reviewed
- * describes, or its tags identify it, as orca_release_match_view
- * `from_tags` describes; such a Release is in no other bucket. */
+ * is at least `confident_at`, is not dismissed and, unless a Track's release
+ * ID names it, has the Release's track count or an unknown one. Candidates
+ * rank by how many Tracks name them, then by how their track count fits the
+ * Release's (one a Track's release ID names fits), then by confidence.
+ * NEEDS_REVIEW: a candidate exists but is not CONFIDENT. UNMATCHED: there
+ * is none. REVIEWED: a person's review of its best candidate still holds,
+ * as orca_library_mark_release_reviewed describes, or its tags identify
+ * it, as orca_release_match_view `from_tags` describes; such a Release is
+ * in no other bucket. */
 typedef enum orca_release_match_bucket {
     ORCA_RELEASE_MATCH_BUCKET_CONFIDENT = 0,
     ORCA_RELEASE_MATCH_BUCKET_NEEDS_REVIEW = 1,
