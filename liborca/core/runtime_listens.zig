@@ -314,7 +314,7 @@ pub fn libraryApplyRelease(
 ) !ReleaseApplyOutcome {
     const library_database = try runtime.libraryDatabase(self, library);
     var written: std.ArrayList(i64) = .empty;
-    defer written.deinit(self.allocator);
+    defer written.deinit(allocator);
     var outcome = try library_pass.release_apply.apply(allocator, library_database, release_id, fields, &written);
     errdefer outcome.deinit();
     if (outcome.values_written != 0) {
