@@ -41,7 +41,7 @@ pub const MusicBrainz = struct {
         const whole_credit = try self.searchCredited(allocator, query, &.{query.artist.?});
         if (whole_credit.items.len != 0) return whole_credit;
         var names_buffer: [max_credited_artists][]const u8 = undefined;
-        const names = commaSeparatedNames(query.artist.?, &names_buffer);
+        const names = creditedNames(query.artist.?, &names_buffer);
         if (names.len < 2) return whole_credit;
         whole_credit.deinit();
         return self.searchCredited(allocator, query, names);
@@ -961,9 +961,9 @@ fn isBlank(text: ?[]const u8) bool {
     return std.mem.trim(u8, value, " \t").len == 0;
 }
 
-fn commaSeparatedNames(credit: []const u8, buffer: *[max_credited_artists][]const u8) []const []const u8 {
+fn creditedNames(credit: []const u8, buffer: *[max_credited_artists][]const u8) []const []const u8 {
     var count: usize = 0;
-    var parts = std.mem.splitScalar(u8, credit, ',');
+    var parts = std.mem.splitAny(u8, credit, ",;");
     while (parts.next()) |part| {
         const name = std.mem.trim(u8, part, " \t");
         if (name.len == 0) continue;
@@ -1371,6 +1371,58 @@ test "the second query names at most eight artists of a comma-joined credit" {
     try testing.expect(std.mem.endsWith(u8, fallback, "artist%3A%22A8%22%29"));
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, fallback, "artist%3A"));
     try testing.expectEqual(@as(usize, 0), list.items.len);
+}
+
+test "a semicolon-joined artist credit that finds nothing is asked again with each artist" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-semicolon-credit?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.adapter.server = "http://127.0.0.1:5000";
+    rig.net.transport.keep_history = true;
+
+    const list = try rig.search(.{ .title = "imagine", .artist = "Ariana Grande;\"Pop\" Wansel;Happy Perez", .album = "thank u, next" });
+    defer list.deinit();
+
+    try expectHistory(&rig, &.{
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "recording%3A%22imagine%22%20AND%20artist%3A%22Ariana%20Grande%3B%5C%22Pop%5C%22%20Wansel%3BHappy%20Perez%22" ++
+            "%20release%3A%22thank%20u%2C%20next%22",
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "recording%3A%22imagine%22%20AND%20%28artist%3A%22Ariana%20Grande%22" ++
+            "%20OR%20artist%3A%22%5C%22Pop%5C%22%20Wansel%22%20OR%20artist%3A%22Happy%20Perez%22%29" ++
+            "%20release%3A%22thank%20u%2C%20next%22",
+    });
+}
+
+test "the second query names at most eight artists of a credit joined by semicolons and commas" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-mixed-bound?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.net.transport.keep_history = true;
+
+    const list = try rig.search(.{ .title = "Posse Cut", .artist = "A1;A2,A3;A4; A5 ,A6;A7,A8;A9;A10" });
+    defer list.deinit();
+
+    try testing.expectEqual(@as(usize, 2), rig.net.transport.history.items.len);
+    const fallback = rig.net.transport.history.items[1].url;
+    try testing.expect(std.mem.endsWith(
+        u8,
+        fallback,
+        "%28artist%3A%22A1%22%20OR%20artist%3A%22A2%22%20OR%20artist%3A%22A3%22%20OR%20artist%3A%22A4%22" ++
+            "%20OR%20artist%3A%22A5%22%20OR%20artist%3A%22A6%22%20OR%20artist%3A%22A7%22%20OR%20artist%3A%22A8%22%29",
+    ));
+    try testing.expectEqual(@as(usize, 8), std.mem.count(u8, fallback, "artist%3A"));
+}
+
+test "a single artist with a trailing semicolon that finds nothing is not asked again" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-trailing-semicolon?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    const list = try rig.search(.{ .title = "Unknown", .artist = "Nobody;" });
+    defer list.deinit();
+
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
 }
 
 test "a single artist that finds nothing is not asked again" {
