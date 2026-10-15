@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Accepting confident matches prefers, between equally confident matches, the one on the album's best release candidate over another edition.
 - A model download no longer writes through a symlink at `<destination>.part`.
 - Writing a date to an ID3v2.3 file no longer deletes its TIME and TRDA frames.
 - Out-of-range seek positions, file lengths and host clock values no longer abort the host with an integer overflow.

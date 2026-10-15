@@ -266,18 +266,33 @@ const ConfidentCandidate = struct {
         const score = self.payload.acoustid_score orelse return false;
         return self.found_by.acoustid and score >= fingerprint_minimum;
     }
+
+    fn onAlbum(self: ConfidentCandidate, song: SongFacts) bool {
+        for (song.album_releases) |release_mbid| if (self.payload.listsRelease(release_mbid)) return true;
+        return false;
+    }
+};
+
+/// What `heldBackByRelease` found for each file of a batch.
+const ReleaseHolds = struct {
+    held_back: []bool,
+    album_releases: []const []const []const u8,
 };
 
 /// What the library knows of the song a file holds.
 const SongFacts = struct {
     track_number: ?u32 = null,
     duration_ms: ?u64 = null,
+    /// The best release candidate of each Release whose Tracks hold the file.
+    album_releases: []const []const u8 = &.{},
 };
 
 /// The proposal bulk acceptance takes for one file, or null. When a proposal
 /// at least `minimum_confidence` is backed by the file's fingerprint, the best
 /// such one by `outranks`; otherwise the most confident proposal, only when it
-/// reaches `minimum_confidence` and shows a higher percent than every other.
+/// reaches `minimum_confidence` and shows a higher percent than every other, or
+/// shares the top percent with other proposals of which exactly one is on the
+/// album.
 fn chooseConfident(candidates: []const ConfidentCandidate, song: SongFacts, minimum_confidence: f32) ?i64 {
     var fingerprinted: ?ConfidentCandidate = null;
     for (candidates) |candidate| {
@@ -301,14 +316,25 @@ fn chooseConfident(candidates: []const ConfidentCandidate, song: SongFacts, mini
         best = candidate;
         best_shared = false;
     }
-    const winner = best orelse return null;
-    if (best_shared or winner.confidence < minimum_confidence) return null;
+    var winner = best orelse return null;
+    if (best_shared) {
+        const top_percent = confidencePercent(winner.confidence);
+        var on_album: ?ConfidentCandidate = null;
+        for (candidates) |candidate| {
+            if (confidencePercent(candidate.confidence) != top_percent or !candidate.onAlbum(song)) continue;
+            if (on_album != null) return null;
+            on_album = candidate;
+        }
+        winner = on_album orelse return null;
+    }
+    if (winner.confidence < minimum_confidence) return null;
     return winner.id;
 }
 
 fn outranks(a: ConfidentCandidate, b: ConfidentCandidate, song: SongFacts) bool {
     const percent = std.math.order(confidencePercent(a.confidence), confidencePercent(b.confidence));
     if (percent != .eq) return percent == .gt;
+    if (a.onAlbum(song) != b.onAlbum(song)) return a.onAlbum(song);
     if (song.track_number) |number| {
         const a_position = a.payload.track_number == number;
         const b_position = b.payload.track_number == number;
@@ -2250,7 +2276,7 @@ pub const IdentificationProposalRepository = struct {
             more = count == ids.len;
             var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
             defer chunk_arena.deinit();
-            try self.weighReleases(&chunk_arena, ids[0..count], confident_at, buckets[0..count]);
+            try self.weighReleases(&chunk_arena, ids[0..count], confident_at, buckets[0..count], null);
             for (buckets[0..count]) |bucket| switch (bucket orelse continue) {
                 .confident => counts.confident += 1,
                 .needs_review => counts.needs_review += 1,
@@ -2274,7 +2300,7 @@ pub const IdentificationProposalRepository = struct {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         defer arena.deinit();
         var bucket: [1]?ReleaseMatchBucket = undefined;
-        try self.weighReleases(&arena, &.{release_id}, confident_at, &bucket);
+        try self.weighReleases(&arena, &.{release_id}, confident_at, &bucket, null);
         return bucket[0] orelse error.UnknownRelease;
     }
 
@@ -2306,7 +2332,7 @@ pub const IdentificationProposalRepository = struct {
             more = count == ids.len;
             var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
             defer chunk_arena.deinit();
-            try self.weighReleases(&chunk_arena, ids[0..count], 1, buckets[0..count]);
+            try self.weighReleases(&chunk_arena, ids[0..count], 1, buckets[0..count], null);
             for (buckets[0..count]) |bucket| switch (bucket orelse continue) {
                 .confident, .needs_review => reviewable += 1,
                 .reviewed, .unmatched => {},
@@ -2317,13 +2343,15 @@ pub const IdentificationProposalRepository = struct {
 
     /// Each of `release_ids`' bucket against `confident_at`, as
     /// `releaseMatchPage` sorts them, or null for a Release that does not
-    /// exist. At most `weigh_chunk` Releases.
+    /// exist. At most `weigh_chunk` Releases. `best_mbids`, when given, receives
+    /// each Release's best release candidate, valid until `chunk_arena` is freed.
     fn weighReleases(
         self: *const IdentificationProposalRepository,
         chunk_arena: *std.heap.ArenaAllocator,
         release_ids: []const i64,
         confident_at: f32,
         buckets: []?ReleaseMatchBucket,
+        best_mbids: ?[]?[]const u8,
     ) !void {
         if (release_ids.len == 0) return;
         const chunk = chunk_arena.allocator();
@@ -2334,6 +2362,9 @@ pub const IdentificationProposalRepository = struct {
         try self.fillReleaseMatchViews(chunk, views, found);
         const bests = try chunk.alloc(?ReleaseCandidate, views.len);
         for (views, found, bests) |*view, exists, *best| best.* = if (exists) try view.best(chunk) else null;
+        if (best_mbids) |out| for (out, bests) |*mbid, best| {
+            mbid.* = if (best) |candidate| candidate.release_mbid else null;
+        };
         const by_tags = try self.identifiedByTags(chunk, views, bests);
         for (views, found, bests, by_tags, buckets) |view, exists, best, identified, *bucket| {
             bucket.* = if (!exists)
@@ -2851,11 +2882,12 @@ pub const IdentificationProposalRepository = struct {
             while (try statement.step() == .row) : (file_count += 1) files[file_count] = statement.columnInt64(0);
         }
         var chosen_count: usize = 0;
-        const held_back = try self.heldBackByRelease(allocator, files[0..file_count], minimum_confidence);
-        defer allocator.free(held_back);
-        for (files[0..file_count], held_back) |file_id, held| {
+        var holds_arena: std.heap.ArenaAllocator = .init(allocator);
+        defer holds_arena.deinit();
+        const holds = try self.heldBackByRelease(holds_arena.allocator(), files[0..file_count], minimum_confidence);
+        for (files[0..file_count], holds.held_back, holds.album_releases) |file_id, held, album_releases| {
             if (held) continue;
-            if (try self.chooseConfidentForFile(allocator, file_id, minimum_confidence)) |proposal_id| {
+            if (try self.chooseConfidentForFile(allocator, file_id, album_releases, minimum_confidence)) |proposal_id| {
                 batch[chosen_count] = proposal_id;
                 chosen_count += 1;
             }
@@ -2868,17 +2900,20 @@ pub const IdentificationProposalRepository = struct {
 
     /// For each of `file_ids`, whether a Release whose Tracks hold it, by
     /// their preferred file or their recording, is in `needs_review` at
-    /// `minimum_confidence`. Caller frees.
+    /// `minimum_confidence`, and the best release candidate of each such
+    /// Release. Everything is allocated from `allocator`.
     fn heldBackByRelease(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         file_ids: []const i64,
         minimum_confidence: f32,
-    ) ![]bool {
+    ) !ReleaseHolds {
         const held_back = try allocator.alloc(bool, file_ids.len);
-        errdefer allocator.free(held_back);
+        const album_releases = try allocator.alloc([]const []const u8, file_ids.len);
         @memset(held_back, false);
-        if (file_ids.len == 0) return held_back;
+        @memset(album_releases, &.{});
+        const holds: ReleaseHolds = .{ .held_back = held_back, .album_releases = album_releases };
+        if (file_ids.len == 0) return holds;
         var arena: std.heap.ArenaAllocator = .init(allocator);
         defer arena.deinit();
         const owned = arena.allocator();
@@ -2912,27 +2947,37 @@ pub const IdentificationProposalRepository = struct {
             }
         }
         var needs_review: std.AutoHashMapUnmanaged(i64, void) = .empty;
+        var best_of: std.AutoHashMapUnmanaged(i64, []const u8) = .empty;
         var start: usize = 0;
         while (start < release_ids.items.len) : (start += weigh_chunk) {
             const chunk_ids = release_ids.items[start..@min(start + weigh_chunk, release_ids.items.len)];
             var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
             defer chunk_arena.deinit();
             var buckets: [weigh_chunk]?ReleaseMatchBucket = undefined;
-            try self.weighReleases(&chunk_arena, chunk_ids, minimum_confidence, buckets[0..chunk_ids.len]);
-            for (chunk_ids, buckets[0..chunk_ids.len]) |release_id, bucket| {
+            var bests: [weigh_chunk]?[]const u8 = undefined;
+            try self.weighReleases(&chunk_arena, chunk_ids, minimum_confidence, buckets[0..chunk_ids.len], bests[0..chunk_ids.len]);
+            for (chunk_ids, buckets[0..chunk_ids.len], bests[0..chunk_ids.len]) |release_id, bucket, best| {
+                if (best) |mbid| try best_of.put(owned, release_id, try owned.dupe(u8, mbid));
                 if ((bucket orelse continue) == .needs_review) try needs_review.put(owned, release_id, {});
             }
         }
         for (holdings.items) |holding| {
             if (needs_review.contains(holding.release_id)) held_back[holding.file_index] = true;
+            const mbid = best_of.get(holding.release_id) orelse continue;
+            const previous = album_releases[holding.file_index];
+            const extended = try allocator.alloc([]const u8, previous.len + 1);
+            @memcpy(extended[0..previous.len], previous);
+            extended[previous.len] = try allocator.dupe(u8, mbid);
+            album_releases[holding.file_index] = extended;
         }
-        return held_back;
+        return holds;
     }
 
     fn chooseConfidentForFile(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         file_id: i64,
+        album_releases: []const []const u8,
         minimum_confidence: f32,
     ) !?i64 {
         var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -2954,7 +2999,9 @@ pub const IdentificationProposalRepository = struct {
                 .payload = payload.value,
             });
         }
-        return chooseConfident(candidates.items, try self.songFacts(file_id), minimum_confidence);
+        var song = try self.songFacts(file_id);
+        song.album_releases = album_releases;
+        return chooseConfident(candidates.items, song, minimum_confidence);
     }
 
     /// The track number and duration of the lowest-numbered Track that plays
@@ -3652,6 +3699,51 @@ test "fingerprint-backed proposals of equal percent prefer the song's own track 
     const candidates = [_]ConfidentCandidate{ other_track, on_track };
     try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{ .track_number = 3 }, 0.8));
     try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{}, 0.8));
+}
+
+const album_edition = "44bdf559-0000-4000-8000-000000000001";
+const other_edition = "908ecb12-0000-4000-8000-000000000002";
+const album_only: []const []const u8 = &.{album_edition};
+
+fn onEdition(candidate: ConfidentCandidate, edition: []const u8, mb_score: u8) ConfidentCandidate {
+    var edited = candidate;
+    edited.payload.release_mbid = edition;
+    edited.payload.mb_score = mb_score;
+    return edited;
+}
+
+test "fingerprint-backed proposals of equal percent prefer the one on the album over a higher MusicBrainz score" {
+    const on_album = onEdition(fingerprintedCandidate(1, mbid_a, 0.951), album_edition, 66);
+    const elsewhere = onEdition(fingerprintedCandidate(2, mbid_b, 0.951), other_edition, 68);
+    const candidates = [_]ConfidentCandidate{ on_album, elsewhere };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{ .album_releases = album_only }, 0.8));
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{}, 0.8));
+}
+
+test "a proposal listing the album's release among its editions counts as on the album" {
+    var listing_album = onEdition(fingerprintedCandidate(1, mbid_a, 0.951), other_edition, 60);
+    listing_album.payload.release_mbids = album_only;
+    const elsewhere = onEdition(fingerprintedCandidate(2, mbid_b, 0.951), other_edition, 68);
+    const candidates = [_]ConfidentCandidate{ listing_album, elsewhere };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{ .album_releases = album_only }, 0.8));
+}
+
+test "a proposal on the album does not beat a higher percent" {
+    const on_album = onEdition(fingerprintedCandidate(1, mbid_a, 0.91), album_edition, 66);
+    const elsewhere = onEdition(fingerprintedCandidate(2, mbid_b, 0.951), other_edition, 68);
+    const candidates = [_]ConfidentCandidate{ on_album, elsewhere };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{ .album_releases = album_only }, 0.8));
+}
+
+test "text-only proposals tied at the top percent resolve to the single one on the album" {
+    const on_album = onEdition(textCandidate(1, mbid_a, 0.951), album_edition, 66);
+    const elsewhere = onEdition(textCandidate(2, mbid_b, 0.951), other_edition, 68);
+    const song: SongFacts = .{ .album_releases = album_only };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&[_]ConfidentCandidate{ on_album, elsewhere }, song, 0.8));
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&[_]ConfidentCandidate{ on_album, elsewhere }, .{}, 0.8));
+    const also_on_album = onEdition(textCandidate(3, mbid_b, 0.951), album_edition, 60);
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&[_]ConfidentCandidate{ on_album, also_on_album, elsewhere }, song, 0.8));
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&[_]ConfidentCandidate{ on_album, elsewhere }, song, 0.96));
 }
 
 test "fingerprint-backed proposals of equal percent and position prefer one MusicBrainz found too" {
