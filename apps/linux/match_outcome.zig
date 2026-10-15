@@ -48,6 +48,15 @@ pub fn matchedText(buffer: []u8, scope: Scope, title: []const u8, bucket: ?Bucke
     };
 }
 
+/// `matchedText` followed by ` · suffix`, or `matchedText` alone when the two
+/// do not fit the buffer.
+pub fn matchedTextWith(buffer: []u8, scope: Scope, title: []const u8, bucket: ?Bucket, suffix: ?[]const u8) [:0]const u8 {
+    const extra = suffix orelse return matchedText(buffer, scope, title, bucket);
+    var scratch: [160]u8 = undefined;
+    const base = matchedText(&scratch, scope, title, bucket);
+    return strings.printZ(buffer, "{s} · {s}", .{ base, extra }) catch matchedText(buffer, scope, title, bucket);
+}
+
 fn unreviewable(scope: Scope) [:0]const u8 {
     return switch (scope) {
         .album, .track_reidentify => no_album_match,
@@ -117,6 +126,21 @@ test "a long album title is cut at a character boundary so the toast still fits"
     try std.testing.expect(std.mem.endsWith(u8, text, " is ready to review in Needs Review"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(text));
     try std.testing.expect(text.len < buffer.len);
+}
+
+test "an album search with a fetched cover appends the cover to the match outcome" {
+    var buffer: [160]u8 = undefined;
+    const cover = "Found the album's cover";
+    try std.testing.expectEqualStrings("No album match found", matchedTextWith(&buffer, .album, "Big Grams", .unmatched, null));
+    try std.testing.expectEqualStrings("No album match found · Found the album's cover", matchedTextWith(&buffer, .album, "Big Grams", .unmatched, cover));
+    try std.testing.expectEqualStrings("Big Grams is ready to review in Needs Review", matchedTextWith(&buffer, .album, "Big Grams", .needs_review, null));
+    try std.testing.expectEqualStrings("Big Grams is ready to review in Needs Review · Found the album's cover", matchedTextWith(&buffer, .album, "Big Grams", .needs_review, cover));
+}
+
+test "an album search whose joined text overflows the buffer keeps the match outcome alone" {
+    var buffer: [64]u8 = undefined;
+    const text = matchedTextWith(&buffer, .album, "Big Grams", .needs_review, "Found the album's cover");
+    try std.testing.expectEqualStrings("Big Grams is ready to review in Needs Review", text);
 }
 
 test "a library search names the albums ready to review, or that none are" {
