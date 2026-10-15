@@ -500,11 +500,15 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
         },
     });
     var album_buffer: [160]u8 = undefined;
+    if (result.accepted == 0) return albumOutcome(
+        self,
+        &album_buffer,
+        .album,
+        moved_to orelse release_id,
+        if (result.cover_art == .fetched) "Found the album's cover" else null,
+    );
     const cover: [:0]const u8 = switch (result.cover_art) {
-        .no_release_id => if (result.accepted != 0)
-            "No release ID to fetch its cover"
-        else
-            return albumOutcome(self, &album_buffer, .album, moved_to orelse release_id),
+        .no_release_id => "No release ID to fetch its cover",
         .fetched => "Found the album's cover",
         .embedded => "The album's files already carry a cover",
         .folder => "The album's folder already has a cover",
@@ -513,7 +517,6 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
         .cached_miss, .not_found => "The Cover Art Archive has no cover for this album",
         .not_requested, .refused, .unavailable, .busy, .cancelled, .partial => "Done",
     };
-    if (result.accepted == 0) return self.toast(cover);
     var buffer: [160]u8 = undefined;
     self.toast(strings.printZ(&buffer, "Accepted {f} {s} · {s}", .{
         strings.grouped(result.accepted),
@@ -563,8 +566,8 @@ fn reidentificationFinished(self: *App, tracked: app.TrackedTask, state_value: l
     if (state_value != .succeeded) return self.toast(unreachableText(result.busy));
     if (result.matched == 0) return self.toast(if (result.confirmed != 0) "Confirmed the current recording" else "No match found");
     var buffer: [160]u8 = undefined;
-    if (tracked.match_release) |release_id| return albumOutcome(self, &buffer, .album, match_release orelse release_id);
-    if (tracked.match_track) |track_id| return albumOutcome(self, &buffer, .track_reidentify, trackRelease(self, track_id));
+    if (tracked.match_release) |release_id| return albumOutcome(self, &buffer, .album, match_release orelse release_id, null);
+    if (tracked.match_track) |track_id| return albumOutcome(self, &buffer, .track_reidentify, trackRelease(self, track_id), null);
     self.toast(match_outcome.libraryText(&buffer, result.matched, result.releases_to_review));
 }
 
@@ -577,7 +580,7 @@ fn trackRelease(self: *App, track_id: i64) ?i64 {
 
 /// Says where a search left the album it concerned, from liborca's bucket
 /// for it, with a button that opens it when it waits for review.
-fn albumOutcome(self: *App, buffer: []u8, scope: match_outcome.Scope, release_id: ?i64) void {
+fn albumOutcome(self: *App, buffer: []u8, scope: match_outcome.Scope, release_id: ?i64, cover_suffix: ?[]const u8) void {
     const library = self.library orelse return;
     const id = release_id orelse return self.toast(match_outcome.matchedText(buffer, scope, "", null));
     const bucket = self.runtime.libraryReleaseMatchBucket(library, id, matches.thresholdFraction(self)) catch |err| switch (err) {
@@ -587,7 +590,7 @@ fn albumOutcome(self: *App, buffer: []u8, scope: match_outcome.Scope, release_id
     const release = (self.runtime.libraryRelease(library, id) catch null) orelse
         return self.toast(match_outcome.matchedText(buffer, scope, "", null));
     defer release.deinit(self.runtime.allocator);
-    const text = match_outcome.matchedText(buffer, scope, release.title, bucket);
+    const text = match_outcome.matchedTextWith(buffer, scope, release.title, bucket, cover_suffix);
     if (!match_outcome.reviewable(bucket)) return self.toast(text);
     const overlay = self.toasts orelse return;
     const review = AlbumReview.create(self, id, bucket.?, release.title) orelse return self.toast(text);
@@ -664,7 +667,7 @@ fn matchingFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.J
     if (searched) |track_id| return if (matched == 0)
         self.toast("No match found")
     else
-        albumOutcome(self, &buffer, .track_search, trackRelease(self, track_id));
+        albumOutcome(self, &buffer, .track_search, trackRelease(self, track_id), null);
     self.toast(match_outcome.libraryText(&buffer, matched, if (stats) |value| value.releases_to_review else 0));
 }
 
