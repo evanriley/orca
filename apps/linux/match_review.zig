@@ -232,7 +232,7 @@ fn applicable(field: Field) bool {
 
 fn checkedByDefault(diff: liborca.ReleaseFieldDiff) bool {
     return diff.differs and switch (diff.field) {
-        .album, .album_artist, .release_date, .release_id => true,
+        .album, .album_artist, .release_date, .release_id, .track_titles => true,
         else => false,
     };
 }

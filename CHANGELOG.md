@@ -24,6 +24,7 @@
 - Accepting confident matches prefers, between equally confident matches, the one on the album's best release candidate over another edition.
 - Lyrics look up the first artist of a semicolon-separated artist list.
 - `Runtime.libraryApplyRelease` no longer frees with the runtime's allocator what it allocated with the caller's, which crashed `orca-cli apply-release`.
+- `orca-gtk` Match Review checks Track titles and artists by default when they differ.
 - A model download no longer writes through a symlink at `<destination>.part`.
 - Writing a date to an ID3v2.3 file no longer deletes its TIME and TRDA frames.
 - Out-of-range seek positions, file lengths and host clock values no longer abort the host with an integer overflow.
