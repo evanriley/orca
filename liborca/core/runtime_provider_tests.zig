@@ -6439,6 +6439,30 @@ fn runLyrics(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64, fetch
     return .{ .outcome = try runtime.jobLyricsOutcome(handle), .lyrics = try runtime.jobTakeLyrics(handle) };
 }
 
+test "the LRCLIB query names the first artist of a semicolon list and leaves commas and an empty first name alone" {
+    var lrclib: FakeLrclib = .{};
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = lrclib.hooks();
+    try runtime.setLrclibServer("https://lyrics.example/");
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-artist-list?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const cases = [_]struct { artist: []const u8, queried: []const u8 }{
+        .{ .artist = "A;B;C", .queried = "artist_name=A&" },
+        .{ .artist = "Ariana Grande;\"Pop\" Wansel;Happy Perez", .queried = "artist_name=Ariana%20Grande&" },
+        .{ .artist = "Tyler, the Creator", .queried = "artist_name=Tyler%2C%20the%20Creator&" },
+        .{ .artist = " ;B", .queried = "artist_name=%3BB&" },
+    };
+    for (cases) |case| {
+        const track = try addMatchTrack(library_database, "Song", case.artist, null);
+        const fetched = try runLyrics(&runtime, library, track, true);
+        defer fetched.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, lrclib.http.lastUrl(), case.queried) != null);
+    }
+}
+
 test "fetched LRCLIB lyrics are kept, and a second job, fetching or not, uses them without asking again" {
     var lrclib: FakeLrclib = .{};
     defer lrclib.deinit();
