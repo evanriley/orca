@@ -324,6 +324,7 @@ fn notes(write: *WritePage) ?*gtk.Widget {
         }
         if (plan.conflicts.len > 6)
             gtk.gtk_box_append(gtk.cast(gtk.Box, box), label(strings.format(&buffer, "and {d} more", .{plan.conflicts.len - 6}).ptr, "write-note"));
+        gtk.gtk_box_append(gtk.cast(gtk.Box, box), label("To write Orca's value, check the field in Match Review and apply it for a matched album, or set it in Edit Metadata, which locks your choice.", "write-note"));
     }
     var skip_counts: std.EnumArray(liborca.TagWriteSkipReason, usize) = .initFill(0);
     for (plan.skipped) |skip| skip_counts.getPtr(skip.reason).* += 1;
@@ -389,9 +390,14 @@ fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const write = writePageOf(data);
     const self = write.self;
     gtk.g_object_set_data(write.page, page_key, null);
-    if (!write.started) if (self.library) |library| self.runtime.discardTagWrite(library, write.plan.plan_id) catch {};
-    write.plan.deinit();
+    const pending_library = if (write.started) null else self.library;
+    if (pending_library) |library| discard(self, library, write.plan) else write.plan.deinit();
     self.allocator.destroy(write);
+}
+
+fn discard(self: *App, library: liborca.LibraryHandle, plan: liborca.TagWritePlan) void {
+    if (plan.files.len != 0) self.runtime.discardTagWrite(library, plan.plan_id) catch {};
+    plan.deinit();
 }
 
 fn button(text: [*:0]const u8, icon: ?[*:0]const u8, class: [*:0]const u8) *gtk.Widget {
@@ -415,11 +421,9 @@ fn button(text: [*:0]const u8, icon: ?[*:0]const u8, class: [*:0]const u8) *gtk.
 pub fn open(self: *App, ids: []const i64) void {
     const library = self.library orelse return;
     const plan = self.runtime.planTagWrite(library, self.io, ids) catch return self.toast("Could not plan the write");
-    if (plan.files.len == 0) {
+    if (plan.files.len == 0 and plan.conflicts.len == 0) {
         defer plan.deinit();
-        return self.toast(if (plan.conflicts.len != 0)
-            "The files' own tags disagree with Orca's matches; edit a field to lock your choice"
-        else if (plan.skipped.len != 0 and allSkippedFor(plan.skipped, .folder_not_writable))
+        return self.toast(if (plan.skipped.len != 0 and allSkippedFor(plan.skipped, .folder_not_writable))
             "Orca can't create files in those folders; check their permissions"
         else if (plan.skipped.len != 0 and allSkippedFor(plan.skipped, .file_read_only))
             "Those files are read-only; Orca leaves read-only files as they are"
@@ -429,14 +433,9 @@ pub fn open(self: *App, ids: []const i64) void {
             "No changes to write");
     }
     const editing_shown = metadata_editor.isShown(self);
-    const target = metadata_editor.host(self) orelse {
-        self.runtime.discardTagWrite(library, plan.plan_id) catch {};
-        plan.deinit();
-        return;
-    };
+    const target = metadata_editor.host(self) orelse return discard(self, library, plan);
     const write = self.allocator.create(WritePage) catch {
-        self.runtime.discardTagWrite(library, plan.plan_id) catch {};
-        plan.deinit();
+        discard(self, library, plan);
         return self.toast("Out of memory");
     };
     const more = gtk.gtk_label_new("");
@@ -459,22 +458,26 @@ pub fn open(self: *App, ids: []const i64) void {
     const files = plan.files.len;
     const heading_words = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
     gtk.gtk_widget_set_hexpand(heading_words, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading_words), label(strings.format(&buffer, "Write tags to {d} {s}", .{
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading_words), label(if (files == 0) "Nothing to write" else strings.format(&buffer, "Write tags to {d} {s}", .{
         files,
         if (files == 1) "file" else "files",
     }).ptr, "write-heading-title"));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading_words), label(
-        "Review exactly what will change on disk. Nothing is written until you confirm.",
-        "write-heading-subtitle",
-    ));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading_words), label(if (files == 0)
+        "The files' own tags disagree with Orca's matches, so Orca leaves them as they are."
+    else
+        "Review exactly what will change on disk. Nothing is written until you confirm.", "write-heading-subtitle"));
 
     const back = button(if (editing_shown) "Back to Editor" else "Cancel", null, "btn-secondary");
     _ = gtk.signalConnect(back, "clicked", gtk.callback(backClicked), write);
-    const write_button = button(strings.format(&buffer, "Write {d} {s}", .{
+    const write_button = button(if (files == 0) "Write Files" else strings.format(&buffer, "Write {d} {s}", .{
         files,
         if (files == 1) "File" else "Files",
     }).ptr, "orca-pen-symbolic", "btn-primary");
     _ = gtk.signalConnect(write_button, "clicked", gtk.callback(writeClicked), write);
+    if (files == 0) {
+        gtk.gtk_widget_set_sensitive(write_button, gtk.false_);
+        gtk.gtk_widget_set_tooltip_text(write_button, "Nothing to write");
+    }
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     gtk.gtk_widget_set_valign(actions, gtk.ALIGN_END);
     gtk.gtk_box_append(gtk.cast(gtk.Box, actions), back);
@@ -496,8 +499,9 @@ pub fn open(self: *App, ids: []const i64) void {
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 22);
     gtk.gtk_widget_add_css_class(content, "write-tags");
     for ([_]*gtk.Widget{ header, cards, section }) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, content), child);
+    if (files == 0) for ([_]*gtk.Widget{ cards, section }) |child| gtk.gtk_widget_set_visible(child, gtk.false_);
     if (notes(write)) |box| gtk.gtk_box_append(gtk.cast(gtk.Box, content), box);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), undoCard());
+    if (files != 0) gtk.gtk_box_append(gtk.cast(gtk.Box, content), undoCard());
 
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
