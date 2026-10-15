@@ -26,6 +26,7 @@
 - `Runtime.libraryApplyRelease` no longer frees with the runtime's allocator what it allocated with the caller's, which crashed `orca-cli apply-release`.
 - `orca-gtk` Match Review checks Track titles and artists by default when they differ.
 - `orca-gtk` Match Review applies checked fields to a reviewed album too.
+- `orca-gtk` Write to File shows the files' conflicting tags when nothing can be written, instead of a dead-end message.
 - A model download no longer writes through a symlink at `<destination>.part`.
 - Writing a date to an ID3v2.3 file no longer deletes its TIME and TRDA frames.
 - Out-of-range seek positions, file lengths and host clock values no longer abort the host with an integer overflow.
