@@ -4,6 +4,7 @@
 
 ### Added
 
+- The engine reads audio through a C++ storage layer (format detection, ISO-BMFF boxes, quick and content hashes) and a codec layer with all nine decoders: WAV, AIFF, FLAC, MP3, AAC/ADTS, ALAC, Opus, Vorbis and QOA.
 - The C++ port scaffolding: a CMake build with `orca::base`, BLAKE3/SHA-256 crypto, a yyjson wrapper and an injectable libcurl HTTP transport, plus doctest/CTest, sanitizer presets and fuzz targets.
 - Radio and Daily Mixes limit how often one Artist repeats, set by `discovery.artist_variety` (`relaxed`, `balanced` by default, or `strict`), `--artist-variety` and `orca_discovery_settings.artist_variety`.
 - Audio embeddings measured with an ONNX Runtime model (`-Dembeddings`, on by default) let Radio and Daily Mixes rank tracks by how alike they sound.

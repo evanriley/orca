@@ -24,6 +24,9 @@ enum class ErrorCode : std::uint32_t {
     insecure_transport,
     cancelled,
     internal,
+    truncated_flac,
+    flac_stream_errors,
+    flac_md5_mismatch,
 };
 
 struct Error {

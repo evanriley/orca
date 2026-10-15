@@ -38,6 +38,12 @@ auto to_string(ErrorCode code) -> std::string_view {
         return "cancelled";
     case ErrorCode::internal:
         return "internal";
+    case ErrorCode::truncated_flac:
+        return "truncated_flac";
+    case ErrorCode::flac_stream_errors:
+        return "flac_stream_errors";
+    case ErrorCode::flac_md5_mismatch:
+        return "flac_md5_mismatch";
     }
     return "unknown";
 }

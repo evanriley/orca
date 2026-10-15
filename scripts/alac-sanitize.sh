@@ -4,8 +4,9 @@
 # Run inside `nix develop` so cc/c++ are on PATH. A clean exit means no seed
 # produced a sanitizer report.
 #
-# The ALAC fork is a fetched zig dependency, so its sources are read from the
-# package tarball in the zig global cache.
+# The ALAC fork is a CMake FetchContent dependency; its sources live under
+# build/debug/_deps/alac-src/codec after configure. The script configures the
+# debug preset when they are absent.
 #
 # Overrides, used to compare against the unmodified upstream sources:
 #   ALAC_VENDOR_DIR  directory holding the *.c and ALACDecoder.cpp
@@ -18,31 +19,17 @@ header_dir="$root/liborca/codec"
 seeds="$root/fixtures/fuzz/alac"
 harness="$root/tests/alac_sanitize_harness.c"
 
+vendor="${ALAC_VENDOR_DIR:-$root/build/debug/_deps/alac-src/codec}"
+if [ ! -d "$vendor" ]; then
+    (cd "$root" && cmake --preset debug >/dev/null)
+fi
+if [ ! -d "$vendor" ]; then
+    echo "alac sources not found at $vendor" >&2
+    exit 2
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-
-if [ -z "${ALAC_VENDOR_DIR:-}" ]; then
-    hash="$(sed -n '/\.alac = \.{/,/}/ s/.*\.hash = "\([^"]*\)".*/\1/p' "$root/build.zig.zon")"
-    if [ -z "$hash" ]; then
-        echo "could not read alac hash from build.zig.zon" >&2
-        exit 2
-    fi
-    cache="$(zig env | sed -n 's/.*"global_cache_dir": "\([^"]*\)".*/\1/p')"
-    if [ -z "$cache" ]; then
-        cache="$(zig env | sed -n 's/.*\.global_cache_dir = "\([^"]*\)".*/\1/p')"
-    fi
-    tarball="$cache/p/$hash.tar.gz"
-    if [ ! -f "$tarball" ]; then
-        zig build --fetch >/dev/null 2>&1 || true
-    fi
-    if [ ! -f "$tarball" ]; then
-        echo "alac package tarball not found at $tarball" >&2
-        exit 2
-    fi
-    tar xzf "$tarball" -C "$work"
-    ALAC_VENDOR_DIR="$work/$hash/codec"
-fi
-vendor="$ALAC_VENDOR_DIR"
 
 san="-fsanitize=address,undefined -fno-sanitize=shift-base -fno-sanitize-recover=all"
 common="-g -O1 -DNDEBUG -fwrapv $san -I$vendor -I$header_dir"

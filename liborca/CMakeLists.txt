@@ -10,6 +10,24 @@ add_library(orca STATIC
     json/json.cpp
     http/client.cpp
     http/curl_transport.cpp
+    codec/aac.cpp
+    codec/adts.cpp
+    codec/aiff.cpp
+    codec/alac.cpp
+    codec/decoder.cpp
+    codec/flac.cpp
+    codec/mp3.cpp
+    codec/mp4.cpp
+    codec/opus.cpp
+    codec/qoa.cpp
+    codec/registry.cpp
+    codec/vorbis.cpp
+    codec/wav.cpp
+    storage/content_hash.cpp
+    storage/format.cpp
+    storage/iso_bmff.cpp
+    storage/quick_hash.cpp
+    storage/source.cpp
 )
 add_library(orca::orca ALIAS orca)
 
@@ -27,6 +45,13 @@ target_link_libraries(orca
         orca_sha256
     PRIVATE
         orca_yyjson
+        orca_aac_shim
+        orca_alac_shim
+        orca_flac_shim
+        orca_mp3_shim
+        orca_opus_shim
+        orca_qoa_shim
+        orca_vorbis_shim
         orca_warnings
         orca_sanitizers
         PkgConfig::LIBCURL
