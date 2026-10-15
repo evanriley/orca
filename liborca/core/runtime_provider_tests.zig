@@ -3781,6 +3781,54 @@ test "Match Album breaks a tie between editions for the Official one with the al
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
 }
 
+test "Match Album accepts nothing when the only release its Tracks list has more tracks than the album" {
+    var fake: FakeMusicBrainz = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-partial?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+
+    const editions = [_][]const u8{bryter_layter_mbid};
+    const facts = [_]database.ReleaseFact{
+        .{ .mbid = bryter_layter_mbid, .status = "Official", .date = "1971-03-01", .track_count = 14 },
+    };
+    for ([_]struct { file: i64, recording: []const u8, title: []const u8 }{
+        .{ .file = northern_sky, .recording = northern_sky_mbid, .title = "Northern Sky" },
+        .{ .file = pink_moon, .recording = pink_moon_mbid, .title = "Pink Moon" },
+    }) |found| {
+        const evidence = [_]database.ProposalEvidence{.{
+            .recording_mbid = found.recording,
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{
+                .title = found.title,
+                .artist = "Nick Drake",
+                .release_mbid = bryter_layter_mbid,
+                .release_mbids = &editions,
+                .release_facts = &facts,
+                .mb_score = 100,
+                .musicbrainz_confidence = 0.95,
+            },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, found.file, .{ .musicbrainz = true }, &evidence);
+    }
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(job_handle)).accepted);
+    const matched_on = try releaseOfFile(library_database, northern_sky);
+    try std.testing.expectEqual(database.ReleaseMatchBucket.needs_review, try runtime.libraryReleaseMatchBucket(library, matched_on, 0.9));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryConfidentMatchCount(library, 0.9));
+    try expectOrcaValue(library_database, northern_sky, .musicbrainz_release_id, null);
+    try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, null);
+}
+
 test "a Match Album whose accept adds a release ID reports the Release its files are on, which keeps its id" {
     var fake: FakeMusicBrainz = .{};
     var runtime = OrcaRuntime.init(std.testing.allocator);
@@ -4576,12 +4624,13 @@ test "a Release's cover release ID is the one most of its accepted matches name"
     const library_database = try libraryDatabase(&runtime, library);
     const album = try addRelease(library_database, "Bryter Layter", null);
     const named = [_][]const u8{ "bbbbbbbb-0000-4000-8000-000000000000", bryter_layter_mbid, bryter_layter_mbid };
+    const listed = [_][]const u8{ named[0], bryter_layter_mbid };
     for (named, 0..) |release_mbid, index| {
         var title_buffer: [16]u8 = undefined;
         const track_id = try addAlbumTrack(library_database, album, try std.fmt.bufPrint(&title_buffer, "Song {d}", .{index}));
         const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
         defer std.testing.allocator.free(file_ids);
-        const payload = try (database.ProposalPayload{ .release_mbid = release_mbid }).encode(std.testing.allocator);
+        const payload = try (database.ProposalPayload{ .release_mbid = release_mbid, .release_mbids = &listed }).encode(std.testing.allocator);
         defer std.testing.allocator.free(payload);
         _ = try library_database.identification_proposals.put(.{
             .file_id = file_ids[0],

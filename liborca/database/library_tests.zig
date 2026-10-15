@@ -2789,6 +2789,52 @@ test "confident proposals are accepted in bulk where a file's best one shows a h
     }
 }
 
+fn addAlbumOfTwo(library: *LibraryDatabase, title: []const u8, payload: []const u8) ![2]i64 {
+    const release_id = try library.releases.upsert(.{ .release_key = title, .title = title });
+    var proposals: [2]i64 = undefined;
+    for (&proposals) |*proposal| {
+        const file = try playFileOf(library, try addFeedbackTrack(library, "Song", try addRecording(library), null));
+        var sql: [128]u8 = undefined;
+        try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET release_id = {d} WHERE preferred_file_id = {d};", .{ release_id, file }, 0));
+        proposal.* = try putProposal(library, file, match_mbid, 0.95, payload);
+    }
+    return proposals;
+}
+
+test "bulk accept and its count skip the files of a Release whose only release has another track count" {
+    var library = try openFeedbackLibrary("accept-edition-fit");
+    defer library.close();
+    const whole_release = "2a3b4c5d-6e7f-4801-9a2b-3c4d5e6f7081";
+    const box_set = "3b4c5d6e-7f80-4912-8b3c-4d5e6f708192";
+    const whole_payload = try (repository.ProposalPayload{
+        .release_mbid = whole_release,
+        .release_facts = &.{.{ .mbid = whole_release, .status = "Official", .track_count = 2 }},
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(whole_payload);
+    const box_set_payload = try (repository.ProposalPayload{
+        .release_mbid = box_set,
+        .release_facts = &.{.{ .mbid = box_set, .status = "Official", .track_count = 12 }},
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(box_set_payload);
+    const whole = try addAlbumOfTwo(&library, "Whole", whole_payload);
+    const partial = try addAlbumOfTwo(&library, "Partial", box_set_payload);
+    const proposals = &library.identification_proposals;
+    const partial_release = try testScalar(library.database, "SELECT id FROM releases WHERE title = 'Partial';");
+    const whole_release_id = try testScalar(library.database, "SELECT id FROM releases WHERE title = 'Whole';");
+
+    try std.testing.expectEqual(repository.ReleaseMatchBucket.needs_review, try proposals.releaseMatchBucketOf(std.testing.allocator, partial_release, 0.9));
+    try std.testing.expectEqual(repository.ReleaseMatchBucket.confident, try proposals.releaseMatchBucketOf(std.testing.allocator, whole_release_id, 0.9));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.confidentCount(std.testing.allocator, 0.9));
+    try std.testing.expectEqual(@as(u64, 2), try acceptedCount(proposals, 0.9));
+
+    for (whole) |proposal| try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, proposal));
+    for (partial) |proposal| try std.testing.expectEqual(repository.ProposalState.pending, try proposalState(&library, proposal));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.confidentCount(std.testing.allocator, 0.9));
+    const in_release = try proposals.acceptConfidentInRelease(std.testing.allocator, 0.9, partial_release);
+    defer in_release.deinit();
+    try std.testing.expectEqual(@as(u64, 0), in_release.accepted);
+}
+
 fn acceptedCount(proposals: *repository.IdentificationProposalRepository, minimum_confidence: f32) !u64 {
     const acceptance = try proposals.acceptConfident(std.testing.allocator, minimum_confidence);
     defer acceptance.deinit();

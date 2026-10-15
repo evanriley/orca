@@ -5580,7 +5580,8 @@ orca_status orca_library_unidentified_count(orca_runtime *runtime, orca_handle l
  * at `minimum_confidence`: per file, the best proposal at least that
  * confident that its fingerprint backs, or else its most confident one when
  * that reaches `minimum_confidence` and shows a higher percent than every
- * other; never a correction. `minimum_confidence` is greater than 0 and at
+ * other; never a correction, nor a file a Release in the NEEDS_REVIEW bucket
+ * at `minimum_confidence` holds. `minimum_confidence` is greater than 0 and at
  * most 1; 0, a negative value, more than 1 or NaN is INVALID_ARGUMENT. */
 orca_status orca_library_confident_match_count(
     orca_runtime *runtime,

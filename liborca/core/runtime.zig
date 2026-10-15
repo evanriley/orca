@@ -1755,6 +1755,8 @@ pub const OrcaRuntime = struct {
         return runtime_listens.libraryConfidentMatchCount(self, library, minimum_confidence);
     }
 
+    /// Accepts each file's confident match, never a correction, and none
+    /// for a file a Release in `needs_review` at `minimum_confidence` holds.
     pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !ConfidentMatchAcceptance {
         return runtime_listens.libraryAcceptConfidentMatches(self, library, minimum_confidence);
     }

@@ -2829,7 +2829,7 @@ pub const IdentificationProposalRepository = struct {
 
     /// The next page of files after `cursor` with a pending proposal at least
     /// `minimum_confidence`, and the proposal `chooseConfident` picks for each
-    /// file that has one.
+    /// file that has one and no Release holding it in `needs_review`.
     fn confidentBatch(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
@@ -2851,7 +2851,10 @@ pub const IdentificationProposalRepository = struct {
             while (try statement.step() == .row) : (file_count += 1) files[file_count] = statement.columnInt64(0);
         }
         var chosen_count: usize = 0;
-        for (files[0..file_count]) |file_id| {
+        const held_back = try self.heldBackByRelease(allocator, files[0..file_count], minimum_confidence);
+        defer allocator.free(held_back);
+        for (files[0..file_count], held_back) |file_id, held| {
+            if (held) continue;
             if (try self.chooseConfidentForFile(allocator, file_id, minimum_confidence)) |proposal_id| {
                 batch[chosen_count] = proposal_id;
                 chosen_count += 1;
@@ -2861,6 +2864,69 @@ pub const IdentificationProposalRepository = struct {
             .chosen = batch[0..chosen_count],
             .last_file_id = if (file_count == 0) null else files[file_count - 1],
         };
+    }
+
+    /// For each of `file_ids`, whether a Release whose Tracks hold it, by
+    /// their preferred file or their recording, is in `needs_review` at
+    /// `minimum_confidence`. Caller frees.
+    fn heldBackByRelease(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        file_ids: []const i64,
+        minimum_confidence: f32,
+    ) ![]bool {
+        const held_back = try allocator.alloc(bool, file_ids.len);
+        errdefer allocator.free(held_back);
+        @memset(held_back, false);
+        if (file_ids.len == 0) return held_back;
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const owned = arena.allocator();
+        var index_of: std.AutoHashMapUnmanaged(i64, usize) = .empty;
+        var json: std.ArrayList(u8) = .empty;
+        try json.append(owned, '[');
+        for (file_ids, 0..) |file_id, index| {
+            try index_of.put(owned, file_id, index);
+            try json.print(owned, "{s}{d}", .{ if (index == 0) "" else ",", file_id });
+        }
+        try json.append(owned, ']');
+        const Holding = struct { file_index: usize, release_id: i64 };
+        var holdings: std.ArrayList(Holding) = .empty;
+        var release_ids: std.ArrayList(i64) = .empty;
+        var seen: std.AutoHashMapUnmanaged(i64, void) = .empty;
+        {
+            var statement = try self.db.prepare(
+                "SELECT preferred_file_id, release_id FROM tracks\n" ++
+                    "WHERE preferred_file_id IN " ++ json_release_ids ++ " AND release_id IS NOT NULL\n" ++
+                    "UNION SELECT files.id, tracks.release_id FROM files JOIN tracks ON tracks.recording_id = files.recording_id\n" ++
+                    "WHERE files.id IN " ++ json_release_ids ++ " AND tracks.release_id IS NOT NULL;",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, json.items);
+            while (try statement.step() == .row) {
+                const file_index = index_of.get(statement.columnInt64(0)) orelse continue;
+                const release_id = statement.columnInt64(1);
+                try holdings.append(owned, .{ .file_index = file_index, .release_id = release_id });
+                if ((try seen.getOrPut(owned, release_id)).found_existing) continue;
+                try release_ids.append(owned, release_id);
+            }
+        }
+        var needs_review: std.AutoHashMapUnmanaged(i64, void) = .empty;
+        var start: usize = 0;
+        while (start < release_ids.items.len) : (start += weigh_chunk) {
+            const chunk_ids = release_ids.items[start..@min(start + weigh_chunk, release_ids.items.len)];
+            var chunk_arena: std.heap.ArenaAllocator = .init(allocator);
+            defer chunk_arena.deinit();
+            var buckets: [weigh_chunk]?ReleaseMatchBucket = undefined;
+            try self.weighReleases(&chunk_arena, chunk_ids, minimum_confidence, buckets[0..chunk_ids.len]);
+            for (chunk_ids, buckets[0..chunk_ids.len]) |release_id, bucket| {
+                if ((bucket orelse continue) == .needs_review) try needs_review.put(owned, release_id, {});
+            }
+        }
+        for (holdings.items) |holding| {
+            if (needs_review.contains(holding.release_id)) held_back[holding.file_index] = true;
+        }
+        return held_back;
     }
 
     fn chooseConfidentForFile(

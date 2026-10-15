@@ -144,7 +144,7 @@ orca-cli dismiss-correction DATABASE GROUP
 orca-cli fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FINGERPRINT=
 orca-cli accept-match DATABASE PROPOSAL_ID   # recording ID, title, artist (and album values) in the library only; a correction locked
 orca-cli dismiss-match DATABASE PROPOSAL_ID
-orca-cli accept-matches DATABASE --min-score=0.9   # each file's best match that confident
+orca-cli accept-matches DATABASE --min-score=0.9   # each file's best match that confident, except on albums that need review
 orca-cli apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release
 orca-cli apply-release DATABASE RELEASE_ID --fields=album,album_artist,date,release_id,track_titles   # those fields of the best candidate's tracklist snapshot, locked: release values on every Track with a file, release-track values on placed Tracks; prints release= values_written= track_values= release_values_only= artist_ids=known|unknown reviewed=ID|- (the Release's ID after reprojection when the Apply left no Track alone and so marked it reviewed, whatever fields it chose and whatever still differs), then left_alone track= reason=not_placed|no_play_file title= lines
 orca-cli match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album; release= is the album's Release afterwards
