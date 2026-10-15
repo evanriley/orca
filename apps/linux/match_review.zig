@@ -230,8 +230,8 @@ fn applicable(field: Field) bool {
     };
 }
 
-fn checkedByDefault(diff: liborca.ReleaseFieldDiff) bool {
-    return diff.differs and switch (diff.field) {
+fn checkedByDefault(bucket: matches.Bucket, diff: liborca.ReleaseFieldDiff) bool {
+    return bucket != .reviewed and diff.differs and switch (diff.field) {
         .album, .album_artist, .release_date, .release_id, .track_titles => true,
         else => false,
     };
@@ -354,8 +354,9 @@ fn showChecked(self: *App) void {
     var tooltip: [:0]const u8 = apply_tooltip;
     var sensitive = count != 0 and review.diff != null;
     var offer_mark = false;
+    const reviewed = review.scope.bucket == .reviewed;
     review.primary = .apply;
-    if (review.scope.bucket == .reviewed) {
+    if (reviewed and count == 0) {
         review.primary = .unmark;
         text = "Unmark Reviewed";
         tooltip = "Put this album back in the list to review";
@@ -381,14 +382,16 @@ fn showChecked(self: *App) void {
                     if (total == 1) "Track" else "Tracks",
                 });
                 tooltip = strings.format(&tooltip_buffer, "Album values go to every track; track values only to the {d} placed", .{placement.placed});
-            } else if (review.diff) |diff| {
-                if (anyDiffers(diff)) {
-                    offer_mark = true;
-                } else {
-                    review.primary = .mark;
-                    text = "Mark as Reviewed";
-                    tooltip = "Nothing differs and every track is placed: take this album off the list without writing";
-                    sensitive = true;
+            } else if (!reviewed) {
+                if (review.diff) |diff| {
+                    if (anyDiffers(diff)) {
+                        offer_mark = true;
+                    } else {
+                        review.primary = .mark;
+                        text = "Mark as Reviewed";
+                        tooltip = "Nothing differs and every track is placed: take this album off the list without writing";
+                        sensitive = true;
+                    }
                 }
             }
         },
@@ -419,7 +422,7 @@ fn fieldRow(self: *App, diff: liborca.ReleaseMatchDiff, each: liborca.ReleaseFie
     else
         "Orca compares this but does not take it from a release");
     if (applicable(each.field)) {
-        gtk.gtk_check_button_set_active(gtk.cast(gtk.CheckButton, check), @intFromBool(kept orelse checkedByDefault(each)));
+        gtk.gtk_check_button_set_active(gtk.cast(gtk.CheckButton, check), @intFromBool(kept orelse checkedByDefault(self.match_review.scope.bucket, each)));
     } else {
         gtk.gtk_widget_set_sensitive(check, gtk.false_);
     }
@@ -826,7 +829,7 @@ fn showNote(self: *App, alignment: *const liborca.ReleaseAlignment) void {
     while (unplaced.next()) |track| : (count += 1) {
         if (count < titles.len) titles[count] = track.title;
     }
-    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, note), @intFromBool(count != 0 and self.match_review.scope.bucket != .reviewed));
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, note), @intFromBool(count != 0));
     if (count == 0) return;
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
@@ -1105,7 +1108,7 @@ fn applyRelease(self: *App, library: liborca.LibraryHandle, entry: Entry) void {
     writeApplied(&writer, outcome, fields.count()) catch {};
     self.toast(matches.finish(&buffer, &writer));
     matches.accepted(self);
-    handled(self, true);
+    handled(self, self.match_review.scope.bucket != .reviewed);
 }
 
 fn markReviewed(self: *App, library: liborca.LibraryHandle, entry: Entry) void {
