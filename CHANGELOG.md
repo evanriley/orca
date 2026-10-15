@@ -39,6 +39,7 @@
 - A file MusicBrainz text search cannot find but AcoustID hears is looked up on MusicBrainz by recording ID, so its album gets a release candidate.
 - `orca-gtk` Match Album reports where the album's match stands, not its cover, when it accepts nothing.
 - An album's best release candidate is the edition its Tracks name and whose track count fits, not a larger compilation, and a candidate with another track count needs review.
+- Accepting confident matches, for an album or the whole library, leaves alone the files of an album that needs review.
 
 ### Changed
 
