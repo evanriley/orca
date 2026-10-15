@@ -5,6 +5,13 @@ zig-pkg/
 result*
 /fixtures/library/design.db*
 
+# CMake and C++ build state
+/build/
+/CMakeUserPresets.json
+/compile_commands.json
+/.cache/
+/Testing/
+
 # Local editor and OS state
 .DS_Store
 *.swp

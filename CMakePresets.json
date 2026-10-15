@@ -1,0 +1,119 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++",
+                "ORCA_BUILD_TESTS": "ON"
+            }
+        },
+        {
+            "name": "debug",
+            "inherits": "base",
+            "displayName": "Debug (GCC 15)",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "release",
+            "inherits": "base",
+            "displayName": "Release (GCC 15)",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+        {
+            "name": "asan",
+            "inherits": "base",
+            "displayName": "Debug + AddressSanitizer",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ORCA_SANITIZER": "address"
+            }
+        },
+        {
+            "name": "ubsan",
+            "inherits": "base",
+            "displayName": "Debug + UndefinedBehaviorSanitizer",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ORCA_SANITIZER": "undefined"
+            }
+        },
+        {
+            "name": "lsan",
+            "inherits": "base",
+            "displayName": "Debug + LeakSanitizer",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ORCA_SANITIZER": "leak"
+            }
+        },
+        {
+            "name": "tsan",
+            "inherits": "base",
+            "displayName": "Debug + ThreadSanitizer",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ORCA_SANITIZER": "thread"
+            }
+        },
+        {
+            "name": "fuzz",
+            "displayName": "Clang + libFuzzer",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/fuzz",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "ORCA_BUILD_TESTS": "OFF",
+                "ORCA_BUILD_FUZZERS": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "debug", "configurePreset": "debug" },
+        { "name": "release", "configurePreset": "release" },
+        { "name": "asan", "configurePreset": "asan" },
+        { "name": "ubsan", "configurePreset": "ubsan" },
+        { "name": "lsan", "configurePreset": "lsan" },
+        { "name": "tsan", "configurePreset": "tsan" },
+        { "name": "fuzz", "configurePreset": "fuzz" }
+    ],
+    "testPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "asan",
+            "configurePreset": "asan",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "ubsan",
+            "configurePreset": "ubsan",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "lsan",
+            "configurePreset": "lsan",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "tsan",
+            "configurePreset": "tsan",
+            "output": { "outputOnFailure": true }
+        }
+    ]
+}

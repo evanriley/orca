@@ -45,35 +45,19 @@ package bundles only permissively licensed models. See
 
 ## Toolchain
 
-- Use Zig 0.17.0, from `nix develop` or direnv, or installed as
-  [the install requirements](docs/install.md#requirements) describe for a build
-  outside Nix. This codebase uses `std.Io`, not the older `std.fs` and
-  `std.io` APIs.
-- The dev shell supplies SQLite, the codec libraries, PipeWire, GTK4, and
-  libsecret. Never hard-code library paths under `/usr` or `/nix/store`.
-- When `build.zig.zon` dependencies change, update the
-  `zig_0_17.fetchDeps` hash in `nix/package.nix`; set it to `lib.fakeHash`
-  and rebuild to obtain the hash.
-- GTK4 is hand-bound because `translate-C` cannot parse its headers.
-- nixpkgs has no zls for Zig 0.17, so the dev shell does not provide one.
-
-Zig 0.17 constraints that affect correctness:
-
-- A by-value struct parameter is a copy. Pass `*const T` when a pointer into
-  the argument must outlive the call.
-- Use `std.Io.Mutex` and `std.Io.Condition` when an `io` is available;
-  `std.Thread.Mutex`, `Condition`, and `ResetEvent` do not exist.
-- `std.Io.Dir` cannot fsync a directory. Open the directory path as a file for
-  durable renames.
-- Convert signed durations to unsigned before zero-padded formatting.
-- Sentinel strings use `std.fmt.bufPrintSentinel`,
-  `std.fmt.allocPrintSentinel` and `Allocator.dupeSentinel`.
-- `@typeInfo` returns parallel arrays (`field_names`, `field_types`,
-  `field_attrs`), not a `fields` slice; `std.meta.fields` does not exist.
-- `std.http.Client` and `std.Io.net.HostName` accept only RFC 1123 host
-  names, so a bracketed IPv6 literal URL cannot be requested.
-- Build scripts cannot read `zig build -- ARGS` or the install prefix; use
-  `Run.addPassthruArgs` and install-relative `LazyPath`s.
+- Use C++23 with GCC 15, from `nix develop` or direnv. Clang builds the fuzz
+  and sanitizer presets.
+- The dev shell supplies CMake, Ninja, ccache, pkg-config, SQLite, the codec
+  libraries, PipeWire, GTK4, gtkmm4, libadwaita, libsecret and libcurl. Never
+  hard-code library paths under `/usr` or `/nix/store`.
+- Vendored dependencies (yyjson, BLAKE3, a single-file SHA-256, doctest) are
+  fetched by commit from `cmake/Dependencies.cmake`; the repository holds no
+  third-party source.
+- Formatting is clang-format (`.clang-format`); naming and lint checks are in
+  `.clang-tidy`. [docs/style.md](docs/style.md) governs what the formatter
+  cannot: bounds, assertions, naming and function length.
+- Engine code does not throw exceptions and does not use bare `new`/`delete`;
+  errors travel in `std::expected<T, orca::Error>`.
 
 ## Architecture invariants
 
@@ -98,28 +82,27 @@ boundaries. Read `liborca/AGENTS.md` before changing `liborca/` and
 
 ## Verification
 
-Run commands from the repository root inside the dev shell. Outside Nix, run
-the `zig` commands; CI runs the `nix` ones. What CI runs on pull requests and
-on `main` is in [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration).
+Run commands from the repository root inside the dev shell. What CI runs on
+pull requests and on `main` is in
+[CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration).
 
 ```sh
-zig fmt --check liborca apps benchmarks tests build build.zig
-zig build
-zig build test
-zig build fuzz
+clang-format --dry-run -Werror $(git ls-files '*.cpp' '*.hpp')
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+cmake --preset ubsan && cmake --build --preset ubsan && ctest --preset ubsan
+cmake --preset fuzz && cmake --build --preset fuzz
 nix flake check
 nix build
 ```
 
-Run compiler commands unpiped so their exit status is preserved. A plain
-`zig build` replaces `zig-out/bin` with Debug artifacts; rebuild with
-`-Doptimize=ReleaseFast` immediately before benchmarks.
+Run compiler commands unpiped so their exit status is preserved.
 
-Tests must not use real audio hardware. Playback checks receive an explicit
-device from `scripts/silent-sink.sh`; an omitted device selects the system
-default output. `scripts/headless-audio.sh zig build test` supplies the private
-PipeWire and WirePlumber setup used by CI. `zig build pipewire-live-smoke` is a
-host-dependent check and is not part of the normal suite.
+Tests must not use real audio hardware, real network services or wall-clock
+sleeps. Playback checks receive an explicit device from
+`scripts/silent-sink.sh`; an omitted device selects the system default output.
+`scripts/headless-audio.sh` supplies the private PipeWire and WirePlumber setup
+used by CI.
 
 Every implementation change adds a one-line entry to the Unreleased section of
 `CHANGELOG.md`, as [releasing.md](docs/releasing.md#changelog) describes.

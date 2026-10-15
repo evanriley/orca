@@ -21,9 +21,6 @@ are [GitHub issues](https://github.com/evanriley/orca/issues).
   file with more than two channels.
 - Crossfade, never applied between gapless album tracks.
 - Synchronized multi-zone playback with drift correction.
-- A macOS app: a CoreAudio output behind the backend contract and an FSEvents
-  watcher behind `library/watch.zig`, after the POSIX lock defect
-  ([#40](https://github.com/evanriley/orca/issues/40)) is fixed.
 - Windows.
 - More formats, sniffed or not recognized until they are supported:
   - WavPack, Monkey's Audio (APE), TTA and Musepack.
@@ -52,6 +49,8 @@ are [GitHub issues](https://github.com/evanriley/orca/issues).
 
 ## Not planned
 
+- macOS during the C++ port; it will be revisited with a fresh approach after
+  the port lands.
 - Preserving file modification dates on tag writes: it would hide the
   write from the incremental scan.
 - A DAW, plugin host, or arbitrary DSP graph.

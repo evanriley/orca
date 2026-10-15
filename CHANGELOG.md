@@ -4,6 +4,7 @@
 
 ### Added
 
+- The C++ port scaffolding: a CMake build with `orca::base`, BLAKE3/SHA-256 crypto, a yyjson wrapper and an injectable libcurl HTTP transport, plus doctest/CTest, sanitizer presets and fuzz targets.
 - Radio and Daily Mixes limit how often one Artist repeats, set by `discovery.artist_variety` (`relaxed`, `balanced` by default, or `strict`), `--artist-variety` and `orca_discovery_settings.artist_variety`.
 - Audio embeddings measured with an ONNX Runtime model (`-Dembeddings`, on by default) let Radio and Daily Mixes rank tracks by how alike they sound.
 - A second, larger embedding model, `discogs_maest`, beside `clap_htsat_unfused`; each model's embeddings are stored separately and never compared (schema v6).
