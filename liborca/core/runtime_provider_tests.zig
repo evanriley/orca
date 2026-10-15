@@ -9245,6 +9245,19 @@ test "Apply reports every Track as given its release track's values, and that th
     try std.testing.expectEqual(@as(?i64, try releaseOfFile(library_database, setup.files[0])), outcome.reviewed_release_id);
 }
 
+test "Apply with an allocator other than the runtime's writes the values and leaks nothing" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const setup = try nightcallWithAcoustIdMatch(&runtime, "file:orca-apply-caller-allocator?mode=memory&cache=shared");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const outcome = try runtime.libraryApplyRelease(setup.library, arena.allocator(), setup.album, all_release_fields);
+    defer outcome.deinit();
+    try std.testing.expect(outcome.values_written > 0);
+    try std.testing.expectEqual(@as(u32, 4), outcome.track_values);
+}
+
 test "Apply after pairing a suggested Track gives it the release track's values and keeps the pairing's" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
