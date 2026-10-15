@@ -1818,15 +1818,16 @@ pub const OrcaRuntime = struct {
     /// A Release whose review of its best candidate still holds, or whose
     /// tags identify it (`ReleaseMatchItem.from_tags`), is `reviewed`;
     /// otherwise it is `confident` when its best candidate's
-    /// confidence is at least `confident_at`, `needs_review` when it is
-    /// lower or unknown (`ReleaseCandidate.unread`: a Track's release ID
-    /// names the release and Orca has not read it), and `unmatched` with no
-    /// candidate. Weighing every Release, a page costs a walk of the
-    /// library; each item with a candidate then costs one Release view,
-    /// snapshot and pairings read and an alignment for its placement
-    /// counts. A `filter` keeps the Releases whose title or album artist has
-    /// a word starting with each of its words, as `search` matches them; at
-    /// most 256 bytes.
+    /// confidence is at least `confident_at` and, unless a Track's release
+    /// ID names it, its track count is the Release's or unknown,
+    /// `needs_review` when not (confidence unknown included:
+    /// `ReleaseCandidate.unread`, a Track's release ID names the release and
+    /// Orca has not read it), and `unmatched` with no candidate. Weighing
+    /// every Release, a page costs a walk of the library; each item with a
+    /// candidate then costs one Release view, snapshot and pairings read
+    /// and an alignment for its placement counts. A `filter` keeps the
+    /// Releases whose title or album artist has a word starting with each
+    /// of its words, as `search` matches them; at most 256 bytes.
     pub fn libraryReleaseMatchPage(
         self: *OrcaRuntime,
         library: LibraryHandle,

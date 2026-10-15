@@ -874,9 +874,12 @@ pub const MatchReviewPage = struct {
 
 /// Where a Release stands against MusicBrainz on the Matches page.
 pub const ReleaseMatchBucket = enum(u8) {
-    /// Its best candidate is at least as confident as the caller's threshold.
+    /// Its best candidate is at least as confident as the caller's threshold
+    /// and, unless a Track's release ID names it, has the Release's track
+    /// count or an unknown one.
     confident,
-    /// Its best candidate is less confident than that.
+    /// Its best candidate is less confident than that, or has another track
+    /// count.
     needs_review,
     /// None of its Tracks names a MusicBrainz release it was not told is wrong.
     unmatched,
@@ -900,12 +903,35 @@ pub const ReleaseCandidate = struct {
     /// else 0. Null while a Track's release ID names the release and Orca
     /// holds no snapshot of it.
     confidence: ?f32,
+    /// How many of the Release's Tracks score above 0 on the release and
+    /// within `naming_score_margin` of their best score on any candidate.
+    tracks_naming: u32 = 0,
+    /// A Track's release ID in effect names the release.
+    named_by_id: bool = false,
 
     /// A Track's release ID names the release and Orca has not read it.
     pub fn unread(self: ReleaseCandidate) bool {
         return self.confidence == null;
     }
 };
+
+/// How far below a Track's best score on any candidate its score on a
+/// release may be and the Track still count toward that release's
+/// `ReleaseCandidate.tracks_naming`.
+pub const naming_score_margin: f32 = 0.10;
+
+/// How releases of `a` and `b` tracks fit an album of `album_track_count`,
+/// the better fit first: an equal count, then the smaller difference, then
+/// an unknown count. Equal when the album's count is unknown.
+pub fn trackCountFitOrder(album_track_count: ?u32, a: ?u32, b: ?u32) std.math.Order {
+    return std.math.order(trackCountDistance(album_track_count, a), trackCountDistance(album_track_count, b));
+}
+
+fn trackCountDistance(album_track_count: ?u32, release_track_count: ?u32) u64 {
+    const album = album_track_count orelse return std.math.maxInt(u64);
+    const release = release_track_count orelse return std.math.maxInt(u64);
+    return @abs(@as(i64, release) - @as(i64, album));
+}
 
 /// How many of a Release's Tracks the alignment with its best candidate's
 /// snapshot places.
@@ -1130,8 +1156,11 @@ pub const ReleaseMatchView = struct {
     }
 
     /// Every release the Tracks name that is not dismissed, best first: an
-    /// unread one, then by confidence, then a track count equal to the
-    /// Release's, then the earlier date, then the lower ID.
+    /// unread one, then the one more Tracks name (`tracks_naming`: a Track
+    /// names each release it scores within `naming_score_margin` of its
+    /// best), then the track count that fits the Release's (`trackCountFitOrder`, where a release a Track's
+    /// release ID names fits exactly), then by confidence, then the earlier
+    /// date, then the lower ID.
     pub fn candidates(self: *const ReleaseMatchView, allocator: std.mem.Allocator) ![]ReleaseCandidate {
         var list: std.ArrayList(ReleaseCandidate) = .empty;
         errdefer list.deinit(allocator);
@@ -1146,7 +1175,10 @@ pub const ReleaseMatchView = struct {
                 for (proposal.payload.release_mbids orelse &.{}) |mbid| try self.addCandidate(allocator, &list, mbid);
             }
         }
-        for (list.items) |*candidate| self.describe(candidate);
+        const track_bests = try allocator.alloc(f32, self.tracks.len);
+        defer allocator.free(track_bests);
+        for (self.tracks, track_bests) |track, *best_score| best_score.* = self.bestScore(track);
+        for (list.items) |*candidate| self.describe(candidate, track_bests);
         std.mem.sort(ReleaseCandidate, list.items, self.track_count, betterCandidate);
         return list.toOwnedSlice(allocator);
     }
@@ -1160,7 +1192,7 @@ pub const ReleaseMatchView = struct {
     /// What the Tracks say about `release_mbid`, dismissed or not.
     pub fn describedCandidate(self: *const ReleaseMatchView, release_mbid: []const u8) ReleaseCandidate {
         var result: ReleaseCandidate = .{ .release_mbid = release_mbid, .title = "", .date = null, .track_count = null, .confidence = 0 };
-        self.describe(&result);
+        self.describe(&result, null);
         return result;
     }
 
@@ -1170,14 +1202,36 @@ pub const ReleaseMatchView = struct {
         try list.append(allocator, .{ .release_mbid = mbid, .title = "", .date = null, .track_count = null, .confidence = 0 });
     }
 
-    fn describe(self: *const ReleaseMatchView, candidate: *ReleaseCandidate) void {
+    fn bestScore(self: *const ReleaseMatchView, track: ReleaseMatchTrack) f32 {
+        var best_score: f32 = 0;
+        if (track.release_mbid) |named| best_score = @max(best_score, self.candidateScore(track, named));
+        for (track.proposals) |proposal| {
+            if (proposal.state == .accepted) {
+                if (proposal.payload.isEnriched()) best_score = @max(best_score, self.candidateScore(track, proposal.payload.release_mbid.?));
+                continue;
+            }
+            if (proposal.payload.release_mbid) |mbid| best_score = @max(best_score, self.candidateScore(track, mbid));
+            for (proposal.payload.release_mbids orelse &.{}) |mbid| best_score = @max(best_score, self.candidateScore(track, mbid));
+        }
+        return best_score;
+    }
+
+    fn candidateScore(self: *const ReleaseMatchView, track: ReleaseMatchTrack, mbid: []const u8) f32 {
+        if (!metadata.isMusicBrainzId(mbid) or self.isDismissed(mbid)) return 0;
+        return track.score(mbid);
+    }
+
+    fn describe(self: *const ReleaseMatchView, candidate: *ReleaseCandidate, track_bests: ?[]const f32) void {
         const mbid = candidate.release_mbid;
         var total: f32 = 0;
         var album: ?[]const u8 = null;
         var named_by_id = false;
         var unread = false;
-        for (self.tracks) |track| {
-            total += track.score(mbid);
+        for (self.tracks, 0..) |track, index| {
+            const track_score = track.score(mbid);
+            total += track_score;
+            const best_score = if (track_bests) |bests| bests[index] else self.bestScore(track);
+            if (track_score > 0 and track_score >= best_score - naming_score_margin) candidate.tracks_naming += 1;
             if (track.namesById(mbid)) {
                 named_by_id = true;
                 if (track.named_release == .not_read) unread = true;
@@ -1196,6 +1250,7 @@ pub const ReleaseMatchView = struct {
                 }
             }
         }
+        candidate.named_by_id = named_by_id;
         if (candidate.title.len == 0) candidate.title = album orelse if (named_by_id) self.title else "";
         candidate.confidence = if (unread)
             null
@@ -1218,12 +1273,19 @@ fn presentOrNull(value: ?[]const u8) ?[]const u8 {
     return if (text.len == 0) null else text;
 }
 
+fn fittedTrackCount(track_count: u32, candidate: ReleaseCandidate) ?u32 {
+    return if (candidate.named_by_id) track_count else candidate.track_count;
+}
+
 fn betterCandidate(track_count: u32, a: ReleaseCandidate, b: ReleaseCandidate) bool {
     if (a.unread() != b.unread()) return a.unread();
+    if (a.tracks_naming != b.tracks_naming) return a.tracks_naming > b.tracks_naming;
+    switch (trackCountFitOrder(track_count, fittedTrackCount(track_count, a), fittedTrackCount(track_count, b))) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
     if (a.confidence != null and b.confidence != null and a.confidence.? != b.confidence.?) return a.confidence.? > b.confidence.?;
-    const a_count = a.track_count == track_count;
-    const b_count = b.track_count == track_count;
-    if (a_count != b_count) return a_count;
     if (a.date != null and b.date != null) {
         const order = std.mem.order(u8, a.date.?, b.date.?);
         if (order != .eq) return order == .lt;
@@ -1344,10 +1406,16 @@ fn nextReleaseIds(statement: *sqlite.Statement, ids: []i64) !usize {
     return count;
 }
 
-pub fn releaseMatchBucket(best: ?ReleaseCandidate, confident_at: f32) ReleaseMatchBucket {
+/// `confident` when the best candidate is at least `confident_at`
+/// confident and, unless a Track's release ID names it, its known track
+/// count equals the Release's.
+pub fn releaseMatchBucket(best: ?ReleaseCandidate, release_track_count: u32, confident_at: f32) ReleaseMatchBucket {
     const candidate = best orelse return .unmatched;
     const confidence = candidate.confidence orelse return .needs_review;
-    return if (confidence >= confident_at) .confident else .needs_review;
+    if (confidence < confident_at) return .needs_review;
+    if (candidate.named_by_id) return .confident;
+    const candidate_track_count = candidate.track_count orelse return .confident;
+    return if (candidate_track_count == release_track_count) .confident else .needs_review;
 }
 pub const IdentificationProposalRepository = struct {
     db: sqlite.Database,
@@ -2111,7 +2179,7 @@ pub const IdentificationProposalRepository = struct {
                     if (!exists) continue;
                 }
                 const review = try reviewOf(self.db, id, best, identified);
-                const in_bucket: ReleaseMatchBucket = if (review != .none) .reviewed else releaseMatchBucket(best, confident_at);
+                const in_bucket: ReleaseMatchBucket = if (review != .none) .reviewed else releaseMatchBucket(best, if (weigh) view.track_count else 0, confident_at);
                 if (in_bucket != bucket) continue;
                 if (skipped < offset) {
                     skipped += 1;
@@ -2273,7 +2341,7 @@ pub const IdentificationProposalRepository = struct {
             else if (try reviewOf(self.db, view.release_id, best, identified) != .none)
                 .reviewed
             else
-                releaseMatchBucket(best, confident_at);
+                releaseMatchBucket(best, view.track_count, confident_at);
         }
     }
 
@@ -3741,4 +3809,218 @@ test "a value is never stored blank and is cut at its cap on a character boundar
     const capped = cleanValue(&long).?;
     try testing.expectEqual(@as(usize, max_value_bytes - 1), capped.len);
     try testing.expect(std.unicode.utf8ValidateSlice(capped));
+}
+
+const release_c = "cccccccc-1111-4000-8000-000000000000";
+
+fn listing(confidence: f32, release_mbids: []const []const u8, facts: []const ReleaseFact) ReleaseMatchProposal {
+    return .{
+        .id = 1,
+        .state = .pending,
+        .confidence = confidence,
+        .found_by = .{ .musicbrainz = true },
+        .recording_mbid = mbid_a,
+        .in_album_group = false,
+        .corrects = false,
+        .payload = .{ .release_mbids = release_mbids, .release_facts = facts },
+    };
+}
+
+fn trackProposing(proposals: []const ReleaseMatchProposal) ReleaseMatchTrack {
+    return .{
+        .track_id = 1,
+        .play_file = 1,
+        .title = "Song",
+        .artist = "Artist",
+        .duration_ms = null,
+        .track_number = null,
+        .disc_number = null,
+        .release_mbid = null,
+        .proposals = proposals,
+    };
+}
+
+fn candidatesOf(tracks: []const ReleaseMatchTrack, track_count: u32) ![]ReleaseCandidate {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const view: ReleaseMatchView = .{
+        .arena = &arena,
+        .release_id = 1,
+        .title = "Album",
+        .album_artist = "Artist",
+        .release_date = null,
+        .release_type = null,
+        .release_mbid = null,
+        .tracks = tracks,
+        .track_count = track_count,
+        .dismissed = &.{},
+    };
+    return view.candidates(testing.allocator);
+}
+
+test "a release candidate more Tracks name ranks above a more confident one fewer name" {
+    const fewer = [_][]const u8{release_a};
+    const more = [_][]const u8{release_b};
+    const both = [_]ReleaseMatchProposal{ listing(0.26, &fewer, &.{}), listing(0.17, &more, &.{}) };
+    const only_more = [_]ReleaseMatchProposal{listing(0.17, &more, &.{})};
+    const tracks = [_]ReleaseMatchTrack{ trackProposing(&both), trackProposing(&both), trackProposing(&only_more) };
+
+    const ranked = try candidatesOf(&tracks, 3);
+    defer testing.allocator.free(ranked);
+
+    try testing.expectEqual(@as(usize, 2), ranked.len);
+    try testing.expectEqualStrings(release_b, ranked[0].release_mbid);
+    try testing.expectEqual(@as(u32, 3), ranked[0].tracks_naming);
+    try testing.expectEqualStrings(release_a, ranked[1].release_mbid);
+    try testing.expectEqual(@as(u32, 2), ranked[1].tracks_naming);
+    try testing.expect(ranked[1].confidence.? > ranked[0].confidence.?);
+}
+
+test "among candidates every Track names, the Release's track count ranks above a larger, more confident edition" {
+    const facts = [_]ReleaseFact{ .{ .mbid = release_a, .track_count = 2 }, .{ .mbid = release_b, .track_count = 4 } };
+    const deluxe = [_][]const u8{release_b};
+    const editions = [_][]const u8{ release_a, release_b };
+    const proposals = [_]ReleaseMatchProposal{ listing(0.95, &deluxe, &facts), listing(0.9, &editions, &facts) };
+    const tracks = [_]ReleaseMatchTrack{ trackProposing(&proposals), trackProposing(&proposals) };
+
+    const ranked = try candidatesOf(&tracks, 2);
+    defer testing.allocator.free(ranked);
+
+    try testing.expectEqualStrings(release_a, ranked[0].release_mbid);
+    try testing.expectEqual(@as(?u32, 2), ranked[0].track_count);
+    try testing.expectEqualStrings(release_b, ranked[1].release_mbid);
+    try testing.expect(ranked[1].confidence.? > ranked[0].confidence.?);
+}
+
+test "without the Release's track count the nearest count ranks first and an unknown one last" {
+    const facts = [_]ReleaseFact{ .{ .mbid = release_a, .track_count = 5 }, .{ .mbid = release_b, .track_count = 3 } };
+    const box_set = [_][]const u8{release_a};
+    const editions = [_][]const u8{ release_a, release_b, release_c };
+    const proposals = [_]ReleaseMatchProposal{ listing(0.99, &box_set, &facts), listing(0.9, &editions, &facts) };
+    const tracks = [_]ReleaseMatchTrack{ trackProposing(&proposals), trackProposing(&proposals) };
+
+    const ranked = try candidatesOf(&tracks, 2);
+    defer testing.allocator.free(ranked);
+
+    try testing.expectEqual(@as(usize, 3), ranked.len);
+    try testing.expectEqualStrings(release_b, ranked[0].release_mbid);
+    try testing.expectEqualStrings(release_a, ranked[1].release_mbid);
+    try testing.expectEqualStrings(release_c, ranked[2].release_mbid);
+    try testing.expectEqual(@as(?u32, null), ranked[2].track_count);
+}
+
+test "a track count fits an album best when equal, then when nearer, and worst when unknown" {
+    try testing.expectEqual(std.math.Order.lt, trackCountFitOrder(10, 10, 11));
+    try testing.expectEqual(std.math.Order.lt, trackCountFitOrder(10, 9, 20));
+    try testing.expectEqual(std.math.Order.eq, trackCountFitOrder(10, 9, 11));
+    try testing.expectEqual(std.math.Order.lt, trackCountFitOrder(10, 327, null));
+    try testing.expectEqual(std.math.Order.eq, trackCountFitOrder(null, 10, 327));
+}
+
+fn candidateWith(track_count: ?u32, confidence: ?f32, named_by_id: bool) ReleaseCandidate {
+    return .{
+        .release_mbid = release_a,
+        .title = "Album",
+        .date = null,
+        .track_count = track_count,
+        .confidence = confidence,
+        .named_by_id = named_by_id,
+    };
+}
+
+test "a best candidate with another known track count needs review even at full confidence" {
+    try testing.expectEqual(ReleaseMatchBucket.needs_review, releaseMatchBucket(candidateWith(327, 1, false), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.needs_review, releaseMatchBucket(candidateWith(4, 1, false), 5, 0.9));
+}
+
+test "a best candidate with the Release's track count or an unknown one is bucketed by confidence" {
+    try testing.expectEqual(ReleaseMatchBucket.confident, releaseMatchBucket(candidateWith(5, 0.95, false), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.needs_review, releaseMatchBucket(candidateWith(5, 0.8, false), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.confident, releaseMatchBucket(candidateWith(null, 0.95, false), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.needs_review, releaseMatchBucket(candidateWith(null, 0.8, false), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.needs_review, releaseMatchBucket(candidateWith(5, null, false), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.unmatched, releaseMatchBucket(null, 5, 0.9));
+}
+
+test "a best candidate a Track's release ID names is bucketed by confidence whatever its track count" {
+    try testing.expectEqual(ReleaseMatchBucket.confident, releaseMatchBucket(candidateWith(327, 1, true), 5, 0.9));
+    try testing.expectEqual(ReleaseMatchBucket.needs_review, releaseMatchBucket(candidateWith(327, 0.5, true), 5, 0.9));
+}
+
+test "a candidate a Track's release ID names is marked so and stays confident at another track count" {
+    const facts = [_]ReleaseFact{.{ .mbid = release_a, .track_count = 12 }};
+    const editions = [_][]const u8{release_a};
+    const proposals = [_]ReleaseMatchProposal{listing(0.95, &editions, &facts)};
+    var tagged = trackProposing(&proposals);
+    tagged.release_mbid = release_a;
+    tagged.named_release = .placed;
+    const tracks = [_]ReleaseMatchTrack{ tagged, trackProposing(&proposals) };
+
+    const ranked = try candidatesOf(&tracks, 2);
+    defer testing.allocator.free(ranked);
+
+    try testing.expect(ranked[0].named_by_id);
+    try testing.expectEqual(ReleaseMatchBucket.confident, releaseMatchBucket(ranked[0], 2, 0.9));
+}
+
+test "a candidate Tracks' release IDs name fits the Release, so it outranks a less confident edition with the Release's track count" {
+    const facts = [_]ReleaseFact{.{ .mbid = release_b, .track_count = 2 }};
+    const editions = [_][]const u8{release_b};
+    const proposals = [_]ReleaseMatchProposal{listing(0.95, &editions, &facts)};
+    var tagged = trackProposing(&proposals);
+    tagged.release_mbid = release_a;
+    tagged.named_release = .placed;
+    const tracks = [_]ReleaseMatchTrack{ tagged, tagged };
+
+    const ranked = try candidatesOf(&tracks, 2);
+    defer testing.allocator.free(ranked);
+
+    try testing.expectEqual(@as(usize, 2), ranked.len);
+    try testing.expectEqualStrings(release_a, ranked[0].release_mbid);
+    try testing.expectEqual(@as(?u32, null), ranked[0].track_count);
+    try testing.expectEqualStrings(release_b, ranked[1].release_mbid);
+}
+
+test "a Track counts toward only the releases it scores near its best on, so a one-track Release keeps its most confident candidate" {
+    const facts = [_]ReleaseFact{ .{ .mbid = release_a, .track_count = 88 }, .{ .mbid = release_b, .track_count = 1 } };
+    const compilation = [_][]const u8{release_a};
+    const remix = [_][]const u8{release_b};
+    const unknown = [_][]const u8{release_c};
+    const proposals = [_]ReleaseMatchProposal{ listing(1, &compilation, &facts), listing(0.51, &remix, &facts) };
+    const unknown_count = [_]ReleaseMatchProposal{ listing(1, &unknown, &facts), listing(0.51, &remix, &facts) };
+
+    const ranked = try candidatesOf(&.{trackProposing(&proposals)}, 1);
+    defer testing.allocator.free(ranked);
+    try testing.expectEqualStrings(release_a, ranked[0].release_mbid);
+    try testing.expectEqual(@as(u32, 1), ranked[0].tracks_naming);
+    try testing.expectEqualStrings(release_b, ranked[1].release_mbid);
+    try testing.expectEqual(@as(u32, 0), ranked[1].tracks_naming);
+
+    const unread_count = try candidatesOf(&.{trackProposing(&unknown_count)}, 1);
+    defer testing.allocator.free(unread_count);
+    try testing.expectEqualStrings(release_c, unread_count[0].release_mbid);
+    try testing.expectEqual(@as(?u32, null), unread_count[0].track_count);
+}
+
+test "a described candidate counts the Tracks naming it as the ranked candidates do" {
+    const facts = [_]ReleaseFact{.{ .mbid = release_b, .track_count = 1 }};
+    const compilation = [_][]const u8{release_a};
+    const remix = [_][]const u8{release_b};
+    const proposals = [_]ReleaseMatchProposal{ listing(1, &compilation, &facts), listing(0.51, &remix, &facts) };
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const view: ReleaseMatchView = .{
+        .arena = &arena,
+        .release_id = 1,
+        .title = "Album",
+        .album_artist = "Artist",
+        .release_date = null,
+        .release_type = null,
+        .release_mbid = null,
+        .tracks = &.{trackProposing(&proposals)},
+        .track_count = 1,
+        .dismissed = &.{},
+    };
+    try testing.expectEqual(@as(u32, 1), view.describedCandidate(release_a).tracks_naming);
+    try testing.expectEqual(@as(u32, 0), view.describedCandidate(release_b).tracks_naming);
 }

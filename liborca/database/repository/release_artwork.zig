@@ -446,7 +446,8 @@ fn requireReleaseLocked(db: sqlite.Database, release_id: i64) !void {
 }
 
 /// Votes for release IDs. The most votes win; a tie goes to the one equal to
-/// `tag`, then by `ReleaseRanking`, then to the lowest.
+/// `tag`, then by `ReleaseRanking` (an Official release, then the track
+/// count that fits the album's, then the earlier date), then to the lowest.
 pub const MbidTally = struct {
     entries: std.ArrayList(Entry) = .empty,
 
@@ -491,8 +492,11 @@ pub const MbidTally = struct {
         const current_fact = ranking.factFor(&current.mbid);
         const entry_official = isOfficial(entry_fact);
         if (entry_official != isOfficial(current_fact)) return entry_official;
-        const entry_complete = ranking.hasAlbumTrackCount(entry_fact);
-        if (entry_complete != ranking.hasAlbumTrackCount(current_fact)) return entry_complete;
+        switch (identification.trackCountFitOrder(ranking.album_track_count, trackCount(entry_fact), trackCount(current_fact))) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
         switch (dateOrder(entry_fact, current_fact)) {
             .lt => return true,
             .gt => return false,
@@ -510,13 +514,11 @@ pub const ReleaseRanking = struct {
         for (self.facts) |fact| if (std.mem.eql(u8, fact.mbid, mbid)) return fact;
         return null;
     }
-
-    fn hasAlbumTrackCount(self: ReleaseRanking, fact: ?identification.ReleaseFact) bool {
-        const album = self.album_track_count orelse return false;
-        const release = (fact orelse return false).track_count orelse return false;
-        return release == album;
-    }
 };
+
+fn trackCount(fact: ?identification.ReleaseFact) ?u32 {
+    return (fact orelse return null).track_count;
+}
 
 fn isOfficial(fact: ?identification.ReleaseFact) bool {
     const status = (fact orelse return false).status orelse return false;
@@ -619,4 +621,30 @@ test "the tag and more votes still outrank every release fact" {
     try tally.add(testing.allocator, mbid_b.*);
     try tally.add(testing.allocator, mbid_b.*);
     try testing.expectEqualStrings(mbid_b, &tally.rankedWinner("", .{ .facts = &facts, .album_track_count = 12 }).?);
+}
+
+test "among Official releases a tie goes to the track count nearest the album's, an unknown one last" {
+    const nearer = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "1990", .track_count = 327 },
+        .{ .mbid = mbid_b, .status = "Official", .date = "1991" },
+        .{ .mbid = mbid_c, .status = "Official", .date = "2020", .track_count = 73 },
+    };
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf("", &nearer, 5)).?);
+    const exact = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "1990", .track_count = 6 },
+        .{ .mbid = mbid_b, .status = "Official", .date = "1991", .track_count = 5 },
+        .{ .mbid = mbid_c, .status = "Official", .date = "2020", .track_count = 4 },
+    };
+    try testing.expectEqualStrings(mbid_b, &(try rankedWinnerOf("", &exact, 5)).?);
+    const unknown = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "1990" },
+        .{ .mbid = mbid_c, .status = "Official", .date = "2020", .track_count = 327 },
+    };
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf("", &unknown, 5)).?);
+    const bootleg = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "1990", .track_count = 327 },
+        .{ .mbid = mbid_c, .status = "Bootleg", .date = "1980", .track_count = 5 },
+    };
+    try testing.expectEqualStrings(mbid_a, &(try rankedWinnerOf("", &bootleg, 5)).?);
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf(mbid_c, &nearer, 300)).?);
 }
