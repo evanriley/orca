@@ -43,6 +43,13 @@ pub const Result = struct {
 pub const retry_missing_after_s: i64 = 7 * 24 * 60 * 60;
 pub const fetch_deadline_ms: i64 = 60_000;
 
+/// The first name of a semicolon-separated artist list, or `artist` whole when
+/// that name is empty.
+fn firstArtist(artist: []const u8) []const u8 {
+    const first = std.mem.trim(u8, artist[0 .. std.mem.indexOfScalar(u8, artist, ';') orelse artist.len], " \t");
+    return if (first.len == 0) artist else first;
+}
+
 pub const Fetch = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -62,7 +69,7 @@ pub const Fetch = struct {
         const artist = std.mem.trim(u8, summary.artist, " \t");
         if (title.len == 0 or artist.len == 0)
             return localOr(local, if (self.lrclib == null) .not_found else .no_metadata);
-        const query: lrclib.Query = .init(title, artist, std.mem.trim(u8, summary.album, " \t"), summary.duration_ms);
+        const query: lrclib.Query = .init(title, firstArtist(artist), std.mem.trim(u8, summary.album, " \t"), summary.duration_ms);
         const digest = query.digest();
 
         const stored = try self.library.track_lyrics.get(self.allocator, track_id);
