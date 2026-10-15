@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Match Album points every Track at the album's best release candidate instead of a separate vote, so equally listed editions no longer split an album; tied candidates rank an Official edition, then one whose date agrees with the album's, then the one more Tracks' matches chose.
 - Accepting confident matches prefers, between equally confident matches, the one on the album's best release candidate over another edition.
 - Lyrics look up the first artist of a semicolon-separated artist list.
 - `Runtime.libraryApplyRelease` no longer frees with the runtime's allocator what it allocated with the caller's, which crashed `orca-cli apply-release`.

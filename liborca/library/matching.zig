@@ -627,61 +627,42 @@ pub const LibraryMatching = struct {
         return .done;
     }
 
-    /// Match Album's second phase. Each file votes once for every release
-    /// its stored proposals list; the winner is looked up, and every proposal
-    /// outside an album group whose recording it holds is pointed at it with
-    /// what it says. Then every release its Tracks' release IDs name and the
-    /// Release's best candidate are snapshotted when they have no current
-    /// snapshot.
+    /// Match Album's second phase. Every release its Tracks' release IDs
+    /// name that Orca has not read is snapshotted; the Release's best
+    /// candidate among those Orca read is looked up, and every proposal
+    /// outside an album group whose recording it holds is pointed at it
+    /// with what it says. Then the best candidate is snapshotted when it
+    /// has no current snapshot.
     fn alignRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
-        const step = try self.voteRelease(release_id);
+        var step = try self.snapshotUnreadCandidates(release_id);
+        if (step != .done) return step;
+        step = try self.pointAtBestCandidate(release_id);
         if (step != .done) return step;
         return self.snapshotBestCandidate(release_id);
     }
 
-    fn voteRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
-        const list = try self.proposals.releaseProposals(self.allocator, release_id);
-        defer list.deinit();
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-        const scratch = arena.allocator();
-        const payloads = try scratch.alloc(?database.ProposalPayload, list.items.len);
-        var tally: database.repository.MbidTally = .{};
-        defer tally.deinit(self.allocator);
-        var file_votes: std.ArrayList([36]u8) = .empty;
-        var facts: std.ArrayList(database.ReleaseFact) = .empty;
-        var voting_file: ?i64 = null;
-        for (list.items, payloads) |item, *slot| {
-            slot.* = null;
-            if (voting_file != item.file_id) {
-                for (file_votes.items) |mbid| try tally.add(self.allocator, mbid);
-                file_votes.clearRetainingCapacity();
-                voting_file = item.file_id;
-            }
-            const parsed = database.ProposalPayload.parse(scratch, item.payload) catch |err| switch (err) {
-                error.InvalidProposalPayload => continue,
-                error.OutOfMemory => return err,
-            };
-            slot.* = parsed.value;
-            if (parsed.value.release_mbid) |mbid| try addVote(scratch, &file_votes, mbid);
-            for (parsed.value.release_mbids orelse &.{}) |mbid| try addVote(scratch, &file_votes, mbid);
-            for (parsed.value.release_facts orelse &.{}) |fact| try addFact(scratch, &facts, fact);
-        }
-        for (file_votes.items) |mbid| try tally.add(self.allocator, mbid);
-        const winner = tally.rankedWinner(list.tag, .{
-            .facts = facts.items,
-            .album_track_count = list.track_count,
-        }) orelse return .done;
-        const release = switch (try self.lookUpRelease(&winner)) {
+    fn pointAtBestCandidate(self: *LibraryMatching, release_id: i64) !ReleaseStep {
+        const best_mbid = try self.bestReadCandidate(release_id) orelse return .done;
+        defer self.allocator.free(best_mbid);
+        const release = switch (try self.lookUpRelease(best_mbid)) {
             .found => |lookup| lookup,
             .unusable, .uncached => return .done,
             .cancelled => return .cancelled,
             .unavailable => return .unavailable,
             .busy => return .busy,
         };
-        for (list.items, payloads) |item, slot| {
+        const list = try self.proposals.releaseProposals(self.allocator, release_id);
+        defer list.deinit();
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        for (list.items) |item| {
             if (item.in_album_group) continue;
-            var payload = slot orelse continue;
+            const parsed = database.ProposalPayload.parse(scratch, item.payload) catch |err| switch (err) {
+                error.InvalidProposalPayload => continue,
+                error.OutOfMemory => return err,
+            };
+            var payload = parsed.value;
             const enrichment = try release.enrichment(item.recording_mbid, item.tagged_track_number) orelse continue;
             payload.enrich(release.id(), enrichment);
             const encoded = try payload.encode(scratch);
@@ -765,19 +746,34 @@ pub const LibraryMatching = struct {
     }
 
     /// Snapshots every release a Track's release ID names that Orca has not
-    /// read, then the Release's best candidate.
-    fn snapshotBestCandidate(self: *LibraryMatching, release_id: i64) !ReleaseStep {
-        {
-            const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
-            defer view.deinit();
-            const candidates = try view.candidates(self.allocator);
-            defer self.allocator.free(candidates);
-            for (candidates) |candidate| {
-                if (!candidate.unread()) break;
-                const step = try self.snapshotRelease(candidate.release_mbid);
-                if (step != .done) return step;
-            }
+    /// read.
+    fn snapshotUnreadCandidates(self: *LibraryMatching, release_id: i64) !ReleaseStep {
+        const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
+        defer view.deinit();
+        const candidates = try view.candidates(self.allocator);
+        defer self.allocator.free(candidates);
+        for (candidates) |candidate| {
+            if (!candidate.unread()) break;
+            const step = try self.snapshotRelease(candidate.release_mbid);
+            if (step != .done) return step;
         }
+        return .done;
+    }
+
+    /// The Release's best candidate that Orca read, or null. Caller frees.
+    fn bestReadCandidate(self: *LibraryMatching, release_id: i64) !?[]u8 {
+        const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
+        defer view.deinit();
+        const candidates = try view.candidates(self.allocator);
+        defer self.allocator.free(candidates);
+        for (candidates) |candidate| {
+            if (!candidate.unread()) return try self.allocator.dupe(u8, candidate.release_mbid);
+        }
+        return null;
+    }
+
+    /// Snapshots the Release's best candidate.
+    fn snapshotBestCandidate(self: *LibraryMatching, release_id: i64) !ReleaseStep {
         const view = try self.proposals.releaseMatchView(self.allocator, release_id, false);
         defer view.deinit();
         const best = try view.best(self.allocator) orelse return .done;
@@ -1030,17 +1026,6 @@ pub const LibraryMatching = struct {
         return false;
     }
 };
-
-fn addVote(allocator: std.mem.Allocator, votes: *std.ArrayList([36]u8), mbid: []const u8) !void {
-    if (!metadata.isMusicBrainzId(mbid)) return;
-    for (votes.items) |vote| if (std.mem.eql(u8, &vote, mbid)) return;
-    try votes.append(allocator, mbid[0..36].*);
-}
-
-fn addFact(allocator: std.mem.Allocator, facts: *std.ArrayList(database.ReleaseFact), fact: database.ReleaseFact) !void {
-    for (facts.items) |known| if (std.mem.eql(u8, known.mbid, fact.mbid)) return;
-    try facts.append(allocator, fact);
-}
 
 fn strongestHeardRecordings(
     heard: []const providers.Candidate,
@@ -1338,8 +1323,7 @@ pub fn releaseMatchEvidence(
     evidence.durations_within_1s = compared != 0 and within == compared;
     evidence.artist_agrees = try textsAgree(allocator, view.album_artist, release.artist);
     evidence.title_agrees = try textsAgree(allocator, view.title, release.title);
-    evidence.date_agrees = view.release_date != null and release.date.len != 0 and
-        std.mem.eql(u8, view.release_date.?, release.date);
+    evidence.date_agrees = database.releaseDatesAgree(view.release_date, release.date);
 
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);

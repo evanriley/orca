@@ -3775,10 +3775,105 @@ test "Match Album breaks a tie between editions for the Official one with the al
 
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
     try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(job_handle)).accepted);
-    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
-    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bootleg) != null);
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
     try expectOrcaValue(library_database, northern_sky, .musicbrainz_release_id, bryter_layter_mbid);
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
+}
+
+const tied_edition_mbid = "44bdf559-1c2d-4e3f-8a4b-5c6d7e8f9a0b";
+const tied_other_mbid = "908ecb12-3d4e-4f5a-8b6c-7d8e9f0a1b2c";
+const tied_titles = [_][]const u8{ "imagine", "needy", "NASA", "bloodline" };
+const tied_shared = [_][]const u8{ "c1a00000-0000-4000-8000-000000000001", "c1a00000-0000-4000-8000-000000000002" };
+const tied_album_only = [_][]const u8{ "c1a00000-0000-4000-8000-000000000003", "c1a00000-0000-4000-8000-000000000004" };
+const tied_other_only = [_][]const u8{ "c1a00000-0000-4000-8000-000000000005", "c1a00000-0000-4000-8000-000000000006" };
+const tied_album_date = "2019-02-08";
+const tied_album_release = "{\"id\":\"" ++ tied_edition_mbid ++ "\",\"title\":\"thank u, next\",\"date\":\"" ++ tied_album_date ++ "\"," ++
+    "\"artist-credit\":[{\"name\":\"Nick Drake\",\"joinphrase\":\"\",\"artist\":{\"id\":\"" ++ nick_drake_mbid ++ "\"}}]," ++
+    "\"release-group\":{\"id\":\"" ++ bryter_layter_group_mbid ++ "\"},\"media\":[{\"position\":1,\"tracks\":[" ++
+    releaseTrack("d2b00000-0000-4000-8000-000000000001", "1", "imagine", tied_shared[0]) ++ "," ++
+    releaseTrack("d2b00000-0000-4000-8000-000000000002", "2", "needy", tied_shared[1]) ++ "," ++
+    releaseTrack("d2b00000-0000-4000-8000-000000000003", "3", "NASA", tied_album_only[0]) ++ "," ++
+    releaseTrack("d2b00000-0000-4000-8000-000000000004", "4", "bloodline", tied_album_only[1]) ++ "]}]}";
+
+test "Match Album points every file at the edition whose snapshot date agrees with the album when more proposals chose another" {
+    var fake: FakeMusicBrainz = .{ .release_body = tied_album_release };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-tied-editions?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var files: [tied_titles.len]i64 = undefined;
+    inline for (tied_titles, &files, 0..) |title, *file, index| {
+        file.* = try observeFile(library_database, "/music/ariana/" ++ std.fmt.comptimePrint("{d}", .{index + 1}) ++ ".flac", title, "Nick Drake");
+        try library_database.observed_tags.upsert(.{ .file_id = file.*, .values = .{ .title = title, .artist = "Nick Drake", .date = tied_album_date } });
+    }
+    try projectAll(library_database);
+    try library_database.release_tracklists.replace(&.{
+        .release_mbid = tied_edition_mbid,
+        .title = "thank u, next",
+        .artist_credit = "Nick Drake",
+        .release_date = tied_album_date,
+        .medium_count = 1,
+        .fetched_at = 0,
+        .tracks = &.{},
+    });
+    const album = try releaseOfFile(library_database, files[0]);
+    for (files) |file| try std.testing.expectEqual(album, try releaseOfFile(library_database, file));
+
+    const facts = [_]database.ReleaseFact{
+        .{ .mbid = tied_edition_mbid, .status = "Official", .track_count = 4 },
+        .{ .mbid = tied_other_mbid, .status = "Official", .date = "2019-12-06", .track_count = 4 },
+    };
+    const both = [_][]const u8{ tied_edition_mbid, tied_other_mbid };
+    const album_only = [_][]const u8{tied_edition_mbid};
+    const other_only = [_][]const u8{tied_other_mbid};
+    for (tied_shared, files[0..2], tied_titles[0..2]) |recording, file, title| {
+        const evidence = [_]database.ProposalEvidence{.{
+            .recording_mbid = recording,
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{ .title = title, .artist = "Nick Drake", .release_mbid = tied_other_mbid, .release_mbids = &both, .release_facts = &facts, .mb_score = 100, .musicbrainz_confidence = 0.95 },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &evidence);
+    }
+    for (tied_album_only, tied_other_only, files[2..], tied_titles[2..]) |on_album, on_other, file, title| {
+        const evidence = [_]database.ProposalEvidence{
+            .{
+                .recording_mbid = on_other,
+                .found_by = .{ .musicbrainz = true },
+                .payload = .{ .title = title, .artist = "Nick Drake", .release_mbid = tied_other_mbid, .release_mbids = &other_only, .release_facts = &facts, .mb_score = 100, .musicbrainz_confidence = 0.95 },
+            },
+            .{
+                .recording_mbid = on_album,
+                .found_by = .{ .musicbrainz = true },
+                .payload = .{ .title = title, .artist = "Nick Drake", .release_mbid = tied_edition_mbid, .release_mbids = &album_only, .release_facts = &facts, .mb_score = 100, .musicbrainz_confidence = 0.95 },
+            },
+        };
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &evidence);
+    }
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, files.len), (try runtime.jobMatchStats(job_handle)).accepted);
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ tied_edition_mbid) != null);
+    try std.testing.expectEqual(@as(i64, files.len), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM identification_proposals WHERE state = 1 AND CAST(payload AS TEXT) LIKE '%\"release_mbid\":\"" ++ tied_edition_mbid ++ "\"%';",
+    ));
+    try std.testing.expectEqual(@as(i64, files.len), try database.columns.scalar(library_database.database, "SELECT count(*) FROM identification_proposals WHERE state = 1;"));
+    for (files) |file| try expectOrcaValue(library_database, file, .musicbrainz_release_id, tied_edition_mbid);
+
+    const matched = try releaseOfFile(library_database, files[0]);
+    for (files) |file| try std.testing.expectEqual(matched, try releaseOfFile(library_database, file));
+    const view = try library_database.identification_proposals.releaseMatchView(std.testing.allocator, matched, false);
+    defer view.deinit();
+    const best = (try view.best(std.testing.allocator)) orelse return error.TestExpectedBestCandidate;
+    try std.testing.expectEqualStrings(tied_edition_mbid, best.release_mbid);
+    try std.testing.expectEqualStrings(tied_album_date, view.release_date orelse return error.TestExpectedReleaseDate);
+    try std.testing.expect(best.date_agrees);
 }
 
 test "Match Album accepts nothing when the only release its Tracks list has more tracks than the album" {

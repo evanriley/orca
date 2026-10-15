@@ -290,6 +290,7 @@ pub const ReleaseIdentity = repository.ReleaseIdentity;
 pub const ReleaseMatchProposal = repository.ReleaseMatchProposal;
 pub const ReleaseMatchTrack = repository.ReleaseMatchTrack;
 pub const ReleaseMatchView = repository.ReleaseMatchView;
+pub const releaseDatesAgree = repository.releaseDatesAgree;
 pub const LocalArtworkSource = repository.LocalArtworkSource;
 pub const ArtworkSize = repository.ArtworkSize;
 pub const RecordingMbid = repository.RecordingMbid;
