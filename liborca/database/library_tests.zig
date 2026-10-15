@@ -2835,6 +2835,50 @@ test "bulk accept and its count skip the files of a Release whose only release h
     try std.testing.expectEqual(@as(u64, 0), in_release.accepted);
 }
 
+test "bulk accept takes the proposal on the album's best release over an equally confident one on another edition" {
+    var library = try openFeedbackLibrary("accept-album-edition");
+    defer library.close();
+    const album_edition = "44bdf559-0000-4000-8000-000000000001";
+    const other_edition = "908ecb12-0000-4000-8000-000000000002";
+    const facts = [_]repository.ReleaseFact{
+        .{ .mbid = album_edition, .status = "Official", .track_count = 2 },
+        .{ .mbid = other_edition, .status = "Official", .track_count = 2 },
+    };
+    const album_payload = try (repository.ProposalPayload{
+        .release_mbid = album_edition,
+        .release_mbids = &.{album_edition},
+        .release_facts = facts[0..1],
+        .mb_score = 66,
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(album_payload);
+    const other_payload = try (repository.ProposalPayload{
+        .release_mbid = other_edition,
+        .release_mbids = &.{other_edition},
+        .release_facts = facts[1..2],
+        .mb_score = 68,
+    }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(other_payload);
+    const release_id = try library.releases.upsert(.{ .release_key = "Album", .title = "Album" });
+    var files: [2]i64 = undefined;
+    for (&files) |*file| {
+        file.* = try playFileOf(&library, try addFeedbackTrack(&library, "Song", try addRecording(&library), null));
+        var sql: [128]u8 = undefined;
+        try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET release_id = {d} WHERE preferred_file_id = {d};", .{ release_id, file.* }, 0));
+    }
+    const on_album = try putProposal(&library, files[0], match_mbid, 0.951, album_payload);
+    const elsewhere = try putProposal(&library, files[0], rival_mbid, 0.951, other_payload);
+    const second = try putProposal(&library, files[1], match_mbid, 0.951, album_payload);
+
+    try std.testing.expectEqual(@as(u64, 2), try library.identification_proposals.confidentCount(std.testing.allocator, 0.9));
+    const accepted = try library.identification_proposals.acceptConfidentInRelease(std.testing.allocator, 0.9, release_id);
+    defer accepted.deinit();
+
+    try std.testing.expectEqual(@as(u64, 2), accepted.accepted);
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, on_album));
+    try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, elsewhere));
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, second));
+}
+
 fn acceptedCount(proposals: *repository.IdentificationProposalRepository, minimum_confidence: f32) !u64 {
     const acceptance = try proposals.acceptConfident(std.testing.allocator, minimum_confidence);
     defer acceptance.deinit();
