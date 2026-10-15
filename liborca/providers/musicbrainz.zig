@@ -13,6 +13,7 @@ pub const default_server = "https://musicbrainz.org";
 pub const release_lookup_query = "?fmt=json&inc=recordings+artist-credits+release-groups";
 const search_limit = 10;
 const max_credited_artists = 8;
+pub const max_searched_recording_ids = 3;
 
 const CachedRefusal = enum { use, ask_again };
 
@@ -45,6 +46,28 @@ pub const MusicBrainz = struct {
         if (names.len < 2) return whole_credit;
         whole_credit.deinit();
         return self.searchCredited(allocator, query, names);
+    }
+
+    pub fn searchRecordingIds(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        mbids: []const []const u8,
+        album: ?[]const u8,
+    ) !model.CandidateList {
+        var lucene = std.Io.Writer.Allocating.init(allocator);
+        defer lucene.deinit();
+        var searched: usize = 0;
+        for (mbids) |mbid| {
+            if (searched == max_searched_recording_ids) break;
+            if (!metadata.isMusicBrainzId(mbid)) continue;
+            if (searched != 0) try lucene.writer.writeAll(" OR ");
+            try lucene.writer.print("rid:\"{s}\"", .{mbid});
+            searched += 1;
+        }
+        if (searched == 0) return .{ .allocator = allocator, .items = &.{} };
+        const request_url = try self.recordingSearchUrl(allocator, lucene.written());
+        defer allocator.free(request_url);
+        return self.request(model.CandidateList, allocator, request_url, SearchParser{ .album = album });
     }
 
     fn searchCredited(
@@ -257,13 +280,17 @@ pub const MusicBrainz = struct {
             try lucene.writer.writeAll(" ");
             try writeTerm(&lucene.writer, "release", query.album.?);
         }
+        return self.recordingSearchUrl(allocator, lucene.written());
+    }
+
+    fn recordingSearchUrl(self: MusicBrainz, allocator: std.mem.Allocator, lucene: []const u8) ![]u8 {
         var request_url = std.Io.Writer.Allocating.init(allocator);
         errdefer request_url.deinit();
         try request_url.writer.print("{s}/ws/2/recording?fmt=json&limit={d}&query=", .{
             std.mem.trimEnd(u8, self.server, "/"),
             search_limit,
         });
-        try url_encoding.writeEncoded(&request_url.writer, lucene.written());
+        try url_encoding.writeEncoded(&request_url.writer, lucene);
         var list = request_url.toArrayList();
         return list.toOwnedSlice(allocator);
     }
@@ -1446,6 +1473,95 @@ test "a search without a title or an artist makes no request" {
     try testing.expectError(error.InsufficientIdentificationEvidence, rig.search(.{ .title = "Orca", .artist = "" }));
     try testing.expectError(error.InsufficientIdentificationEvidence, rig.search(.{ .title = " ", .artist = "Artist" }));
     try testing.expectEqual(@as(u32, 0), rig.net.transport.requestCount());
+}
+
+const heard_recording_mbids = [_][]const u8{
+    "11111111-2222-4333-8444-555555555555",
+    "22222222-3333-4444-8555-666666666666",
+    "33333333-4444-4555-8666-777777777777",
+    "44444444-5555-4666-8777-888888888888",
+};
+
+test "a recording ID search asks for one recording by its ID" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-rid-one?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.adapter.server = "http://127.0.0.1:5000/";
+
+    const list = try rig.adapter.searchRecordingIds(testing.allocator, heard_recording_mbids[0..1], null);
+    defer list.deinit();
+
+    try testing.expectEqualStrings(
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "rid%3A%2211111111-2222-4333-8444-555555555555%22",
+        rig.net.transport.lastUrl(),
+    );
+}
+
+test "a recording ID search asks for three recordings in one request and drops a fourth" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-rid-three?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.adapter.server = "http://127.0.0.1:5000";
+    rig.net.transport.keep_history = true;
+
+    const list = try rig.adapter.searchRecordingIds(testing.allocator, &heard_recording_mbids, null);
+    defer list.deinit();
+
+    try expectHistory(&rig, &.{
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "rid%3A%2211111111-2222-4333-8444-555555555555%22" ++
+            "%20OR%20rid%3A%2222222222-3333-4444-8555-666666666666%22" ++
+            "%20OR%20rid%3A%2233333333-4444-4555-8666-777777777777%22",
+    });
+}
+
+test "a recording ID search skips an ID that is not a MusicBrainz ID and asks nothing when none is left" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-rid-invalid?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.adapter.server = "http://127.0.0.1:5000";
+    rig.net.transport.keep_history = true;
+
+    const none = try rig.adapter.searchRecordingIds(testing.allocator, &.{ "t1", "not\" OR rid:\"x" }, null);
+    defer none.deinit();
+    try testing.expectEqual(@as(usize, 0), none.items.len);
+    try testing.expectEqual(@as(u32, 0), rig.net.transport.requestCount());
+    const empty = try rig.adapter.searchRecordingIds(testing.allocator, &.{}, null);
+    defer empty.deinit();
+    try testing.expectEqual(@as(u32, 0), rig.net.transport.requestCount());
+
+    const list = try rig.adapter.searchRecordingIds(testing.allocator, &.{ "t1", heard_recording_mbids[1] }, null);
+    defer list.deinit();
+    try expectHistory(&rig, &.{
+        "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query=" ++
+            "rid%3A%2222222222-3333-4444-8555-666666666666%22",
+    });
+}
+
+test "a recording found by its ID names the release closest to the album and every release it is on" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-rid-release?mode=memory&cache=shared");
+    defer rig.deinit();
+    const single_mbid = "5a5a5a5a-1111-4222-8333-444444444444";
+    const album_mbid = "6b6b6b6b-1111-4222-8333-444444444444";
+    rig.respond(200, "{\"recordings\":[{\"id\":\"" ++ found_recording_mbid ++ "\",\"title\":\"imagine\"," ++
+        "\"artist-credit\":[{\"name\":\"Ariana Grande\",\"joinphrase\":\"\"}],\"releases\":[" ++
+        "{\"id\":\"" ++ single_mbid ++ "\",\"title\":\"imagine\",\"status\":\"Official\"}," ++
+        "{\"id\":\"" ++ album_mbid ++ "\",\"title\":\"thank u, next\",\"status\":\"Official\"," ++
+        "\"media\":[{\"track-offset\":0,\"track\":[{\"number\":\"1\"}]}]}]}]}");
+
+    const list = try rig.adapter.searchRecordingIds(testing.allocator, &.{found_recording_mbid}, "thank u, next");
+    defer list.deinit();
+
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    const found = list.items[0];
+    try testing.expectEqualStrings(found_recording_mbid, found.provider_id);
+    try testing.expectEqualStrings("thank u, next", found.album);
+    try testing.expectEqualStrings(album_mbid, found.release_mbid.?);
+    try testing.expectEqual(@as(?u32, 1), found.track_number);
+    try testing.expectEqual(@as(usize, 2), found.release_mbids.len);
+    try testing.expectEqual(@as(usize, 2), found.release_facts.len);
 }
 
 test "answers are cached for thirty days, empty ones too, and an expired one stands in when the service is down" {
