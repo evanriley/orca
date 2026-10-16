@@ -155,6 +155,7 @@
             pkgs.ffmpeg-headless
             pkgs.sqlite-interactive.bin
             pkgs.wireplumber
+            pkgs.procps
           ];
           buildInputs = self.packages.${pkgs.stdenv.hostPlatform.system}.orca.buildInputs;
           shellHook = ''
