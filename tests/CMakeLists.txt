@@ -9,7 +9,9 @@ if(ORCA_BUILD_TESTS)
         metadata_model_test.cpp
         metadata_id3v1_test.cpp
         metadata_id3v2_test.cpp
+        metadata_id3v2_writer_test.cpp
         metadata_vorbis_comment_test.cpp
+        metadata_vorbis_writer_test.cpp
         metadata_ogg_comment_test.cpp
         metadata_mp4_tags_test.cpp
         metadata_riff_tags_test.cpp
@@ -18,6 +20,11 @@ if(ORCA_BUILD_TESTS)
         metadata_lrc_test.cpp
         metadata_lyrics_test.cpp
         metadata_artwork_test.cpp
+        metadata_journal_lock_test.cpp
+        metadata_mutation_test.cpp
+        metadata_journal_test.cpp
+        metadata_file_mutation_test.cpp
+        metadata_executor_test.cpp
         codec_test.cpp
         codec_lib_test.cpp
         codec_mp4_test.cpp

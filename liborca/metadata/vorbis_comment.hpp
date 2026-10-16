@@ -4,6 +4,7 @@
 #include "liborca/metadata/arena.hpp"
 #include "liborca/metadata/lyrics.hpp"
 #include "liborca/metadata/model.hpp"
+#include "liborca/metadata/mutation.hpp"
 #include "liborca/storage/source.hpp"
 
 #include <cstddef>
@@ -11,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace orca::metadata::vorbis_comment {
 
@@ -52,5 +54,21 @@ private:
 [[nodiscard]] auto picture_from_block(std::span<const std::byte> block)
     -> std::optional<PictureView>;
 [[nodiscard]] auto artwork_kind(std::uint32_t picture_type) -> ArtworkKind;
+
+/// The key a write stores `field` under.
+[[nodiscard]] auto field_key(Field field) -> std::string_view;
+
+/// `genres` replaces every GENRE entry with one entry per genre, after
+/// checking the file's current GENRE values are `genres.before`.
+[[nodiscard]] auto rewrite(std::span<const std::byte> payload,
+                           const std::vector<mutation::Change>& changes,
+                           const std::optional<mutation::GenreChange>& genres)
+    -> expected<std::vector<std::byte>>;
+
+/// A new comment block with `changes` and `genres`, refusing any change that
+/// states a `before` and any non-empty genre precondition.
+[[nodiscard]] auto create(const std::vector<mutation::Change>& changes,
+                          const std::optional<mutation::GenreChange>& genres)
+    -> expected<std::vector<std::byte>>;
 
 }

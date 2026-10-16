@@ -9,16 +9,22 @@ add_library(orca STATIC
     crypto/secure_zero.cpp
     json/json.cpp
     metadata/artwork.cpp
+    metadata/file_mutation.cpp
+    metadata/executor.cpp
     metadata/id3v1.cpp
     metadata/id3v2.cpp
     metadata/image_header.cpp
     metadata/lrc.cpp
     metadata/lyrics.cpp
     metadata/genre_alias.cpp
+    metadata/journal_lock.cpp
+    metadata/journal.cpp
     metadata/model.cpp
+    metadata/mutation.cpp
     metadata/riff_tags.cpp
     metadata/mp4_tags.cpp
     metadata/ogg_comment.cpp
+    metadata/recovery.cpp
     metadata/vorbis_comment.cpp
     http/client.cpp
     http/curl_transport.cpp

@@ -558,6 +558,304 @@ private:
     return {};
 }
 
+[[nodiscard]] auto trim_value(std::string_view text) -> std::string_view {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' ||
+                             text.front() == '\n')) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r' ||
+                             text.back() == '\n')) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+[[nodiscard]] auto field_matches(Field field, std::string_view key) -> bool {
+    switch (field) {
+    case Field::title:
+        return matches(key, {"TITLE"});
+    case Field::artist:
+        return matches(key, {"ARTIST"});
+    case Field::album:
+        return matches(key, {"ALBUM"});
+    case Field::album_artist:
+        return matches(key, {"ALBUMARTIST", "ALBUM ARTIST", "ALBUM_ARTIST"});
+    case Field::track_number:
+        return matches(key, {"TRACKNUMBER"});
+    case Field::disc_number:
+        return matches(key, {"DISCNUMBER"});
+    case Field::date:
+        return matches(key, {"DATE", "YEAR"});
+    case Field::compilation:
+        return matches(key, {"COMPILATION"});
+    case Field::musicbrainz_recording_id:
+        return matches(key, {"MUSICBRAINZ_TRACKID"});
+    case Field::musicbrainz_release_id:
+        return matches(key, {"MUSICBRAINZ_ALBUMID"});
+    case Field::musicbrainz_release_group_id:
+        return matches(key, {"MUSICBRAINZ_RELEASEGROUPID"});
+    case Field::musicbrainz_release_track_id:
+        return matches(key, {"MUSICBRAINZ_RELEASETRACKID"});
+    case Field::musicbrainz_album_artist_id:
+        return matches(key, {"MUSICBRAINZ_ALBUMARTISTID"});
+    case Field::explicit_advisory:
+        return matches(key, {"ITUNESADVISORY"});
+    case Field::composer:
+        return matches(key, {"COMPOSER"});
+    case Field::comment:
+        return matches(key, {"COMMENT"});
+    }
+    return false;
+}
+
+/// The keys the reader may have taken `field` from: those a rewrite replaces,
+/// and for a comment also the `DESCRIPTION` it falls back to, which a rewrite
+/// keeps.
+[[nodiscard]] auto reader_matches(Field field, std::string_view key) -> bool {
+    if (field_matches(field, key)) {
+        return true;
+    }
+    return field == Field::comment && matches(key, {"DESCRIPTION"});
+}
+
+[[nodiscard]] auto is_genre_key(std::string_view key) -> bool {
+    return matches(key, {"GENRE"});
+}
+
+/// Whether a stored comment value is `expected` as the reader interprets it.
+[[nodiscard]] auto value_matches(Field field, std::string_view expected, std::string_view raw)
+    -> bool {
+    const std::string_view value = trim_value(raw);
+    if (field == Field::track_number || field == Field::disc_number) {
+        const auto slash = value.find('/');
+        const std::string_view number =
+            slash == std::string_view::npos ? value : value.substr(0, slash);
+        return trim_value(number) == expected;
+    }
+    if (field == Field::compilation) {
+        return std::string_view(is_truthy(value) ? "1" : "0") == expected;
+    }
+    return value == expected;
+}
+
+[[nodiscard]] auto validate_changes(const std::vector<mutation::Change>& changes)
+    -> expected<void> {
+    for (std::size_t index = 0; index < changes.size(); ++index) {
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            if (changes[previous].field == changes[index].field) {
+                return fail(ErrorCode::duplicate_metadata_field_change,
+                            "vorbis: duplicate field change");
+            }
+        }
+    }
+    return {};
+}
+
+/// Whether the GENRE values the reader would collect from the entries at
+/// `cursor` are exactly `expected`, in order.
+[[nodiscard]] auto genres_match(std::span<const std::byte> payload, std::size_t cursor,
+                                std::uint32_t count,
+                                const std::vector<std::string>& expected_genres) -> expected<bool> {
+    std::size_t matched = 0;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto entry = take_string(payload, cursor);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        const auto parsed = parse_entry(*entry);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        if (!is_genre_key(parsed->key)) {
+            continue;
+        }
+        const std::string_view value = trim_value(parsed->value);
+        if (value.empty()) {
+            continue;
+        }
+        if (matched == expected_genres.size() || value != expected_genres[matched]) {
+            return false;
+        }
+        matched += 1;
+    }
+    return matched == expected_genres.size();
+}
+
+[[nodiscard]] auto validate_preconditions(std::span<const std::byte> payload, std::size_t cursor,
+                                          std::uint32_t count,
+                                          const std::vector<mutation::Change>& changes)
+    -> expected<void> {
+    for (const mutation::Change& change : changes) {
+        if (!change.before) {
+            continue;
+        }
+        bool found = false;
+        std::size_t check_cursor = cursor;
+        for (std::uint32_t index = 0; index < count; ++index) {
+            const auto entry = take_string(payload, check_cursor);
+            if (!entry) {
+                return std::unexpected(entry.error());
+            }
+            const auto parsed = parse_entry(*entry);
+            if (!parsed) {
+                return std::unexpected(parsed.error());
+            }
+            if (reader_matches(change.field, parsed->key) &&
+                value_matches(change.field, *change.before, parsed->value)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return fail(ErrorCode::metadata_precondition_changed, "vorbis: precondition");
+        }
+    }
+    return {};
+}
+
+struct Totals {
+    std::optional<std::string_view> track;
+    std::optional<std::string_view> disc;
+};
+
+[[nodiscard]] auto collect_totals(std::span<const std::byte> payload, std::size_t cursor,
+                                  std::uint32_t count) -> expected<Totals> {
+    Totals totals;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto entry = take_string(payload, cursor);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        const auto parsed = parse_entry(*entry);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        const auto slash = parsed->value.find('/');
+        if (slash == std::string_view::npos) {
+            continue;
+        }
+        if (field_matches(Field::track_number, parsed->key)) {
+            totals.track = parsed->value.substr(slash);
+        }
+        if (field_matches(Field::disc_number, parsed->key)) {
+            totals.disc = parsed->value.substr(slash);
+        }
+    }
+    return totals;
+}
+
+[[nodiscard]] inline auto to_text(std::span<const std::byte> bytes) -> std::string_view {
+    return std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+void append_bytes(std::vector<std::byte>& out, std::string_view text) {
+    for (const char byte : text) {
+        out.push_back(static_cast<std::byte>(byte));
+    }
+}
+
+void append_u32(std::vector<std::byte>& out, std::uint32_t value) {
+    for (std::size_t index = 0; index < 4; ++index) {
+        out.push_back(static_cast<std::byte>((value >> (index * 8U)) & 0xffU));
+    }
+}
+
+[[nodiscard]] auto append_string(std::vector<std::byte>& out, std::string_view text)
+    -> expected<void> {
+    if (text.size() > 0xffffffffULL) {
+        return fail(ErrorCode::metadata_value_too_long, "vorbis: value too long");
+    }
+    append_u32(out, static_cast<std::uint32_t>(text.size()));
+    append_bytes(out, text);
+    return {};
+}
+
+[[nodiscard]] auto copy_unchanged_entries(std::span<const std::byte> payload, std::size_t& cursor,
+                                          std::uint32_t count,
+                                          const std::vector<mutation::Change>& changes,
+                                          bool replaces_genres, std::vector<std::byte>& output)
+    -> expected<std::uint32_t> {
+    std::uint32_t output_count = 0;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto entry = take_string(payload, cursor);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        const auto parsed = parse_entry(*entry);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        bool replaced = replaces_genres && is_genre_key(parsed->key);
+        for (const mutation::Change& change : changes) {
+            if (field_matches(change.field, parsed->key)) {
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            if (const auto appended = append_string(output, to_text(*entry)); !appended) {
+                return std::unexpected(appended.error());
+            }
+            output_count += 1;
+        }
+    }
+    return output_count;
+}
+
+[[nodiscard]] auto append_changes(std::vector<std::byte>& output, std::uint32_t& output_count,
+                                  const std::vector<mutation::Change>& changes,
+                                  std::optional<std::string_view> track_total,
+                                  std::optional<std::string_view> disc_total) -> expected<void> {
+    for (const mutation::Change& change : changes) {
+        if (!change.after) {
+            continue;
+        }
+        if (!utf8_valid(*change.after)) {
+            return fail(ErrorCode::invalid_metadata_text, "vorbis: invalid text");
+        }
+        const std::string_view key = field_key(change.field);
+        std::string_view total;
+        if (change.field == Field::track_number) {
+            total = track_total.value_or("");
+        } else {
+            if (change.field == Field::disc_number) {
+                total = disc_total.value_or("");
+            }
+        }
+        const bool has_slash = change.after->find('/') != std::string::npos;
+        const std::string_view suffix = has_slash ? std::string_view{} : total;
+        const std::size_t length = key.size() + 1 + change.after->size() + suffix.size();
+        if (length > 0xffffffffULL) {
+            return fail(ErrorCode::metadata_value_too_long, "vorbis: value too long");
+        }
+        append_u32(output, static_cast<std::uint32_t>(length));
+        append_bytes(output, key);
+        output.push_back(std::byte{'='});
+        append_bytes(output, *change.after);
+        append_bytes(output, suffix);
+        output_count += 1;
+    }
+    return {};
+}
+
+[[nodiscard]] auto append_genre(std::vector<std::byte>& output, std::uint32_t& output_count,
+                                std::string_view genre) -> expected<void> {
+    if (!utf8_valid(genre)) {
+        return fail(ErrorCode::invalid_metadata_text, "vorbis: invalid text");
+    }
+    constexpr std::string_view genre_key = "GENRE";
+    const std::size_t length = genre_key.size() + 1 + genre.size();
+    if (length > 0xffffffffULL) {
+        return fail(ErrorCode::metadata_value_too_long, "vorbis: value too long");
+    }
+    append_u32(output, static_cast<std::uint32_t>(length));
+    append_bytes(output, genre_key);
+    output.push_back(std::byte{'='});
+    append_bytes(output, genre);
+    output_count += 1;
+    return {};
+}
+
 }
 
 auto Entries::init(std::span<const std::byte> payload) -> expected<Entries> {
@@ -797,6 +1095,132 @@ auto artwork_kind(std::uint32_t picture_type) -> ArtworkKind {
         return ArtworkKind::back_cover;
     }
     return ArtworkKind::other;
+}
+
+auto field_key(Field field) -> std::string_view {
+    switch (field) {
+    case Field::title:
+        return "TITLE";
+    case Field::artist:
+        return "ARTIST";
+    case Field::album:
+        return "ALBUM";
+    case Field::track_number:
+        return "TRACKNUMBER";
+    case Field::album_artist:
+        return "ALBUMARTIST";
+    case Field::disc_number:
+        return "DISCNUMBER";
+    case Field::date:
+        return "DATE";
+    case Field::compilation:
+        return "COMPILATION";
+    case Field::musicbrainz_recording_id:
+        return "MUSICBRAINZ_TRACKID";
+    case Field::musicbrainz_release_id:
+        return "MUSICBRAINZ_ALBUMID";
+    case Field::musicbrainz_release_group_id:
+        return "MUSICBRAINZ_RELEASEGROUPID";
+    case Field::musicbrainz_release_track_id:
+        return "MUSICBRAINZ_RELEASETRACKID";
+    case Field::musicbrainz_album_artist_id:
+        return "MUSICBRAINZ_ALBUMARTISTID";
+    case Field::explicit_advisory:
+        return "ITUNESADVISORY";
+    case Field::composer:
+        return "COMPOSER";
+    case Field::comment:
+        return "COMMENT";
+    }
+    return {};
+}
+
+auto rewrite(std::span<const std::byte> payload, const std::vector<mutation::Change>& changes,
+             const std::optional<mutation::GenreChange>& genres)
+    -> expected<std::vector<std::byte>> {
+    const auto valid = validate_changes(changes);
+    if (!valid) {
+        return std::unexpected(valid.error());
+    }
+    std::size_t cursor = 0;
+    const auto vendor = take_string(payload, cursor);
+    if (!vendor) {
+        return std::unexpected(vendor.error());
+    }
+    const auto count = take_u32(payload, cursor);
+    if (!count) {
+        return std::unexpected(count.error());
+    }
+    if (genres) {
+        const auto matched = genres_match(payload, cursor, *count, genres->before);
+        if (!matched) {
+            return std::unexpected(matched.error());
+        }
+        if (!*matched) {
+            return fail(ErrorCode::metadata_precondition_changed, "vorbis: genre precondition");
+        }
+    }
+    const auto preconditions = validate_preconditions(payload, cursor, *count, changes);
+    if (!preconditions) {
+        return std::unexpected(preconditions.error());
+    }
+    const auto totals = collect_totals(payload, cursor, *count);
+    if (!totals) {
+        return std::unexpected(totals.error());
+    }
+
+    std::vector<std::byte> output;
+    if (const auto appended = append_string(output, to_text(*vendor)); !appended) {
+        return std::unexpected(appended.error());
+    }
+    const std::size_t count_offset = output.size();
+    append_u32(output, 0);
+    const auto unchanged =
+        copy_unchanged_entries(payload, cursor, *count, changes, genres.has_value(), output);
+    if (!unchanged) {
+        return std::unexpected(unchanged.error());
+    }
+    std::uint32_t output_count = *unchanged;
+    if (cursor != payload.size()) {
+        return fail(ErrorCode::invalid_vorbis_comment, "vorbis: trailing bytes");
+    }
+    const auto appended_changes =
+        append_changes(output, output_count, changes, totals->track, totals->disc);
+    if (!appended_changes) {
+        return std::unexpected(appended_changes.error());
+    }
+    if (genres) {
+        for (const std::string& genre : genres->after) {
+            const auto appended = append_genre(output, output_count, genre);
+            if (!appended) {
+                return std::unexpected(appended.error());
+            }
+        }
+    }
+    for (std::size_t index = 0; index < 4; ++index) {
+        output[count_offset + index] =
+            static_cast<std::byte>((output_count >> (index * 8U)) & 0xffU);
+    }
+    return output;
+}
+
+auto create(const std::vector<mutation::Change>& changes,
+            const std::optional<mutation::GenreChange>& genres)
+    -> expected<std::vector<std::byte>> {
+    for (const mutation::Change& change : changes) {
+        if (change.before) {
+            return fail(ErrorCode::metadata_precondition_changed, "vorbis: create precondition");
+        }
+    }
+    if (genres && !genres->before.empty()) {
+        return fail(ErrorCode::metadata_precondition_changed, "vorbis: create precondition");
+    }
+    std::vector<std::byte> base;
+    if (const auto appended = append_string(base, "Orca"); !appended) {
+        return std::unexpected(appended.error());
+    }
+    append_u32(base, 0);
+    return rewrite(base, changes, genres);
 }
 
 }
