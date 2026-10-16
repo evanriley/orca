@@ -8,6 +8,18 @@ add_library(orca STATIC
     crypto/sha256.cpp
     crypto/secure_zero.cpp
     json/json.cpp
+    metadata/artwork.cpp
+    metadata/id3v1.cpp
+    metadata/id3v2.cpp
+    metadata/image_header.cpp
+    metadata/lrc.cpp
+    metadata/lyrics.cpp
+    metadata/genre_alias.cpp
+    metadata/model.cpp
+    metadata/riff_tags.cpp
+    metadata/mp4_tags.cpp
+    metadata/ogg_comment.cpp
+    metadata/vorbis_comment.cpp
     http/client.cpp
     http/curl_transport.cpp
     codec/aac.cpp

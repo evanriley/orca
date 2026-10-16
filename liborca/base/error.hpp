@@ -27,6 +27,17 @@ enum class ErrorCode : std::uint32_t {
     truncated_flac,
     flac_stream_errors,
     flac_md5_mismatch,
+    invalid_id3v2_tag,
+    truncated_id3v2_tag,
+    invalid_id3v2_text,
+    id3v2_tag_too_large,
+    invalid_flac_stream,
+    truncated_flac_stream,
+    invalid_vorbis_comment,
+    invalid_ogg_stream,
+    truncated_ogg_stream,
+    ogg_comment_not_found,
+    ogg_comment_too_large,
 };
 
 struct Error {
