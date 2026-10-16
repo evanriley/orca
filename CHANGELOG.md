@@ -4,6 +4,7 @@
 
 ### Added
 
+- The engine reads and writes tags through a C++ metadata layer: every container reader, the lyrics and artwork dispatches, and file mutation with a BLAKE3-sealed plan, a journaled stage-and-rename write, undo and startup recovery.
 - The engine reads audio through a C++ storage layer (format detection, ISO-BMFF boxes, quick and content hashes) and a codec layer with all nine decoders: WAV, AIFF, FLAC, MP3, AAC/ADTS, ALAC, Opus, Vorbis and QOA.
 - The C++ port scaffolding: a CMake build with `orca::base`, BLAKE3/SHA-256 crypto, a yyjson wrapper and an injectable libcurl HTTP transport, plus doctest/CTest, sanitizer presets and fuzz targets.
 - Radio and Daily Mixes limit how often one Artist repeats, set by `discovery.artist_variety` (`relaxed`, `balanced` by default, or `strict`), `--artist-variety` and `orca_discovery_settings.artist_variety`.
