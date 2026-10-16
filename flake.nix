@@ -13,6 +13,11 @@
     let
       lib = nixpkgs.lib;
 
+      source = builtins.path {
+        path = ./.;
+        name = "orca-source";
+      };
+
       forAllSystems = f: lib.genAttrs [ "x86_64-linux" ] (system: f nixpkgs.legacyPackages.${system});
     in
     {
@@ -88,7 +93,7 @@
 
           zig-fmt = pkgs.runCommand "orca-zig-fmt" { nativeBuildInputs = [ pkgs.zig_0_17 ]; } ''
             export HOME="$TMPDIR"
-            cd ${self}
+            cd ${source}
             zig fmt --check liborca apps benchmarks tests build build.zig
             touch "$out"
           '';
@@ -165,5 +170,39 @@
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
+
+      legacyPackages = forAllSystems (pkgs: {
+        ci =
+          let
+            system = pkgs.stdenv.hostPlatform.system;
+            step = key: label: command: {
+              inherit key label command;
+              target = "source";
+            };
+          in
+          {
+            targets =
+              lib.mapAttrs' (name: lib.nameValuePair "checks.${name}") (
+                removeAttrs self.checks.${system} [ "orca" ]
+              )
+              // {
+                package = self.packages.${system}.orca;
+                source = pkgs.runCommandLocal "orca-source" { } "ln -s ${source} $out";
+              };
+            evalOnly = { };
+            extraSteps = [
+              (step "orca-fmt" ":orca: zig fmt" "orca/ci.sh fmt")
+              (
+                step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test"
+                // {
+                  depends_on = [ "orca-fmt" ];
+                }
+              )
+              (
+                step "orca-package" ":orca: package check" "orca/ci.sh package" // { depends_on = [ "orca-test" ]; }
+              )
+            ];
+          };
+      });
     };
 }
