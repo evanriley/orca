@@ -17,6 +17,10 @@ case "${1:-}" in
     ;;
   nix)
     nix --accept-flake-config flake check -L .
+    if [ -n "${GERRIT_MERGE:-}" ]; then
+      out=$(nix --accept-flake-config build --no-link --print-out-paths .#orca)
+      cachix push orca "$out"
+    fi
     ;;
   *)
     echo "unknown phase '$1': expected fmt, test, package or nix" >&2
