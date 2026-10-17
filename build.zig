@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         []const u8,
         "provider-contact",
         "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
-    ) orelse "https://github.com/evanriley/orca";
+    ) orelse "https://code.maybemaybe.lol/maybe.git/tree/orca";
     const gtk = b.option(bool, "gtk", "Build and install orca-gtk on Linux") orelse true;
     const static_lib = b.option(bool, "static-lib", "Install the static liborca") orelse true;
     const unit_test_shards = b.option(u32, "unit-test-shards", "Number of processes that run liborca's unit tests in parallel") orelse 4;

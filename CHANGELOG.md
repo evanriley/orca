@@ -65,6 +65,7 @@
 - `zig build package-check` keeps its Zig global cache in `~/.cache/orca/package-check` (`ORCA_PACKAGE_CHECK_CACHE` overrides it) instead of a fresh one per run, so repeat runs are faster.
 - `zig build test` and `zig build test-liborca` run liborca's unit tests in parallel processes, set by `-Dunit-test-shards` (4 by default).
 - The Nix package no longer installs `liborca.a`; link `liborca.so` or build from source to link statically (`-Dstatic-lib=false` leaves it out of `zig build install`).
+- The default `-Dprovider-contact`, sent in the `User-Agent` of provider requests, is `https://code.maybemaybe.lol/maybe.git/tree/orca`.
 
 ## 0.4.0 - 2026-10-11
 
