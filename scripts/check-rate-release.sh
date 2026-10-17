@@ -116,7 +116,13 @@ run_scenario() {
     for _ in $(seq 3); do
         seen="$seen $(graph_rate)"
     done
-    wait "$play_pid" || fail "$name: pw-play failed: $(cat "$scratch/$name.pw-play")"
+    local play_status=0
+    if ! kill -0 "$play_pid" 2>/dev/null; then
+        wait "$play_pid" || play_status=$?
+        fail "$name: pw-play exited $play_status before the rate samples finished: $(cat "$scratch/$name.pw-play")"
+    fi
+    kill "$play_pid"
+    wait "$play_pid" || true
     exec 3>&-
     wait "$driver_pid" || status=$?
     [[ "$status" == 0 ]] || fail "$name: driver exited $status: $(cat "$out")"
