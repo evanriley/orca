@@ -42,6 +42,7 @@ zig build -Dgtk=false         # the same without orca-gtk and its files
 zig build -Dembeddings=false  # liborca without audio embeddings and ONNX Runtime
 zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
 zig build test-liborca        # liborca's unit and integration tests only; CI runs them with -Doptimize=ReleaseSafe
+zig build test -Dunit-test-shards=N   # run liborca's unit tests in N parallel processes, 4 by default
 zig build abi-compat          # orca.h keeps the layouts, values and functions of tests/abi/orca-0.1.0.h
 zig build fuzz --fuzz[=N]     # fuzz the parser targets; N iterations per target, unlimited opens the web UI
 zig build embed-example       # build examples/embed against this checkout

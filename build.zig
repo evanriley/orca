@@ -14,6 +14,8 @@ pub fn build(b: *std.Build) void {
         "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
     ) orelse "https://github.com/evanriley/orca";
     const gtk = b.option(bool, "gtk", "Build and install orca-gtk on Linux") orelse true;
+    const unit_test_shards = b.option(u32, "unit-test-shards", "Number of processes that run liborca's unit tests in parallel") orelse 4;
+    if (unit_test_shards == 0) std.process.fatal("-Dunit-test-shards=0: expected at least 1 shard. Pass -Dunit-test-shards=1 to run liborca's unit tests in one process.", .{});
     const embeddings = b.option(bool, "embeddings", "Build audio embeddings into liborca; needs ONNX Runtime") orelse true;
     const embedding_model = b.option(
         []const u8,
@@ -167,8 +169,10 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run orca-cli");
     run_step.dependOn(&run_cli.step);
 
-    const unit_tests = b.addTest(.{ .root_module = liborca_module });
-    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const unit_tests = b.addTest(.{
+        .root_module = liborca_module,
+        .test_runner = .{ .path = b.path("build/test_runner.zig"), .mode = .server },
+    });
 
     const orca_header_translate = b.addTranslateC(.{
         .root_source_file = b.path("liborca/orca.h"),
@@ -287,11 +291,16 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run all unit and integration tests");
-    test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_integration_tests.step);
     const test_liborca_step = b.step("test-liborca", "Run liborca's unit and integration tests");
-    test_liborca_step.dependOn(&run_unit_tests.step);
     test_liborca_step.dependOn(&run_integration_tests.step);
+    for (0..unit_test_shards) |shard_index| {
+        const run_unit_tests = b.addRunArtifact(unit_tests);
+        run_unit_tests.setName(b.fmt("run unit tests {d}/{d}", .{ shard_index, unit_test_shards }));
+        run_unit_tests.addArg(b.fmt("--shard={d}/{d}", .{ shard_index, unit_test_shards }));
+        test_step.dependOn(&run_unit_tests.step);
+        test_liborca_step.dependOn(&run_unit_tests.step);
+    }
     // Built as its own project, so the documented way to embed liborca as a
     // Zig package dependency is exercised rather than asserted.
     const embed_example = b.addSystemCommand(&.{ b.graph.zig_exe, "build", b.fmt("-Dembeddings={}", .{embeddings}) });
