@@ -378,7 +378,6 @@ pub fn build(b: *std.Build) void {
         .root_module = liborca_module,
         .filters = &.{"fuzz:"},
         .use_llvm = true,
-        .test_runner = .{ .path = b.path("build/test_runner.zig"), .mode = .server },
     });
     const fuzz_step = b.step("fuzz", "Replay fuzz seeds; add --fuzz to fuzz");
     fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
