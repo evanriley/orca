@@ -177,10 +177,10 @@
         ci =
           let
             system = pkgs.stdenv.hostPlatform.system;
-            step = key: label: command: {
-              inherit key label command;
-              target = "source";
-            };
+            fullStep = key: label: command: { inherit key label command; };
+            step =
+              key: label: command:
+              fullStep key label command // { target = "source"; };
           in
           {
             targets =
@@ -196,7 +196,11 @@
               (step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test")
               (step "orca-package" ":orca: package check" "orca/ci.sh package")
             ];
-            fullSteps = [ ];
+            fullSteps = [
+              (fullStep "orca-release-safe" ":orca: ReleaseSafe liborca tests" "orca/ci.sh release-safe")
+              (fullStep "orca-sanitize" ":orca: ALAC and AAC sanitizers" "orca/ci.sh sanitize")
+              (fullStep "orca-cross" ":orca: aarch64-macos library build" "orca/ci.sh cross")
+            ];
           };
       });
     };

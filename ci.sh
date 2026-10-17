@@ -48,8 +48,21 @@ case "${1:-}" in
     prepare_buildkite
     nix --accept-flake-config develop -c zig build package-check
     ;;
+  release-safe)
+    prepare_buildkite
+    nix --accept-flake-config develop -c scripts/headless-audio.sh zig build test-liborca -Doptimize=ReleaseSafe
+    ;;
+  sanitize)
+    prepare_buildkite
+    nix --accept-flake-config develop -c scripts/alac-sanitize.sh
+    nix --accept-flake-config develop -c scripts/aac-sanitize.sh
+    ;;
+  cross)
+    prepare_buildkite
+    nix --accept-flake-config develop -c zig build lib -Dtarget=aarch64-macos
+    ;;
   *)
-    echo "unknown phase '$1': expected fmt, test or package" >&2
+    echo "unknown phase '$1': expected fmt, test, package, release-safe, sanitize or cross" >&2
     exit 2
     ;;
 esac
