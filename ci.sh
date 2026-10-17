@@ -8,9 +8,7 @@ case "${1:-}" in
     nix --accept-flake-config develop -c zig fmt --check liborca apps benchmarks tests build build.zig
     ;;
   test)
-    nix --accept-flake-config develop -c zig build
-    nix --accept-flake-config develop -c scripts/headless-audio.sh zig build test bench-build embed-example
-    nix --accept-flake-config develop -c zig build fuzz
+    nix --accept-flake-config develop -c scripts/headless-audio.sh zig build install test bench-build embed-example fuzz
     ;;
   package)
     nix --accept-flake-config develop -c zig build package-check
