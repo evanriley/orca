@@ -9,15 +9,16 @@ scratch=""
 prepare_buildkite() {
   [ "${BUILDKITE:-}" = true ] || return 0
 
-  if [ -z "${ZIG_LOCAL_CACHE_DIR:-}" ]; then
-    : "${BUILDKITE_AGENT_NAME:?ci.sh: BUILDKITE_AGENT_NAME is unset; expected the Buildkite agent name to key the Zig cache}"
+  if [ -z "${ZIG_LOCAL_CACHE_DIR:-}" ] || [ -z "${ZIG_GLOBAL_CACHE_DIR:-}" ]; then
+    : "${BUILDKITE_AGENT_NAME:?ci.sh: BUILDKITE_AGENT_NAME is unset; expected the Buildkite agent name to key the Zig caches}"
     local cache="${XDG_CACHE_HOME:-$HOME/.cache}/orca-ci/$BUILDKITE_AGENT_NAME"
-    if [ -d "$cache" ] && [ -z "$(find "$cache/.stamp" -mtime "-$cache_max_age_days" 2>/dev/null)" ]; then
+    if [ -d "$cache" ] && { [ ! -d "$cache/local" ] || [ -z "$(find "$cache/.stamp" -mtime "-$cache_max_age_days" 2>/dev/null)" ]; }; then
       rm -rf "$cache"
     fi
-    mkdir -p "$cache"
+    mkdir -p "$cache/local" "$cache/global"
     [ -e "$cache/.stamp" ] || touch "$cache/.stamp"
-    export ZIG_LOCAL_CACHE_DIR="$cache"
+    export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-$cache/local}"
+    export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$cache/global}"
   fi
 
   mkdir -p "$ZIG_LOCAL_CACHE_DIR"
