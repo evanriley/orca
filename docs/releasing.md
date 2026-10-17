@@ -57,15 +57,15 @@ A different model is a new file under a new tag, never a replaced asset:
 4. Commit, push the commit to Gerrit with `git push origin HEAD:refs/for/main`,
    and submit it once CI votes Verified +1.
 5. Check out the updated `main`, tag the release commit (`RELEASE_COMMIT`
-   below) with a signed, annotated `vX.Y.Z` tag whose message is that
+   below) with a signed, annotated `orca-vX.Y.Z` tag whose message is that
    version's section of `CHANGELOG.md`, and push the tag:
 
    ```sh
    version=X.Y.Z
    { printf 'Orca %s\n\n' "$version"
      awk -v v="$version" '$1 == "##" { p = ($2 == v); next } p' CHANGELOG.md
-   } | git tag -s "v$version" --cleanup=whitespace -F - RELEASE_COMMIT
-   git push origin "v$version"
+   } | git tag -s "orca-v$version" --cleanup=whitespace -F - RELEASE_COMMIT
+   git push origin "orca-v$version"
    ```
 
    `--cleanup=whitespace` keeps the `###` headings, which the default
