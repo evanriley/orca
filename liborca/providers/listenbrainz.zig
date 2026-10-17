@@ -1485,7 +1485,9 @@ test "a 413 or 422 on a single listen rejects it and it is never resent" {
 }
 
 test "a listen whose lease was lost during the request is skipped and the others are delivered" {
+    const log_level = std.testing.log_level;
     std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var fixture: Fixture = undefined;
     try fixture.start("file:orca-lb-stale?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();

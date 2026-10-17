@@ -528,6 +528,9 @@ fn playFromAnotherThread(runtime: *Runtime, status: *Status) void {
 
 test "a destroy from another thread is refused in debug builds and leaves the runtime usable" {
     if (builtin.mode != .debug) return error.SkipZigTest;
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
     var library: Handle = undefined;

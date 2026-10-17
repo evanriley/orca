@@ -4676,7 +4676,9 @@ test "opening a new Library or a current one makes no copy" {
 }
 
 test "a copy that cannot be written fails the open and leaves the Library at its version" {
+    const log_level = std.testing.log_level;
     std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var fixture = try UpgradeFixture.init();
     defer fixture.deinit();
     (try fixture.released(1)).close();

@@ -346,6 +346,9 @@ test "concurrent first installs replace fcntl once and every caller sees it inst
 
 test "an install while a database file is open leaves fcntl alone and stays refused" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var fake: FakeUnixVfs = .{};
     var installation: linux_locks.Installation = .{};
 
