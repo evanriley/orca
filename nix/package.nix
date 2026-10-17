@@ -87,7 +87,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   meta = {
     description = "Local-files-first music player and library-maintenance application";
-    homepage = "https://github.com/evanriley/orca";
+    homepage = "https://code.maybemaybe.lol/maybe.git/tree/orca";
     license = lib.licenses.mpl20;
     platforms = [ "x86_64-linux" ];
     mainProgram = "orca-gtk";

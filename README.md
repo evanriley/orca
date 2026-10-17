@@ -62,8 +62,8 @@ smaller enhancements are [git-bug issues](https://b.maybemaybe.lol).
 ## Install
 
 ```sh
-nix run github:evanriley/orca
-nix run github:evanriley/orca#orca-cli -- --version
+nix run 'git+https://code.maybemaybe.lol/maybe?dir=orca'
+nix run 'git+https://code.maybemaybe.lol/maybe?dir=orca#orca-cli' -- --version
 ```
 
 [Install](docs/install.md) covers NixOS and Home Manager modules, the binary

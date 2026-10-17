@@ -13,8 +13,8 @@ The flake packages Orca for `x86_64-linux`. The package installs `orca-gtk`,
 Run it without installing:
 
 ```sh
-nix run github:evanriley/orca
-nix run github:evanriley/orca#orca-cli -- --version
+nix run 'git+https://code.maybemaybe.lol/maybe?dir=orca'
+nix run 'git+https://code.maybemaybe.lol/maybe?dir=orca#orca-cli' -- --version
 ```
 
 ### NixOS
@@ -22,7 +22,7 @@ nix run github:evanriley/orca#orca-cli -- --version
 ```nix
 {
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.orca.url = "github:evanriley/orca";
+  inputs.orca.url = "git+https://code.maybemaybe.lol/maybe?dir=orca";
   inputs.orca.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs =
@@ -214,6 +214,6 @@ writes.
   and AcoustID user key `orca-gtk` stores. `orca-cli` reads them from
   `ORCA_LISTENBRAINZ_TOKEN` and `ORCA_ACOUSTID_USER_KEY`.
 - With the Nix package on a distribution other than NixOS, including
-  `nix run github:evanriley/orca#orca-gtk`, `orca-gtk` may need
-  [nixGL](https://github.com/nix-community/nixGL) to find the host's OpenGL
-  drivers.
+  `nix run 'git+https://code.maybemaybe.lol/maybe?dir=orca#orca-gtk'`,
+  `orca-gtk` may need [nixGL](https://github.com/nix-community/nixGL) to find
+  the host's OpenGL drivers.
