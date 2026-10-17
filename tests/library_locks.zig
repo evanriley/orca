@@ -24,12 +24,12 @@ test "a second Orca process cannot delete the WAL under a live Library" {
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    const working_directory = try std.process.currentPathAlloc(io, std.testing.allocator);
-    defer std.testing.allocator.free(working_directory);
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const scratch_path = buffer[0..try temporary.dir.realPath(io, &buffer)];
     const database_path = try std.fmt.allocPrintSentinel(
         std.testing.allocator,
-        "{s}/.zig-cache/tmp/{s}/library.db",
-        .{ working_directory, temporary.sub_path },
+        "{s}/library.db",
+        .{scratch_path},
         0,
     );
     defer std.testing.allocator.free(database_path);

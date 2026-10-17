@@ -12,13 +12,8 @@ const Scratch = struct {
     fn init(io: std.Io) !Scratch {
         var temporary = std.testing.tmpDir(.{});
         errdefer temporary.cleanup();
-        const working_directory = try std.process.currentPathAlloc(io, std.testing.allocator);
-        defer std.testing.allocator.free(working_directory);
-        const path = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "{s}/.zig-cache/tmp/{s}",
-            .{ working_directory, temporary.sub_path },
-        );
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try std.testing.allocator.dupe(u8, buffer[0..try temporary.dir.realPath(io, &buffer)]);
         errdefer std.testing.allocator.free(path);
         const database_path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/library.db", .{path}, 0);
         return .{ .temporary = temporary, .path = path, .database_path = database_path };

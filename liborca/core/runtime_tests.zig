@@ -5998,9 +5998,8 @@ const PlaylistFileFixture = struct {
         self.library = try self.runtime.openLibrary(std.testing.io, uri);
         self.directory = std.testing.tmpDir(.{ .iterate = true });
         errdefer self.directory.cleanup();
-        const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
-        defer std.testing.allocator.free(current);
-        self.root = try std.fmt.allocPrint(std.testing.allocator, "{s}/.zig-cache/tmp/{s}", .{ current, self.directory.sub_path });
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        self.root = try std.testing.allocator.dupe(u8, buffer[0..try self.directory.dir.realPath(std.testing.io, &buffer)]);
     }
 
     fn deinit(self: *PlaylistFileFixture) void {
