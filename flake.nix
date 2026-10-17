@@ -13,9 +13,9 @@
     let
       lib = nixpkgs.lib;
 
-      source = builtins.path {
-        path = ./.;
-        name = "orca-source";
+      source = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.difference ./. (lib.fileset.fileFilter (file: file.hasExt "md") ./.);
       };
 
       forAllSystems = f: lib.genAttrs [ "x86_64-linux" ] (system: f nixpkgs.legacyPackages.${system});
