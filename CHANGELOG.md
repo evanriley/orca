@@ -62,6 +62,7 @@
 - libxaac is pinned to an upstream commit with AAC decoder security fixes.
 - **Breaking:** a Library opened by this version upgrades to schema v7 and cannot then be opened by an older Orca.
 - `zig build test` no longer builds the benchmarks or `examples/embed`; `zig build bench-build` and `embed-example` do, and `zig build test-liborca` runs only liborca's unit and integration tests.
+- `zig build package-check` keeps its Zig global cache in `~/.cache/orca/package-check` (`ORCA_PACKAGE_CHECK_CACHE` overrides it) instead of a fresh one per run, so repeat runs are faster.
 
 ## 0.4.0 - 2026-10-11
 

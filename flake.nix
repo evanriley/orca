@@ -161,6 +161,7 @@
             pkgs.sqlite-interactive.bin
             pkgs.wireplumber
             pkgs.procps
+            pkgs.util-linux
           ];
           buildInputs = self.packages.${pkgs.stdenv.hostPlatform.system}.orca.buildInputs;
           shellHook = ''

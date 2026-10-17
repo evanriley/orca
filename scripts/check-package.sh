@@ -6,6 +6,9 @@
 #
 # Usage:
 #   scripts/check-package.sh ZIG SOURCE_ROOT VERSION [SEED_PACKAGE...]
+#
+# The Zig global cache persists in ORCA_PACKAGE_CHECK_CACHE (default
+# ~/.cache/orca/package-check/<agent>) and is rebuilt after 7 days.
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
@@ -19,9 +22,27 @@ shift 3
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cache=$work/cache
-export ZIG_GLOBAL_CACHE_DIR=$cache
+cache=${ORCA_PACKAGE_CHECK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/orca/package-check/${BUILDKITE_AGENT_NAME:-local}}
+mkdir -p "$(dirname "$cache")"
+exec 9>"$cache.lock"
+if ! flock -n 9; then
+    echo "check-package: waiting for the lock on $cache.lock" >&2
+    flock 9
+fi
+if [[ -e $cache && ! -e $cache/stamp ]]; then
+    echo "check-package: $cache exists but has no stamp file, so it is not a package-check cache; remove it or set ORCA_PACKAGE_CHECK_CACHE to a new directory" >&2
+    exit 1
+fi
+if [[ -e $cache/stamp && -z $(find "$cache/stamp" -mtime -7) ]]; then
+    rm -rf "$cache"
+fi
+if [[ ! -e $cache ]]; then
+    mkdir -p "$cache"
+    touch "$cache/stamp"
+fi
+rm -rf "$cache/p" "$cache/tmp"
 mkdir -p "$cache/p"
+export ZIG_GLOBAL_CACHE_DIR=$cache
 for seed in "$@"; do
     if [[ -f $seed ]]; then
         cp "$seed" "$cache/p/"
