@@ -2,6 +2,7 @@
   lib,
   stdenv,
   zig_0_17,
+  callPackage,
   fetchurl,
   pkg-config,
   wrapGAppsHook4,
@@ -72,6 +73,8 @@ stdenv.mkDerivation (finalAttrs: {
   };
 
   postConfigure = ''
+    cp -r ${callPackage ./zig-cache.nix { }}/. "$ZIG_GLOBAL_CACHE_DIR"
+    chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR"
     ln -s ${finalAttrs.deps} "$ZIG_GLOBAL_CACHE_DIR/p"
   '';
 
