@@ -1,9 +1,9 @@
 # Contributing
 
-Orca is a 0.x preview. Known issues are
-[GitHub issues](https://github.com/evanriley/orca/issues), and the
-[roadmap](docs/roadmap.md) lists planned work. Open an issue before starting
-anything larger than a fix.
+Orca is a 0.x preview and a personal project that takes no outside
+contributions, issues or pull requests. These are the rules its own changes
+follow. Known issues are [git-bug issues](https://b.maybemaybe.lol), and the
+[roadmap](docs/roadmap.md) lists planned work.
 
 ## Development environment
 

@@ -6,21 +6,15 @@ Orca is a 0.x preview. Only the latest release receives security fixes.
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately with GitHub's private vulnerability
-reporting:
-
-1. Open the [Security tab](https://github.com/evanriley/orca/security) of the
-   `evanriley/orca` repository.
-2. Choose Report a vulnerability and describe the issue.
-
-Do not open a public issue or pull request for a vulnerability.
+Report vulnerabilities privately by email to
+[evan@evanriley.com](mailto:evan@evanriley.com). Do not report a vulnerability
+in public.
 
 Include the affected version (`orca-cli --version`), the platform, and steps
 or a file that reproduces the problem.
 
 Orca is a one-maintainer project. Reports are handled on a best-effort basis,
-with no guaranteed response time. A reporter will hear back through the same
-private report.
+with no guaranteed response time. A reporter will hear back by email.
 
 ## Scope
 

@@ -15,7 +15,7 @@ it, and the rules a contributor must keep. They hold no measurements, decision
 history, session notes or implementation narrative; those belong in commit
 messages. Direction (Planned, Ideas, Not planned) belongs in
 [docs/roadmap.md](docs/roadmap.md), what works today in the README's Features
-list, and defects, test gaps and small enhancements in GitHub issues. Rules an
+list, and defects, test gaps and small enhancements in git-bug issues. Rules an
 agent must not break belong in the `AGENTS.md` of the tree they govern. Change
 an `AGENTS.md` file only when an agent working rule changes.
 

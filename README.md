@@ -6,10 +6,19 @@ playback, metadata, analysis and online identification; `orca-gtk` and
 `orca-cli` are thin clients of it, and other applications can embed it through
 its Zig API or C ABI.
 
-Orca is pre-1.0 ([1.0 readiness](https://github.com/evanriley/orca/issues/43)). A
+Orca is pre-1.0 ([1.0 readiness](https://b.maybemaybe.lol/672513d)). A
 release before 1.0 bumps the minor version when it breaks the Zig API, the
 C ABI or the Library schema. Orca builds and plays on x86_64 Linux with
 PipeWire; other platforms are on the roadmap.
+
+Orca is a personal project, source available under the [MPL-2.0](LICENSE). It
+takes no outside contributions. The
+[GitHub repository](https://github.com/evanriley/orca) is a read-only mirror of
+`orca/` in the
+[`maybe` monorepo](https://code.maybemaybe.lol/maybe.git/tree/orca) and takes
+no issues or pull requests. Report a serious problem, such as a security hole
+or data loss, by email to
+[evan@evanriley.com](mailto:evan@evanriley.com).
 
 Orca changes music files only through a plan the user approves, journaled so
 that an interrupted write is recovered and a finished one can be undone. It
@@ -48,7 +57,7 @@ it receives.
   macOS without audio output or folder watching.
 
 [The roadmap](docs/roadmap.md) lists planned work and ideas; defects and
-smaller enhancements are [GitHub issues](https://github.com/evanriley/orca/issues).
+smaller enhancements are [git-bug issues](https://b.maybemaybe.lol).
 
 ## Install
 

@@ -8,7 +8,7 @@ Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
 release bumps the minor version when it contains a breaking change to the
 Zig API, the C ABI or the Library schema, and the patch version otherwise.
 1.0 follows the
-[1.0 readiness](https://github.com/evanriley/orca/issues/43) conditions.
+[1.0 readiness](https://b.maybemaybe.lol/672513d) conditions.
 
 ## Changelog
 
