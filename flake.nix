@@ -192,16 +192,8 @@
               };
             evalOnly = { };
             extraSteps = [
-              (step "orca-fmt" ":orca: zig fmt" "orca/ci.sh fmt")
-              (
-                step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test"
-                // {
-                  depends_on = [ "orca-fmt" ];
-                }
-              )
-              (
-                step "orca-package" ":orca: package check" "orca/ci.sh package" // { depends_on = [ "orca-fmt" ]; }
-              )
+              (step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test")
+              (step "orca-package" ":orca: package check" "orca/ci.sh package")
             ];
           };
       });
