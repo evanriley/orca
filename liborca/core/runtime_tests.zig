@@ -944,7 +944,9 @@ test "runtime Zone policies and failures remain independent" {
     );
 }
 
-/// A wall-clock bound for a test that is waiting on another thread.
+/// A bound of at least the given milliseconds for a test that is waiting on
+/// another thread. It counts one-millisecond sleeps, so on a loaded machine
+/// the wait runs longer than its nominal duration.
 ///
 /// A count of `std.Thread.yield()` calls is not a duration, and on a loaded
 /// machine it runs out before an engine has opened an output. The sleep also
