@@ -1045,8 +1045,8 @@ test "feeding the same audio in small or large chunks measures identical bytes" 
 }
 
 test "audio past the window is ignored" {
-    var signal: Signal = .init(.{ .clicks = 100 }, 11_025, 1, 610);
-    var analyzer = try Analyzer.init(testing.allocator, signal.sample_rate, signal.channels, .{});
+    var signal: Signal = .init(.{ .clicks = 100 }, 11_025, 1, 30);
+    var analyzer = try Analyzer.init(testing.allocator, signal.sample_rate, signal.channels, .{ .max_seconds = 20 });
     defer analyzer.deinit();
     var buffer: [8192]f32 = undefined;
     while (true) {
@@ -1055,7 +1055,7 @@ test "audio past the window is ignored" {
         try analyzer.process(buffer[0..frames]);
     }
     const features = try analyzer.finish();
-    try testing.expectEqual(@as(u32, 600_000), features.analysed_ms);
+    try testing.expectEqual(@as(u32, 20_000), features.analysed_ms);
     try expectTempoNear(100, features);
 }
 
