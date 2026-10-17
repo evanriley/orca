@@ -72,6 +72,8 @@ stdenv.mkDerivation (finalAttrs: {
     hash = "sha256-EtPiwVk7oRHfYQP+rC885PToXl78KtknrBaoQC57PDY=";
   };
 
+  zigBuildFlags = [ "-Dstatic-lib=false" ];
+
   postConfigure = ''
     cp -r ${callPackage ./zig-cache.nix { }}/. "$ZIG_GLOBAL_CACHE_DIR"
     chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR"

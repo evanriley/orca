@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
         "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
     ) orelse "https://github.com/evanriley/orca";
     const gtk = b.option(bool, "gtk", "Build and install orca-gtk on Linux") orelse true;
+    const static_lib = b.option(bool, "static-lib", "Install the static liborca") orelse true;
     const unit_test_shards = b.option(u32, "unit-test-shards", "Number of processes that run liborca's unit tests in parallel") orelse 4;
     if (unit_test_shards == 0) std.process.fatal("-Dunit-test-shards=0: expected at least 1 shard. Pass -Dunit-test-shards=1 to run liborca's unit tests in one process.", .{});
     const embeddings = b.option(bool, "embeddings", "Build audio embeddings into liborca; needs ONNX Runtime") orelse true;
@@ -123,7 +124,7 @@ pub fn build(b: *std.Build) void {
     liborca.bundle_compiler_rt = true;
     liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
     installLicenses(b);
-    b.installArtifact(liborca);
+    if (static_lib) b.installArtifact(liborca);
     const lib_step = b.step("lib", "Build the static liborca and orca.h");
     lib_step.dependOn(&b.addInstallArtifact(liborca, .{}).step);
 
@@ -141,6 +142,7 @@ pub fn build(b: *std.Build) void {
         liborca_shared.use_llvm = true;
         liborca_shared.use_lld = true;
     }
+    liborca_shared.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
     b.installArtifact(liborca_shared);
     const pkg_config = b.addInstallFile(
         b.addWriteFiles().add("orca.pc", pkgConfigFile(b, target.result.os.tag, embeddings)),

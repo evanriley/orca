@@ -129,6 +129,7 @@
                 [ -x ${orca}/bin/orca-gtk ] || fail "bin/orca-gtk is missing"
                 [ -f ${orca}/include/orca/orca.h ] || fail "include/orca/orca.h is missing"
                 [ -f ${orca}/lib/liborca.so.0 ] || fail "lib/liborca.so.0 is missing"
+                [ ! -e ${orca}/lib/liborca.a ] || fail "lib/liborca.a is installed; expected the Nix package to leave out the static library"
                 soname=$(readelf -d ${orca}/lib/liborca.so.0 | sed -n 's/.*Library soname: \[\(.*\)\]/\1/p')
                 [ "$soname" = liborca.so.0 ] || fail "lib/liborca.so.0 has SONAME '$soname'; expected liborca.so.0"
 

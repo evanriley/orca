@@ -6,7 +6,7 @@ Orca installs from its Nix flake or builds from source. Both produce
 ## Install with Nix
 
 The flake packages Orca for `x86_64-linux`. The package installs `orca-gtk`,
-`orca-cli`, static and shared `liborca`, `include/orca/orca.h`,
+`orca-cli`, shared `liborca`, `include/orca/orca.h`,
 `lib/pkgconfig/orca.pc`, the desktop entry, the icons and the
 [sound similarity model](sound-similarity.md).
 
@@ -164,12 +164,12 @@ Ubuntu 24.04.
 zig build -Doptimize=ReleaseSafe -p ~/.local
 ```
 
-`-p` sets the install prefix. Add `-Dgtk=false` to build without `orca-gtk`
-or `-Dembeddings=false` to build without ONNX Runtime, and pass the same
-options to `zig build test`. The build targets the baseline CPU of the
-architecture; `-Dcpu=native` uses every instruction set of the building
-machine, which speeds analysis and produces a binary that may not run on
-another CPU. The install holds:
+`-p` sets the install prefix. Add `-Dgtk=false` to build without `orca-gtk`,
+`-Dembeddings=false` to build without ONNX Runtime or `-Dstatic-lib=false` to
+leave out `liborca.a`, and pass the same options to `zig build test`. The
+build targets the baseline CPU of the architecture; `-Dcpu=native` uses every
+instruction set of the building machine, which speeds analysis and produces a
+binary that may not run on another CPU. The install holds:
 
 - `bin/orca-gtk` and `bin/orca-cli`;
 - `lib/liborca.a`, `lib/liborca.so` and `lib/pkgconfig/orca.pc`;

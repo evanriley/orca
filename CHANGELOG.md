@@ -64,6 +64,7 @@
 - `zig build test` no longer builds the benchmarks or `examples/embed`; `zig build bench-build` and `embed-example` do, and `zig build test-liborca` runs only liborca's unit and integration tests.
 - `zig build package-check` keeps its Zig global cache in `~/.cache/orca/package-check` (`ORCA_PACKAGE_CHECK_CACHE` overrides it) instead of a fresh one per run, so repeat runs are faster.
 - `zig build test` and `zig build test-liborca` run liborca's unit tests in parallel processes, set by `-Dunit-test-shards` (4 by default).
+- The Nix package no longer installs `liborca.a`; link `liborca.so` or build from source to link statically (`-Dstatic-lib=false` leaves it out of `zig build install`).
 
 ## 0.4.0 - 2026-10-11
 

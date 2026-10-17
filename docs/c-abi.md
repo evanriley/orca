@@ -206,7 +206,8 @@ cc host.c $(pkg-config --cflags --libs orca)
 ```
 
 Static library. The linker prefers `liborca.so` when both libraries sit in one
-directory, so `-Bstatic` selects `liborca.a`:
+directory, so `-Bstatic` selects `liborca.a`. The Nix package installs no
+`liborca.a`; a static link needs a [source build](install.md#build-and-install):
 
 ```sh
 cc host.c $(pkg-config --cflags orca) -Wl,-Bstatic -lorca -Wl,-Bdynamic \
