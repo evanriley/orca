@@ -199,7 +199,7 @@
                 }
               )
               (
-                step "orca-package" ":orca: package check" "orca/ci.sh package" // { depends_on = [ "orca-test" ]; }
+                step "orca-package" ":orca: package check" "orca/ci.sh package" // { depends_on = [ "orca-fmt" ]; }
               )
             ];
           };
