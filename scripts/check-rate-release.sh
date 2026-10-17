@@ -30,6 +30,7 @@ fi
 }
 
 sink=orca-rate-release
+other_node=orca-rate-release-other
 orca_rate=44100
 other_rate=48000
 
@@ -42,7 +43,7 @@ mkdir -p "$scratch"
 python3 - "$scratch" "$orca_rate" "$other_rate" <<'EOF'
 import sys, wave
 scratch, orca_rate, other_rate = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-for rate, seconds in ((orca_rate, 60), (other_rate, 12)):
+for rate, seconds in ((orca_rate, 60), (other_rate, 60)):
     with wave.open(f"{scratch}/silence-{rate}.wav", "wb") as out:
         out.setnchannels(2)
         out.setsampwidth(2)
@@ -111,8 +112,16 @@ run_scenario() {
         done
         [[ "$(node_state Orca)" == idle ]] || fail "$name: Orca's stream stayed $(node_state Orca) after pause"
     fi
-    timeout 20 pw-play --target "$sink" --rate "$other_rate" "$scratch/silence-$other_rate.wav" >"$scratch/$name.pw-play" 2>&1 &
-    local play_pid=$!
+    timeout 60 pw-play -P "{ node.name = $other_node }" --target "$sink" --rate "$other_rate" \
+        "$scratch/silence-$other_rate.wav" >"$scratch/$name.pw-play" 2>&1 &
+    local play_pid=$! play_state=""
+    for _ in $(seq 50); do
+        play_state=$(node_state "$other_node")
+        [[ "$play_state" == running ]] && break
+        sleep 0.1
+    done
+    [[ "$play_state" == running ]] ||
+        fail "$name: the $other_rate Hz stream stayed ${play_state:-absent}, expected running: $(cat "$scratch/$name.pw-play")"
     for _ in $(seq 3); do
         seen="$seen $(graph_rate)"
     done
