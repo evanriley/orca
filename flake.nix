@@ -196,6 +196,7 @@
               (step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test")
               (step "orca-package" ":orca: package check" "orca/ci.sh package")
             ];
+            fullSteps = [ ];
           };
       });
     };
