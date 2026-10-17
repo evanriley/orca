@@ -99,8 +99,8 @@ boundaries. Read `liborca/AGENTS.md` before changing `liborca/` and
 ## Verification
 
 Run commands from the repository root inside the dev shell. Outside Nix, run
-the `zig` commands; CI runs the `nix` ones. What CI runs on pull requests and
-on `main` is in [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration).
+the `zig` commands; CI runs the `nix` ones. What CI runs on patchsets and merges
+to `main` is in [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration).
 
 ```sh
 zig fmt --check liborca apps benchmarks tests build build.zig

@@ -95,77 +95,15 @@ omitted device selects the system default output, which is real hardware.
 
 ## Continuous integration
 
-`.github/workflows/test.yml` runs in three tiers. A `required` job fails when
-any job fails; a skipped job counts as passing.
+Buildkite builds every patchset and every merge to `main`, as described in the
+[root README](../README.md#ci). Only targets that changed build. For orca they
+are:
 
-### Fast tier
-
-Every pull request that changes anything outside `docs/`, `orca-design/` and
-Markdown files runs:
-
-- `lint`: `zig fmt --check` and a pinact check that every action is pinned to
-  the commit its version comment names;
-- `test`: `zig build`, `zig build test bench-build embed-example` under
-  `scripts/headless-audio.sh`, and `zig build fuzz`.
-
-A pull request that touches only `docs/`, `orca-design/` or Markdown files
-skips every job.
-
-### Scoped tier
-
-These jobs run on a pull request only when it changes their inputs:
-
-- `nix`: `nix flake check`, the package build, the NixOS module and the
-  installed tree. Inputs: `flake.nix`, `flake.lock`, `nix/`, `build/`,
-  `build.zig` and `build.zig.zon`;
-- `package`: `zig build package-check` against the fetched Zig package.
-  Inputs: `build.zig.zon`, `build/`, `build.zig`, `examples/` and
-  `scripts/check-package.sh`.
-
-### Full tier
-
-The full tier runs every job: the fast and scoped jobs plus
-
-- `release`: `zig build test-liborca -Doptimize=ReleaseSafe` under
-  `scripts/headless-audio.sh`;
-- `sanitize`: the ALAC and AAC sanitizer scripts;
-- `cross-macos`: the static `liborca` cross-build for aarch64 macOS;
-- `distro`: a build with the official Zig release against the libraries of
-  Debian 13 (with `-Dgtk=false`) and Fedora 43.
-
-It runs on:
-
-- every push to `main`;
-- a manual dispatch of the workflow;
-- a pull request that carries the `ci:full` label. Adding a label re-runs the
-  pull request's tiers;
-- the nightly schedule at 07:00 UTC;
-- completion of the `ci-images` workflow, when it succeeded.
-
-The nightly run is skipped when the head commit of `main` already has a
-successful run of this workflow from a push, a dispatch, a `ci-images`
-completion or an earlier nightly, unless the latest successful `ci-images` run
-finished after that run.
-
-On pushes to `main` the `nix` job uploads the package to the
-[orca.cachix.org](https://orca.cachix.org) binary cache.
-
-### Zig cache
-
-The `test` job restores `.zig-cache`, `~/.cache/zig` and
-`examples/embed/.zig-cache` from the newest cache whose key starts with
-`zig-debug-` and the hash of `build.zig.zon` and `flake.lock`. A pull request
-that changes either file falls back to the newest `zig-debug-` cache; a push
-to `main` starts cold instead, which drops stale entries. Only pushes to
-`main` save the cache, and only when the three directories total at most
-4 GiB.
-
-### Images
-
-The `distro` jobs run in prebuilt images on GitHub Container Registry, built
-weekly by `.github/workflows/ci-images.yml`, instead of pulling from Docker Hub
-on every run. Dependabot proposes action updates weekly, a week after their
-release.
+- the Nix targets: the `orca` package, the source, `checks.installed`,
+  `checks.nixos-module` and `checks.zig-fmt`;
+- `orca/ci.sh test`: `zig build install test bench-build embed-example fuzz`
+  under headless audio;
+- `orca/ci.sh package`: `zig build package-check`.
 
 ## Coding agents
 
