@@ -181,6 +181,10 @@
             step =
               key: label: command:
               fullStep key label command // { target = "source"; };
+            heavy = {
+              concurrency_group = "maybe/blaziken-heavy";
+              concurrency = 1;
+            };
           in
           {
             targets =
@@ -193,13 +197,13 @@
               };
             evalOnly = { };
             extraSteps = [
-              (step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test")
-              (step "orca-package" ":orca: package check" "orca/ci.sh package")
+              (step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test" // heavy)
+              (step "orca-package" ":orca: package check" "orca/ci.sh package" // heavy)
             ];
             fullSteps = [
-              (fullStep "orca-release-safe" ":orca: ReleaseSafe liborca tests" "orca/ci.sh release-safe")
-              (fullStep "orca-sanitize" ":orca: ALAC and AAC sanitizers" "orca/ci.sh sanitize")
-              (fullStep "orca-cross" ":orca: aarch64-macos library build" "orca/ci.sh cross")
+              (fullStep "orca-release-safe" ":orca: ReleaseSafe liborca tests" "orca/ci.sh release-safe" // heavy)
+              (fullStep "orca-sanitize" ":orca: ALAC and AAC sanitizers" "orca/ci.sh sanitize" // heavy)
+              (fullStep "orca-cross" ":orca: aarch64-macos library build" "orca/ci.sh cross" // heavy)
             ];
           };
       });
