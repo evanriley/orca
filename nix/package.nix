@@ -80,6 +80,8 @@ stdenv.mkDerivation (finalAttrs: {
     ln -s ${finalAttrs.deps} "$ZIG_GLOBAL_CACHE_DIR/p"
   '';
 
+  requiredSystemFeatures = [ "big-parallel" ];
+
   postInstall = ''
     mkdir -p "$out/share/orca/models"
     ln -s ${finalAttrs.embeddingModel} "$out/share/orca/models/clap_audio_int8.onnx"

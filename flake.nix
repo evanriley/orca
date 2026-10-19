@@ -182,8 +182,7 @@
               key: label: command:
               fullStep key label command // { target = "source"; };
             heavy = {
-              concurrency_group = "maybe/blaziken-heavy";
-              concurrency = 1;
+              heavy = true;
             };
           in
           {
