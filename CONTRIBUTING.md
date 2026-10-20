@@ -105,6 +105,10 @@ are:
   under headless audio;
 - `orca/ci.sh package`: `zig build package-check`.
 
+A merge build skips the `test` and `package` steps because the patchset build
+already ran them on the same tree. The nightly build of `main` runs them
+again.
+
 ## Coding agents
 
 [AGENTS.md](AGENTS.md) holds the working rules for coding agents: toolchain
