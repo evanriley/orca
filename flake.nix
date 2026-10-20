@@ -196,11 +196,19 @@
               };
             evalOnly = { };
             extraSteps = [
-              (step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test" // heavy)
-              (step "orca-package" ":orca: package check" "orca/ci.sh package" // heavy)
+              (
+                step "orca-test" ":orca: zig build, tests and fuzz" "orca/ci.sh test" // heavy // { priority = 2; }
+              )
+              (step "orca-package" ":orca: package check" "orca/ci.sh package" // heavy // { priority = 3; })
             ];
             fullSteps = [
-              (fullStep "orca-release-safe" ":orca: ReleaseSafe liborca tests" "orca/ci.sh release-safe" // heavy)
+              (
+                fullStep "orca-release-safe" ":orca: ReleaseSafe liborca tests" "orca/ci.sh release-safe"
+                // heavy
+                // {
+                  priority = 3;
+                }
+              )
               (fullStep "orca-sanitize" ":orca: ALAC and AAC sanitizers" "orca/ci.sh sanitize" // heavy)
               (fullStep "orca-cross" ":orca: aarch64-macos library build" "orca/ci.sh cross" // heavy)
             ];
