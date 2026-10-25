@@ -2,7 +2,7 @@
 
 Where Orca is headed. What works today is in the
 [README](../README.md#features). Defects, test gaps and smaller enhancements
-are [git-bug issues](https://b.maybemaybe.lol).
+are [git-bug issues](https://b.pis.fyi).
 
 - [Planned](#planned): capabilities with a decided scope.
 - [Ideas](#ideas): larger capabilities with no commitment.
@@ -12,7 +12,7 @@ are [git-bug issues](https://b.maybemaybe.lol).
 
 - Tag writers for M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag, which
   are reported as not writable today
-  ([01dd72c](https://b.maybemaybe.lol/01dd72c)).
+  ([01dd72c](https://b.pis.fyi/01dd72c)).
 - File moves. The journaled `MutationPlan` executor performs them, but no
   runtime entry point or client reaches them.
 - Full multichannel. Canonical PCM carries a channel count but no layout, so
@@ -23,7 +23,7 @@ are [git-bug issues](https://b.maybemaybe.lol).
 - Synchronized multi-zone playback with drift correction.
 - A macOS app: a CoreAudio output behind the backend contract and an FSEvents
   watcher behind `library/watch.zig`, after the POSIX lock defect
-  ([816eb5e](https://b.maybemaybe.lol/816eb5e)) is fixed.
+  ([816eb5e](https://b.pis.fyi/816eb5e)) is fixed.
 - Windows.
 - More formats, sniffed or not recognized until they are supported:
   - WavPack, Monkey's Audio (APE), TTA and Musepack.

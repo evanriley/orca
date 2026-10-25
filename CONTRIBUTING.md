@@ -2,7 +2,7 @@
 
 Orca is a 0.x preview and a personal project that takes no outside
 contributions, issues or pull requests. These are the rules its own changes
-follow. Known issues are [git-bug issues](https://b.maybemaybe.lol), and the
+follow. Known issues are [git-bug issues](https://b.pis.fyi), and the
 [roadmap](docs/roadmap.md) lists planned work.
 
 ## Development environment
